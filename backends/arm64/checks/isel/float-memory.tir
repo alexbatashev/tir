@@ -10,6 +10,6 @@ module {
   module_end
 }
 
-// CHECK: arm64.store_float_double {ft = %virt0:FPR64, rn = %virt1:GPRsp, imm = 0}
-// CHECK: arm64.load_float_double {ft = %virt2:FPR64, rn = %virt1:GPRsp, imm = 0}
+// CHECK: arm64.store_float_double {ft = %[[V0:[0-9]+]]:FPR64, rn = %[[V1:[0-9]+]]:GPRsp, imm = 0}
+// CHECK: arm64.load_float_double {ft = %[[V2:[0-9]+]]:FPR64, rn = %[[V1]]:GPRsp, imm = 0}
 // CHECK: asm.vret

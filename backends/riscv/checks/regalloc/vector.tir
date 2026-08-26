@@ -19,7 +19,7 @@ module {
 
 // CHECK: asm.symbol {name = "fixed"
 // CHECK: riscv.vsetivli {rd = x0, avl = 4, vtypei = 208}
-// CHECK-NEXT: riscv.vadd.vv {vd = {{v[0-9]+}}, vs2 = v8, vs1 = v9
+// CHECK-NEXT: riscv.vadd.vv {vd = %{{[0-9]+}}:{{v[0-9]+}}, vs2 = %{{[0-9]+}}:v8, vs1 = %{{[0-9]+}}:v9
 // CHECK-NOT: riscv.vsetivli
-// CHECK: riscv.vmul.vv {vd = v8
+// CHECK: riscv.vmul.vv {vd = %{{[0-9]+}}:v8
 // CHECK: asm.vret

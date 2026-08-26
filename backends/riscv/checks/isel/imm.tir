@@ -13,7 +13,7 @@ module {
   module_end
 }
 
-// CHECK: asm.symbol {name = "addc", arg_regs = [%virt0:GPR]}
+// CHECK: asm.symbol {name = "addc", arg_regs = [%[[V0:[0-9]+]]:GPR]
 // CHECK-NOT: constant
-// CHECK: riscv.addiw {rd = %virt2:GPR, rs1 = %virt0:GPR, imm = 5}
+// CHECK: riscv.addiw {rd = %[[V2:[0-9]+]]:GPR, rs1 = %[[V0]]:GPR, imm = 5}
 // CHECK: asm.vret

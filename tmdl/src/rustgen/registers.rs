@@ -153,7 +153,11 @@ fn register_view(rc: &ast::RegisterClass) -> proc_macro2::TokenStream {
     }
 }
 
-fn emit_register_info(files: &[ast::File]) -> Result<proc_macro2::TokenStream, TMDLError> {
+fn emit_register_info(
+    files: &[ast::File],
+    dialect: &str,
+) -> Result<proc_macro2::TokenStream, TMDLError> {
+    let dialect_lit = proc_macro2::Literal::string(dialect);
     let classes: HashMap<String, &ast::RegisterClass> = files
         .iter()
         .flat_map(|f| f.register_classes())
@@ -181,13 +185,16 @@ fn emit_register_info(files: &[ast::File]) -> Result<proc_macro2::TokenStream, T
         indices.sort_unstable();
         indices.dedup();
         let index_lits = indices.iter().map(|i| proc_macro2::Literal::u16_unsuffixed(*i));
+        let print_fn = format_ident!("print_{}", rc.name.to_lowercase());
         class_entries.push(quote! {
             tir::backend::regalloc::RegClassInfo {
                 name: #name_lit,
+                dialect: #dialect_lit,
                 file: #file_lit,
                 registers: &[#(#index_lits),*],
                 group_width: #group_width,
                 view: #view,
+                print_name: #print_fn,
             }
         });
     }
@@ -259,6 +266,24 @@ fn emit_register_info(files: &[ast::File]) -> Result<proc_macro2::TokenStream, T
             tir::backend::regalloc::RegisterInfo {
                 classes: &REG_CLASSES,
             }
+        }
+
+        /// One type parse key per register class, so a value's class is written
+        /// `!#dialect_lit.<class>` and reads back to the same class.
+        pub fn reg_class_type_parsers() -> Vec<(&'static str, tir::TypeParser)> {
+            fn parse<'src>(
+                mnemonic: &str,
+                parser: &mut tir::parse::text::Parser<'src>,
+                context: &tir::Context,
+            ) -> Result<tir::TypeId, (tir::parse::Span, tir::Error)> {
+                tir::backend::reg_class_type_parser(&REG_CLASSES, #dialect_lit)(
+                    mnemonic, parser, context,
+                )
+            }
+            REG_CLASSES
+                .iter()
+                .map(|class| (class.name, parse as tir::TypeParser))
+                .collect()
         }
 
         /// Architectural width in bits of each register class under `features`.

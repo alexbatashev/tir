@@ -141,6 +141,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
             &operand_names,
             &attributes,
             has_results,
+            result_variadic,
             &state,
         )
     };
@@ -498,7 +499,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     let result_builder_field = if !has_results {
         quote! {}
     } else if result_variadic {
-        quote! { result_types: Vec<tir::TypeId>, }
+        quote! { result_types: Vec<tir::TypeId>, result_values: Vec<tir::ValueId>, }
     } else {
         quote! { result_type: Option<tir::TypeId>, }
     };
@@ -506,7 +507,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     let result_builder_default = if !has_results {
         quote! {}
     } else if result_variadic {
-        quote! { result_types: Vec::new(), }
+        quote! { result_types: Vec::new(), result_values: Vec::new(), }
     } else {
         quote! { result_type: None, }
     };
@@ -517,6 +518,15 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         quote! {
             pub fn result_types(mut self, types: Vec<tir::TypeId>) -> Self {
                 self.result_types = types;
+                self
+            }
+
+            /// Adopt values that already exist as this op's results, instead of
+            /// minting fresh ones from [`Self::result_types`]. A rewrite that
+            /// moves a definition from one op to another (a two-address tie
+            /// lowered to a copy) keeps the value it was reaching.
+            pub fn result_values(mut self, values: Vec<tir::ValueId>) -> Self {
+                self.result_values = values;
                 self
             }
         }
@@ -606,11 +616,14 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         }
     } else if result_variadic {
         quote! {
-            let result_vec: Vec<tir::ValueId> = self
-                .result_types
-                .iter()
-                .map(|ty| self.context.create_value(*ty, None).id())
-                .collect();
+            let result_vec: Vec<tir::ValueId> = if self.result_values.is_empty() {
+                self.result_types
+                    .iter()
+                    .map(|ty| self.context.create_value(*ty, None).id())
+                    .collect()
+            } else {
+                self.result_values
+            };
         }
     } else if result_optional {
         quote! {
@@ -843,6 +856,9 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
             }
         }
 
+        // Generated: one parameter per declared port, which for a machine
+        // instruction is however many registers it names.
+        #[allow(clippy::too_many_arguments)]
         pub fn #op_fn_name(
             context: &tir::Context,
             #(#operand_fn_params,)*
@@ -1485,6 +1501,7 @@ fn make_parser(
     operands: &[String],
     attributes: &[AttrSpec],
     has_results: bool,
+    result_variadic: bool,
     state: &StatePorts,
 ) -> proc_macro2::TokenStream {
     let state_operand_setter = if state.input {
@@ -1566,7 +1583,16 @@ fn make_parser(
         })
         .collect();
 
-    let result_parser = if has_results {
+    let result_parser = if !has_results {
+        quote! {}
+    } else {
+        // A variadic result group is written as the one result the generic form
+        // prints; an op with several is spelled by its own format.
+        let bind = if result_variadic {
+            quote! { builder = builder.result_types(vec![result_ty]); }
+        } else {
+            quote! { builder = builder.result_type(result_ty); }
+        };
         quote! {
             if !parser.parse_token(":") {
                 return Err((parser.span(), tir::Error::ExpectedToken(":")));
@@ -1574,10 +1600,8 @@ fn make_parser(
             let result_ty = parser.parse_type(context)
                 ?
                 .ok_or_else(|| (parser.span(), tir::Error::ExpectedType))?;
-            builder = builder.result_type(result_ty);
+            #bind
         }
-    } else {
-        quote! {}
     };
 
     quote! {
@@ -1600,15 +1624,7 @@ fn make_parser(
                    loop {
                        if let Some(name) = parser.parse_ident() {
                            if !parser.parse_token("=") { ok = false; break; }
-                           let mut val = if parser.parse_token("%virt") {
-                               if let Some(id) = parser.parse_number() {
-                                   let mut class = None;
-                                   if parser.parse_token(":") {
-                                       if let Some(cls) = parser.parse_ident() { class = context.resolve_reg_class(cls); } else { ok = false; }
-                                   }
-                                   tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Virtual { id: id as u32, class: class })
-                               } else { ok = false; break; }
-                           } else if let Some(value) = parser.parse_attribute_value(context)? {
+                           let mut val = if let Some(value) = parser.parse_attribute_value(context)? {
                                value
                            } else {
                                ok = false; break;

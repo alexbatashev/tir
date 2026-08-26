@@ -20,13 +20,13 @@ module {
     func.return %r
   }
   // CHECK: asm.symbol {name = "complement_arm"
-  // CHECK: riscv.blt {rs1 = %virt{{[0-9]+}}:GPR, rs2 = %virt{{[0-9]+}}:GPR, imm = ^[[THEN:bb[0-9]+]]}
+  // CHECK: riscv.blt {rs1 = %{{[0-9]+}}:GPR, rs2 = %{{[0-9]+}}:GPR, imm = ^[[THEN:bb[0-9]+]]}
   // CHECK-NEXT: asm.vbr ^[[ELSE:bb[0-9]+]]
   // The then-arm's own scope proves the gate's condition, not its complement.
   // CHECK: ^[[THEN]]:
-  // CHECK-NEXT: riscv.addi {rd = %virt{{[0-9]+}}:GPR, rs1 = x0, imm = 0}
+  // CHECK-NEXT: riscv.addi {rd = %{{[0-9]+}}:GPR, rs1 = x0, imm = 0}
   // CHECK: ^[[ELSE]]:
-  // CHECK-NEXT: riscv.addi {rd = %virt{{[0-9]+}}:GPR, rs1 = x0, imm = 1}
+  // CHECK-NEXT: riscv.addi {rd = %{{[0-9]+}}:GPR, rs1 = x0, imm = 1}
 
   // An `eq` gate makes its operands congruent in the guarded arm, so the arm's
   // use of `%x` binds the constant it is proven equal to — as an immediate.
@@ -42,8 +42,8 @@ module {
     }
     func.return %r
   }
-  // CHECK: asm.symbol {name = "eq_arm_immediate", arg_regs = [%virt{{[0-9]+}}:GPR, %virt[[P:[0-9]+]]:GPR]}
-  // CHECK: riscv.addi {rd = %virt{{[0-9]+}}:GPR, rs1 = %virt[[P]]:GPR, imm = 7}
+  // CHECK: asm.symbol {name = "eq_arm_immediate", arg_regs = [%{{[0-9]+}}:GPR, %[[P:[0-9]+]]:GPR]
+  // CHECK: riscv.addi {rd = %{{[0-9]+}}:GPR, rs1 = %[[P]]:GPR, imm = 7}
 
   module_end
 }

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::attributes::AttributeValue;
+use crate::attributes::{AttributeValue, RegisterAttr};
 use crate::block::BlockId;
 use crate::parse::common::{Cursor, Span};
 use crate::value::ValueId;
@@ -221,6 +221,9 @@ impl<'src> Parser<'src> {
             }
             return Ok(Some(AttributeValue::Dict(Box::new(values))));
         }
+        if let Some(value) = self.parse_register_attribute(context)? {
+            return Ok(Some(value));
+        }
         if let Some(ty) = self.parse_type(context)? {
             return Ok(Some(AttributeValue::Type(ty)));
         }
@@ -234,6 +237,77 @@ impl<'src> Parser<'src> {
             return Ok(Some(AttributeValue::F64(value)));
         }
         Ok(self.parse_number().map(AttributeValue::Int))
+    }
+
+    /// A register-valued attribute: `%3` (a value the op names but does not
+    /// read), `%3:GPR[5]` (an assignment entry) or `GPR[5]` (a physical
+    /// register the op names directly).
+    fn parse_register_attribute(
+        &mut self,
+        context: &crate::Context,
+    ) -> Result<Option<AttributeValue>, (Span, crate::Error)> {
+        let mark = self.position;
+        if self.parse_token("%") {
+            let Some(number) = self.parse_number() else {
+                self.position = mark;
+                return Ok(None);
+            };
+            let value = crate::ValueId::from_number(number as u32);
+            if !self.parse_token(":") {
+                return Ok(Some(AttributeValue::Value(value)));
+            }
+            // `%3:GPR` is the value with its class printed for readability — the
+            // class is its type; `%3:GPR[5]` additionally names the register it
+            // was allocated.
+            match self.parse_physical_register(context) {
+                Some((class, index)) => {
+                    return Ok(Some(AttributeValue::Register(RegisterAttr::Assigned {
+                        value,
+                        class,
+                        index,
+                    })));
+                }
+                None if self.parse_ident().is_some() => {
+                    return Ok(Some(AttributeValue::Value(value)));
+                }
+                None => return Err((self.span(), crate::Error::ExpectedToken("register class"))),
+            }
+        }
+        match self.parse_physical_register(context) {
+            Some((class, index)) => Ok(Some(AttributeValue::Register(RegisterAttr::Physical {
+                class,
+                index,
+            }))),
+            None => Ok(None),
+        }
+    }
+
+    /// `GPR[5]`: a register class name and an encoding index.
+    fn parse_physical_register(
+        &mut self,
+        context: &crate::Context,
+    ) -> Option<(crate::backend::regalloc::RegClassId, u16)> {
+        let mark = self.position;
+        let class = self
+            .parse_ident()
+            .and_then(|name| context.resolve_reg_class(name));
+        let Some(class) = class else {
+            self.position = mark;
+            return None;
+        };
+        if !self.parse_token("[") {
+            self.position = mark;
+            return None;
+        }
+        let Some(index) = self.parse_number() else {
+            self.position = mark;
+            return None;
+        };
+        if !self.parse_token("]") {
+            self.position = mark;
+            return None;
+        }
+        Some((class, index as u16))
     }
 
     pub fn parse_number(&mut self) -> Option<i64> {

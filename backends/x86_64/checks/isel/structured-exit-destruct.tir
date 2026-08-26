@@ -30,12 +30,12 @@ module {
 
 // CHECK-NOT: scf.
 // CHECK: asm.vbr %0 ^[[TEST:bb[0-9]+]]
-// CHECK: ^[[TEST]](%{{[0-9]+}}: !i64):
+// CHECK: ^[[TEST]](%{{[0-9]+}}: !x86_64.GPR):
 // CHECK: asm.vbr %{{[0-9]+}} ^[[EXIT:bb[0-9]+]]
 // The body: the nested gate's taken arm breaks, the other falls through.
-// CHECK: ^[[BODY:bb[0-9]+]](%{{[0-9]+}}: !i64):
+// CHECK: ^[[BODY:bb[0-9]+]](%{{[0-9]+}}: !x86_64.GPR):
 // CHECK: x86_64.je {imm = ^[[BREAK:bb[0-9]+]]}
-// CHECK: ^[[EXIT]](%{{[0-9]+}}: !i64):
+// CHECK: ^[[EXIT]](%{{[0-9]+}}: !x86_64.GPR):
 // CHECK-NEXT: asm.vret
 // CHECK: asm.vbr %{{[0-9]+}} ^[[TEST]]
 // CHECK: ^[[BREAK]]:

@@ -34,7 +34,7 @@ pub fn generate_rust_modules<'a>(
     let features = emit_features(files)?;
     let register_traits = emit_register_trait_helpers(files)?;
     let registers = emit_register_parsers_and_printers(files)?;
-    let register_info = emit_register_info(files)?;
+    let register_info = emit_register_info(files, dialect)?;
     let abi_info = emit_abi_info(files, item_cache)?;
     let (machine_models, sched_tables) = emit_machine_models(files, item_cache)?;
     let split_files: Vec<&ast::File> = split_inputs

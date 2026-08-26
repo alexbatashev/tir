@@ -496,7 +496,8 @@ fn hash_attr_value(value: &AttributeValue, h: &mut impl Hasher) {
             k.hash(h);
             hash_attr_value(v, h);
         }),
-        // Register attributes are machine IR; the value vocabulary never sees them.
-        AttributeValue::Register(_) => {}
+        // Register and value attributes are machine IR; the value vocabulary
+        // never sees them.
+        AttributeValue::Register(_) | AttributeValue::Value(_) => {}
     }
 }

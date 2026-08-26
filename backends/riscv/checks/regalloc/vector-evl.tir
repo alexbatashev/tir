@@ -14,7 +14,7 @@ module {
 }
 
 // CHECK: asm.symbol {name = "dyn"
-// CHECK: riscv.vsetvli {rd = x0, avl = x10, vtypei = 208}
+// CHECK: riscv.vsetvli {rd = x0, avl = %{{[0-9]+}}:x10, vtypei = 208}
 // CHECK-NEXT: riscv.vadd.vv
 // CHECK-NOT: riscv.vsetvli
 // CHECK: riscv.vmul.vv

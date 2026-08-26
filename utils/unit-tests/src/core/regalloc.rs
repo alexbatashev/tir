@@ -301,6 +301,7 @@ fn forbidden_register_is_avoided() {
 static ALIASING_CLASSES: &[RegClassInfo] = &[
     RegClassInfo {
         name: "GPR",
+        dialect: "test",
         file: "GPR",
         registers: &[0, 1, 2, 3],
         group_width: 1,
@@ -308,9 +309,11 @@ static ALIASING_CLASSES: &[RegClassInfo] = &[
             bit_offset: 0,
             merge: false,
         },
+        print_name: tir::backend::regalloc::no_register_name,
     },
     RegClassInfo {
         name: "GPRsp",
+        dialect: "test",
         file: "GPR",
         registers: &[0, 1, 2, 3],
         group_width: 1,
@@ -318,6 +321,7 @@ static ALIASING_CLASSES: &[RegClassInfo] = &[
             bit_offset: 0,
             merge: false,
         },
+        print_name: tir::backend::regalloc::no_register_name,
     },
 ];
 
@@ -364,6 +368,7 @@ fn distinct_files_do_not_alias() {
     static CLASSES: &[RegClassInfo] = &[
         RegClassInfo {
             name: "A",
+            dialect: "test",
             file: "A",
             registers: &[0, 1, 2, 3],
             group_width: 1,
@@ -371,9 +376,11 @@ fn distinct_files_do_not_alias() {
                 bit_offset: 0,
                 merge: false,
             },
+            print_name: tir::backend::regalloc::no_register_name,
         },
         RegClassInfo {
             name: "B",
+            dialect: "test",
             file: "B",
             registers: &[0, 1, 2, 3],
             group_width: 1,
@@ -381,6 +388,7 @@ fn distinct_files_do_not_alias() {
                 bit_offset: 0,
                 merge: false,
             },
+            print_name: tir::backend::regalloc::no_register_name,
         },
     ];
     let info = RegisterInfo { classes: CLASSES };
@@ -409,6 +417,7 @@ fn group_registers_interfere_by_span() {
     static CLASSES: &[RegClassInfo] = &[
         RegClassInfo {
             name: "VR",
+            dialect: "test",
             file: "VR",
             registers: &[0, 1, 2, 3],
             group_width: 1,
@@ -416,9 +425,11 @@ fn group_registers_interfere_by_span() {
                 bit_offset: 0,
                 merge: false,
             },
+            print_name: tir::backend::regalloc::no_register_name,
         },
         RegClassInfo {
             name: "VRM2",
+            dialect: "test",
             file: "VR",
             registers: &[0, 1, 2, 3],
             group_width: 2,
@@ -426,6 +437,7 @@ fn group_registers_interfere_by_span() {
                 bit_offset: 0,
                 merge: false,
             },
+            print_name: tir::backend::regalloc::no_register_name,
         },
     ];
     let info = RegisterInfo { classes: CLASSES };
@@ -460,6 +472,7 @@ fn forbidden_register_aliases_across_classes() {
     static CLASSES: &[RegClassInfo] = &[
         RegClassInfo {
             name: "GPR",
+            dialect: "test",
             file: "GPR",
             registers: &[0, 1, 2, 3],
             group_width: 1,
@@ -467,9 +480,11 @@ fn forbidden_register_aliases_across_classes() {
                 bit_offset: 0,
                 merge: false,
             },
+            print_name: tir::backend::regalloc::no_register_name,
         },
         RegClassInfo {
             name: "GPRsp",
+            dialect: "test",
             file: "GPR",
             registers: &[0, 1, 2, 3],
             group_width: 1,
@@ -477,6 +492,7 @@ fn forbidden_register_aliases_across_classes() {
                 bit_offset: 0,
                 merge: false,
             },
+            print_name: tir::backend::regalloc::no_register_name,
         },
     ];
     let info = RegisterInfo { classes: CLASSES };
@@ -510,6 +526,7 @@ fn forbidden_register_aliases_across_classes() {
 static SUBCLASS_CLASSES: &[RegClassInfo] = &[
     RegClassInfo {
         name: "GPR",
+        dialect: "test",
         file: "GPR",
         registers: &[0, 1, 2, 3],
         group_width: 1,
@@ -517,9 +534,11 @@ static SUBCLASS_CLASSES: &[RegClassInfo] = &[
             bit_offset: 0,
             merge: false,
         },
+        print_name: tir::backend::regalloc::no_register_name,
     },
     RegClassInfo {
         name: "GPRlow",
+        dialect: "test",
         file: "GPR",
         registers: &[0, 1],
         group_width: 1,
@@ -527,6 +546,7 @@ static SUBCLASS_CLASSES: &[RegClassInfo] = &[
             bit_offset: 0,
             merge: false,
         },
+        print_name: tir::backend::regalloc::no_register_name,
     },
 ];
 

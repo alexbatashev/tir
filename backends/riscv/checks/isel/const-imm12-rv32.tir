@@ -9,7 +9,7 @@ module {
   }
   // CHECK: asm.symbol {name = "five"
   // CHECK-NOT: constant
-  // CHECK: riscv.addi {rd = %virt0:GPR, rs1 = x0, imm = 5}
+  // CHECK: riscv.addi {rd = %[[V0:[0-9]+]]:GPR, rs1 = x0, imm = 5}
 
   %fn_imm_min = func.func @imm_min() -> !i32 {
     %0 = constant {value = -2048} : !i32
@@ -17,6 +17,6 @@ module {
   }
   // CHECK: asm.symbol {name = "imm_min"
   // CHECK-NOT: constant
-  // CHECK: riscv.addi {rd = %virt2:GPR, rs1 = x0, imm = -2048}
+  // CHECK: riscv.addi {rd = %[[V2:[0-9]+]]:GPR, rs1 = x0, imm = -2048}
   module_end
 }

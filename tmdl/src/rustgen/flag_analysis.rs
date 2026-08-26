@@ -930,12 +930,12 @@ fn emit_flag_definer_prelude(
             continue;
         };
         match op_ty {
-            Type::Struct(class_name) => {
+            Type::Struct(_) => {
                 operand_constraint_entries.push(constraint_entry(
                     symbol,
                     quote! { tir::graph::OperandConstraint::Register },
                 ));
-                prelude_attrs.push(emit_attr_value(op_name, symbol, &reg_class_id(class_name)));
+                prelude_attrs.push(emit_attr_value(op_name, symbol));
             }
             Type::Bits(_) | Type::Integer => {
                 operand_constraint_entries.push(constraint_entry(
@@ -948,14 +948,13 @@ fn emit_flag_definer_prelude(
         }
     }
 
-    let declared: Vec<String> = d.ops.iter().map(|(name, _)| name.clone()).collect();
     let (emitter_ts, prelude_shim) = emit_emitter_spec(
         &prelude_key,
         dialect,
         &d.op_name,
         &d_op_ty_ident,
         &prelude_attrs,
-        &declared,
+        &d.inst.name,
     );
     let emitter_ts = if emitted_preludes.insert(d.inst.name.clone()) {
         emitter_ts

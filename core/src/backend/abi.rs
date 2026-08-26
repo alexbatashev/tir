@@ -23,8 +23,31 @@ pub fn type_kind(context: &Context, ty: TypeId) -> ValueKind {
     }
 }
 
-pub(crate) fn value_kind(context: &Context, value: ValueId) -> ValueKind {
-    type_kind(context, context.get_value(value).ty())
+/// Classifies a value for ABI register assignment. A value already living in a
+/// register is classified by the file it lives in — what the register holds is
+/// what the calling convention places — and everything else by its type.
+pub(crate) fn value_kind(context: &Context, abi: &AbiInfo, value: ValueId) -> ValueKind {
+    let ty = context.get_value(value).ty();
+    match crate::backend::type_class(context, ty) {
+        Some(class) => class_kind(abi, class),
+        None => type_kind(context, ty),
+    }
+}
+
+/// The ABI class a register class belongs to: the argument or return sequence
+/// drawing from the same register file.
+fn class_kind(abi: &AbiInfo, class: crate::backend::regalloc::RegClassId) -> ValueKind {
+    abi.args
+        .iter()
+        .chain(abi.rets.iter())
+        .find(|sequence| {
+            sequence
+                .regs
+                .first()
+                .is_some_and(|register| register.0.file() == class.file())
+        })
+        .map(|sequence| sequence.kind)
+        .unwrap_or(ValueKind::Int)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

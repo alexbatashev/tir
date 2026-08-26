@@ -13,7 +13,7 @@ module {
 }
 
 // On RV64 an i32 multiply selects the word op and an i64 multiply the full mul.
-// CHECK: asm.symbol {name = "mul32", arg_regs = [%virt0:GPR, %virt1:GPR]}
-// RV64: riscv.mulw {rd = %virt2:GPR, rs1 = %virt0:GPR, rs2 = %virt1:GPR}
-// CHECK: asm.symbol {name = "mul64", arg_regs = [%virt4:GPR, %virt5:GPR]}
-// CHECK: riscv.mul {rd = %virt6:GPR, rs1 = %virt4:GPR, rs2 = %virt5:GPR}
+// CHECK: asm.symbol {name = "mul32", arg_regs = [%[[V0:[0-9]+]]:GPR, %[[V1:[0-9]+]]:GPR]
+// RV64: riscv.mulw {rd = %[[V2:[0-9]+]]:GPR, rs1 = %[[V0]]:GPR, rs2 = %[[V1]]:GPR}
+// CHECK: asm.symbol {name = "mul64", arg_regs = [%[[V4:[0-9]+]]:GPR, %[[V5:[0-9]+]]:GPR]
+// CHECK: riscv.mul {rd = %[[V6:[0-9]+]]:GPR, rs1 = %[[V4]]:GPR, rs2 = %[[V5]]:GPR}

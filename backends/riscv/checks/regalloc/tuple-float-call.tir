@@ -11,5 +11,5 @@ module {
 }
 
 // CHECK: asm.vcall {callee = "make_pair"
-// CHECK: riscv.fsgnj.d {fd = f10, fs = f11}
+// CHECK: riscv.fsgnj.d {fd = %{{[0-9]+}}:f10, fs = f11}
 // CHECK: asm.vret

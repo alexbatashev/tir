@@ -16,7 +16,7 @@ module {
     func.return %4
   }
   // CHECK: asm.symbol {name = "slt_branch"
-  // CHECK: arm64.cmp {rn = %virt28:GPR, rm = %virt29:GPR}
+  // CHECK: arm64.cmp {rn = %[[V28:[0-9]+]]:GPR, rm = %[[V29:[0-9]+]]:GPR}
   // CHECK-NEXT: arm64.b.lt {imm = ^bb1}
   // CHECK-NEXT: asm.vbr ^bb2
 
@@ -32,7 +32,7 @@ module {
   }
   // a <= b canonicalizes to b >= a: cmp with swapped operands, then b.ge.
   // CHECK: asm.symbol {name = "sle_branch"
-  // CHECK: arm64.cmp {rn = %virt32:GPR, rm = %virt31:GPR}
+  // CHECK: arm64.cmp {rn = %[[V32:[0-9]+]]:GPR, rm = %[[V31:[0-9]+]]:GPR}
   // CHECK-NEXT: arm64.b.ge {imm = ^bb1}
 
   %fn_ult_branch = func.func @ult_branch(%0: !i64, %1: !i64) -> !i64 {
@@ -77,8 +77,8 @@ module {
   // defines the low bit of its register, so the branch must read that bit
   // alone: mask it out with `and #1`, then compare that against zero.
   // CHECK: asm.symbol {name = "fallback"
-  // CHECK: arm64.and_imm {rd = %virt{{[0-9]+}}:GPRsp, rn = %virt{{[0-9]+}}:GPR, immr = 0, imms = 0}
-  // CHECK-NEXT: arm64.cbnz {rt = %virt{{[0-9]+}}:GPR, imm = ^bb1}
+  // CHECK: arm64.and_imm {rd = %{{[0-9]+}}:GPR, rn = %{{[0-9]+}}:GPR, immr = 0, imms = 0}
+  // CHECK-NEXT: arm64.cbnz {rt = %{{[0-9]+}}:GPR, imm = ^bb1}
   // CHECK-NEXT: asm.vbr ^bb2
 
   module_end

@@ -10,7 +10,7 @@ module {
 }
 
 // CHECK: riscv.addi {rd = x2, rs1 = x2, imm = -32}
-// CHECK: riscv.sd {rs1 = x2, rs2 = {{.*}}, imm = 0}
-// CHECK: riscv.fsd {rs1 = x2, fs2 = f{{[0-9]+}}, imm = 8}
+// CHECK: riscv.sd {rs1 = x2, rs2 = %{{[0-9]+}}:{{.*}}, imm = 0}
+// CHECK: riscv.fsd {rs1 = x2, fs2 = %{{[0-9]+}}:f{{[0-9]+}}, imm = 8}
 // CHECK: asm.vcall {callee = "ext"
 // CHECK: riscv.addi {rd = x2, rs1 = x2, imm = 32}

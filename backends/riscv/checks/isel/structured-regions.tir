@@ -31,7 +31,7 @@ module {
 }
 
 // CHECK: asm.symbol {name = "choose"
-// CHECK: riscv.addi {rd = %virt{{[0-9]+}}:GPR, rs1 = %virt1:GPR, imm = 7}
-// CHECK: riscv.addi {rd = %virt{{[0-9]+}}:GPR, rs1 = %virt1:GPR, imm = -7}
+// CHECK: riscv.addi {rd = %{{[0-9]+}}:GPR, rs1 = %[[V1:[0-9]+]]:GPR, imm = 7}
+// CHECK: riscv.addi {rd = %{{[0-9]+}}:GPR, rs1 = %[[V1]]:GPR, imm = -7}
 // CHECK: asm.symbol {name = "accumulate"
-// CHECK: riscv.addi {rd = %virt{{[0-9]+}}:GPR, rs1 = %virt{{[0-9]+}}:GPR, imm = 5}
+// CHECK: riscv.addi {rd = %{{[0-9]+}}:GPR, rs1 = %{{[0-9]+}}:GPR, imm = 5}

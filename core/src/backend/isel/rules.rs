@@ -17,29 +17,26 @@ use crate::backend::isel::{
 use crate::backend::regalloc::RegClassId;
 use crate::graph::MetaMutDag;
 
-/// One attribute of the emitted instruction: where its value comes from.
+/// One slot of the emitted instruction: where its contents come from.
 #[derive(Clone, Copy)]
 pub enum EmitAttr {
-    /// `req.results[result]` as a virtual register of the class.
+    /// The result port `attr`: a fresh value of the port's class, standing for
+    /// `req.results[result]`.
     Result {
         attr: &'static str,
         result: u16,
         class: RegClassId,
     },
-    /// `req.results[result]` defined in one required physical register.
+    /// [`EmitAttr::Result`] pinned to one required physical register.
     ResultFixedDef {
         attr: &'static str,
         result: u16,
         class: RegClassId,
         index: u16,
     },
-    /// The value bound to `symbol` as a virtual register of the class.
-    Value {
-        attr: &'static str,
-        symbol: u32,
-        class: RegClassId,
-    },
-    /// The value bound to `symbol`, read from one physical register.
+    /// The operand port `attr`: the value bound to `symbol`.
+    Value { attr: &'static str, symbol: u32 },
+    /// [`EmitAttr::Value`] pinned to one required physical register.
     FixedUse {
         attr: &'static str,
         symbol: u32,
@@ -69,108 +66,136 @@ pub struct EmitSpec {
     /// `|instance| Box::new(FooOp(instance))`.
     pub wrap: fn(OpHandle) -> Box<dyn Operation>,
     pub attrs: &'static [EmitAttr],
-    /// Every attribute the op declares; emission fills all of them.
-    pub declared: &'static [&'static str],
+    /// The emitted opcode's register ports, so a slot lands in the SSA position
+    /// the opcode declares for it whatever order the rule binds them in.
+    pub regs: &'static [crate::backend::RegPort],
 }
 
-/// Interprets an [`EmitSpec`]: bind each attribute from the match and build
-/// the op. `RewriteFailed` when a required binding is absent.
+/// Interprets an [`EmitSpec`]: bind each slot from the match and build the op.
+/// `RewriteFailed` when a required binding is absent.
+///
+/// A register slot becomes an SSA operand or result — a result is born typed
+/// with its port's register class, which is what makes the class of every
+/// machine value a type read — unless it names a physical register, which stays
+/// an attribute literal. A slot the instruction must read or write in a fixed
+/// register records that in the op's [`PINS_ATTR`] constraint.
 pub fn emit_with(
     context: &Context,
     req: &EmitRequest,
     m: &RuleMatch,
     spec: &EmitSpec,
 ) -> Result<Box<dyn Operation>, PassError> {
-    let mut attributes = Vec::with_capacity(spec.attrs.len());
+    let mut attributes = Vec::new();
+    let mut operands: Vec<(usize, tir::ValueId)> = Vec::new();
+    let mut results: Vec<(usize, tir::ValueId)> = Vec::new();
+    let mut pins = std::collections::BTreeMap::new();
+    let port = |name: &str| {
+        spec.regs
+            .iter()
+            .position(|port| port.name == name)
+            .ok_or_else(|| {
+                PassError::InvalidRuleSet(format!(
+                    "{}.{} has no register slot '{name}'",
+                    spec.op.0, spec.op.1
+                ))
+            })
+    };
+    let bind = |name: &str, value: tir::ValueId| -> Result<(usize, tir::ValueId), PassError> {
+        let port = port(name)?;
+        if let Some(class) = spec.regs[port].class {
+            crate::backend::retype_untyped(context, value, class);
+        }
+        Ok((port, value))
+    };
     for entry in spec.attrs {
         let fail = || PassError::RewriteFailed(req.op_id());
-        let value = match *entry {
-            EmitAttr::Result { result, class, .. } => {
-                let id = req.results.get(result as usize).ok_or_else(fail)?.number();
-                AttributeValue::Register(RegisterAttr::Virtual {
-                    id,
-                    class: Some(class),
-                })
+        match *entry {
+            EmitAttr::Result {
+                attr,
+                result,
+                class,
+            } => {
+                results.push((port(attr)?, new_result(context, req, result, class)?));
             }
             EmitAttr::ResultFixedDef {
+                attr,
                 result,
                 class,
                 index,
-                ..
             } => {
-                let id = req.results.get(result as usize).ok_or_else(fail)?.number();
-                AttributeValue::Register(RegisterAttr::FixedDef { id, class, index })
+                pins.insert(attr.to_string(), pin(class, index));
+                results.push((port(attr)?, new_result(context, req, result, class)?));
             }
-            EmitAttr::Value { symbol, class, .. } => {
-                let src = m.value_binding(symbol).ok_or_else(fail)?;
-                AttributeValue::Register(RegisterAttr::Virtual {
-                    id: src.number(),
-                    class: Some(class),
-                })
+            EmitAttr::Value { attr, symbol } => {
+                operands.push(bind(attr, m.value_binding(symbol).ok_or_else(fail)?)?);
             }
             EmitAttr::FixedUse {
+                attr,
                 symbol,
                 class,
                 index,
-                ..
             } => {
-                let src = m.value_binding(symbol).ok_or_else(fail)?;
-                AttributeValue::Register(RegisterAttr::FixedUse {
-                    id: src.number(),
-                    class,
-                    index,
-                })
+                pins.insert(attr.to_string(), pin(class, index));
+                operands.push(bind(attr, m.value_binding(symbol).ok_or_else(fail)?)?);
             }
-            EmitAttr::Physical { class, index, .. } => {
-                AttributeValue::Register(RegisterAttr::Physical { class, index })
+            EmitAttr::Physical { attr, class, index } => {
+                attributes.push(context.named_attribute(
+                    attr,
+                    AttributeValue::Register(RegisterAttr::Physical { class, index }),
+                ));
             }
-            EmitAttr::Int { symbol, .. } => {
-                AttributeValue::Int(m.int_binding(symbol).ok_or_else(fail)?)
+            EmitAttr::Int { attr, symbol } => {
+                let value = AttributeValue::Int(m.int_binding(symbol).ok_or_else(fail)?);
+                attributes.push(context.named_attribute(attr, value));
             }
-            EmitAttr::Block { symbol, .. } => {
-                AttributeValue::Block(m.block_binding(symbol).ok_or_else(fail)?)
+            EmitAttr::Block { attr, symbol } => {
+                let value = AttributeValue::Block(m.block_binding(symbol).ok_or_else(fail)?);
+                attributes.push(context.named_attribute(attr, value));
             }
-            EmitAttr::IntOrValue { symbol, .. } => {
-                if let Some(v) = m.int_binding(symbol) {
-                    AttributeValue::Int(v)
-                } else {
-                    let src = m.value_binding(symbol).ok_or_else(fail)?;
-                    AttributeValue::Register(RegisterAttr::Virtual {
-                        id: src.number(),
-                        class: None,
-                    })
+            EmitAttr::IntOrValue { attr, symbol } => match m.int_binding(symbol) {
+                Some(value) => {
+                    attributes.push(context.named_attribute(attr, AttributeValue::Int(value)))
                 }
-            }
-        };
-        let attr = match *entry {
-            EmitAttr::Result { attr, .. }
-            | EmitAttr::ResultFixedDef { attr, .. }
-            | EmitAttr::Value { attr, .. }
-            | EmitAttr::FixedUse { attr, .. }
-            | EmitAttr::Physical { attr, .. }
-            | EmitAttr::Int { attr, .. }
-            | EmitAttr::Block { attr, .. }
-            | EmitAttr::IntOrValue { attr, .. } => attr,
-        };
-        attributes.push(context.named_attribute(attr, value));
-    }
-    for declared in spec.declared {
-        if !attributes
-            .iter()
-            .any(|a| Some(a.name) == context.sym(declared))
-        {
-            panic!("Missing required attribute: {declared}");
+                None => operands.push(bind(attr, m.value_binding(symbol).ok_or_else(fail)?)?),
+            },
         }
     }
+    if !pins.is_empty() {
+        attributes.push(context.named_attribute(
+            crate::backend::PINS_ATTR,
+            AttributeValue::Dict(Box::new(pins)),
+        ));
+    }
+    operands.sort_by_key(|(port, _)| *port);
+    results.sort_by_key(|(port, _)| *port);
     let instance = OpInstance::new_dynamic(
         spec.op,
         context.as_context_ref(),
-        vec![],
-        vec![],
+        operands.into_iter().map(|(_, value)| value).collect(),
+        results.into_iter().map(|(_, value)| value).collect(),
         vec![],
         attributes,
     );
     Ok((spec.wrap)(context.add_operation(instance)))
+}
+
+/// The value a result port defines: a fresh one of the port's class, standing
+/// for the mid-end result the rule covers.
+fn new_result(
+    context: &Context,
+    req: &EmitRequest,
+    result: u16,
+    class: RegClassId,
+) -> Result<tir::ValueId, PassError> {
+    req.results
+        .get(result as usize)
+        .ok_or_else(|| PassError::RewriteFailed(req.op_id()))?;
+    let ty = crate::backend::RegClassType::new(context, class);
+    Ok(context.create_value(ty, None).id())
+}
+
+fn pin(class: RegClassId, index: u16) -> AttributeValue {
+    AttributeValue::Register(RegisterAttr::Physical { class, index })
 }
 
 /// The storage domain of a register operand: integer, float, or either.

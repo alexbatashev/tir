@@ -165,6 +165,7 @@ fn build_rules_resolves_register_widths() {
     let (blob, kinds, offset) = symbol_blob();
     static WIDE: RegClassInfo = RegClassInfo {
         name: "W",
+        dialect: "test",
         file: "W",
         registers: &[0],
         group_width: 1,
@@ -172,6 +173,7 @@ fn build_rules_resolves_register_widths() {
             bit_offset: 8,
             merge: true,
         },
+        print_name: tir::backend::regalloc::no_register_name,
     };
     static REGS: &[RegOperandSpec] = &[RegOperandSpec {
         symbol: 0,

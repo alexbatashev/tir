@@ -13,9 +13,9 @@ module {
   module_end
 }
 
-// CHECK: riscv.addi {rd = {{x[0-9]+}}, rs1 = x0, imm = 64}
+// CHECK: riscv.addi {rd = %{{[0-9]+}}:{{x[0-9]+}}, rs1 = x0, imm = 64}
 // RV64: riscv.slliw
 // RV32: riscv.slli
-// CHECK: riscv.fmv.w.x {fd = {{f[0-9]+}}, rs1 = {{x[0-9]+}}}
-// CHECK: riscv.fmul.s {fd = {{f[0-9]+}}, fs1 = {{f[0-9]+}}, fs2 = f10}
+// CHECK: riscv.fmv.w.x {fd = %{{[0-9]+}}:{{f[0-9]+}}, rs1 = %{{[0-9]+}}:{{x[0-9]+}}}
+// CHECK: riscv.fmul.s {fd = %{{[0-9]+}}:{{f[0-9]+}}, fs1 = %{{[0-9]+}}:{{f[0-9]+}}, fs2 = %{{[0-9]+}}:f10}
 // CHECK: asm.vret

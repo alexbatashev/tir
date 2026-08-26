@@ -53,12 +53,12 @@ module {
   module_end
 }
 
-// CHECK: asm.symbol {name = "sum", arg_regs = [%virt0:GPR, %virt1:GPR]}
-// CHECK: arm64.store_word {rt = %virt0:GPR, rn = %virt2:GPRsp, imm = 0}
-// CHECK: arm64.store_word {rt = %virt1:GPR, rn = %virt3:GPRsp, imm = 0}
-// CHECK: arm64.load_word_unsigned {rt = %virt4:GPR, rn = %virt2:GPRsp, imm = 0}
-// CHECK: arm64.load_word_unsigned {rt = %virt5:GPR, rn = %virt3:GPRsp, imm = 0}
-// CHECK: arm64.add_w {rd = %virt6:GPR32, rn = %virt4:GPR32, rm = %virt5:GPR32}
+// CHECK: asm.symbol {name = "sum", arg_regs = [%[[V0:[0-9]+]]:GPR, %[[V1:[0-9]+]]:GPR]
+// CHECK: arm64.store_word {rt = %[[V0]]:GPR, rn = %[[V2:[0-9]+]]:GPRsp, imm = 0}
+// CHECK: arm64.store_word {rt = %[[V1]]:GPR, rn = %[[V3:[0-9]+]]:GPRsp, imm = 0}
+// CHECK: arm64.load_word_unsigned {rt = %[[V4:[0-9]+]]:GPR, rn = %[[V2]]:GPRsp, imm = 0}
+// CHECK: arm64.load_word_unsigned {rt = %[[V5:[0-9]+]]:GPR, rn = %[[V3]]:GPRsp, imm = 0}
+// CHECK: arm64.add_w {rd = %[[V6:[0-9]+]]:GPR32, rn = %[[V4]]:GPR, rm = %[[V5]]:GPR}
 // CHECK: asm.vret
 
 // CHECK: asm.symbol {name = "word_reg_offset"
@@ -74,7 +74,7 @@ module {
 
 // CHECK: asm.symbol {name = "signed_i16_load_to_i32"
 // CHECK: arm64.lslv_w
-// CHECK: arm64.asr_w {rd = %virt{{[0-9]+}}:GPR32, rn = %virt{{[0-9]+}}:GPR32, imm = 16}
+// CHECK: arm64.asr_w {rd = %{{[0-9]+}}:GPR32, rn = %{{[0-9]+}}:GPR32, imm = 16}
 // CHECK: asm.symbol {name = "signed_i8_arg_to_i32"
 // CHECK: arm64.lslv_w
-// CHECK: arm64.asr_w {rd = %virt{{[0-9]+}}:GPR32, rn = %virt{{[0-9]+}}:GPR32, imm = 24}
+// CHECK: arm64.asr_w {rd = %{{[0-9]+}}:GPR32, rn = %{{[0-9]+}}:GPR32, imm = 24}

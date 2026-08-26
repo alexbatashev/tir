@@ -37,10 +37,13 @@ instruction Sub for [TextIsa] : Binary {
     behavior { todo(); }
 }
 
-// Text-only operations share the attribute formatter instead of expanding the
-// same register-dispatch loop into every generated operation.
-// CHECK-COUNT-1: fn custom_print_text_operation
+// Every operation prints through the one shared machine-op formatter, which
+// reads the register slots from the opcode's `InstrInfo` instead of expanding
+// the same register-dispatch loop into every generated operation.
+// CHECK: static REGS_ADD
+// CHECK: name: "d",
+// CHECK: name: "a",
 // CHECK: impl AddOp
-// CHECK: custom_print_text_operation(&self.0, "test.add", &["d", "a"], fmt)
+// CHECK: tir::backend::print_machine_op(fmt, self)
 // CHECK: impl SubOp
-// CHECK: custom_print_text_operation(&self.0, "test.sub", &["d", "a"], fmt)
+// CHECK: tir::backend::print_machine_op(fmt, self)

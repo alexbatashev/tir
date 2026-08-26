@@ -214,7 +214,7 @@ or implementing an interface; it never means teaching core code about an op.
 | `MemoryRead` / `MemoryWrite` | location, value, **and state accessors**: the state operand read, and (for writes) the state result produced (§6) |
 | `PromotableAllocation` | the value naming an allocation eligible for chain-splitting |
 | `ConstantLike`, `ConstantFold`, `Commutative`, `IntegerArithmetic`, `SameOperandType`, `OpCost` | value semantics for folding, e-graph seeding, and extraction cost |
-| `RegisterSemantics`, `MachineInstruction` | machine-op register roles and marking |
+| `MachineInstruction` | machine-op marking; register slots are `InstrInfo::regs` |
 
 Interfaces whose consumers disappear are deleted; an orphaned interface is a
 bug, not a reserve.

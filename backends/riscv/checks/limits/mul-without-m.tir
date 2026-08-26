@@ -13,4 +13,4 @@ module {
   module_end
 }
 
-// CHECK: riscv.mul {rd = %virt2:GPR, rs1 = %virt0:GPR, rs2 = %virt1:GPR}
+// CHECK: riscv.mul {rd = %[[V2:[0-9]+]]:GPR, rs1 = %[[V0:[0-9]+]]:GPR, rs2 = %[[V1:[0-9]+]]:GPR}

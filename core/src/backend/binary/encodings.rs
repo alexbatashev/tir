@@ -5,6 +5,7 @@
 //! `[op_lo, op_lo + width)` map to word bits `[word_lo, word_lo + width)`.
 
 use tir::attributes::{AttributeValue, NamedAttribute, RegisterAttr};
+use tir::backend::{RegAssignment, reg_slot, slot_register};
 use tir::{Context, OpHandle, OpId, OpInstance};
 
 use crate::backend::binary::{EncodedInst, FixupTarget, InstFixup};
@@ -62,18 +63,19 @@ pub struct EncodeSpec {
 }
 
 /// Interprets an [`EncodeSpec`]. `None` when an operand cannot be encoded (e.g.
-/// a virtual register survived register allocation); symbol/block operands
-/// become fixups with their bits left zero.
-pub fn encode_with(op: &OpHandle, spec: &EncodeSpec) -> Option<EncodedInst> {
+/// a value `assignment` gives no register); symbol/block operands become fixups
+/// with their bits left zero.
+pub fn encode_with(
+    op: &OpHandle,
+    spec: &EncodeSpec,
+    assignment: &RegAssignment,
+) -> Option<EncodedInst> {
     let mut word = spec.const_word;
     let mut fixups = Vec::new();
     for field in spec.fields {
         if field.register {
-            let value = match op.attr(field.attr)? {
-                AttributeValue::Register(RegisterAttr::Physical { index, .. }) => index as u128,
-                _ => return None,
-            };
-            scatter(&mut word, value, field.runs);
+            let (_, index) = slot_register(reg_slot(op, field.attr)?, assignment)?;
+            scatter(&mut word, index as u128, field.runs);
             continue;
         }
         // Immediates written in assembly may be spelled signed or unsigned

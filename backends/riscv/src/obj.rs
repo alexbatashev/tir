@@ -7,7 +7,7 @@ use tir::attributes::AttributeValue;
 use tir::backend::binary::{EM_RISCV, ElfClass, ObjectFormatInfo, RelocKind};
 use tir::backend::{VirtualBranchOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp};
 
-use crate::{JumpAndLinkOpBuilder, JumpAndLinkRegOpBuilder, phys, virt};
+use crate::{JumpAndLinkOpBuilder, JumpAndLinkRegOpBuilder, gpr_ty, phys};
 
 const R_RISCV_BRANCH: u32 = 16;
 const R_RISCV_32: u32 = 1;
@@ -155,16 +155,18 @@ pub(crate) fn lower_sym_addr(
         return Ok(false);
     };
     let sym = addr_of.sym_name();
-    let dest = virt(addr_of.result().number(), crate::RegClass::GPR.id());
+    let dest = addr_of.result();
+    context.retype_value(dest, gpr_ty(context));
+    let upper = context.create_value(gpr_ty(context), None).id();
 
     let lui = crate::LoadUpperImmOpBuilder::new(context)
-        .attr("rd", dest.clone())
+        .result_values(vec![upper])
         .attr("imm", AttributeValue::Str(sym.clone().into()))
         .build();
     rewriter.insert_op_before(op, &lui)?;
     let addi = crate::AddImmOpBuilder::new(context)
-        .attr("rd", dest.clone())
-        .attr("rs1", dest)
+        .result_values(vec![dest])
+        .rs1(upper)
         .attr("imm", AttributeValue::Str(sym.into()))
         .build();
     rewriter.replace_op(op, &addi)?;
@@ -226,16 +228,18 @@ pub(crate) fn finalize_virtual_ops(
         return Ok(true);
     }
 
-    // `vcall_indirect` becomes `jalr ra, target, 0`; the target register was
-    // colored by the allocator through the op's `callee_reg` attribute.
+    // `vcall_indirect` becomes `jalr ra, target, 0`; the target register is the
+    // one the allocator gave the call's callee operand.
     if let Some(call) = op.as_op::<VirtualIndirectCallOp>() {
-        let target = register_attr(&call, "callee_reg")?;
+        let target = call.operands().first().copied().ok_or_else(|| {
+            tir::PassError::InvalidRuleSet("indirect call has no callee register".to_string())
+        })?;
         let jalr = JumpAndLinkRegOpBuilder::new(context)
             .attr(
                 "rd",
                 phys(&crate::default_abi().ra.expect("RISC-V ABI must define ra")),
             )
-            .attr("rs1", target)
+            .rs1(target)
             .attr("imm", AttributeValue::Int(0))
             .build();
         rewriter.replace_op(op, &jalr)?;
@@ -248,14 +252,6 @@ pub(crate) fn finalize_virtual_ops(
 fn string_attr(op: &dyn tir::Operation, name: &str) -> Result<String, tir::PassError> {
     match op.attr(name) {
         Some(AttributeValue::Str(s)) => Some(s.to_string()),
-        _ => None,
-    }
-    .ok_or_else(|| tir::PassError::InvalidRuleSet(format!("call is missing its '{name}'")))
-}
-
-fn register_attr(op: &dyn tir::Operation, name: &str) -> Result<AttributeValue, tir::PassError> {
-    match op.attr(name) {
-        Some(value @ AttributeValue::Register(_)) => Some(value.clone()),
         _ => None,
     }
     .ok_or_else(|| tir::PassError::InvalidRuleSet(format!("call is missing its '{name}'")))

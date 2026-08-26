@@ -9,7 +9,7 @@ module {
 }
 
 // CHECK:      asm.symbol {{.*}}name = "make_pair"
-// CHECK:      x86_64.mov {dst = rax, src = rdi}
-// CHECK-NEXT: x86_64.mov {dst = rdx, src = rsi}
+// CHECK:      x86_64.mov {dst = %{{[0-9]+}}:rax, src = %{{[0-9]+}}:rdi}
+// CHECK-NEXT: x86_64.mov {dst = %{{[0-9]+}}:rdx, src = %{{[0-9]+}}:rsi}
 // CHECK-NOT:  make_tuple
 // CHECK-NEXT: asm.vret

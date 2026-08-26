@@ -18,6 +18,88 @@ use tir::sem::template_node;
 
 use super::fixtures::{atomic_pattern, binary, nary, symbol};
 
+// The instructions the test rules emit. A selection rule emits a machine
+// instruction, whose operands are registers rather than typed mid-end values,
+// so these markers say only what the assertions read: the mnemonic and the
+// order they were emitted in.
+macro_rules! marker_info {
+    ($op:ident, $name:literal) => {
+        impl tir::backend::MachineInstruction for $op {
+            fn info(&self) -> &'static tir::backend::InstrInfo {
+                static INFO: tir::backend::InstrInfo = tir::backend::InstrInfo {
+                    name: $name,
+                    mnemonic: $name,
+                    ..tir::backend::InstrInfo::BASE
+                };
+                &INFO
+            }
+
+            fn instance(&self) -> &tir::OpHandle {
+                &self.0
+            }
+        }
+    };
+}
+
+tir::helpers::operation! {
+    ShlMarkerOp {
+        name: "shli",
+        dialect: "test",
+        operands: O { a: "?tir::Any", b: "?tir::Any", },
+        results: R { regs: "*tir::Any" },
+        interfaces: [tir::backend::MachineInstruction],
+    }
+}
+
+tir::helpers::operation! {
+    ShrsMarkerOp {
+        name: "shrsi",
+        dialect: "test",
+        operands: O { a: "?tir::Any", b: "?tir::Any", },
+        results: R { regs: "*tir::Any" },
+        interfaces: [tir::backend::MachineInstruction],
+    }
+}
+
+tir::helpers::operation! {
+    SubMarkerOp {
+        name: "subi",
+        dialect: "test",
+        operands: O { a: "?tir::Any", b: "?tir::Any", },
+        results: R { regs: "*tir::Any" },
+        interfaces: [tir::backend::MachineInstruction],
+    }
+}
+
+tir::helpers::operation! {
+    MulMarkerOp {
+        name: "muli",
+        dialect: "test",
+        operands: O { a: "?tir::Any", b: "?tir::Any", },
+        results: R { regs: "*tir::Any" },
+        interfaces: [tir::backend::MachineInstruction],
+    }
+}
+
+marker_info!(ShlMarkerOp, "shli");
+marker_info!(ShrsMarkerOp, "shrsi");
+marker_info!(SubMarkerOp, "subi");
+marker_info!(MulMarkerOp, "muli");
+
+/// Build one of the marker instructions over `value`, producing `result_ty`.
+macro_rules! marker {
+    ($op:ident, $builder:ident, $context:expr, $value:expr, $result_ty:expr) => {{
+        $op::register_interfaces($context);
+        Box::new(
+            $builder::new($context)
+                .a($value)
+                .b($value)
+                .result_types(vec![$result_ty])
+                .build(),
+        )
+    }};
+}
+
 /// `module { func demo(args…) -> ret }` with an empty body block; the module is
 /// not yet closed so the test can append the body it needs.
 fn function(
@@ -124,21 +206,27 @@ fn emit_mul(
     ))
 }
 
+// A rule reads its operands from the match, not from the op it covers: a fused
+// pattern covers ops whose results the cover retires.
 fn emit_sub(
     context: &Context,
     req: &EmitRequest,
-    _m: &RuleMatch,
+    m: &RuleMatch,
 ) -> Result<Box<dyn Operation>, PassError> {
-    let op = req.op.expect("backed by an op");
+    let lhs = m
+        .value_binding(0)
+        .ok_or(PassError::RewriteFailed(req.op_id()))?;
+    let rhs = m
+        .value_binding(1)
+        .ok_or(PassError::RewriteFailed(req.op_id()))?;
     let result_ty = req.result_ty.expect("typed result");
+    SubMarkerOp::register_interfaces(context);
     Ok(Box::new(
-        ops::subi(
-            context,
-            op.op().operands()[0],
-            op.op().operands()[1],
-            result_ty,
-        )
-        .build(),
+        SubMarkerOpBuilder::new(context)
+            .a(lhs)
+            .b(rhs)
+            .result_types(vec![result_ty])
+            .build(),
     ))
 }
 
@@ -773,8 +861,8 @@ fn emit_shift_marker(
         // The shift amount is an immediate (m.int_binding(1)); operands beyond the
         // mnemonic don't matter for this test, so the source register is reused.
         let built: Box<dyn Operation> = match marker {
-            SymKind::ShiftLeft => Box::new(ops::shli(context, rs1, rs1, result_ty).build()),
-            _ => Box::new(ops::shrsi(context, rs1, rs1, result_ty).build()),
+            SymKind::ShiftLeft => marker!(ShlMarkerOp, ShlMarkerOpBuilder, context, rs1, result_ty),
+            _ => marker!(ShrsMarkerOp, ShrsMarkerOpBuilder, context, rs1, result_ty),
         };
         Ok(built)
     }
@@ -797,8 +885,12 @@ fn emit_shift_prelude(
         .value_binding(0)
         .ok_or(PassError::RewriteFailed(req.op_id()))?;
     let result_ty = req.result_ty.expect("typed result");
-    Ok(Box::new(
-        ops::subi(context, value, value, result_ty).build(),
+    Ok(marker!(
+        SubMarkerOp,
+        SubMarkerOpBuilder,
+        context,
+        value,
+        result_ty
     ))
 }
 
@@ -920,7 +1012,13 @@ fn emit_load_marker(
         .value_binding(0)
         .ok_or(PassError::RewriteFailed(req.op_id()))?;
     let result_ty = req.result_ty.expect("typed result");
-    Ok(Box::new(ops::shli(context, base, base, result_ty).build()))
+    Ok(marker!(
+        ShlMarkerOp,
+        ShlMarkerOpBuilder,
+        context,
+        base,
+        result_ty
+    ))
 }
 
 fn emit_store_marker(
@@ -932,8 +1030,12 @@ fn emit_store_marker(
         .value_binding(4)
         .ok_or(PassError::RewriteFailed(req.op_id()))?;
     let result_ty = context.get_value(value).ty();
-    Ok(Box::new(
-        ops::muli(context, value, value, result_ty).build(),
+    Ok(marker!(
+        MulMarkerOp,
+        MulMarkerOpBuilder,
+        context,
+        value,
+        result_ty
     ))
 }
 

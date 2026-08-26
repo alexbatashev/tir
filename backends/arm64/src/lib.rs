@@ -1,4 +1,5 @@
 use tir::Operation;
+use tir::backend::RegSlot;
 use tir::helpers::{dialect, operation};
 
 const MODEL_CHECK_SOURCES: &[(&str, &str)] = &[
@@ -187,6 +188,7 @@ dialect! {
     Arm64Dialect {
         name: "arm64",
         operation_file: concat!(env!("OUT_DIR"), "/arm64_ops.rs"),
+        type_parsers: reg_class_type_parsers(),
     }
 }
 
@@ -226,21 +228,19 @@ fn emit_branch_nonzero(
     condition: tir::ValueId,
     dest: tir::BlockId,
 ) -> Vec<Box<dyn Operation>> {
-    let bit = context
-        .create_value(tir::builtin::IntegerType::new(context, 1), None)
-        .id();
+    let bit = context.create_value(gpr_ty(context), None).id();
     vec![
         Box::new(
             AndImmediateOpBuilder::new(context)
-                .attr("rd", virt(bit.number(), RegClass::GPRsp.id()))
-                .attr("rn", virt(condition.number(), RegClass::GPR.id()))
+                .result_values(vec![bit])
+                .rn(condition)
                 .attr("immr", tir::attributes::AttributeValue::Int(0))
                 .attr("imms", tir::attributes::AttributeValue::Int(0))
                 .build(),
         ),
         Box::new(
             CompareBranchNonZeroOpBuilder::new(context)
-                .attr("rt", virt(bit.number(), RegClass::GPR.id()))
+                .rt(bit)
                 .attr("imm", tir::attributes::AttributeValue::Block(dest))
                 .build(),
         ),
@@ -251,18 +251,15 @@ fn emit_branch_nonzero(
 const XZR: u16 = 31;
 
 /// Build a register-register move (`orr rd, xzr, rm`).
-fn mv(
-    context: &tir::Context,
-    rd: tir::attributes::AttributeValue,
-    rm: tir::attributes::AttributeValue,
-) -> Box<dyn Operation> {
-    Box::new(
-        OrOpBuilder::new(context)
-            .attr("rd", rd)
-            .attr("rn", phys(&(RegClass::GPR.id(), XZR)))
-            .attr("rm", rm)
-            .build(),
-    )
+fn mv(context: &tir::Context, rd: RegSlot, rm: RegSlot) -> Box<dyn Operation> {
+    let builder = OrOpBuilder::new(context).attr("rn", phys(&(RegClass::GPR.id(), XZR)));
+    let builder = tir::reg_use!(builder, rm, rm);
+    Box::new(tir::reg_def!(builder, rd, rd).build())
+}
+
+/// The type of a value living in a `GPR`.
+fn gpr_ty(context: &tir::Context) -> tir::TypeId {
+    tir::backend::RegClassType::new(context, RegClass::GPR.id())
 }
 
 pub fn create_isel_pass(context: &tir::Context) -> tir::backend::isel::InstructionSelectPass {
@@ -287,23 +284,12 @@ fn create_isel_pass_for(
 struct Arm64CallEmitter;
 
 impl tir::backend::call_lowering::CallEmitter for Arm64CallEmitter {
-    fn copy(
-        &self,
-        context: &tir::Context,
-        dst: tir::attributes::AttributeValue,
-        src: tir::attributes::AttributeValue,
-    ) -> Box<dyn Operation> {
-        let class = match &dst {
-            tir::attributes::AttributeValue::Register(register) => register.class(),
-            _ => None,
-        };
+    fn copy(&self, context: &tir::Context, dst: RegSlot, src: RegSlot) -> Box<dyn Operation> {
+        let class = tir::backend::slot_class(context, dst);
         if class == Some(RegClass::FPR64.id()) {
-            Box::new(
-                FMoveRegisterDoubleOpBuilder::new(context)
-                    .attr("fd", dst)
-                    .attr("fa", src)
-                    .build(),
-            )
+            let builder = FMoveRegisterDoubleOpBuilder::new(context);
+            let builder = tir::reg_use!(builder, fa, src);
+            Box::new(tir::reg_def!(builder, fd, dst).build())
         } else {
             mv(context, dst, src)
         }
@@ -313,27 +299,25 @@ impl tir::backend::call_lowering::CallEmitter for Arm64CallEmitter {
         &self,
         context: &tir::Context,
         abi: &tir::backend::abi::AbiInfo,
-        value: tir::attributes::AttributeValue,
+        value: tir::ValueId,
+        class: tir::backend::regalloc::RegClassId,
         offset: i64,
     ) -> Result<Box<dyn Operation>, tir::PassError> {
-        let class = match &value {
-            tir::attributes::AttributeValue::Register(register) => register.class(),
-            _ => None,
-        };
-        if class == Some(RegClass::FPR64.id()) {
+        let offset = tir::attributes::AttributeValue::Int(offset);
+        if class == RegClass::FPR64.id() {
             Ok(Box::new(
                 StoreFloatDoubleOpBuilder::new(context)
-                    .attr("ft", value)
+                    .ft(value)
                     .attr("rn", phys(&abi.sp))
-                    .attr("imm", tir::attributes::AttributeValue::Int(offset))
+                    .attr("imm", offset)
                     .build(),
             ))
         } else {
             Ok(Box::new(
                 StoreDoublewordOpBuilder::new(context)
-                    .attr("rt", value)
+                    .rt(value)
                     .attr("rn", phys(&abi.sp))
-                    .attr("imm", tir::attributes::AttributeValue::Int(offset))
+                    .attr("imm", offset)
                     .build(),
             ))
         }
@@ -366,13 +350,6 @@ fn phys(reg: &tir::backend::liveness::PhysReg) -> tir::attributes::AttributeValu
     })
 }
 
-fn virt(value: u32, class: tir::backend::regalloc::RegClassId) -> tir::attributes::AttributeValue {
-    tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Virtual {
-        id: value,
-        class: Some(class),
-    })
-}
-
 /// AArch64 register allocation target: the generated register file plus `str`/`ldr`
 /// spill code and a `sub sp, sp, #frame` / `add sp, sp, #frame` prologue/epilogue.
 pub struct Arm64RegAlloc;
@@ -385,25 +362,26 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
     fn emit_spill_store(
         &self,
         context: &tir::Context,
-        value: u32,
+        value: tir::ValueId,
         class: tir::backend::regalloc::RegClassId,
         frame: &tir::backend::liveness::PhysReg,
         offset: i64,
     ) -> Box<dyn Operation> {
+        let offset = tir::attributes::AttributeValue::Int(offset);
         if class == RegClass::FPR64.id() {
             return Box::new(
                 StoreFloatDoubleOpBuilder::new(context)
-                    .attr("ft", virt(value, class))
+                    .ft(value)
                     .attr("rn", phys(frame))
-                    .attr("imm", tir::attributes::AttributeValue::Int(offset))
+                    .attr("imm", offset)
                     .build(),
             );
         }
         Box::new(
             StoreDoublewordOpBuilder::new(context)
-                .attr("rt", virt(value, class))
+                .rt(value)
                 .attr("rn", phys(frame))
-                .attr("imm", tir::attributes::AttributeValue::Int(offset))
+                .attr("imm", offset)
                 .build(),
         )
     }
@@ -411,25 +389,26 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
     fn emit_spill_reload(
         &self,
         context: &tir::Context,
-        value: u32,
+        value: tir::ValueId,
         class: tir::backend::regalloc::RegClassId,
         frame: &tir::backend::liveness::PhysReg,
         offset: i64,
     ) -> Box<dyn Operation> {
+        let offset = tir::attributes::AttributeValue::Int(offset);
         if class == RegClass::FPR64.id() {
             return Box::new(
                 LoadFloatDoubleOpBuilder::new(context)
-                    .attr("ft", virt(value, class))
+                    .result_values(vec![value])
                     .attr("rn", phys(frame))
-                    .attr("imm", tir::attributes::AttributeValue::Int(offset))
+                    .attr("imm", offset)
                     .build(),
             );
         }
         Box::new(
             LoadDoublewordOpBuilder::new(context)
-                .attr("rt", virt(value, class))
+                .result_values(vec![value])
                 .attr("rn", phys(frame))
-                .attr("imm", tir::attributes::AttributeValue::Int(offset))
+                .attr("imm", offset)
                 .build(),
         )
     }
@@ -438,24 +417,19 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
         &self,
         context: &tir::Context,
         class: tir::backend::regalloc::RegClassId,
-        dst: u32,
-        src: u32,
+        dst: RegSlot,
+        src: RegSlot,
     ) -> Box<dyn Operation> {
         match class.name() {
             // The 32-bit classes alias GPR's physical file (same register numbering),
             // and any value only ever written through its 32-bit view already has
             // zeroed upper bits, so a plain 64-bit copy carries it correctly.
-            "GPR" | "GPRsp" | "GPR32" | "GPR32sp" => mv(
-                context,
-                virt(dst, RegClass::GPR.id()),
-                virt(src, RegClass::GPR.id()),
-            ),
-            "FPR64" => Box::new(
-                FMoveRegisterDoubleOpBuilder::new(context)
-                    .attr("fd", virt(dst, RegClass::FPR64.id()))
-                    .attr("fa", virt(src, RegClass::FPR64.id()))
-                    .build(),
-            ),
+            "GPR" | "GPRsp" | "GPR32" | "GPR32sp" => mv(context, dst, src),
+            "FPR64" => {
+                let builder = FMoveRegisterDoubleOpBuilder::new(context);
+                let builder = tir::reg_use!(builder, fa, src);
+                Box::new(tir::reg_def!(builder, fd, dst).build())
+            }
             other => unimplemented!("arm64 register copy for class {other} is not implemented"),
         }
     }
@@ -518,7 +492,7 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
     fn emit_frame_address(
         &self,
         context: &tir::Context,
-        dst: u32,
+        dst: tir::ValueId,
         class: tir::backend::regalloc::RegClassId,
         frame: &tir::backend::liveness::PhysReg,
         offset: i64,
@@ -531,7 +505,7 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
         }
         Ok(vec![Box::new(
             AddImmediateOpBuilder::new(context)
-                .attr("rd", virt(dst, class))
+                .result_values(vec![dst])
                 .attr("rn", phys(frame))
                 .attr("imm", tir::attributes::AttributeValue::Int(offset))
                 .build(),

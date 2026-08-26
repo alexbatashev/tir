@@ -8,6 +8,6 @@ module {
   module_end
 }
 
-// CHECK: arm64.load_doubleword {rt = {{x[0-9]+}}, rn = sp, imm = 0}
+// CHECK: arm64.load_doubleword {rt = %{{[0-9]+}}:{{x[0-9]+}}, rn = sp, imm = 0}
 // CHECK: arm64.sxtw
 // CHECK: asm.vret

@@ -13,8 +13,8 @@ module {
 }
 
 // CHECK: asm.symbol {name = "bits_to_double"
-// CHECK: riscv.fmv.d.x {fd = %virt{{[0-9]+}}:FPR64, rs1 = %virt{{[0-9]+}}:GPR}
+// CHECK: riscv.fmv.d.x {fd = %{{[0-9]+}}:FPR64, rs1 = %{{[0-9]+}}:GPR}
 // CHECK: asm.vret
 // CHECK: asm.symbol {name = "double_to_bits"
-// CHECK: riscv.fmv.x.d {rd = %virt{{[0-9]+}}:GPR, fs1 = %virt{{[0-9]+}}:FPR64}
+// CHECK: riscv.fmv.x.d {rd = %{{[0-9]+}}:GPR, fs1 = %{{[0-9]+}}:FPR64}
 // CHECK: asm.vret

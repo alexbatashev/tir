@@ -1,20 +1,19 @@
 //! Target-independent register allocation.
 //!
-//! The allocator works on machine IR produced by instruction selection, where
-//! every register operand is carried in an op attribute as
-//! [`RegisterAttr::Virtual`] (its `id` is the SSA value number),
-//! [`RegisterAttr::FixedUse`], or [`RegisterAttr::Physical`]. It reads the def/use
-//! role of each register operand from the opcode's registered register semantics,
-//! computes liveness, builds an interference graph, and solves an optimal coloring
-//! with the shared PBQP solver ([`tir_pbqp`]). The chosen physical registers are
-//! written back by rewriting every `Virtual` attribute to `Physical`.
+//! The allocator works on machine IR produced by instruction selection, where a
+//! register operand is an SSA operand or result whose type is its register
+//! class. It computes liveness, builds an interference graph, and solves an
+//! optimal coloring with the shared PBQP solver ([`tir_pbqp`]). Nothing is
+//! rewritten: the chosen registers are written onto the function's `asm.symbol`
+//! as a [`crate::backend::RegAssignment`], which assembly printing and encoding
+//! read.
 //!
 //! Register files come from [`RegisterInfo`]; allocation order and calling
 //! convention policy come from the selected [`crate::backend::abi::AbiInfo`].
 
 use std::collections::{HashMap, HashSet};
 
-use tir::attributes::{AttributeRole, AttributeValue, RegisterAttr};
+use tir::attributes::AttributeValue;
 use tir::{
     AnalysisManager, BlockId, Context, OpId, Operation, OperationRef, Pass, PassError, PassTarget,
     Rewriter, ValueId,
@@ -23,13 +22,17 @@ use tir_pbqp::{self as pbqp, INF_COST, PbqpMatrix, PbqpNodeId, PbqpProblem};
 
 use crate::backend::liveness::{self, Liveness, PhysReg};
 use crate::backend::prealloc;
+use crate::backend::registers::fresh_reg;
 use crate::backend::{SymbolOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp};
 use crate::ptr::AllocaOp;
 
 /// Architectural metadata for one register class.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct RegClassInfo {
     pub name: &'static str,
+    /// The dialect whose TMDL description declares this class. Names the
+    /// register-class type a value of this class carries (`!x86_64.GPR`).
+    pub dialect: &'static str,
     /// The physical register file this class draws from — the root of its TMDL
     /// inheritance chain. Classes that share a file (e.g. AArch64 `GPR` and
     /// `GPRsp`, which differ only in whether encoding 31 is `xzr` or `sp`) name the
@@ -47,6 +50,30 @@ pub struct RegClassInfo {
     /// Where this class's architectural view sits in its storage element and
     /// whether a write merges into it (see [`RegisterView`]).
     pub view: RegisterView,
+    /// Renders one of this class's registers by encoding index, so a physical
+    /// register prints as its assembly name wherever it appears.
+    pub print_name: crate::backend::asm_desc::RegisterNamePrinter,
+}
+
+/// Two class records describe the same class when their architecture does; the
+/// name printer is a rendering detail and is not compared.
+impl PartialEq for RegClassInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.dialect == other.dialect
+            && self.file == other.file
+            && self.registers == other.registers
+            && self.group_width == other.group_width
+            && self.view == other.view
+    }
+}
+
+impl Eq for RegClassInfo {}
+
+/// The [`RegClassInfo::print_name`] of a class with no assembly names, used by
+/// tests and by classes a target does not print.
+pub fn no_register_name(_index: u16, _prefer_abi: bool) -> Option<String> {
+    None
 }
 
 /// A handle to a register class: a pointer to its `'static` [`RegClassInfo`].
@@ -71,6 +98,11 @@ impl RegClassId {
 
     pub fn name(self) -> &'static str {
         self.0.name
+    }
+
+    /// The dialect this class belongs to (see [`RegClassInfo::dialect`]).
+    pub fn dialect(self) -> &'static str {
+        self.0.dialect
     }
 
     /// The physical register file this class draws from (see [`RegClassInfo::file`]).
@@ -537,36 +569,38 @@ fn interference_matrix(
 pub trait TargetRegAlloc: Send + Sync {
     fn register_info(&self) -> RegisterInfo;
 
-    /// Build a store of virtual register `value` (of class `class`) to
-    /// `[frame + offset]`.
+    /// Build a store of `value` (of class `class`) to `[frame + offset]`.
     fn emit_spill_store(
         &self,
         context: &Context,
-        value: u32,
+        value: ValueId,
         class: RegClassId,
         frame: &PhysReg,
         offset: i64,
     ) -> Box<dyn Operation>;
 
-    /// Build a load from `[frame + offset]` into virtual register `value`.
+    /// Build a load from `[frame + offset]` defining `value`, which the caller
+    /// has already created with the class's type.
     fn emit_spill_reload(
         &self,
         context: &Context,
-        value: u32,
+        value: ValueId,
         class: RegClassId,
         frame: &PhysReg,
         offset: i64,
     ) -> Box<dyn Operation>;
 
-    /// Build a register-to-register copy of virtual register `src` into virtual
-    /// register `dst` (both of class `class`). Only reached on targets whose
-    /// instructions have tied (two-address) operands, so the default panics.
+    /// Build a register-to-register copy of `src` into `dst` (both of class
+    /// `class`). Either end is a value the copy defines or reads, or a physical
+    /// register named directly. Only reached on targets whose instructions have
+    /// tied (two-address) operands or a calling convention, so the default
+    /// panics.
     fn emit_copy(
         &self,
         context: &Context,
         class: RegClassId,
-        dst: u32,
-        src: u32,
+        dst: crate::backend::RegSlot,
+        src: crate::backend::RegSlot,
     ) -> Box<dyn Operation> {
         let _ = (context, class, dst, src);
         unimplemented!("this target has tied operands but no copy emitter")
@@ -603,7 +637,7 @@ pub trait TargetRegAlloc: Send + Sync {
     fn emit_frame_address(
         &self,
         _context: &Context,
-        _dst: u32,
+        _dst: ValueId,
         class: RegClassId,
         _frame: &PhysReg,
         _offset: i64,
@@ -619,7 +653,8 @@ pub trait TargetRegAlloc: Send + Sync {
 /// selection: it computes liveness over the symbol's body, pre-colors the calling
 /// convention's argument and return registers, solves an optimal coloring with
 /// [`allocate`], spills and retries when the optimum demands it, and finally
-/// rewrites every virtual register operand to its assigned physical register.
+/// records where every value went in the symbol's
+/// [`crate::backend::RegAssignment`].
 pub struct RegisterAllocationPass {
     target: Box<dyn TargetRegAlloc>,
     abi: &'static crate::backend::abi::AbiInfo,
@@ -726,14 +761,20 @@ impl Pass for RegisterAllocationPass {
             if !context.has_operation(copy.op) {
                 continue;
             }
-            let endpoints = copy_endpoints(context, copy.op);
-            let erasable = endpoints == Some((copy.src, copy.dst))
-                && matches!(
-                    (assignment.get(&copy.src), assignment.get(&copy.dst)),
+            // Read the endpoints as they stand: spilling and an earlier
+            // coalesce may have renamed either end since collection.
+            let erasable = matches!(
+                copy_endpoints(context, copy.op),
+                Some((src, dst)) if matches!(
+                    (assignment.get(&src), assignment.get(&dst)),
                     (Some(src), Some(dst)) if src.0.span(src.1) == dst.0.span(dst.1)
-                );
+                )
+            );
             if erasable {
-                rewriter.erase_op(&op_ref_in(context, copy.block, copy.op))?;
+                // Both ends live in one register, so the copy is a self-move.
+                // Its destination value stays: the assignment placed it, and a
+                // two-address instruction may define it again.
+                rewriter.erase_op_keeping_results(&op_ref_in(context, copy.block, copy.op))?;
             } else {
                 strip_attr(context, copy.op, prealloc::COALESCABLE_COPY_ATTR);
             }
@@ -756,7 +797,20 @@ impl Pass for RegisterAllocationPass {
             frame_size,
             saves.len(),
         )?;
-        rewrite_registers(context, &blocks, &assignment);
+        // Allocation ends by recording where every value went; the ops it
+        // decided about are untouched.
+        // Coalescing and spilling retire values; the map describes the ones the
+        // function still names.
+        let map: crate::backend::RegAssignment = assignment
+            .iter()
+            .map(|(&vreg, &register)| (ValueId::from_number(vreg), register))
+            .filter(|(value, _)| context.has_value(*value))
+            .collect();
+        let mut attrs = op.op().attributes().to_vec();
+        let pins = context.sym(crate::backend::ARG_PINS_ATTR);
+        attrs.retain(|attr| Some(attr.name) != pins);
+        attrs.push(context.named_attribute(crate::backend::ASSIGNMENT_ATTR, map.to_attribute()));
+        context.set_op_attributes(op.op().id, attrs);
         if frame_size > 0 || !saves.is_empty() {
             self.insert_frame(context, rewriter, &blocks, frame_size, &saves)?;
         }
@@ -773,9 +827,9 @@ impl RegisterAllocationPass {
     /// Replace every use of an `alloca` result with a frame address computed
     /// immediately before that use. Rematerializing keeps each address live for a
     /// single instruction instead of spanning the whole function, which is what
-    /// lets bodies with many address-taken locals allocate at all: an alloca vreg
-    /// cannot be spilled (its defining op carries no register attributes, so the
-    /// slot would never be written), so a long-lived one pins a register forever.
+    /// lets bodies with many address-taken locals allocate at all: an alloca
+    /// value cannot be spilled (nothing would write the slot), so a long-lived
+    /// one pins a register forever.
     fn rematerialize_stack_allocas(
         &self,
         context: &Context,
@@ -791,12 +845,12 @@ impl RegisterAllocationPass {
         let frame_register = self.frame_register();
         let mut sites = Vec::new();
         for alloca in allocas {
-            let class = vreg_class_in(context, blocks, alloca.vreg)
+            let class = slot_class_of(context, blocks, alloca.value)
                 .or(default_class)
                 .ok_or_else(|| {
                     PassError::InvalidRuleSet(format!(
-                        "stack allocation vreg {} has no register class",
-                        alloca.vreg
+                        "stack allocation %{} has no register class",
+                        alloca.value.number()
                     ))
                 })?;
             sites.push((alloca, class));
@@ -806,16 +860,13 @@ impl RegisterAllocationPass {
                 if !context.has_operation(op_id) {
                     continue;
                 }
-                let uses = liveness::op_regs(&context.get_op(op_id)).uses;
+                let operands = context.get_op(op_id).operands().to_vec();
                 for &(alloca, class) in &sites {
-                    if op_id == alloca.op_id
-                        || !uses.iter().any(|register| is_vreg(register, alloca.vreg))
-                    {
+                    if op_id == alloca.op_id || !operands.contains(&alloca.value) {
                         continue;
                     }
-                    let ty = context.get_value(ValueId::from_number(alloca.vreg)).ty();
-                    let fresh = context.create_value(ty, None).id().number();
-                    frame.temps.insert(fresh);
+                    let fresh = fresh_reg(context, class);
+                    frame.temps.insert(fresh.number());
                     let target = op_ref_in(context, block, op_id);
                     for address in self.target.emit_frame_address(
                         context,
@@ -826,13 +877,22 @@ impl RegisterAllocationPass {
                     )? {
                         rewriter.insert_op_before(&target, address.as_ref())?;
                     }
-                    rename_attr(context, op_id, alloca.vreg, fresh, RoleClass::Read);
+                    for (index, operand) in operands.iter().enumerate() {
+                        if *operand == alloca.value {
+                            context.set_op_operand(op_id, index, fresh);
+                        }
+                    }
                 }
             }
         }
         Ok(())
     }
 
+    /// Turn each instruction's pre-coloring constraints into point constraints:
+    /// a value an instruction must read or write in a fixed register is copied
+    /// in or out right there, and the pin moves to the copy's own value. A
+    /// register is a constraint at one instruction, not a home for a whole live
+    /// range, so nothing else has to avoid it.
     fn lower_fixed_registers(
         &self,
         context: &Context,
@@ -844,82 +904,57 @@ impl RegisterAllocationPass {
         for &block_id in blocks {
             for op_id in context.get_block(block_id).op_ids() {
                 let op = context.get_op(op_id);
-                let fixed_registers: Vec<_> = op
-                    .attributes()
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(attr_index, attr)| match &attr.value {
-                        AttributeValue::Register(RegisterAttr::FixedUse { id, class, index }) => {
-                            Some((attr_index, *id, *class, *index, true))
-                        }
-                        AttributeValue::Register(RegisterAttr::FixedDef { id, class, index }) => {
-                            Some((attr_index, *id, *class, *index, false))
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                if fixed_registers.is_empty() {
+                if op.attr(crate::backend::PINS_ATTR).is_none() {
                     continue;
                 }
-
                 let op_ref = op_ref_in(context, block_id, op_id);
-                let mut attributes = op.attributes().to_vec();
-                for (attr_index, value, class, index, is_use) in fixed_registers {
-                    let ty = context.get_value(ValueId::from_number(value)).ty();
-                    let fixed = context.create_value(ty, None).id().number();
-                    // A fixed register is a point constraint at this instruction, not
-                    // a home for the value's whole live range: copying in before a
-                    // use and out after a def keeps the pin local, so the value may
-                    // live across another instruction that claims the same register.
-                    // The copy carries a coalescing mark and disappears whenever both
-                    // ends land in one register.
-                    let copy = if is_use {
-                        let copy = self.target.emit_copy(context, class, fixed, value);
-                        rewriter.insert_op_before(&op_ref, copy.as_ref())?;
+                for slot in crate::backend::reg_slots(&op) {
+                    let crate::backend::RegSlot::Value(value) = slot.slot else {
+                        continue;
+                    };
+                    let Some((class, index)) = crate::backend::slot_pin(&op, slot.port.name) else {
+                        continue;
+                    };
+                    let Some(position) = slot.position else {
+                        continue;
+                    };
+                    let fixed = fresh_reg(context, class);
+                    let copy = if slot.port.def {
+                        let copy = self.target.emit_copy(
+                            context,
+                            class,
+                            crate::backend::RegSlot::Value(value),
+                            crate::backend::RegSlot::Value(fixed),
+                        );
+                        insert_after(context, rewriter, block_id, op_id, copy.as_ref())?;
+                        context.set_op_result(op_id, position, fixed);
                         copy
                     } else {
-                        let copy = self.target.emit_copy(context, class, value, fixed);
-                        insert_after(context, rewriter, block_id, op_id, copy.as_ref())?;
+                        let copy = self.target.emit_copy(
+                            context,
+                            class,
+                            crate::backend::RegSlot::Value(fixed),
+                            crate::backend::RegSlot::Value(value),
+                        );
+                        rewriter.insert_op_before(&op_ref, copy.as_ref())?;
+                        context.set_op_operand(op_id, position, fixed);
                         copy
                     };
                     mark_coalescable(context, copy.id());
-                    attributes[attr_index].value =
-                        AttributeValue::Register(RegisterAttr::Virtual {
-                            id: fixed,
-                            class: Some(class),
-                        });
-                    if let Some(previous) = precolor.insert(fixed, (class, index))
-                        && previous != (class, index)
-                    {
-                        return Err(PassError::InvalidRuleSet(format!(
-                            "virtual register {fixed} is pinned to conflicting physical registers"
-                        )));
-                    }
+                    precolor.insert(fixed.number(), (class, index));
                 }
-                context.set_op_attributes(op_id, attributes);
+                strip_attr(context, op_id, crate::backend::PINS_ATTR);
             }
         }
-        // Symbol-level pins the ABI precolor pass recorded on `arg_regs` and
-        // `result_address`: a `FixedDef` entry pins its value at the function
-        // boundary, then reads as an ordinary virtual register again.
-        let mut attributes = op.op().attributes().to_vec();
-        let pinned = ["arg_regs", "result_address"].map(|name| context.sym(name));
-        let mut changed = false;
-        for attr in &mut attributes {
-            if pinned.contains(&Some(attr.name)) {
-                changed |= consume_fixed_defs(&mut attr.value, &mut precolor)?;
-            }
-        }
-        if changed {
-            context.set_op_attributes(op.op().id, attributes);
+        // The calling convention's argument pins name values the entry copies
+        // already made local, so they pin only the boundary itself.
+        let arg_pins = crate::backend::RegAssignment::of_op(op.op(), crate::backend::ARG_PINS_ATTR);
+        for (value, register) in arg_pins.iter() {
+            precolor.insert(value.number(), register);
         }
         Ok(precolor)
     }
 
-    /// Lower every spilled virtual register by splitting its live range: each def is
-    /// renamed to a fresh register and followed by a store; each use is preceded by a
-    /// reload into a fresh register. The fresh registers are short-lived and get
-    /// colored on the next round.
     fn spill_all(
         &self,
         context: &Context,
@@ -942,7 +977,7 @@ impl RegisterAllocationPass {
                 .ok_or_else(|| {
                     PassError::InvalidRuleSet(format!("spilled vreg {vreg} has no register class"))
                 })?;
-            let ty = context.get_value(ValueId::from_number(vreg)).ty();
+            let spilled = ValueId::from_number(vreg);
             let offset = frame.alloc_slot();
 
             for &block_id in blocks {
@@ -953,41 +988,44 @@ impl RegisterAllocationPass {
                         continue;
                     }
                     let op = context.get_op(op_id);
-                    let regs = liveness::op_regs(&op);
-                    let defines = regs.defs.iter().any(|r| is_vreg(r, vreg));
-                    let uses = regs.uses.iter().any(|r| is_vreg(r, vreg));
+                    let uses: Vec<usize> = op
+                        .operands()
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, operand)| **operand == spilled)
+                        .map(|(index, _)| index)
+                        .collect();
+                    let defines: Vec<usize> = op
+                        .results()
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, result)| **result == spilled)
+                        .map(|(index, _)| index)
+                        .collect();
+                    if uses.is_empty() && defines.is_empty() {
+                        continue;
+                    }
 
-                    // A read-modify-write occurrence (a ReadWrite attribute, e.g. a
-                    // lowered two-address destination) must keep the read and the
-                    // write in one register: reload into a single fresh register,
-                    // rename both directions to it, and store it back after.
-                    if uses && defines {
-                        let fresh = context.create_value(ty, None).id().number();
-                        frame.temps.insert(fresh);
+                    // A read-modify-write occurrence (a two-address destination
+                    // lowered to a tie) must keep the read and the write in one
+                    // register: reload into a single fresh register, rename both
+                    // directions to it, and store it back after.
+                    let fresh = fresh_reg(context, class);
+                    frame.temps.insert(fresh.number());
+                    let op_ref = op_ref_in(context, block_id, op_id);
+                    if !uses.is_empty() {
                         let reload = self
                             .target
                             .emit_spill_reload(context, fresh, class, &frame_reg, offset);
-                        let op_ref = op_ref_in(context, block_id, op_id);
                         rewriter.insert_op_before(&op_ref, reload.as_ref())?;
-                        rename_attr(context, op_id, vreg, fresh, RoleClass::Read);
-                        rename_attr(context, op_id, vreg, fresh, RoleClass::Write);
-                        let store = self
-                            .target
-                            .emit_spill_store(context, fresh, class, &frame_reg, offset);
-                        insert_after(context, rewriter, block_id, op_id, store.as_ref())?;
-                    } else if uses {
-                        let fresh = context.create_value(ty, None).id().number();
-                        frame.temps.insert(fresh);
-                        let reload = self
-                            .target
-                            .emit_spill_reload(context, fresh, class, &frame_reg, offset);
-                        let op_ref = op_ref_in(context, block_id, op_id);
-                        rewriter.insert_op_before(&op_ref, reload.as_ref())?;
-                        rename_attr(context, op_id, vreg, fresh, RoleClass::Read);
-                    } else if defines {
-                        let fresh = context.create_value(ty, None).id().number();
-                        frame.temps.insert(fresh);
-                        rename_attr(context, op_id, vreg, fresh, RoleClass::Write);
+                    }
+                    for index in uses {
+                        context.set_op_operand(op_id, index, fresh);
+                    }
+                    for index in defines.iter().copied() {
+                        context.set_op_result(op_id, index, fresh);
+                    }
+                    if !defines.is_empty() {
                         let store = self
                             .target
                             .emit_spill_store(context, fresh, class, &frame_reg, offset);
@@ -1054,28 +1092,26 @@ impl RegisterAllocationPass {
         for arg in args {
             let load_id = arg.load;
             let op = context.get_op(load_id);
-            let Some(liveness::RegRef::Virtual { id, .. }) =
-                liveness::op_regs(&op).defs.into_iter().next()
-            else {
-                return Err(PassError::InvalidRuleSet(format!(
-                    "stack argument load for vreg {} has no virtual definition",
-                    arg.vreg
-                )));
-            };
-            let dst = assignment[&id];
+            let value = op.results().first().copied().ok_or_else(|| {
+                PassError::InvalidRuleSet(format!(
+                    "stack argument load for %{} has no virtual definition",
+                    arg.value.number()
+                ))
+            })?;
+            let dst = assignment[&value.number()];
             if dst.0.file() != arg.class.file() || dst.0.group_width != arg.class.group_width {
                 return Err(PassError::InvalidRuleSet(format!(
-                    "stack argument vreg {} assigned to {:?}, expected class {}",
-                    arg.vreg,
+                    "stack argument %{} assigned to {:?}, expected class {}",
+                    arg.value.number(),
                     dst,
                     arg.class.name()
                 )));
             }
             let offset =
                 frame_plan.incoming_stack_arg_offset(frame_size, pushed_saves, arg.stack_index);
-            let load = self
-                .target
-                .emit_spill_reload(context, id, dst.0, &frame_register, offset);
+            let load =
+                self.target
+                    .emit_spill_reload(context, value, dst.0, &frame_register, offset);
             let target = op_ref_in(context, entry, load_id);
             rewriter.replace_op(&target, load.as_ref())?;
         }
@@ -1215,7 +1251,7 @@ fn align_delta(offset: u32, align: u32, desired_remainder: u32) -> u32 {
 struct StackAlloca {
     op_id: OpId,
     block: BlockId,
-    vreg: u32,
+    value: ValueId,
     offset: i64,
 }
 
@@ -1237,7 +1273,7 @@ fn collect_stack_allocas(
             allocas.push(StackAlloca {
                 op_id,
                 block,
-                vreg: result.number(),
+                value: result,
                 offset: frame
                     .alloc_stack_allocation(allocation.size() as u32, allocation.align() as u32),
             });
@@ -1258,16 +1294,6 @@ fn erase_stack_allocas(
         }
     }
     Ok(())
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RoleClass {
-    Read,
-    Write,
-}
-
-fn is_vreg(r: &liveness::RegRef, vreg: u32) -> bool {
-    matches!(r, liveness::RegRef::Virtual { id, .. } if *id == vreg)
 }
 
 /// The control-flow successors of each block, for liveness's inter-block
@@ -1353,14 +1379,17 @@ fn callee_saved_slots(
     frame: &mut FramePlan,
     abi_callee_saved: &[PhysReg],
 ) -> Vec<(PhysReg, i64)> {
+    // Keyed by the ABI's own spelling of the register: a value allocated
+    // through a narrower view of one (x86 `ebx` for `rbx`) names the same
+    // physical register, and it is saved once, in full.
     let mut regs: Vec<PhysReg> = assignment
         .values()
-        .filter(|p| {
+        .filter_map(|p| {
             abi_callee_saved
                 .iter()
-                .any(|candidate| p.0.overlaps(p.1, candidate.0, candidate.1))
+                .find(|candidate| p.0.overlaps(p.1, candidate.0, candidate.1))
+                .copied()
         })
-        .copied()
         .collect();
     regs.sort();
     regs.dedup();
@@ -1411,12 +1440,8 @@ fn collect_coalescable_copies(
 /// and first written virtual register.
 fn copy_endpoints(context: &Context, op_id: OpId) -> Option<(u32, u32)> {
     let regs = liveness::op_regs(&context.get_op(op_id));
-    let virtual_id = |r: &liveness::RegRef| match r {
-        liveness::RegRef::Virtual { id, .. } => Some(*id),
-        _ => None,
-    };
-    let src = regs.uses.iter().find_map(virtual_id)?;
-    let dst = regs.defs.iter().find_map(virtual_id)?;
+    let src = regs.uses.first()?.number();
+    let dst = regs.defs.first()?.number();
     Some((src, dst))
 }
 
@@ -1431,49 +1456,8 @@ fn strip_attr(context: &Context, op_id: OpId, name: &str) {
     context.set_op_attributes(op_id, attrs);
 }
 
-/// Consume `FixedDef` pins recorded on a symbol attribute (`arg_regs`,
-/// `result_address`) into `precolor`, rewriting each entry back to a plain
-/// virtual register. Recurses into argument groups (arrays and dicts).
-fn consume_fixed_defs(
-    value: &mut AttributeValue,
-    precolor: &mut HashMap<u32, PhysReg>,
-) -> Result<bool, PassError> {
-    match value {
-        AttributeValue::Register(RegisterAttr::FixedDef { id, class, index }) => {
-            let (id, pin) = (*id, (*class, *index));
-            if let Some(previous) = precolor.insert(id, pin)
-                && previous != pin
-            {
-                return Err(PassError::InvalidRuleSet(format!(
-                    "virtual register {id} is pinned to conflicting physical registers"
-                )));
-            }
-            *value = AttributeValue::Register(RegisterAttr::Virtual {
-                id,
-                class: Some(pin.0),
-            });
-            Ok(true)
-        }
-        AttributeValue::Array(items) => {
-            let mut changed = false;
-            for item in items {
-                changed |= consume_fixed_defs(item, precolor)?;
-            }
-            Ok(changed)
-        }
-        AttributeValue::Dict(map) => {
-            let mut changed = false;
-            for item in map.values_mut() {
-                changed |= consume_fixed_defs(item, precolor)?;
-            }
-            Ok(changed)
-        }
-        _ => Ok(false),
-    }
-}
-
 struct IncomingStackArg {
-    vreg: u32,
+    value: ValueId,
     class: RegClassId,
     stack_index: usize,
     load: OpId,
@@ -1498,17 +1482,18 @@ fn collect_stack_arg_loads(
             else {
                 continue;
             };
-            let Some(liveness::RegRef::Virtual {
-                id,
-                class: Some(class),
-            }) = liveness::op_regs(&op).defs.into_iter().next()
-            else {
-                return Err(PassError::InvalidRuleSet(
-                    "stack argument load has no class-qualified virtual definition".to_string(),
-                ));
-            };
+            let value = op.results().first().copied().ok_or_else(|| {
+                PassError::InvalidRuleSet(
+                    "stack argument load has no virtual definition".to_string(),
+                )
+            })?;
+            let class = crate::backend::value_class(context, value).ok_or_else(|| {
+                PassError::InvalidRuleSet(
+                    "stack argument load defines a value with no register class".to_string(),
+                )
+            })?;
             args.push(IncomingStackArg {
-                vreg: id,
+                value,
                 class,
                 stack_index,
                 load: op_id,
@@ -1518,29 +1503,18 @@ fn collect_stack_arg_loads(
     Ok(args)
 }
 
-/// The register class a virtual register is referenced with, from the first
-/// class-qualified register attribute naming it.
-pub(crate) fn vreg_class_in(
-    context: &Context,
-    blocks: &[BlockId],
-    vreg: u32,
-) -> Option<RegClassId> {
-    let class_of = |value: &AttributeValue| match value {
-        AttributeValue::Register(RegisterAttr::Virtual { id, class: Some(c) }) if *id == vreg => {
-            Some(*c)
-        }
-        _ => None,
-    };
+/// The register class `value` is read through, for a value whose own type does
+/// not name one (an `alloca` address): the class of the first register slot
+/// naming it.
+fn slot_class_of(context: &Context, blocks: &[BlockId], value: ValueId) -> Option<RegClassId> {
+    if let Some(class) = crate::backend::value_class(context, value) {
+        return Some(class);
+    }
     for &block_id in blocks {
         for op_id in context.get_block(block_id).op_ids() {
-            for attr in context.get_op(op_id).attributes() {
-                if let Some(c) = class_of(&attr.value) {
-                    return Some(c);
-                }
-                if let AttributeValue::Array(items) = &attr.value
-                    && let Some(c) = items.iter().find_map(&class_of)
-                {
-                    return Some(c);
+            for slot in crate::backend::reg_slots(&context.get_op(op_id)) {
+                if slot.slot == crate::backend::RegSlot::Value(value) {
+                    return slot.port.class;
                 }
             }
         }
@@ -1548,6 +1522,7 @@ pub(crate) fn vreg_class_in(
     None
 }
 
+/// A fresh value of `class`: the type a machine instruction reads it through.
 /// Count how many times each virtual register is referenced (def or use) across the
 /// body, used to weight spill cost so the least-used register spills first.
 fn reference_counts(context: &Context, blocks: &[BlockId]) -> HashMap<u32, u32> {
@@ -1556,126 +1531,10 @@ fn reference_counts(context: &Context, blocks: &[BlockId]) -> HashMap<u32, u32> 
         for op_id in context.get_block(block_id).op_ids() {
             let op = context.get_op(op_id);
             let regs = liveness::op_regs(&op);
-            for r in regs.defs.iter().chain(regs.uses.iter()) {
-                if let liveness::RegRef::Virtual { id, .. } = r {
-                    *counts.entry(*id).or_insert(0) += 1;
-                }
+            for value in regs.defs.iter().chain(regs.uses.iter()) {
+                *counts.entry(value.number()).or_insert(0) += 1;
             }
         }
     }
     counts
-}
-
-/// Rewrite a single op's register attributes: replace virtual register `from` with
-/// virtual register `to` in attributes matching the given role direction.
-pub(crate) fn rename_attr(
-    context: &Context,
-    op_id: OpId,
-    from: u32,
-    to: u32,
-    role_class: RoleClass,
-) {
-    let op = context.get_op(op_id);
-    let mut attrs = op.attributes().to_vec();
-    let mut changed = false;
-    for attr in &mut attrs {
-        let role = role_of_sym(&op, attr.name);
-        let matches_dir = match role_class {
-            RoleClass::Read => matches!(role, AttributeRole::Use | AttributeRole::ReadWrite),
-            RoleClass::Write => {
-                matches!(
-                    role,
-                    AttributeRole::Def | AttributeRole::ReadWrite | AttributeRole::Clobber
-                )
-            }
-        };
-        if !matches_dir {
-            continue;
-        }
-        attr.value = match &attr.value {
-            AttributeValue::Register(RegisterAttr::Virtual { id, class }) if *id == from => {
-                AttributeValue::Register(RegisterAttr::Virtual {
-                    id: to,
-                    class: *class,
-                })
-            }
-            // Fixed-register references also name a virtual register; a use
-            // that survives under its old id would keep the pinned value live
-            // past its point constraint (e.g. an ABI argument read by an x86
-            // division across a call).
-            AttributeValue::Register(RegisterAttr::FixedUse { id, class, index })
-                if *id == from && role_class == RoleClass::Read =>
-            {
-                AttributeValue::Register(RegisterAttr::FixedUse {
-                    id: to,
-                    class: *class,
-                    index: *index,
-                })
-            }
-            AttributeValue::Register(RegisterAttr::FixedDef { id, class, index })
-                if *id == from && role_class == RoleClass::Write =>
-            {
-                AttributeValue::Register(RegisterAttr::FixedDef {
-                    id: to,
-                    class: *class,
-                    index: *index,
-                })
-            }
-            _ => continue,
-        };
-        changed = true;
-    }
-    if changed {
-        context.set_op_attributes(op_id, attrs);
-    }
-}
-
-/// Rewrite every virtual register operand in the body to its assigned physical
-/// register.
-fn rewrite_registers(context: &Context, blocks: &[BlockId], assignment: &HashMap<u32, PhysReg>) {
-    for &block_id in blocks {
-        for op_id in context.get_block(block_id).op_ids() {
-            let op = context.get_op(op_id);
-            let mut attrs = op.attributes().to_vec();
-            let mut changed = false;
-            for attr in &mut attrs {
-                if let AttributeValue::Register(RegisterAttr::Virtual { id, .. }) = &attr.value
-                    && let Some((class, index)) = assignment.get(id)
-                {
-                    attr.value = AttributeValue::Register(RegisterAttr::Physical {
-                        class: *class,
-                        index: *index,
-                    });
-                    changed = true;
-                }
-            }
-            if changed {
-                context.set_op_attributes(op_id, attrs);
-            }
-        }
-    }
-}
-
-/// [`role_of`] for an interned attribute name.
-pub(crate) fn role_of_sym(op: &tir::OpHandle, name: tir::Sym) -> AttributeRole {
-    let context = op.context.upgrade();
-    op.clone()
-        .as_interface::<dyn tir::attributes::RegisterSemantics>()
-        .map(|semantics| semantics.attribute_roles())
-        .unwrap_or_default()
-        .iter()
-        .find(|(n, _)| context.sym(n) == Some(name))
-        .map(|(_, r)| *r)
-        .unwrap_or(AttributeRole::None)
-}
-
-pub(crate) fn role_of(op: &tir::OpHandle, name: &str) -> AttributeRole {
-    op.clone()
-        .as_interface::<dyn tir::attributes::RegisterSemantics>()
-        .map(|semantics| semantics.attribute_roles())
-        .unwrap_or_default()
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, r)| *r)
-        .unwrap_or(AttributeRole::None)
 }

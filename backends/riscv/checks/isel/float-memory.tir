@@ -25,13 +25,13 @@ module {
   module_end
 }
 
-// CHECK: asm.symbol {name = "roundtrip", arg_regs = [%virt0:FPR32, %virt1:FPR64, %virt2:GPR]}
-// CHECK: riscv.fsw {rs1 = %virt3:GPR, fs2 = %virt0:FPR32, imm = 0}
-// CHECK: riscv.sw {rs1 = %virt4:GPR, rs2 = %virt2:GPR, imm = 0}
-// CHECK: riscv.flw {fd = %virt5:FPR32, rs1 = %virt3:GPR, imm = 0}
-// CHECK: riscv.fadd.s {fd = %virt6:FPR32, fs1 = %virt0:FPR32, fs2 = %virt5:FPR32}
-// CHECK: riscv.fsw {rs1 = %virt3:GPR, fs2 = %virt6:FPR32, imm = 0}
-// CHECK: riscv.fsd {rs1 = %virt7:GPR, fs2 = %virt1:FPR64, imm = 0}
-// CHECK: riscv.fld {fd = %virt8:FPR64, rs1 = %virt7:GPR, imm = 0}
-// CHECK: riscv.fadd.d {fd = %virt9:FPR64, fs1 = %virt1:FPR64, fs2 = %virt8:FPR64}
+// CHECK: asm.symbol {name = "roundtrip", arg_regs = [%[[V0:[0-9]+]]:FPR32, %[[V1:[0-9]+]]:FPR64, %[[V2:[0-9]+]]:GPR]
+// CHECK: riscv.fsw {rs1 = %[[V3:[0-9]+]]:GPR, fs2 = %[[V0]]:FPR32, imm = 0}
+// CHECK: riscv.sw {rs1 = %[[V4:[0-9]+]]:GPR, rs2 = %[[V2]]:GPR, imm = 0}
+// CHECK: riscv.flw {fd = %[[V5:[0-9]+]]:FPR32, rs1 = %[[V3]]:GPR, imm = 0}
+// CHECK: riscv.fadd.s {fd = %[[V6:[0-9]+]]:FPR32, fs1 = %[[V0]]:FPR32, fs2 = %[[V5]]:FPR32}
+// CHECK: riscv.fsw {rs1 = %[[V3]]:GPR, fs2 = %[[V6]]:FPR32, imm = 0}
+// CHECK: riscv.fsd {rs1 = %[[V7:[0-9]+]]:GPR, fs2 = %[[V1]]:FPR64, imm = 0}
+// CHECK: riscv.fld {fd = %[[V8:[0-9]+]]:FPR64, rs1 = %[[V7]]:GPR, imm = 0}
+// CHECK: riscv.fadd.d {fd = %[[V9:[0-9]+]]:FPR64, fs1 = %[[V1]]:FPR64, fs2 = %[[V8]]:FPR64}
 // CHECK: asm.vret

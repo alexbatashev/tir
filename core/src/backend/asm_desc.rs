@@ -15,6 +15,7 @@
 //! descriptor does not describe.
 
 use tir::attributes::{AttributeValue, NamedAttribute, RegisterAttr, find_attribute};
+use tir::backend::{RegAssignment, reg_slot, slot_register};
 use tir::parse::tokens::Parser;
 use tir::{Context, OpHandle, Operation};
 
@@ -211,22 +212,24 @@ fn parse_immediate<'src>(
 
 /// Render an instruction's assembly per `desc`, or `None` if an operand
 /// attribute is missing or holds a value the syntax cannot print.
-pub fn print(desc: &InstrDesc, context: &Context, op: &OpHandle) -> Option<String> {
+///
+/// A register slot holding a value prints the register `assignment` placed it
+/// in; a slot naming a physical register prints that one.
+pub fn print(
+    desc: &InstrDesc,
+    context: &Context,
+    op: &OpHandle,
+    assignment: &RegAssignment,
+) -> Option<String> {
     let attributes = &op.attributes();
     let mut out = String::new();
     for part in desc.print {
         match part {
             PrintPart::Text(text) => out.push_str(text),
             PrintPart::Register(name, print) => {
-                match &find_attribute(context, attributes, name)?.value {
-                    AttributeValue::Register(RegisterAttr::Physical { index, .. }) => {
-                        out.push_str(&print(*index, false)?)
-                    }
-                    AttributeValue::Register(RegisterAttr::Virtual { id, .. }) => {
-                        out.push_str(&format!("%virt{id}"))
-                    }
-                    _ => return None,
-                }
+                let slot = reg_slot(op, name)?;
+                let (_, index) = slot_register(slot, assignment)?;
+                out.push_str(&print(index, false)?)
             }
             PrintPart::Immediate(name) => match &find_attribute(context, attributes, name)?.value {
                 AttributeValue::Int(value) => out.push_str(&value.to_string()),

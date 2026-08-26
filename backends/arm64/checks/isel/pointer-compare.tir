@@ -18,7 +18,7 @@ module {data_layout = #data_layout} {
     func.return %4
   }
   // CHECK: asm.symbol {name = "below"
-  // CHECK: arm64.cmp {rn = %virt12:GPR, rm = %virt13:GPR}
+  // CHECK: arm64.cmp {rn = %[[V12:[0-9]+]]:GPR, rm = %[[V13:[0-9]+]]:GPR}
   // CHECK-NEXT: arm64.b.lo {imm = ^bb1}
 
   %fn_is_null = func.func @is_null(%0: !ptr.p) -> !i64 {
@@ -33,7 +33,7 @@ module {data_layout = #data_layout} {
     func.return %4
   }
   // CHECK: asm.symbol {name = "is_null"
-  // CHECK: arm64.cmp_imm {rn = %virt{{[0-9]+}}:GPRsp, imm = 0}
+  // CHECK: arm64.cmp_imm {rn = %{{[0-9]+}}:GPR, imm = 0}
   // CHECK-NEXT: arm64.b.eq {imm = ^bb1}
 
   module_end

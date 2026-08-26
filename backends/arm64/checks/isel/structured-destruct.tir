@@ -23,13 +23,13 @@ module {
 
 // CHECK-NOT: scf.
 // CHECK: asm.vbr %1, %0 ^[[TEST:bb[0-9]+]]
-// CHECK: ^[[TEST]](%{{[0-9]+}}: !i64, %{{[0-9]+}}: !i64):
-// CHECK-NEXT: arm64.cmp_imm {rn = %virt{{[0-9]+}}:GPRsp, imm = 0}
+// CHECK: ^[[TEST]](%{{[0-9]+}}: !arm64.GPR, %{{[0-9]+}}: !arm64.GPR):
+// CHECK-NEXT: arm64.cmp_imm {rn = %{{[0-9]+}}:GPR, imm = 0}
 // CHECK-NEXT: arm64.b.gt {imm = ^[[ENTER:bb[0-9]+]]}
 // CHECK-NEXT: asm.vbr %{{[0-9]+}}, %{{[0-9]+}} ^[[EXIT:bb[0-9]+]]
-// CHECK: ^[[BODY:bb[0-9]+]](%{{[0-9]+}}: !i64, %{{[0-9]+}}: !i64):
+// CHECK: ^[[BODY:bb[0-9]+]](%{{[0-9]+}}: !arm64.GPR, %{{[0-9]+}}: !arm64.GPR):
 // CHECK: asm.vbr %{{[0-9]+}}, %{{[0-9]+}} ^[[TEST]]
-// CHECK: ^[[EXIT]](%{{[0-9]+}}: !i64, %{{[0-9]+}}: !i64):
+// CHECK: ^[[EXIT]](%{{[0-9]+}}: !arm64.GPR, %{{[0-9]+}}: !arm64.GPR):
 // CHECK-NEXT: asm.vret
 // CHECK: ^[[ENTER]]:
 // CHECK-NEXT: asm.vbr %{{[0-9]+}}, %{{[0-9]+}} ^[[BODY]]

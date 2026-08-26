@@ -15,4 +15,4 @@ module {
 }
 
 // CHECK: x86_64.movsxd
-// CHECK: x86_64.movzxd {dst = %virt{{[0-9]+}}:GPR, src = %virt{{[0-9]+}}:GPR32}
+// CHECK: x86_64.movzxd {dst = %{{[0-9]+}}:GPR, src = %{{[0-9]+}}:GPR}

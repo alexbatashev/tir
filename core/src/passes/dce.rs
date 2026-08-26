@@ -1,7 +1,7 @@
 //! Dead code elimination shared by SSA functions and machine symbols: a
-//! worklist over [`DefUse`] chains erases pure ops whose every virtual def
-//! (SSA result or Def-role register attribute) is unused, retiring the erased
-//! op's reads so newly dead producers are revisited without rescanning.
+//! worklist over [`DefUse`] chains erases pure ops whose every result is
+//! unused, retiring the erased op's reads so newly dead producers are revisited
+//! without rescanning.
 //!
 //! A block no execution reaches is dead the same way: `sccp` leaves its
 //! executability in [`ConstantFacts`], and the blocks it never reached go with
@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::analysis::{ConstantFacts, DefUse, RegRef, op_regs};
+use crate::analysis::{ConstantFacts, DefUse, execution_regs, op_regs};
 use crate::backend::SymbolOp;
 use crate::{
     AnalysisManager, BlockId, Context, MemoryWrite, OpHandle, OpId, OperationRef, Pass, PassError,
@@ -74,9 +74,7 @@ impl Pass for DeadCodeEliminationPass {
             rewriter.erase_op(&OperationRef::new(instance.clone(), block, None))?;
 
             for used in used_regs {
-                let RegRef::Virtual { id, .. } = used else {
-                    continue;
-                };
+                let id = used.number();
                 if let Some(count) = use_counts.get_mut(&id) {
                     *count -= 1;
                     if *count == 0 {
@@ -161,9 +159,9 @@ fn successors(context: &Context, block: BlockId) -> Vec<BlockId> {
 }
 
 /// A pure value-producing op whose every virtual def is unused. Nested regions,
-/// a terminator, a memory write, or any physical-register write keep it; an op
-/// with SSA results must additionally declare pure semantics, so effectful ops
-/// like calls survive even when their result is unread.
+/// a terminator, a memory write, or any physical-register write keep it; a
+/// mid-end op with SSA results must additionally declare pure semantics, so
+/// effectful ops like calls survive even when their result is unread.
 fn is_erasable(instance: &OpHandle, use_counts: &HashMap<u32, usize>) -> bool {
     if !instance.regions().is_empty()
         || instance.clone().as_interface::<dyn Terminator>().is_some()
@@ -171,26 +169,31 @@ fn is_erasable(instance: &OpHandle, use_counts: &HashMap<u32, usize>) -> bool {
     {
         return false;
     }
-    if !instance.results().is_empty() && !super::is_pure_value(instance) {
-        return false;
+    // A machine instruction states its effects in its `InstrInfo`; the purity
+    // declaration below is what a mid-end op has instead, and its results are
+    // the only signal there.
+    let machine = instance
+        .clone()
+        .as_interface::<dyn crate::backend::MachineInstruction>();
+    match &machine {
+        Some(mi) if mi.info().effects.writes => return false,
+        None if !instance.results().is_empty() && !super::is_pure_value(instance) => return false,
+        _ => {}
     }
 
-    let regs = op_regs(instance);
-    if regs
-        .defs
-        .iter()
-        .any(|r| matches!(r, RegRef::Physical { .. }))
-    {
+    let regs = execution_regs(instance);
+    if !regs.phys_defs.is_empty() {
         return false;
     }
 
     let mut defines = false;
     for def in &regs.defs {
-        if let RegRef::Virtual { id, .. } = def {
-            defines = true;
-            if use_counts.get(id).is_some_and(|&count| count > 0) {
-                return false;
-            }
+        defines = true;
+        if use_counts
+            .get(&def.number())
+            .is_some_and(|&count| count > 0)
+        {
+            return false;
         }
     }
     // Only a value-producing op is a DCE candidate; a def-less pure op is left alone.

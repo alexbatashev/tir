@@ -16,11 +16,11 @@ module {
   module_end
 }
 
-// ISEL: riscv.vsetvli {rd = %virt3:GPR, avl = %virt2:GPR, vtypei = 208}
-// ISEL-NEXT: riscv.vadd.vv {vd = %virt4:VR, vs2 = %virt0:VR, vs1 = %virt1:VR, sew = 32, vl = %virt3}
-// ISEL-NEXT: riscv.vmul.vv {vd = %virt5:VR, vs2 = %virt4:VR, vs1 = %virt1:VR, sew = 32, vl = %virt3}
+// ISEL: riscv.vsetvli {rd = %[[V3:[0-9]+]]:GPR, avl = %[[V2:[0-9]+]]:GPR, vtypei = 208}
+// ISEL-NEXT: riscv.vadd.vv {vd = %[[V4:[0-9]+]]:VR, vs2 = %[[V0:[0-9]+]]:VR, vs1 = %[[V1:[0-9]+]]:VR, vl = %[[V3]]:GPR, sew = 32}
+// ISEL-NEXT: riscv.vmul.vv {vd = %[[V5:[0-9]+]]:VR, vs2 = %[[V4]]:VR, vs1 = %[[V1]]:VR, vl = %[[V3]]:GPR, sew = 32}
 
-// CHECK: riscv.vsetvli {rd = {{x[0-9]+}}, avl = x10, vtypei = 208}
+// CHECK: riscv.vsetvli {rd = %{{[0-9]+}}:{{x[0-9]+}}, avl = %{{[0-9]+}}:x10, vtypei = 208}
 // CHECK-NOT: riscv.vsetvli
 // CHECK-NOT: riscv.vsetivli
 // CHECK: riscv.vadd.vv

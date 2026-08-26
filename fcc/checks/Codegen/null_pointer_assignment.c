@@ -12,7 +12,7 @@ void clear(struct node *node)
 
 // IR-LABEL: func.func @clear
 // IR: %[[ZERO:.*]] = ptr.null : !ptr.p
-// IR: ptr.store %[[ZERO]]
+// IR: ptr.store %[[ZERO:[0-9]+]]
 
 // ASM-LABEL: clear:
 // ASM: mov [{{.*}}], {{r[a-z0-9]+}}

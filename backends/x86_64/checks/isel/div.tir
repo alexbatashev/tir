@@ -34,6 +34,6 @@ module {
 // ISEL: unsigned_divide
 
 // REGALLOC-LABEL: name = "div64"
-// REGALLOC: sign_extend_dividend {rax = GPR[0], rdx_def = GPR[2]}
-// REGALLOC: signed_divide {dst = rsi, rax = GPR[0], rax_def = GPR[0], rdx = GPR[2], rdx_def = GPR[2]}
+// REGALLOC: sign_extend_dividend {rax = %36:rax, rdx_def = rdx}
+// REGALLOC: signed_divide {dst = %{{[0-9]+}}:rsi, rax = %37:rax, rdx = rdx, rax_def = %38:rax, rdx_def = rdx}
 // REGALLOC: asm.vret

@@ -187,7 +187,7 @@ operation! {
             callee: "Str",
             outgoing_stack_size: "UInt",
         },
-        interfaces: [tir::attributes::RegisterSemantics, tir::backend::MachineInstruction],
+        interfaces: [tir::backend::MachineInstruction],
     }
 }
 
@@ -202,21 +202,17 @@ impl MachineInstruction for VirtualCallOp {
     }
 }
 
-impl tir::attributes::RegisterSemantics for VirtualCallOp {
-    fn attribute_roles(&self) -> &'static [(&'static str, tir::attributes::AttributeRole)] {
-        &[("clobbers", tir::attributes::AttributeRole::Clobber)]
-    }
-}
-
 operation! {
     VirtualIndirectCallOp {
         name: "vcall_indirect",
         dialect: "asm",
+        operands: O {
+            callee: "tir::backend::RegClassType",
+        },
         attributes: A {
-            callee_reg: "Register",
             outgoing_stack_size: "UInt",
         },
-        interfaces: [tir::attributes::RegisterSemantics, tir::backend::MachineInstruction],
+        interfaces: [tir::backend::MachineInstruction],
     }
 }
 
@@ -228,15 +224,6 @@ impl MachineInstruction for VirtualIndirectCallOp {
 
     fn instance(&self) -> &tir::OpHandle {
         &self.0
-    }
-}
-
-impl tir::attributes::RegisterSemantics for VirtualIndirectCallOp {
-    fn attribute_roles(&self) -> &'static [(&'static str, tir::attributes::AttributeRole)] {
-        &[
-            ("callee_reg", tir::attributes::AttributeRole::Use),
-            ("clobbers", tir::attributes::AttributeRole::Clobber),
-        ]
     }
 }
 

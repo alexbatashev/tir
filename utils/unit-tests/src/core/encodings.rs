@@ -5,7 +5,10 @@ use tir::backend::binary::{
     decode_with, encode_with, patch_with, DecodeField, DecodeFieldKind, DecodeSpec, EncodeField,
     EncodeSpec, FieldRun, FixupTarget, InstFixup, PatchSpec,
 };
-use tir::{Context, OpInstance};
+use tir::backend::{
+    ControlFlow, InstrInfo, MachineInstruction, RegAssignment, RegClassType, RegPort,
+};
+use tir::{Context, OpInstance, Operation};
 
 use super::fixtures::r;
 
@@ -13,8 +16,54 @@ fn phys(index: u16) -> AttributeValue {
     AttributeValue::Register(RegisterAttr::Physical { class: r(), index })
 }
 
+// The instruction the encoder is exercised on: one register slot `rd` it
+// writes, and an immediate.
+tir::helpers::operation! {
+    TestInstOp {
+        name: "inst",
+        dialect: "test",
+        results: R { regs: "*tir::backend::RegClassType" },
+        interfaces: [tir::backend::MachineInstruction],
+    }
+}
+
+static RD_PORT: [RegPort; 1] = [RegPort {
+    name: "rd",
+    class: Some(r()),
+    def: true,
+    tied_to: None,
+}];
+
+impl MachineInstruction for TestInstOp {
+    fn info(&self) -> &'static InstrInfo {
+        static INFO: InstrInfo = InstrInfo {
+            name: "inst",
+            mnemonic: "inst",
+            control_flow: ControlFlow::None,
+            regs: &RD_PORT,
+            ..InstrInfo::BASE
+        };
+        &INFO
+    }
+
+    fn instance(&self) -> &tir::OpHandle {
+        &self.0
+    }
+}
+
+/// The op with its `rd` slot naming a physical register directly.
 fn op_with(attrs: Vec<(&str, AttributeValue)>) -> (Context, tir::OpHandle) {
     let context = Context::with_default_dialects();
+    let handle = build(&context, attrs, Vec::new());
+    (context, handle)
+}
+
+fn build(
+    context: &Context,
+    attrs: Vec<(&str, AttributeValue)>,
+    results: Vec<tir::ValueId>,
+) -> tir::OpHandle {
+    TestInstOp::register_interfaces(context);
     let attributes = attrs
         .into_iter()
         .map(|(name, value)| context.named_attribute(name, value))
@@ -23,12 +72,11 @@ fn op_with(attrs: Vec<(&str, AttributeValue)>) -> (Context, tir::OpHandle) {
         ("test", "inst"),
         context.as_context_ref(),
         vec![],
-        vec![],
+        results,
         vec![],
         attributes,
     );
-    let handle = context.add_operation(instance);
-    (context, handle)
+    context.add_operation(instance)
 }
 
 // `lui rd, imm`: 55 | rd << 7 | (imm & 0xFFFFF) << 12
@@ -62,7 +110,7 @@ const LUI: EncodeSpec = EncodeSpec {
 #[test]
 fn encode_scatters_register_and_immediate() {
     let (_context, op) = op_with(vec![("rd", phys(5)), ("imm", AttributeValue::Int(0x12345))]);
-    let encoded = encode_with(&op, &LUI).unwrap();
+    let encoded = encode_with(&op, &LUI, &RegAssignment::default()).unwrap();
     assert_eq!(
         encoded.bytes,
         (55u32 | (5 << 7) | (0x12345 << 12)).to_le_bytes()
@@ -71,18 +119,27 @@ fn encode_scatters_register_and_immediate() {
 }
 
 #[test]
-fn encode_rejects_out_of_range_and_virtual() {
+fn encode_rejects_out_of_range_and_unallocated() {
     let (_context, op) = op_with(vec![("rd", phys(5)), ("imm", AttributeValue::Int(1048576))]);
-    assert!(encode_with(&op, &LUI).is_none());
+    assert!(encode_with(&op, &LUI, &RegAssignment::default()).is_none());
 
-    let (_context, op) = op_with(vec![
-        (
-            "rd",
-            AttributeValue::Register(RegisterAttr::Virtual { id: 0, class: None }),
-        ),
-        ("imm", AttributeValue::Int(1)),
-    ]);
-    assert!(encode_with(&op, &LUI).is_none());
+    // A slot holding a value the assignment does not place has no register to
+    // encode.
+    let context = Context::with_default_dialects();
+    let ty = RegClassType::new(&context, r());
+    let unplaced = context.create_value(ty, None).id();
+    let op = build(
+        &context,
+        vec![("imm", AttributeValue::Int(1))],
+        vec![unplaced],
+    );
+    assert!(encode_with(&op, &LUI, &RegAssignment::default()).is_none());
+
+    // Placed, it encodes as that register.
+    let mut assignment = RegAssignment::default();
+    assignment.insert(unplaced, (r(), 5));
+    let encoded = encode_with(&op, &LUI, &assignment).expect("encodes once placed");
+    assert_eq!(encoded.bytes, (55u32 | (5 << 7) | (1 << 12)).to_le_bytes());
 }
 
 #[test]
@@ -91,7 +148,7 @@ fn encode_leaves_symbol_operand_as_fixup() {
         ("rd", phys(5)),
         ("imm", AttributeValue::Str("g".into())),
     ]);
-    let encoded = encode_with(&op, &LUI).unwrap();
+    let encoded = encode_with(&op, &LUI, &RegAssignment::default()).unwrap();
     assert_eq!(encoded.bytes, (55u32 | (5 << 7)).to_le_bytes());
     assert_eq!(
         encoded.fixups,

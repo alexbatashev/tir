@@ -91,6 +91,9 @@ pub struct BinaryWriter;
 pub struct ObjectEmission {
     obj: ObjectFile,
     current_section: Option<usize>,
+    /// Where register allocation put the current symbol's values; the encoder
+    /// resolves a register slot holding a value through it.
+    assignment: crate::backend::RegAssignment,
     block_starts: HashMap<BlockId, u64>,
     fixups: Vec<PendingFixup>,
 }
@@ -190,6 +193,8 @@ impl BinaryWriter {
         fmt: &ObjectFormatInfo,
     ) -> Result<(), BinaryEmitError> {
         let name = string_attr(op, "name").ok_or(BinaryEmitError::MissingSymbolName)?;
+        state.assignment =
+            crate::backend::RegAssignment::of_op(op, crate::backend::ASSIGNMENT_ATTR);
         let section = state
             .current_section
             .unwrap_or_else(|| ensure_section(&mut state.obj, ".text"));
@@ -246,10 +251,11 @@ impl BinaryWriter {
                 op: op.name().to_string(),
             });
         };
-        let encoded =
-            super::encode_with(op, spec).ok_or_else(|| BinaryEmitError::CannotEncode {
+        let encoded = super::encode_with(op, spec, &state.assignment).ok_or_else(|| {
+            BinaryEmitError::CannotEncode {
                 op: op.name().to_string(),
-            })?;
+            }
+        })?;
 
         let section = state
             .current_section

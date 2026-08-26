@@ -1838,12 +1838,15 @@ impl InstructionSelectPass {
             } else {
                 block_arc.append(op.id());
             }
+            // The tile's results are born register-class-typed; the mid-end
+            // values they stand for are replaced by them.
             for (&old, new) in scheduled
                 .results
                 .iter()
                 .zip(context.get_op(op.id()).results().iter())
             {
                 self.emitted_values.insert(old, *new);
+                context.replace_value_uses(old, *new);
             }
         }
         for (old, new) in &plan.value_remaps {
@@ -1874,9 +1877,13 @@ impl InstructionSelectPass {
             self.region_values.insert((*op, *slot), emit.clone());
         }
 
+        // The cover replaces a whole group of operations at once, and region
+        // destruction still reads the values it consumed — a region terminator
+        // forwards them across an edge whether or not a tile re-produced them.
+        // The ops go; the values they defined stay readable.
         for op in plan.erase_ops.into_iter().rev() {
             let op = OperationRef::new(context.get_op(op), Some(block_arc.clone()), None);
-            rewriter.erase_op(&op)?;
+            rewriter.erase_op_keeping_results(&op)?;
         }
 
         Ok(())
@@ -2928,10 +2935,6 @@ impl Pass for InstructionSelectPass {
 
     fn target(&self) -> PassTarget {
         PassTarget::Any
-    }
-
-    fn emits_machine_ir(&self) -> bool {
-        true
     }
 
     fn run(

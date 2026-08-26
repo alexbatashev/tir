@@ -284,8 +284,8 @@ Before the function-wide graph is built, call lowering makes scalar extractions
 explicit for tuple values forwarded directly between calls or returned without
 an intervening `make_tuple`. Selection therefore sees ordinary scalar values;
 no tuple machine operation or target-specific lowering rule is introduced.
-Grouped function arguments retain an ordered array of scalar virtual registers
-in `asm.symbol.arg_regs`, which lets register allocation assign the whole ABI
+Grouped function arguments retain an ordered array of the scalar values the
+group is passed in, in `asm.symbol.arg_regs`, which lets register allocation assign the whole ABI
 group transactionally or place every member on the stack. The source alignment
 of a group is preserved with that array. A target ABI may use it to align the
 next register slot before assigning the group; alignment never creates an IR
@@ -768,7 +768,7 @@ commit can own that. `commit_block_solution` applies one plan through the
 
 A pure instruction left dead by cross-block fusion — a value a consumer's block
 recomputed for itself — is dropped by the `DeadCodeEliminationPass` the pipeline
-runs next, while results are still virtual registers.
+runs next, while nothing has been allocated a register yet.
 
 ## Conditional branches
 
@@ -974,12 +974,12 @@ fallbacks.
 A register a behavior reads by path without it being an encoded operand (RVV
 `VCSR::vl`, `VCFG::sew`) is a real dependency. The read becomes a pattern
 symbol like any operand, and the generated emitter stamps whatever the symbol
-bound — an immediate or a virtual register — onto the selected op as a
-*demand attribute* named after the register (`vl = 4`, `sew = 32`, with a
-`Use` role for register values). Selection never materializes the register's
+bound onto the selected op's slot of that name (`vl`, `sew`): an immediate
+becomes the slot's attribute (`vl = 4`, `sew = 32`), a value becomes the
+operand the slot reads. Selection never materializes the register's
 definer; a target machine pass does (RISC-V `riscv-insert-vsetvli` tracks the
 configured state forward through each block and inserts `vset{i}vli` exactly
-where the demanded configuration changes). Demand attributes are to that pass
+where the demanded configuration changes). Demand slots are to that pass
 what virtual registers are to allocation: a recorded obligation, concretized
 later.
 
@@ -1118,13 +1118,22 @@ struct EmitRequest<'a> {
 }
 ```
 
-By convention an emitter writes its destination *into the original result
-`ValueId`* (TMDL-generated emitters store it as the destination register
-attribute), so consumers and later passes keep referencing the same values. A
-machine op declares no SSA results, so the original values stay live and the
-Def-role register attribute claims their def-site; where a covered value is not
-the tile's destination, the plan's `value_remaps` point its readers at the
-register that is.
+An emitter builds a machine instruction whose register slots are SSA ports: a
+slot it writes is a result, one it reads an operand, and a slot naming a
+register the instruction does not choose (a hardwired `x0`, a clobber) holds
+that register as an attribute instead. Which slots an opcode has, in which
+order, and what class each admits is `InstrInfo::regs`; the emitter binds them
+by name and `emit_with` places each in the position its port declares.
+
+A destination is *born* in its port's register class: the emitter mints a fresh
+value typed `!<dialect>.<class>` and selection replaces the mid-end result it
+stands for with it, so consumers and later passes read the machine value. Where
+a covered value is not a tile's destination, the plan's `value_remaps` point its
+readers at the value that is. An operand a tile binds that no tile produced — a
+stack allocation or constant a target pass materializes later — is retyped in
+place to the class of the slot reading it (`retype_untyped`); call lowering does
+the same for the arguments it copies. After selection every value a machine
+instruction names is a register, which the machine-IR verifier checks.
 
 ## Key types at a glance
 

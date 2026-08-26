@@ -12,4 +12,4 @@ module {
   module_end
 }
 
-// CHECK: arm64.mul {rd = %virt2:GPR, rn = %virt0:GPR, rm = %virt1:GPR}
+// CHECK: arm64.mul {rd = %[[V2:[0-9]+]]:GPR, rn = %[[V0:[0-9]+]]:GPR, rm = %[[V1:[0-9]+]]:GPR}

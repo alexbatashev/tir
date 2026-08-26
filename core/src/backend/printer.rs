@@ -50,10 +50,12 @@ impl AsmPrinter {
     }
 
     /// Render one instruction, or `None` if `op` is not a machine instruction.
+    /// `assignment` places the values its register slots hold.
     pub fn print_instruction(
         &self,
         context: &Context,
         op: &OpHandle,
+        assignment: &crate::backend::RegAssignment,
     ) -> Result<Option<String>, AsmPrintError> {
         let Some(mi) = op.clone().as_interface::<dyn MachineInstruction>() else {
             return Ok(None);
@@ -63,7 +65,7 @@ impl AsmPrinter {
                 op: op.name().as_str(),
             });
         };
-        crate::backend::asm_desc::print(desc, context, op)
+        crate::backend::asm_desc::print(desc, context, op, assignment)
             .map(Some)
             .ok_or(AsmPrintError::InvalidInstruction {
                 op: op.name().as_str(),
@@ -76,7 +78,12 @@ impl AsmPrinter {
         module: &ModuleOp,
     ) -> Result<String, AsmPrintError> {
         let mut out = String::new();
-        self.print_block(context, module.body(), &mut out)?;
+        self.print_block(
+            context,
+            module.body(),
+            &mut out,
+            &crate::backend::RegAssignment::default(),
+        )?;
         Ok(out)
     }
 
@@ -85,9 +92,10 @@ impl AsmPrinter {
         context: &Context,
         block: tir::BlockHandle,
         out: &mut String,
+        assignment: &crate::backend::RegAssignment,
     ) -> Result<(), AsmPrintError> {
         for op_id in block.op_ids() {
-            self.print_op(context, &context.get_op(op_id), out)?;
+            self.print_op_in(context, &context.get_op(op_id), out, assignment)?;
         }
         Ok(())
     }
@@ -99,6 +107,16 @@ impl AsmPrinter {
         context: &Context,
         op: &OpHandle,
         out: &mut String,
+    ) -> Result<(), AsmPrintError> {
+        self.print_op_in(context, op, out, &crate::backend::RegAssignment::default())
+    }
+
+    fn print_op_in(
+        &self,
+        context: &Context,
+        op: &OpHandle,
+        out: &mut String,
+        assignment: &crate::backend::RegAssignment,
     ) -> Result<(), AsmPrintError> {
         if op.is::<ModuleEndOp>()
             || op.is::<SectionEndOp>()
@@ -121,11 +139,15 @@ impl AsmPrinter {
                 out.push_str(&name);
                 out.push('\n');
             }
-            self.print_block(context, section.body(), out)?;
+            self.print_block(context, section.body(), out, assignment)?;
             return Ok(());
         }
 
         if op.clone().as_op::<SymbolOp>().is_some() {
+            // Register allocation left the values in place and recorded where it
+            // put them; this is where that map is read.
+            let assignment =
+                &crate::backend::RegAssignment::of_op(op, crate::backend::ASSIGNMENT_ATTR);
             let name = string_attr(op, "name").ok_or(AsmPrintError::MissingSymbolName)?;
             if string_attr(op, "binding").as_deref() != Some("local") {
                 out.push_str(".global ");
@@ -155,7 +177,7 @@ impl AsmPrinter {
                     }
                     out.push_str(":\n");
                 }
-                self.print_block(context, block, out)?;
+                self.print_block(context, block, out, assignment)?;
             }
             return Ok(());
         }
@@ -212,7 +234,7 @@ impl AsmPrinter {
             return Ok(());
         }
 
-        if let Some(text) = self.print_instruction(context, op)? {
+        if let Some(text) = self.print_instruction(context, op, assignment)? {
             out.push('\t');
             out.push_str(&text);
             out.push('\n');

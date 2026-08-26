@@ -21,8 +21,6 @@ struct Definer<'a> {
     /// The op's registered name (`OPNAME`, falling back to `MNEMONIC`).
     op_name: String,
     mnemonic: String,
-    /// Declared attribute names (operand names), for builder parity.
-    op_attrs: Vec<String>,
     written: FixedReg,
     /// The right-hand side of the single fixed-register write.
     write_rhs: &'a ast::Expr,
@@ -235,10 +233,12 @@ fn is_fixed_register_shape(inst: &ast::Instruction, ops: &[(String, Type)]) -> b
     referenced_operands(rhs, &register_operand_names(ops)).is_empty()
 }
 
-/// The `roles` schema entries for a fixed-register definer/reader op: a `Use`
-/// slot for every register path it reads and a `Def` slot for every register
-/// path it writes, so register allocation and liveness see the fixed-register
-/// data flow the composed rules wire up. Empty for every other instruction.
+/// The register ports of a fixed-register definer/reader op: a use slot for
+/// every register path it reads and a def slot for every register path it
+/// writes, so register allocation and liveness see the fixed-register data flow
+/// the composed rules wire up. Empty for every other instruction. Returned as
+/// `(slot, class, is_def)`, reads before writes and each group sorted — the
+/// order the composed emitters bind them in.
 fn fixed_register_role_items(
     inst: &ast::Instruction,
     ops: &[(String, Type)],
@@ -246,7 +246,7 @@ fn fixed_register_role_items(
     register_name_map: &HashMap<(String, u32), String>,
     flag_classes: &HashSet<String>,
     pc_classes: &HashSet<String>,
-) -> Vec<(String, proc_macro2::TokenStream)> {
+) -> Vec<(String, String, bool)> {
     if !is_fixed_register_shape(inst, ops) {
         return Vec::new();
     }
@@ -281,7 +281,7 @@ fn fixed_register_role_items(
         };
         let slot = fixed_read_slot_name(&name);
         if seen.insert(slot.clone()) {
-            items.push((slot, quote! { Use }));
+            items.push((slot, class.clone(), false));
         }
     }
     for (class, regname) in &writes {
@@ -290,7 +290,7 @@ fn fixed_register_role_items(
         };
         let slot = fixed_write_slot_name(&name);
         if seen.insert(slot.clone()) {
-            items.push((slot, quote! { Def }));
+            items.push((slot, class.clone(), true));
         }
     }
     items
@@ -533,7 +533,6 @@ fn emit_one_division_rule(
     let class_id = reg_class_id(&dividend_class);
     let sibling_class_id = reg_class_id(&sibling_reg.0);
     let sibling_index = sibling_reg.1;
-    let divisor_class_id = reg_class_id(divisor_class);
     let dividend_use_slot = fixed_read_slot_name(&dividend_name);
     let dividend_def_slot = fixed_write_slot_name(&dividend_name);
     let sibling_use_slot = fixed_read_slot_name(&sibling_name);
@@ -568,34 +567,52 @@ fn emit_one_division_rule(
         emit_attr_result_fixed_def(&sibling_def_slot, 0, &sibling_class_id, sibling_index)
     };
 
-    let prelude_attrs = [
-        emit_attr_fixed_use(&dividend_use_slot, lhs_symbol, &class_id, dividend_index),
-        emit_attr_physical(&sibling_def_slot, &sibling_class_id, sibling_index),
-    ];
+    // A definer that extends the dividend (`cdq`) reads its register and has a
+    // slot for it; one that only clears the sibling (`xor edx, edx`) has none.
+    let mut definer_reads = HashSet::new();
+    collect_register_path_reads(&definer.inst.behavior, &mut definer_reads);
+    let definer_reads_dividend = definer_reads.iter().any(|(class, regname)| {
+        *class == dividend_class
+            && register_index_map.get(&(class.clone(), regname.clone()))
+                == Some(&u32::from(dividend_index))
+    });
+    let mut prelude_attrs = Vec::new();
+    if definer_reads_dividend {
+        prelude_attrs.push(emit_attr_fixed_use(
+            &dividend_use_slot,
+            lhs_symbol,
+            &class_id,
+            dividend_index,
+        ));
+    }
+    prelude_attrs.push(emit_attr_physical(
+        &sibling_def_slot,
+        &sibling_class_id,
+        sibling_index,
+    ));
     let (prelude_ts, prelude_shim) = emit_emitter_spec(
         &prelude_key,
         dialect,
         &definer.op_name,
         &definer_op_ty,
         &prelude_attrs,
-        &definer.op_attrs,
+        &definer.inst.name,
     );
 
     let emit_attrs = [
-        emit_attr_value(divisor_name, divisor_symbol, &divisor_class_id),
+        emit_attr_value(divisor_name, divisor_symbol),
         emit_attr_fixed_use(&dividend_use_slot, lhs_symbol, &class_id, dividend_index),
         dividend_def_attr,
         emit_attr_physical(&sibling_use_slot, &sibling_class_id, sibling_index),
         sibling_def_attr,
     ];
-    let reader_declared: Vec<String> = reader.ops.iter().map(|(name, _)| name.clone()).collect();
     let (emitter_ts, emit_shim) = emit_emitter_spec(
         &rule_key,
         dialect,
         &reader.op_name,
         &reader_op_ty,
         &emit_attrs,
-        &reader_declared,
+        &reader.inst.name,
     );
     let constraints = [
         constraint_entry(lhs_symbol, quote! { tir::graph::OperandConstraint::Register }),
@@ -768,7 +785,6 @@ fn classify_definer<'a>(
         inst,
         op_name: op_name.to_string(),
         mnemonic: mnemonic.to_string(),
-        op_attrs: ops.iter().map(|(name, _)| name.clone()).collect(),
         written,
         write_rhs: rhs,
     })

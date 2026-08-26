@@ -18,9 +18,9 @@ module {
   module_end
 }
 
-// CHECK: riscv.lw {rd = %[[FIRST:.*]]:GPR, rs1 = %virt0:GPR, imm = 0}
+// CHECK: riscv.lw {rd = %[[FIRST:.*]]:GPR, rs1 = %[[V0:[0-9]+]]:GPR, imm = 0}
 // CHECK-NOT: riscv.lw
-// CHECK: riscv.addw {rd = %[[SUM:.*]]:GPR, rs1 = %[[FIRST]]:GPR, rs2 = %[[FIRST]]:GPR}
-// CHECK: riscv.sw {rs1 = %virt0:GPR, rs2 = %virt1:GPR, imm = 0}
-// CHECK: riscv.lw {rd = %[[RELOADED:.*]]:GPR, rs1 = %virt0:GPR, imm = 0}
-// CHECK: riscv.addw {rd = {{.*}}:GPR, rs1 = %[[SUM]]:GPR, rs2 = %[[RELOADED]]:GPR}
+// CHECK: riscv.addw {rd = %[[SUM:.*]]:GPR, rs1 = %[[FIRST:[0-9]+]]:GPR, rs2 = %[[FIRST:[0-9]+]]:GPR}
+// CHECK: riscv.sw {rs1 = %[[V0]]:GPR, rs2 = %[[V1:[0-9]+]]:GPR, imm = 0}
+// CHECK: riscv.lw {rd = %[[RELOADED:.*]]:GPR, rs1 = %[[V0]]:GPR, imm = 0}
+// CHECK: riscv.addw {rd = {{.*}}:GPR, rs1 = %[[SUM:[0-9]+]]:GPR, rs2 = %[[RELOADED:[0-9]+]]:GPR}

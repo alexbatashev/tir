@@ -207,7 +207,7 @@ impl tir::backend::regalloc::TargetRegAlloc for PtxRegAlloc {
     fn emit_spill_store(
         &self,
         _context: &tir::Context,
-        _value: u32,
+        _value: tir::ValueId,
         _class: tir::backend::regalloc::RegClassId,
         _frame: &tir::backend::liveness::PhysReg,
         _offset: i64,
@@ -218,7 +218,7 @@ impl tir::backend::regalloc::TargetRegAlloc for PtxRegAlloc {
     fn emit_spill_reload(
         &self,
         _context: &tir::Context,
-        _value: u32,
+        _value: tir::ValueId,
         _class: tir::backend::regalloc::RegClassId,
         _frame: &tir::backend::liveness::PhysReg,
         _offset: i64,

@@ -19,8 +19,8 @@ module {
 }
 
 // CHECK-NOT: scf.
-// CHECK: riscv.andi {rd = %virt{{[0-9]+}}:GPR, rs1 = %virt0:GPR, imm = 1}
-// CHECK-NEXT: riscv.bne {rs1 = %virt{{[0-9]+}}:GPR, rs2 = x0, imm = ^[[THEN:bb[0-9]+]]}
+// CHECK: riscv.andi {rd = %{{[0-9]+}}:GPR, rs1 = %[[V0:[0-9]+]]:GPR, imm = 1}
+// CHECK-NEXT: riscv.bne {rs1 = %{{[0-9]+}}:GPR, rs2 = x0, imm = ^[[THEN:bb[0-9]+]]}
 // CHECK-NEXT: asm.vbr ^[[ELSE:bb[0-9]+]]
 // CHECK: ^[[THEN]]:
 // CHECK-NEXT: riscv.add
@@ -28,6 +28,6 @@ module {
 // CHECK: ^[[ELSE]]:
 // CHECK-NEXT: riscv.sub
 // CHECK-NEXT: asm.vbr %{{[0-9]+}} ^[[JOIN]]
-// CHECK: ^[[JOIN]](%{{[0-9]+}}: !i64):
+// CHECK: ^[[JOIN]](%{{[0-9]+}}: !riscv.GPR):
 // CHECK-NEXT: asm.vret
 // CHECK-NOT: scf.

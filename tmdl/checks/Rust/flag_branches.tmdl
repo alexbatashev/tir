@@ -166,8 +166,8 @@ instruction SelectEq for [FlagIsa] {
 
 // The shared flag-definer emitter spec binds the compare's register operands.
 // CHECK: static EMIT_FLAG_DEFINER_CMP
-// CHECK: symbol: 0,
-// CHECK: "rn",
+// CHECK: attr: "rn",
+// CHECK-NEXT: symbol: 0,
 
 // zf == 1 composes to Eq over the definer's operands, sf != of to the signed
 // Lt (proved through the sign/overflow formula, not recognized syntactically),

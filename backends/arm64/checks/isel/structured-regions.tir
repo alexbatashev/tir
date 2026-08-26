@@ -31,7 +31,7 @@ module {
 }
 
 // CHECK: asm.symbol {name = "choose"
-// CHECK: arm64.add_imm {rd = %virt{{[0-9]+}}:GPRsp, rn = %virt1:GPRsp, imm = 7}
-// CHECK: arm64.sub_imm {rd = %virt{{[0-9]+}}:GPRsp, rn = %virt1:GPRsp, imm = 7}
+// CHECK: arm64.add_imm {rd = %{{[0-9]+}}:GPRsp, rn = %[[V1:[0-9]+]]:GPR, imm = 7}
+// CHECK: arm64.sub_imm {rd = %{{[0-9]+}}:GPRsp, rn = %[[V1]]:GPR, imm = 7}
 // CHECK: asm.symbol {name = "accumulate"
-// CHECK: arm64.add_imm {rd = %virt{{[0-9]+}}:GPRsp, rn = %virt{{[0-9]+}}:GPRsp, imm = 5}
+// CHECK: arm64.add_imm {rd = %{{[0-9]+}}:GPRsp, rn = %{{[0-9]+}}:GPR, imm = 5}

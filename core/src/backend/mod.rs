@@ -16,8 +16,10 @@ pub mod pipeline;
 pub mod prealloc;
 mod printer;
 pub mod regalloc;
+mod registers;
 pub mod sched;
 pub mod target;
+mod verify;
 
 pub use operations::*;
 pub use target::{
@@ -28,6 +30,15 @@ pub use target::{
 // Re-exported so the `register_target!` macro can reference linkme from the
 // backend crates without each of them depending on it directly.
 pub use linkme;
+
+pub use registers::{
+    ARG_PINS_ATTR, ASSIGNMENT_ATTR, PINS_ATTR, RegAssignment, RegClassType, RegPort, RegSlot,
+    SlotRef, assigned_register, fresh_reg, op_slot_register, phys_attr, pin_slot,
+    reg_class_type_parser, reg_ports, reg_slot, reg_slots, retype_untyped, slot_class, slot_pin,
+    slot_register, type_class, value_class,
+};
+
+pub use verify::verify_machine_ir;
 
 pub use lexer::Token;
 pub use lexer::lex;
@@ -308,6 +319,9 @@ pub struct InstrInfo {
     pub program: exec::Program,
     /// Fixed registers the behavior touches without naming them in an operand.
     pub implicit_regs: &'static [tir::attributes::ImplicitReg],
+    /// The opcode's register slots, in declaration order: which are results and
+    /// which operands, and the class each admits. See [`RegPort`].
+    pub regs: &'static [RegPort],
     pub effects: MemoryEffects,
     /// Assembly syntax, or `None` for an opcode with no textual form.
     pub asm: Option<&'static asm_desc::InstrDesc>,
@@ -332,6 +346,7 @@ impl InstrInfo {
         control_flow: ControlFlow::None,
         program: exec::Program::Unsupported("instruction has no behavior"),
         implicit_regs: &[],
+        regs: &[],
         effects: MemoryEffects::NONE,
         asm: None,
         encode: None,
@@ -373,6 +388,96 @@ pub trait MachineInstruction {
     fn control_flow(&self) -> ControlFlow {
         self.info().control_flow
     }
+}
+
+/// Print a machine instruction as IR: its name and one entry per register slot
+/// and attribute, in port order.
+///
+/// A slot holding a value prints as `%3:GPR` — its number and the class its
+/// type names — becoming `%3:rbx` once the enclosing symbol's
+/// [`RegAssignment`] has placed it; a slot naming a physical register prints
+/// that register's assembly name. One shared printer: what a slot is called and
+/// what class it admits are fields of the opcode's [`InstrInfo`], not generated
+/// code.
+pub fn print_machine_op<T: tir::Operation>(
+    fmt: &mut tir::IRFormatter,
+    op: &T,
+) -> Result<(), std::fmt::Error> {
+    let handle = op.handle().clone();
+    let context = handle.context.upgrade();
+    fmt.write(format!("{}.{}", T::dialect(), T::name()))?;
+    let slots = registers::reg_slots(&handle);
+    let mut first = true;
+    let open = |fmt: &mut tir::IRFormatter, first: &mut bool| {
+        let text = if *first { " {" } else { ", " };
+        *first = false;
+        fmt.write(text)
+    };
+    for slot in &slots {
+        open(fmt, &mut first)?;
+        fmt.write(format!("{} = ", slot.port.name))?;
+        match slot.slot {
+            RegSlot::Phys((class, index)) => print_register(fmt, class, index)?,
+            RegSlot::Value(value) => {
+                fmt.write(format!("%{}", value.number()))?;
+                // The register a value ended up in, or — before allocation —
+                // the class its type says it lives in.
+                match registers::assigned_register(&context, &handle, value) {
+                    Some((class, index)) => {
+                        fmt.write(":")?;
+                        print_register(fmt, class, index)?;
+                    }
+                    None => {
+                        if let Some(class) = registers::value_class(&context, value) {
+                            fmt.write(format!(":{}", class.name()))?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for attr in op.attributes() {
+        let name = context.resolve(attr.name);
+        if slots.iter().any(|slot| slot.port.name == name) {
+            continue;
+        }
+        open(fmt, &mut first)?;
+        fmt.write(format!("{name} = "))?;
+        attr.value.print(fmt, &context)?;
+    }
+    if !first {
+        fmt.write("}")?;
+    }
+    fmt.write("\n")
+}
+
+fn print_register(
+    fmt: &mut tir::IRFormatter,
+    class: tir::backend::regalloc::RegClassId,
+    index: u16,
+) -> Result<(), std::fmt::Error> {
+    match (class.print_name)(index, false) {
+        Some(name) => fmt.write(name),
+        None => fmt.write(format!("{}[{}]", class.name(), index)),
+    }
+}
+
+/// Rebuild `op` as opcode `T` — a different encoding of the same instruction —
+/// keeping its operands, results and attributes. The values stay put, so the
+/// register assignment that placed them still describes the rewritten op.
+pub fn reencode_as<T: tir::Operation>(
+    context: &tir::Context,
+    op: &tir::OpHandle,
+) -> Box<dyn tir::Operation> {
+    let instance = tir::OpInstance::new_dynamic(
+        (T::dialect(), T::name()),
+        context.as_context_ref(),
+        op.operands().to_vec(),
+        op.results().to_vec(),
+        vec![],
+        op.attributes().to_vec(),
+    );
+    T::from_op_instance_dyn(context.add_operation(instance))
 }
 
 pub fn register_attr(

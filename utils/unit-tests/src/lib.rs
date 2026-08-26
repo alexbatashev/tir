@@ -120,6 +120,7 @@ mod core {
     mod isel_rules;
     mod layout;
     mod liveness;
+    mod machine_ir;
     mod pass;
     mod regalloc;
     mod sem;
