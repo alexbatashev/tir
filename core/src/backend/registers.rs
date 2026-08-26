@@ -118,6 +118,32 @@ pub fn reg_class_type_parser(
     }
 }
 
+/// A fresh value of `class`: the type a machine instruction reads it through.
+pub fn fresh_reg(context: &Context, class: RegClassId) -> ValueId {
+    context
+        .create_value(RegClassType::new(context, class), None)
+        .id()
+}
+
+/// Give a value with no register class the class a machine instruction first
+/// reads it through. Selection retypes the mid-end values it binds — a
+/// constant or stack allocation a target pass materializes later, a call
+/// argument — so every value a machine instruction names is a register.
+pub fn retype_untyped(context: &Context, value: ValueId, class: RegClassId) {
+    if value_class(context, value).is_none() {
+        context.retype_value(value, RegClassType::new(context, class));
+    }
+}
+
+/// The register class a slot holds: the physical register's own, or the class
+/// the value's type names.
+pub fn slot_class(context: &Context, slot: RegSlot) -> Option<RegClassId> {
+    match slot {
+        RegSlot::Phys((class, _)) => Some(class),
+        RegSlot::Value(value) => value_class(context, value),
+    }
+}
+
 /// The register class `value` holds, or `None` if it is not a register — or no
 /// longer exists, which printing a stale reference must survive.
 pub fn value_class(context: &Context, value: ValueId) -> Option<RegClassId> {
@@ -335,7 +361,7 @@ impl RegAssignment {
     }
 
     /// The map `op` carries under `attr` ([`ASSIGNMENT_ATTR`] or
-    /// [`PINS_ATTR`]), empty when it carries none.
+    /// [`ARG_PINS_ATTR`]), empty when it carries none.
     pub fn of_op(op: &OpHandle, attr: &str) -> Self {
         let Some(AttributeValue::Array(entries)) = op.attr(attr) else {
             return Self::default();

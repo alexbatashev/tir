@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use tir::Symbol;
 use tir::analysis::DefUse;
-use tir::attributes::{AttributeValue, RegisterAttr};
+use tir::attributes::AttributeValue;
 use tir::builtin::PtrToFnOp;
 use tir::builtin::{
     MakeTupleOp, MakeTupleOpBuilder, TupleGetOp, TupleGetOpBuilder, TupleType, UnitType,
@@ -17,6 +17,7 @@ use crate::backend::abi::{
 use crate::backend::liveness::PhysReg;
 use crate::backend::regalloc::RegClassId;
 use crate::backend::registers::RegSlot;
+use crate::backend::registers::fresh_reg;
 
 pub trait CallEmitter: Send + Sync {
     /// A register-to-register move. Either end is a value the copy defines or
@@ -318,6 +319,7 @@ impl CallLowering {
         // An argument value must not be pinned for its whole live range, so the
         // call reads a copy of it made right here.
         let detach = |rewriter: &mut Rewriter, value: ValueId, class| {
+            crate::backend::retype_untyped(context, value, class);
             let fresh = fresh_reg(context, class);
             let copy = self
                 .emitter
@@ -396,12 +398,7 @@ impl CallLowering {
                 .caller_saved
                 .iter()
                 .copied()
-                .map(|register| {
-                    AttributeValue::Register(RegisterAttr::Physical {
-                        class: register.0,
-                        index: register.1,
-                    })
-                })
+                .map(crate::backend::phys_attr)
                 .collect::<Vec<_>>()
                 .into(),
         );
@@ -699,12 +696,6 @@ fn stack_class(abi: &AbiInfo, mut kind: ValueKind) -> Option<crate::backend::reg
 }
 
 /// A fresh value of `class`, the type a machine instruction reads it through.
-fn fresh_reg(context: &Context, class: RegClassId) -> ValueId {
-    context
-        .create_value(crate::backend::RegClassType::new(context, class), None)
-        .id()
-}
-
 /// Where a call's target comes from: a named symbol when the callee traces back
 /// to a λ node, otherwise the machine value the address was recovered from.
 fn resolve_callee(context: &Context, call: &CallOp) -> Callee {

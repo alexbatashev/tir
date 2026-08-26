@@ -35,11 +35,7 @@ pub enum EmitAttr {
         index: u16,
     },
     /// The operand port `attr`: the value bound to `symbol`.
-    Value {
-        attr: &'static str,
-        symbol: u32,
-        class: RegClassId,
-    },
+    Value { attr: &'static str, symbol: u32 },
     /// [`EmitAttr::Value`] pinned to one required physical register.
     FixedUse {
         attr: &'static str,
@@ -97,7 +93,19 @@ pub fn emit_with(
         spec.regs
             .iter()
             .position(|port| port.name == name)
-            .unwrap_or(usize::MAX)
+            .ok_or_else(|| {
+                PassError::InvalidRuleSet(format!(
+                    "{}.{} has no register slot '{name}'",
+                    spec.op.0, spec.op.1
+                ))
+            })
+    };
+    let bind = |name: &str, value: tir::ValueId| -> Result<(usize, tir::ValueId), PassError> {
+        let port = port(name)?;
+        if let Some(class) = spec.regs[port].class {
+            crate::backend::retype_untyped(context, value, class);
+        }
+        Ok((port, value))
     };
     for entry in spec.attrs {
         let fail = || PassError::RewriteFailed(req.op_id());
@@ -107,7 +115,7 @@ pub fn emit_with(
                 result,
                 class,
             } => {
-                results.push((port(attr), new_result(context, req, result, class)?));
+                results.push((port(attr)?, new_result(context, req, result, class)?));
             }
             EmitAttr::ResultFixedDef {
                 attr,
@@ -116,10 +124,10 @@ pub fn emit_with(
                 index,
             } => {
                 pins.insert(attr.to_string(), pin(class, index));
-                results.push((port(attr), new_result(context, req, result, class)?));
+                results.push((port(attr)?, new_result(context, req, result, class)?));
             }
-            EmitAttr::Value { attr, symbol, .. } => {
-                operands.push((port(attr), m.value_binding(symbol).ok_or_else(fail)?));
+            EmitAttr::Value { attr, symbol } => {
+                operands.push(bind(attr, m.value_binding(symbol).ok_or_else(fail)?)?);
             }
             EmitAttr::FixedUse {
                 attr,
@@ -128,7 +136,7 @@ pub fn emit_with(
                 index,
             } => {
                 pins.insert(attr.to_string(), pin(class, index));
-                operands.push((port(attr), m.value_binding(symbol).ok_or_else(fail)?));
+                operands.push(bind(attr, m.value_binding(symbol).ok_or_else(fail)?)?);
             }
             EmitAttr::Physical { attr, class, index } => {
                 attributes.push(context.named_attribute(
@@ -148,7 +156,7 @@ pub fn emit_with(
                 Some(value) => {
                     attributes.push(context.named_attribute(attr, AttributeValue::Int(value)))
                 }
-                None => operands.push((port(attr), m.value_binding(symbol).ok_or_else(fail)?)),
+                None => operands.push(bind(attr, m.value_binding(symbol).ok_or_else(fail)?)?),
             },
         }
     }

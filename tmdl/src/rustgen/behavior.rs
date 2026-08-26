@@ -459,12 +459,12 @@ fn emit_cond_branch_rule(
             continue;
         };
         match op_ty {
-            Type::Struct(class_name) => {
+            Type::Struct(_) => {
                 operand_constraint_entries.push(constraint_entry(
                     symbol,
                     quote! { tir::graph::OperandConstraint::Register },
                 ));
-                emit_attrs.push(emit_attr_value(op_name, symbol, &reg_class_id(class_name)));
+                emit_attrs.push(emit_attr_value(op_name, symbol));
             }
             Type::Integer | Type::Bits(_) => {
                 operand_constraint_entries.push(constraint_entry(

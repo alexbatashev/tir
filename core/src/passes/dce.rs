@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::analysis::{ConstantFacts, DefUse, op_regs};
+use crate::analysis::{ConstantFacts, DefUse, execution_regs, op_regs};
 use crate::backend::SymbolOp;
 use crate::{
     AnalysisManager, BlockId, Context, MemoryWrite, OpHandle, OpId, OperationRef, Pass, PassError,
@@ -181,7 +181,7 @@ fn is_erasable(instance: &OpHandle, use_counts: &HashMap<u32, usize>) -> bool {
         _ => {}
     }
 
-    let regs = op_regs(instance);
+    let regs = execution_regs(instance);
     if !regs.phys_defs.is_empty() {
         return false;
     }

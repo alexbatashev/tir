@@ -930,12 +930,12 @@ fn emit_flag_definer_prelude(
             continue;
         };
         match op_ty {
-            Type::Struct(class_name) => {
+            Type::Struct(_) => {
                 operand_constraint_entries.push(constraint_entry(
                     symbol,
                     quote! { tir::graph::OperandConstraint::Register },
                 ));
-                prelude_attrs.push(emit_attr_value(op_name, symbol, &reg_class_id(class_name)));
+                prelude_attrs.push(emit_attr_value(op_name, symbol));
             }
             Type::Bits(_) | Type::Integer => {
                 operand_constraint_entries.push(constraint_entry(

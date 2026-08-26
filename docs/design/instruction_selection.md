@@ -979,7 +979,7 @@ becomes the slot's attribute (`vl = 4`, `sew = 32`), a value becomes the
 operand the slot reads. Selection never materializes the register's
 definer; a target machine pass does (RISC-V `riscv-insert-vsetvli` tracks the
 configured state forward through each block and inserts `vset{i}vli` exactly
-where the demanded configuration changes). Demand attributes are to that pass
+where the demanded configuration changes). Demand slots are to that pass
 what virtual registers are to allocation: a recorded obligation, concretized
 later.
 
@@ -1129,7 +1129,11 @@ A destination is *born* in its port's register class: the emitter mints a fresh
 value typed `!<dialect>.<class>` and selection replaces the mid-end result it
 stands for with it, so consumers and later passes read the machine value. Where
 a covered value is not a tile's destination, the plan's `value_remaps` point its
-readers at the value that is.
+readers at the value that is. An operand a tile binds that no tile produced — a
+stack allocation or constant a target pass materializes later — is retyped in
+place to the class of the slot reading it (`retype_untyped`); call lowering does
+the same for the arguments it copies. After selection every value a machine
+instruction names is a register, which the machine-IR verifier checks.
 
 ## Key types at a glance
 

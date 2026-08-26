@@ -15,26 +15,32 @@ use crate::backend::liveness::PhysReg;
 use crate::backend::regalloc::{
     RegClassId, RegisterAllocationPass, RegisterInfo, TargetRegAlloc, op_ref_in, symbol_body_blocks,
 };
-use crate::backend::registers::{RegAssignment, RegClassType, RegSlot, value_class};
+use crate::backend::registers::{RegAssignment, RegSlot, fresh_reg, value_class};
 use crate::backend::{SymbolOp, VirtualBranchOp, VirtualReturnOp, reg_slots};
 
 /// A fresh value of `class`: the type a machine instruction reads it through.
-fn fresh_reg(context: &Context, class: RegClassId) -> ValueId {
-    context
-        .create_value(RegClassType::new(context, class), None)
-        .id()
-}
-
-/// Require the slot of `op` holding `value` to be `register`.
-fn pin_on(context: &Context, op: tir::OpId, value: ValueId, register: PhysReg) {
+/// Require the slot of `op` holding `value` to be `register`. A copy whose
+/// slots do not name the value cannot carry the constraint, and the ABI
+/// placement would be silently lost.
+fn pin_on(
+    context: &Context,
+    op: tir::OpId,
+    value: ValueId,
+    register: PhysReg,
+) -> Result<(), PassError> {
     let op = context.get_op(op);
-    let Some(slot) = reg_slots(&op)
+    let slot = reg_slots(&op)
         .into_iter()
         .find(|slot| slot.slot == RegSlot::Value(value))
-    else {
-        return;
-    };
+        .ok_or_else(|| {
+            PassError::InvalidRuleSet(format!(
+                "{} has no register slot holding %{}",
+                op.name().as_str(),
+                value.number()
+            ))
+        })?;
     crate::backend::pin_slot(context, &op, slot.port.name, register);
+    Ok(())
 }
 
 /// Compose the register-allocation stage for a target: the pre-allocation
@@ -435,7 +441,7 @@ impl Pass for AbiPrecolorPass {
                     let op_ref = op_ref_in(context, block_id, op_id);
                     rewriter.insert_op_before(&op_ref, copy.as_ref())?;
                     context.set_op_operand(op_id, operand_index, outgoing);
-                    pin_on(context, copy_id, outgoing, (rc, register.1));
+                    pin_on(context, copy_id, outgoing, (rc, register.1))?;
                     mark_op(
                         context,
                         copy_id,

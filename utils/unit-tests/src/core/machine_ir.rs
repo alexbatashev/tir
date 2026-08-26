@@ -175,6 +175,37 @@ fn cross_view_operand_is_rejected() {
     );
 }
 
+/// A register slot holds a register-typed value: a mid-end value that reached
+/// an instruction unretyped has no class for allocation to place it by.
+#[test]
+fn operand_without_a_register_class_is_rejected() {
+    let f = function(|context, builder| {
+        let source = context
+            .create_value(tir::builtin::IntegerType::new(context, 32), None)
+            .id();
+        builder
+            .rs(source)
+            .result_types(vec![RegClassType::new(context, r())])
+    });
+    let error = verify_machine_ir(&f.context, f.symbol.id()).expect_err("class-less operand");
+    assert!(format!("{error:?}").contains("not a register"), "{error:?}");
+}
+
+/// Every SSA position is some port's: a second result on a one-def opcode
+/// would be defined by nothing.
+#[test]
+fn a_result_without_a_port_is_rejected() {
+    let f = function(|context, builder| {
+        let source = value_of(context, r());
+        builder.rs(source).result_types(vec![
+            RegClassType::new(context, r()),
+            RegClassType::new(context, r()),
+        ])
+    });
+    let error = verify_machine_ir(&f.context, f.symbol.id()).expect_err("surplus result");
+    assert!(format!("{error:?}").contains("register slots"), "{error:?}");
+}
+
 /// Once a function carries an assignment it is total: a value an instruction
 /// names with no register is an unfinished allocation, not a free choice.
 #[test]

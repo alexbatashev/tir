@@ -520,11 +520,10 @@ fn emit_aliased_zero_branch_rules(
 
             let prelude_key = format!("flag_definer_{}_aliased", d.inst.name.to_lowercase());
             let d_op_ty_ident = format_ident!("{}Op", &d.inst.name);
-            let class_id = reg_class_id(class_a);
             // Both operands read the same bound value (the aliased pair).
             let prelude_attrs = [
-                emit_attr_value(name_a, 0, &class_id),
-                emit_attr_value(name_b, 0, &class_id),
+                emit_attr_value(name_a, 0),
+                emit_attr_value(name_b, 0),
             ];
             let (prelude_ts, prelude_shim) = emit_emitter_spec(
                 &prelude_key,
@@ -851,7 +850,7 @@ fn emit_flag_reader_rules(
                     continue;
                 };
                 match ty {
-                    Type::Struct(class) => {
+                    Type::Struct(_) => {
                         reader_constraint_entries.push(constraint_entry(
                             symbol,
                             quote! { tir::graph::OperandConstraint::Register },
@@ -863,7 +862,7 @@ fn emit_flag_reader_rules(
                         } else {
                             name.clone()
                         };
-                        reader_attrs.push(emit_attr_value(&attr_name, symbol, &reg_class_id(class)));
+                        reader_attrs.push(emit_attr_value(&attr_name, symbol));
                     }
                     Type::Bits(_) | Type::Integer => {
                         reader_constraint_entries.push(constraint_entry(

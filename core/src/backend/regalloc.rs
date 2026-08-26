@@ -22,6 +22,7 @@ use tir_pbqp::{self as pbqp, INF_COST, PbqpMatrix, PbqpNodeId, PbqpProblem};
 
 use crate::backend::liveness::{self, Liveness, PhysReg};
 use crate::backend::prealloc;
+use crate::backend::registers::fresh_reg;
 use crate::backend::{SymbolOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp};
 use crate::ptr::AllocaOp;
 
@@ -940,14 +941,7 @@ impl RegisterAllocationPass {
                         copy
                     };
                     mark_coalescable(context, copy.id());
-                    if let Some(previous) = precolor.insert(fixed.number(), (class, index))
-                        && previous != (class, index)
-                    {
-                        return Err(PassError::InvalidRuleSet(format!(
-                            "value %{} is pinned to conflicting physical registers",
-                            fixed.number()
-                        )));
-                    }
+                    precolor.insert(fixed.number(), (class, index));
                 }
                 strip_attr(context, op_id, crate::backend::PINS_ATTR);
             }
@@ -1529,12 +1523,6 @@ fn slot_class_of(context: &Context, blocks: &[BlockId], value: ValueId) -> Optio
 }
 
 /// A fresh value of `class`: the type a machine instruction reads it through.
-fn fresh_reg(context: &Context, class: RegClassId) -> ValueId {
-    context
-        .create_value(crate::backend::RegClassType::new(context, class), None)
-        .id()
-}
-
 /// Count how many times each virtual register is referenced (def or use) across the
 /// body, used to weight spill cost so the least-used register spills first.
 fn reference_counts(context: &Context, blocks: &[BlockId]) -> HashMap<u32, u32> {

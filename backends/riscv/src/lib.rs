@@ -599,10 +599,7 @@ struct RiscvCallEmitter;
 
 impl tir::backend::call_lowering::CallEmitter for RiscvCallEmitter {
     fn copy(&self, context: &tir::Context, dst: RegSlot, src: RegSlot) -> Box<dyn Operation> {
-        let class = match dst {
-            RegSlot::Phys((class, _)) => Some(class),
-            RegSlot::Value(value) => tir::backend::value_class(context, value),
-        };
+        let class = tir::backend::slot_class(context, dst);
         match class {
             Some(class) if class == RegClass::FPR32.id() => {
                 let builder = FMoveSOpBuilder::new(context);
@@ -1059,7 +1056,7 @@ impl tir::backend::TargetMachine for RiscvTarget {
 
     fn machine_passes(&self) -> Vec<Box<dyn tir::Pass>> {
         if self.config.features.contains(&Feature::RVV) {
-            vec![Box::new(vsetvli::InsertVsetvliPass::new(self.config.xlen))]
+            vec![Box::new(vsetvli::InsertVsetvliPass)]
         } else {
             Vec::new()
         }

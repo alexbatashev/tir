@@ -348,14 +348,6 @@ fn slot_classes(slots: &[crate::backend::SlotRef]) -> Vec<(ValueId, RegClassId)>
     classes
 }
 
-/// Constrain `value` to the class its type names, narrowed by the class the
-/// slot reading it encodes. A vreg referenced through several classes must
-/// satisfy all of them at once, so the constraints intersect: it may only be
-/// assigned a register every one of them encodes (an x86 value read by a REX-free
-/// operand form is confined to that form's low registers even where it is also
-/// copied through the full `GPR` class). Classes viewing different files or
-/// different offsets of one file, or sharing no register, cannot both hold and are
-/// reported instead of silently resolved to one of them.
 /// The class the slot reading `value` narrows it to, if any.
 fn slot_class(classes: &[(ValueId, RegClassId)], value: ValueId) -> Option<RegClassId> {
     classes
@@ -364,6 +356,14 @@ fn slot_class(classes: &[(ValueId, RegClassId)], value: ValueId) -> Option<RegCl
         .map(|(_, class)| *class)
 }
 
+/// Constrain `value` to the class its type names, narrowed by the class the
+/// slot reading it encodes. A vreg referenced through several classes must
+/// satisfy all of them at once, so the constraints intersect: it may only be
+/// assigned a register every one of them encodes (an x86 value read by a REX-free
+/// operand form is confined to that form's low registers even where it is also
+/// copied through the full `GPR` class). Classes viewing different files or
+/// different offsets of one file, or sharing no register, cannot both hold and are
+/// reported instead of silently resolved to one of them.
 fn record_class(
     result: &mut Liveness,
     context: &Context,

@@ -392,7 +392,6 @@ fn emit_instructions<'a>(
         let ports_ident = format_ident!("REGS_{}", inst.name.to_uppercase());
         let port_count = port_entries.len();
         instruction_reg_ports.push(quote! {
-            #[allow(dead_code)]
             static #ports_ident: [tir::backend::RegPort; #port_count] = [#(#port_entries),*];
         });
 
@@ -551,14 +550,11 @@ fn emit_instructions<'a>(
                             if read_register_operands.contains(op_name)
                                 && let Some(sym) = semantics.variable_symbols.get(op_name)
                             {
-                                emit_attrs.push(emit_attr_value(
-                                    &format!("{op_name}_tied"),
-                                    *sym,
-                                    &class_id,
-                                ));
+                                emit_attrs
+                                    .push(emit_attr_value(&format!("{op_name}_tied"), *sym));
                             }
                         } else if let Some(sym) = semantics.variable_symbols.get(op_name) {
-                            emit_attrs.push(emit_attr_value(op_name, *sym, &class_id));
+                            emit_attrs.push(emit_attr_value(op_name, *sym));
                         } else if let Some(Some(reg_idx)) =
                             semantics.fixed_register_by_class.get(class_name)
                         {
@@ -1391,9 +1387,7 @@ fn emit_instructions<'a>(
         if !implicit_items.is_empty() {
             info_fields.push(quote! { implicit_regs: &[ #(#implicit_items),* ] });
         }
-        if port_count != 0 {
-            info_fields.push(quote! { regs: &#ports_ident });
-        }
+        info_fields.push(quote! { regs: &#ports_ident });
         let (reads_memory, writes_memory) = behavior_memory_effects(&inst.behavior);
         if reads_memory || writes_memory {
             info_fields.push(quote! {

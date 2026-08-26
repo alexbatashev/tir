@@ -218,8 +218,8 @@ struct ContextInstance {
     /// [`Context::take_dirty_ops`], for scoping post-pass verification.
     dirty_ops: Vec<OpId>,
     dialects: HashMap<&'static str, Arc<dyn Dialect>>,
-    /// Register-class names of registered targets, for resolving parsed
-    /// `%virtN:CLASS` operands back to a [`RegClassId`].
+    /// Register-class names of registered targets, for resolving a parsed
+    /// `CLASS[n]` register attribute back to a [`RegClassId`].
     reg_classes: HashMap<&'static str, crate::backend::regalloc::RegClassId>,
     op_interface_converters:
         HashMap<(&'static str, &'static str, std::any::TypeId), OpInterfaceConverter>,
@@ -501,8 +501,8 @@ impl Context {
         self.0.write().dialects.insert(D::name(), dialect);
     }
 
-    /// Register a target's register classes so the generic op parser can resolve a
-    /// `%virtN:CLASS` operand's class name back to its [`RegClassId`]. Backends call
+    /// Register a target's register classes so the attribute parser can resolve a
+    /// `CLASS[n]` register's class name back to its [`RegClassId`]. Backends call
     /// this from `register_dialects` with their generated `register_info().classes`.
     pub fn register_reg_classes(&self, classes: &'static [crate::backend::regalloc::RegClassInfo]) {
         let mut inner = self.0.write();
@@ -1476,12 +1476,11 @@ impl Context {
         }
     }
 
-    /// Read an operation's storage record under the context lock.
-    ///
-    /// `read` must not touch the context: the lock is not reentrant.
     /// Read an attribute of `op` in place. For an attribute large enough that
     /// cloning it per lookup would matter — the register assignment of a whole
     /// function, read once per instruction slot.
+    ///
+    /// `read` must not touch the context: the lock is not reentrant.
     pub fn with_attr<R>(
         &self,
         id: OpId,
@@ -1493,6 +1492,9 @@ impl Context {
         inner.op(id)?.attr_sym(name).map(read)
     }
 
+    /// Read an operation's storage record under the context lock.
+    ///
+    /// `read` must not touch the context: the lock is not reentrant.
     pub(crate) fn with_op<R>(&self, id: OpId, read: impl FnOnce(&OpInstance) -> R) -> R {
         let inner = self.0.read();
         read(inner.op(id).expect("live operation"))

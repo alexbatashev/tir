@@ -33,8 +33,9 @@ pub use linkme;
 
 pub use registers::{
     ARG_PINS_ATTR, ASSIGNMENT_ATTR, PINS_ATTR, RegAssignment, RegClassType, RegPort, RegSlot,
-    SlotRef, assigned_register, op_slot_register, phys_attr, pin_slot, reg_class_type_parser,
-    reg_ports, reg_slot, reg_slots, slot_pin, slot_register, type_class, value_class,
+    SlotRef, assigned_register, fresh_reg, op_slot_register, phys_attr, pin_slot,
+    reg_class_type_parser, reg_ports, reg_slot, reg_slots, retype_untyped, slot_class, slot_pin,
+    slot_register, type_class, value_class,
 };
 
 pub use verify::verify_machine_ir;
@@ -404,7 +405,6 @@ pub fn print_machine_op<T: tir::Operation>(
 ) -> Result<(), std::fmt::Error> {
     let handle = op.handle().clone();
     let context = handle.context.upgrade();
-    let assignment = enclosing_assignment(&context, &handle);
     fmt.write(format!("{}.{}", T::dialect(), T::name()))?;
     let slots = registers::reg_slots(&handle);
     let mut first = true;
@@ -422,7 +422,7 @@ pub fn print_machine_op<T: tir::Operation>(
                 fmt.write(format!("%{}", value.number()))?;
                 // The register a value ended up in, or — before allocation —
                 // the class its type says it lives in.
-                match assignment.get(value) {
+                match registers::assigned_register(&context, &handle, value) {
                     Some((class, index)) => {
                         fmt.write(":")?;
                         print_register(fmt, class, index)?;
@@ -460,20 +460,6 @@ fn print_register(
         Some(name) => fmt.write(name),
         None => fmt.write(format!("{}[{}]", class.name(), index)),
     }
-}
-
-/// The register assignment of the `asm.symbol` `op` sits in, empty outside one
-/// or before allocation.
-fn enclosing_assignment(context: &tir::Context, op: &tir::OpHandle) -> RegAssignment {
-    let mut current = context.parent_op(op.id);
-    while let Some(parent) = current {
-        let parent = context.get_op(parent);
-        if parent.is::<SymbolOp>() {
-            return RegAssignment::of_op(&parent, ASSIGNMENT_ATTR);
-        }
-        current = context.parent_op(parent.id);
-    }
-    RegAssignment::default()
 }
 
 /// Rebuild `op` as opcode `T` — a different encoding of the same instruction —

@@ -20,6 +20,7 @@ use std::collections::HashSet;
 
 use tir::{Context, Error, OpHandle, OpId, ValueId};
 
+use crate::backend::regalloc::RegClassId;
 use crate::backend::registers::{PINS_ATTR, slot_pin};
 use crate::backend::registers::{RegAssignment, RegSlot, reg_slots, value_class};
 use crate::backend::{ARG_PINS_ATTR, ASSIGNMENT_ATTR, SymbolOp};
@@ -73,18 +74,40 @@ fn verify_reg_slots(context: &Context, op: &OpHandle) -> Result<(), Error> {
             port.name,
         )));
     }
+    // Every SSA position is some port's: a surplus operand or result would be
+    // read by nothing, and a missing one shifts every later port.
+    let (values_read, values_written) = slots.iter().fold((0, 0), |(read, written), slot| {
+        match (slot.slot, slot.port.def) {
+            (RegSlot::Value(_), false) => (read + 1, written),
+            (RegSlot::Value(_), true) => (read, written + 1),
+            _ => (read, written),
+        }
+    });
+    if !crate::backend::reg_ports(op).is_empty()
+        && (values_read != op.operands().len() || values_written != op.results().len())
+    {
+        return Err(Error::VerificationError(format!(
+            "{} has {} operands and {} results for {} use and {} def register slots",
+            op.name().as_str(),
+            op.operands().len(),
+            op.results().len(),
+            values_read,
+            values_written,
+        )));
+    }
     for slot in &slots {
         let (RegSlot::Value(value), Some(port_class)) = (slot.slot, slot.port.class) else {
             continue;
         };
         let Some(class) = value_class(context, value) else {
-            continue;
+            return Err(Error::VerificationError(format!(
+                "{} operand '{}' reads %{}, which is not a register",
+                op.name().as_str(),
+                slot.port.name,
+                value.number(),
+            )));
         };
-        // A register group read through a single-register slot — an RVV LMUL
-        // group in a `VR` operand — is the same file at the same offset, and is
-        // the allocation unit rather than a different view.
-        if class.file() != port_class.file() || class.view.bit_offset != port_class.view.bit_offset
-        {
+        if !same_view(class, port_class) {
             return Err(Error::VerificationError(format!(
                 "{} operand '{}' reads %{} of class {} through {}, a different register view",
                 op.name().as_str(),
@@ -134,9 +157,7 @@ fn verify_slot_pins(context: &Context, op: &OpHandle) -> Result<(), Error> {
         let Some(value_class) = value_class(context, value) else {
             continue;
         };
-        if class.file() != value_class.file()
-            || class.view.bit_offset != value_class.view.bit_offset
-        {
+        if !same_view(class, value_class) {
             return Err(Error::VerificationError(format!(
                 "{} slot '{}' holds %{} of class {} but is pinned to {}[{}]",
                 op.name().as_str(),
@@ -158,7 +179,7 @@ fn verify_views(context: &Context, assignment: &RegAssignment) -> Result<(), Err
         let Some(value_class) = value_class(context, value) else {
             continue;
         };
-        if !class.shares_view_with(value_class) {
+        if !same_view(class, value_class) {
             return Err(Error::VerificationError(format!(
                 "%{} of class {} is pinned to {}[{}], a different register view",
                 value.number(),
@@ -169,6 +190,14 @@ fn verify_views(context: &Context, assignment: &RegAssignment) -> Result<(), Err
         }
     }
     Ok(())
+}
+
+/// Whether two classes view the same register file at the same bit offset. A
+/// register group read through a single-register slot — an RVV LMUL group in a
+/// `VR` operand — is the same file at the same offset, and is the allocation
+/// unit rather than a different view, so group width does not enter.
+fn same_view(a: RegClassId, b: RegClassId) -> bool {
+    a.file() == b.file() && a.view.bit_offset == b.view.bit_offset
 }
 
 /// Every register-typed value the symbol's instructions name. A block parameter

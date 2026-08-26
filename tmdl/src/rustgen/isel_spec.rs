@@ -24,14 +24,13 @@ fn emit_attr_result(name: &str, result: usize, class: &proc_macro2::TokenStream)
     }
 }
 
-fn emit_attr_value(name: &str, symbol: u32, class: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+fn emit_attr_value(name: &str, symbol: u32) -> proc_macro2::TokenStream {
     let name_lit = proc_macro2::Literal::string(name);
     let symbol_lit = proc_macro2::Literal::u32_unsuffixed(symbol);
     quote! {
         tir::backend::isel::EmitAttr::Value {
             attr: #name_lit,
             symbol: #symbol_lit,
-            class: #class,
         }
     }
 }

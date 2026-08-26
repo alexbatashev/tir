@@ -285,10 +285,7 @@ struct Arm64CallEmitter;
 
 impl tir::backend::call_lowering::CallEmitter for Arm64CallEmitter {
     fn copy(&self, context: &tir::Context, dst: RegSlot, src: RegSlot) -> Box<dyn Operation> {
-        let class = match dst {
-            RegSlot::Phys((class, _)) => Some(class),
-            RegSlot::Value(value) => tir::backend::value_class(context, value),
-        };
+        let class = tir::backend::slot_class(context, dst);
         if class == Some(RegClass::FPR64.id()) {
             let builder = FMoveRegisterDoubleOpBuilder::new(context);
             let builder = tir::reg_use!(builder, fa, src);

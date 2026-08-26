@@ -369,9 +369,10 @@ impl Rewriter {
         }
     }
 
-    /// Erase `op` but keep the values it defined. Register allocation erases a
-    /// copy it granted one register at both ends: the move is gone, the value it
-    /// produced lives on in that register, and the ops naming it still do.
+    /// Erase `op` but keep the values it defined: a rewrite that hands them to
+    /// another definition (selection replacing a covered op, call lowering, an
+    /// allocator erasing a copy it granted one register at both ends) leaves
+    /// the ops naming them intact.
     pub fn erase_op_keeping_results(&mut self, target: &OperationRef) -> Result<(), PassError> {
         let block = target
             .block

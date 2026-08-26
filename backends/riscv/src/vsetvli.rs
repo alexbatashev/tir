@@ -118,15 +118,10 @@ struct ConfigState {
     vtypei: i64,
 }
 
-pub struct InsertVsetvliPass {
-    xlen: u32,
-}
+#[derive(Default)]
+pub struct InsertVsetvliPass;
 
 impl InsertVsetvliPass {
-    pub fn new(xlen: u32) -> Self {
-        Self { xlen }
-    }
-
     /// Insert the configuration instruction(s) satisfying `demand` before
     /// `anchor`: `vsetivli` when the AVL is a 5-bit immediate, `vsetvli` when
     /// it is a register (materializing larger immediates through `addi`).
@@ -138,7 +133,6 @@ impl InsertVsetvliPass {
         avl: Demand,
         vtypei: i64,
     ) -> Result<(), PassError> {
-        let _ = self.xlen;
         let x0 = tir::backend::phys_attr((crate::RegClass::GPR.id(), 0));
         let vtypei = AttributeValue::Int(vtypei);
         match avl {

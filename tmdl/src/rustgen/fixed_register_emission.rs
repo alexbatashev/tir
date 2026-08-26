@@ -533,7 +533,6 @@ fn emit_one_division_rule(
     let class_id = reg_class_id(&dividend_class);
     let sibling_class_id = reg_class_id(&sibling_reg.0);
     let sibling_index = sibling_reg.1;
-    let divisor_class_id = reg_class_id(divisor_class);
     let dividend_use_slot = fixed_read_slot_name(&dividend_name);
     let dividend_def_slot = fixed_write_slot_name(&dividend_name);
     let sibling_use_slot = fixed_read_slot_name(&sibling_name);
@@ -568,10 +567,29 @@ fn emit_one_division_rule(
         emit_attr_result_fixed_def(&sibling_def_slot, 0, &sibling_class_id, sibling_index)
     };
 
-    let prelude_attrs = [
-        emit_attr_fixed_use(&dividend_use_slot, lhs_symbol, &class_id, dividend_index),
-        emit_attr_physical(&sibling_def_slot, &sibling_class_id, sibling_index),
-    ];
+    // A definer that extends the dividend (`cdq`) reads its register and has a
+    // slot for it; one that only clears the sibling (`xor edx, edx`) has none.
+    let mut definer_reads = HashSet::new();
+    collect_register_path_reads(&definer.inst.behavior, &mut definer_reads);
+    let definer_reads_dividend = definer_reads.iter().any(|(class, regname)| {
+        *class == dividend_class
+            && register_index_map.get(&(class.clone(), regname.clone()))
+                == Some(&u32::from(dividend_index))
+    });
+    let mut prelude_attrs = Vec::new();
+    if definer_reads_dividend {
+        prelude_attrs.push(emit_attr_fixed_use(
+            &dividend_use_slot,
+            lhs_symbol,
+            &class_id,
+            dividend_index,
+        ));
+    }
+    prelude_attrs.push(emit_attr_physical(
+        &sibling_def_slot,
+        &sibling_class_id,
+        sibling_index,
+    ));
     let (prelude_ts, prelude_shim) = emit_emitter_spec(
         &prelude_key,
         dialect,
@@ -582,7 +600,7 @@ fn emit_one_division_rule(
     );
 
     let emit_attrs = [
-        emit_attr_value(divisor_name, divisor_symbol, &divisor_class_id),
+        emit_attr_value(divisor_name, divisor_symbol),
         emit_attr_fixed_use(&dividend_use_slot, lhs_symbol, &class_id, dividend_index),
         dividend_def_attr,
         emit_attr_physical(&sibling_use_slot, &sibling_class_id, sibling_index),

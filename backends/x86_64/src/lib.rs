@@ -23,7 +23,7 @@ mod isa {
 
     use tir::Operation;
     use tir::attributes::{AttributeValue, RegisterAttr};
-    use tir::backend::RegSlot;
+    use tir::backend::{RegSlot, fresh_reg};
     use tir::backend::{VirtualBranchOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp};
     use tir::helpers::{dialect, operation};
 
@@ -55,16 +55,6 @@ mod isa {
                 },
             )
         })
-    }
-
-    /// A fresh value of `class`: the type a machine instruction reads it through.
-    fn fresh_reg(
-        context: &tir::Context,
-        class: tir::backend::regalloc::RegClassId,
-    ) -> tir::ValueId {
-        context
-            .create_value(tir::backend::RegClassType::new(context, class), None)
-            .id()
     }
 
     /// Pre-RA: materialize a `constantf` that survived instruction selection
@@ -187,12 +177,7 @@ mod isa {
     }
 
     fn abi_copy(context: &tir::Context, dst: RegSlot, src: RegSlot) -> Box<dyn Operation> {
-        let class = match dst {
-            RegSlot::Phys((class, _)) => class,
-            RegSlot::Value(value) => {
-                tir::backend::value_class(context, value).expect("ABI copies target a register")
-            }
-        };
+        let class = tir::backend::slot_class(context, dst).expect("ABI copies target a register");
         match class.name() {
             "GPR" => mv(context, dst, src),
             "XMM" => {
