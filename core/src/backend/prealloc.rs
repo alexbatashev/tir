@@ -244,6 +244,11 @@ impl Pass for BlockArgLoweringPass {
                                 arg.number()
                             ))
                         })?;
+                    // A forwarded value no instruction read — a constant or
+                    // allocation a target pass materializes later — meets its
+                    // first machine instruction here: the copy.
+                    crate::backend::retype_untyped(context, arg, class);
+                    crate::backend::retype_untyped(context, param, class);
                     pairs.push((param, arg, class));
                 }
 
