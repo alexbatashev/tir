@@ -374,7 +374,10 @@ missing edge is a divergence with a reproducer.
   read hands its readers — joins included — the state it took.
 - A store is *dead* iff the state it published reaches only writes covering its
   extent: the chain is the barrier, and `dse` asks `AliasFacts` only what two
-  addresses are. Law S2 is the same statement inside the e-graph view.
+  addresses are. Law S2 is the same statement inside the e-graph view. It is
+  also dead where the slot it writes has no reader at all — an allocation the
+  function never lets out of its frame and never loads, whose chain the walk
+  cannot follow past the ports it crosses.
 
 ### 6.5 The state laws
 
@@ -481,8 +484,16 @@ view construction *is* value numbering; commit is the elimination.
   liveness). The mid-end has no dominance consumer.
 - **Dependence** (backend) — per-block dependence graph over machine ops
   (register def/use plus memory constraints) feeding the scheduler.
-- **Affine** (future) — iteration-space view over `LoopLike` ops with
-  intact bounds; the reason counted loops are not rotated away.
+- **Affine** (`analysis::affine`) — iteration-space view over a maximal
+  `CountedLoop` nest with intact bounds, which is the reason counted loops
+  are not rotated away. Per depth the bounds as affine forms over the outer
+  counters and the values the nest was entered with; per `MemoryRead`/
+  `MemoryWrite` the chain its `!state` operand is rooted at, the object its
+  address is derived from and the offset into it; per pair of accesses on
+  one chain the distances the single-equation GCD/bounded test admits, a
+  range-disjointness predicate where the two objects differ, or nothing
+  where it cannot decide. Refusal is per access and per pair. Built on
+  demand and thrown away; `tir opt --print-affine` prints it.
 
 ## 8. What deliberately does not exist
 
