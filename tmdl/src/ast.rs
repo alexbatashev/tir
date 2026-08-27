@@ -74,6 +74,11 @@ pub struct RegisterClass {
     /// (file `GPR`, indices 0..3) but their own encoding differs, so inheriting
     /// `GPR`'s full register list would be wrong.
     pub file: Option<String>,
+    /// Assembly-syntax qualifier appended to every register's ISA name
+    /// (AArch64 arrangement specifiers: `suffix = ".4s"` turns `v3` into
+    /// `v3.4s`). Names are unqualified everywhere else, so encoding indices and
+    /// cross-class references (`VPR::v3`) are unaffected.
+    pub suffix: Option<String>,
     pub parameters: StableHashMap<String, (Type, Option<Expr>)>,
     pub registers: Vec<RegisterDef>,
     pub span: Span,
@@ -1915,9 +1920,16 @@ impl Call {
                 ctx.add_node(tir_symbolic::lang::SymKind::Split, &children)
             }
             BuiltinFunction::Concat => {
-                assert!(self.arguments.len() == 1, "concat requires 1 argument");
-                let iter = self.arguments[0].lower_with_ctx(ctx);
-                ctx.add_node(tir_symbolic::lang::SymKind::IterConcat, &[iter])
+                assert!(
+                    !self.arguments.is_empty(),
+                    "concat requires at least 1 argument"
+                );
+                let iters: Vec<_> = self
+                    .arguments
+                    .iter()
+                    .map(|arg| arg.lower_with_ctx(ctx))
+                    .collect();
+                ctx.add_node(tir_symbolic::lang::SymKind::IterConcat, &iters)
             }
             BuiltinFunction::Zip => {
                 assert!(
@@ -2096,6 +2108,7 @@ impl RegisterClass {
             .collect::<Vec<_>>();
         entries.sort_by_key(|(idx, _, _)| *idx);
 
+        let suffix = self.suffix.clone().unwrap_or_default();
         let mut next_alias_index = HashMap::new();
         entries.into_iter().fold(
             RegisterNameTables {
@@ -2105,6 +2118,7 @@ impl RegisterClass {
             },
             |mut out, (idx, isa_name, alias)| {
                 if idx != u16::MAX {
+                    let isa_name = format!("{isa_name}{suffix}");
                     out.parse_names.push((isa_name.clone(), idx));
                     out.isa_names.push((idx, isa_name));
                 }
