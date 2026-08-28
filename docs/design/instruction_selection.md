@@ -1004,10 +1004,12 @@ proves about the values it reads — its condition's truth, the truth of the
 comparison defining it, the falsity of that comparison's complement, `lhs ≡ rhs`
 under a settled equality, and a tested loop's body guard — is InstCombine's
 (`passes/instcombine`), which owns the same scope machinery over the same e-graph
-type and spends each fact as an IR rewrite. `backend/pipeline.rs::module_prologue`
-runs it, next to the restructuring and state threading the same inputs need, so a
-function reaching selection has already had its facts spent however it arrived
-(`fcc` output, a `.tir` input, JIT text).
+type and spends each fact as an IR rewrite. Whoever produces the IR runs it: a
+compiler driver with a mid-end of its own (`fcc`) already does, and `tir mc` —
+which compiles IR no mid-end has been over — runs it in its driver, ahead of the
+lowering pipeline and over the same restructuring and state threading the
+simplifier's facts are stated on. The backend pipeline itself does not, so a
+driver that has already simplified does not pay for it twice.
 
 Selection therefore reads immediates and folded values out of the IR like any
 other operand: a re-tested condition is a `builtin.constant` by the time the

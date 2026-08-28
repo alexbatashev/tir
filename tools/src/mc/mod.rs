@@ -6,7 +6,9 @@ use std::{error::Error, ffi::OsString};
 use clap::{Args, ValueEnum};
 use tir::backend::binary::{ObjectEmission, render_ascii, write_elf};
 use tir::backend::pipeline::{StopAfter, build_pipeline, lower_and_emit};
-use tir::{Context, IRFormatter, Operation};
+use tir::func::FuncOp;
+use tir::passes::{InstCombinePass, RestructurePass, ThreadStatePass};
+use tir::{Context, IRFormatter, Operation, PassManager};
 
 use crate::common::{InputKind, parse_module, parse_tir, read_input, resolve_kind};
 
@@ -60,6 +62,25 @@ pub enum FileType {
     ObjAscii,
 }
 
+/// Spend the mid-end's facts before lowering. Selection reads what a guarded
+/// region proves off the IR rather than deriving it, and `tir mc` compiles IR no
+/// mid-end has been over — a `.tir` file, or text. The simplifier that owns those
+/// facts needs the structure and the memory chains they are stated over, so the
+/// two normalizations the backend prologue also applies run ahead of it here;
+/// both are no-ops on a function that already has them. A compiler driver with a
+/// mid-end of its own (`fcc`) has done this already, which is why the shared
+/// backend pipeline does not.
+fn simplify(context: &Context, module: &impl Operation) -> Result<(), Box<dyn Error>> {
+    let mut pm = PassManager::new();
+    let functions = pm.nest::<FuncOp>();
+    functions.add_pass(RestructurePass::new());
+    functions.add_pass(ThreadStatePass::new());
+    functions.add_pass(InstCombinePass::new());
+    pm.run(context, context.get_op(module.id()))
+        .map_err(|e| format!("simplification failed: {e}"))?;
+    Ok(())
+}
+
 pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
     let select = |march: &str| {
         tir::backend::select_target_with_abi(
@@ -101,6 +122,7 @@ pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
     if needs_lowering {
         tir::verify_op_tree(&context, module.id())
             .map_err(|e| format!("verification failed: {e}"))?;
+        simplify(&context, &module)?;
     }
 
     let stop_after = match (args.stage, args.filetype) {

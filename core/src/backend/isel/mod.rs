@@ -9,9 +9,9 @@
 //! plan ([`emit`]) the pass commits through the rewriter.
 //!
 //! Selection derives no facts. What a guarded region proves about the values it
-//! reads is the mid-end's — InstCombine spends it as rewrites, and the lowering
-//! prologue runs it — so a block here reads immediates and folded values out of
-//! the IR like any other operand.
+//! reads is the mid-end's — InstCombine spends it as rewrites, and whoever
+//! produces the IR runs it — so a block here reads immediates and folded values
+//! out of the IR like any other operand.
 
 mod builder;
 mod cover;

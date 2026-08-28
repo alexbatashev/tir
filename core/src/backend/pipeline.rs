@@ -16,7 +16,7 @@ use tir::{
 use crate::backend::TargetMachine;
 use crate::backend::lower::OpLoweringPass;
 use crate::passes::{
-    CheckUniqueSymbolsPass, DeadCodeEliminationPass, InstCombinePass, LowerMemoryIntrinsicsPass,
+    CheckUniqueSymbolsPass, DeadCodeEliminationPass, LowerMemoryIntrinsicsPass,
     LowerPtrDisjointPass, MaterializeSymbolAddressesPass, RestructurePass, ThreadStatePass,
 };
 
@@ -128,11 +128,6 @@ fn module_prologue() -> PassManager {
         // function's calls, and by the time it is lowered one at a time the λ
         // those name may already be a machine symbol.
         functions.add_pass(ThreadStatePass::new());
-        // Selection reads facts off the IR, it does not derive them: what a
-        // guarded region proves about the values it reads is spent here, as the
-        // rewrites it stands for. A `.tir` input or JIT text arrives without that
-        // having happened, so the backend that needs the facts is handed them.
-        functions.add_pass(InstCombinePass::new());
     }
     // Object symbols are unique by name, so overloads must already be mangled.
     pm.add_pass(CheckUniqueSymbolsPass::new());
