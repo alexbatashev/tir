@@ -1,0 +1,32 @@
+// RUN: tir opt --pass instcombine %s | filecheck %s
+// RUN: tir opt --pass func.func(instcombine) %s | filecheck %s
+
+// A value defined outside the arm but read inside it as a bare operand — the
+// value a store writes, the value the arm yields — is the literal the arm's own
+// fact makes it. The reads outside the arm are untouched: nothing proves %x
+// there.
+
+module {
+  %fn_f = func.func @f(%x: !i32, %p: !ptr.p<!i32>) -> !i32 {
+    %seven = constant {value = 7} : !i32
+    %c = cmpi %x, %seven {predicate = "eq"} : !i1
+    %r = scf.if %c -> !i32 {
+      ptr.store %x, %p
+      scf.yield %x
+    } else {
+      ptr.store %x, %p
+      scf.yield %x
+    }
+    func.return %r
+  }
+  module_end
+}
+
+// CHECK-LABEL: %{{[0-9]+}} = func.func @f(%[[X:[0-9]+]]: !i32
+// CHECK: scf.if
+// CHECK-NEXT: %[[K:[0-9]+]] = constant {value = 7} : !i32
+// CHECK-NEXT: ptr.store %[[K]],
+// CHECK-NEXT: scf.yield %[[K]]
+// CHECK: else
+// CHECK-NEXT: ptr.store %[[X]],
+// CHECK-NEXT: scf.yield %[[X]]

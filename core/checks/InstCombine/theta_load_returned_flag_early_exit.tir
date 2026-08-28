@@ -8,7 +8,8 @@
 //
 // The value slot is never written before the loop, so what it carries in is a
 // read of what it holds there, and that slot stays in memory around the promoted
-// value.
+// value. The break is only reached with the flag raised, so the flag it carries
+// out is the literal that arm proves it to be.
 
 module {
   %fn_find = func.func @find(%0: !i1, %1: !i32) -> !i32 {
@@ -48,6 +49,7 @@ module {
 // CHECK: do scope(%[[SCOPE:[0-9]+]])(%[[FLAG:[0-9]+]], %[[VALUE:[0-9]+]]) {
 // CHECK: %[[SET:[0-9]+]], %[[TAKEN:[0-9]+]] = scf.if %0 -> !i1, !i32 {
 // CHECK: scf.yield %[[FLAG]], %[[VALUE]]
-// CHECK: scf.break %[[SCOPE]], %[[SET]], %[[TAKEN]]
+// CHECK: %[[RAISED:[0-9]+]] = constant {value = 1} : !i1
+// CHECK-NEXT: scf.break %[[SCOPE]], %[[RAISED]], %[[TAKEN]]
 // CHECK: scf.yield %[[SET]], %[[TAKEN]]
 // CHECK: func.return %[[RESULT]]

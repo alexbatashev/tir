@@ -1,0 +1,27 @@
+// RUN: tir opt --pass func.func(restructure,instcombine) --verify %s | filecheck %s
+
+// A nested gate deciding on the very value the outer gate tested reads that
+// decision as an operand, not as a term of its own class. The arm's fact makes
+// it the literal 1, so the inner gate arrives at selection as a gate over a
+// constant.
+
+module {
+  %fn_f = func.func @f(%a: !i32, %b: !i32) -> !i32 {
+    %0 = cmpi %a, %b {predicate = "eq"} : !i1
+    %1 = constant {value = 1} : !i32
+    %2 = constant {value = 2} : !i32
+    cfg.cond_br %0, ^bb1, ^bb2
+  ^bb1:
+    cfg.cond_br %0, ^bb3(%1 : !i32), ^bb3(%2 : !i32)
+  ^bb2:
+    func.return %a
+  ^bb3(%3: !i32):
+    func.return %3
+  }
+  module_end
+}
+
+// CHECK-LABEL: %{{[0-9]+}} = func.func @f
+// CHECK: scf.if
+// CHECK: %[[T:[0-9]+]] = constant {value = 1} : !i1
+// CHECK: scf.if %[[T]]

@@ -140,7 +140,70 @@ impl Driver<'_> {
         for &op_id in &op_ids {
             self.rewrite_op(op_id, &extraction, rewriter)?;
         }
+        // One literal per class per block: built before the first operand that
+        // reads it, so it is in scope at every later one.
+        for block in &blocks {
+            let mut literals = HashMap::new();
+            for op_id in block.op_ids() {
+                self.literalize_operands(op_id, &extraction, rewriter, &mut literals)?;
+            }
+        }
         self.recurse(&op_ids, rewriter)
+    }
+
+    /// Rebind the operands the assumptions here spell as literals. A value defined
+    /// outside this region and read inside it as a bare operand — the value a store
+    /// writes, the value a return hands back, a nested gate's decision — keeps its
+    /// outer name however the region reads it, because nothing rewrites the
+    /// operation that defines it. The literal is built here, so only the readers
+    /// under the assumption take it.
+    fn literalize_operands(
+        &self,
+        op_id: OpId,
+        extraction: &Extraction<Node>,
+        rewriter: &mut Rewriter,
+        literals: &mut HashMap<Id, ValueId>,
+    ) -> Result<(), PassError> {
+        if !self.context.has_operation(op_id) {
+            return Ok(());
+        }
+        let target = self.at(op_id);
+        let mut bindings = HashMap::new();
+        for operand in self.context.get_op(op_id).operands() {
+            let Some(class) = self.literal_class(operand, extraction) else {
+                continue;
+            };
+            let ty = self.context.get_value(operand).ty();
+            if let Some(literal) =
+                self.materialize(extraction, class, ty, &target, rewriter, literals)?
+            {
+                bindings.insert(operand, literal);
+            }
+        }
+        if !bindings.is_empty() {
+            self.context.rebind_operands(op_id, &bindings);
+        }
+        Ok(())
+    }
+
+    /// The class of `value` where the extraction spells it as a literal the value
+    /// does not already name — a constant's own result is one already.
+    fn literal_class(&self, value: ValueId, extraction: &Extraction<Node>) -> Option<Id> {
+        let &class = self.value_class.get(&value)?;
+        let defined_constant = self
+            .context
+            .get_value(value)
+            .defining_op()
+            .is_some_and(|op| {
+                self.context.has_operation(op)
+                    && self.context.get_op(op).has_interface::<dyn ConstantLike>()
+            });
+        let class = self.eg.find(class);
+        (!defined_constant
+            && extraction
+                .node(class)
+                .is_some_and(|node| node.int().is_some()))
+        .then_some(class)
     }
 
     /// Erase what the rewrites left behind. A rewrite reroutes the readers of a
