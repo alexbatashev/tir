@@ -2,26 +2,25 @@
 
 // Loads and stores select through the MemoryRead/MemoryWrite interfaces: each
 // ptr.store becomes a sw and each ptr.load a lw, with the base pointer bound
-// and a zero immediate offset.
+// and a zero immediate offset. The addresses are the function's own, so the
+// lowering prologue has nothing to forward or to kill.
 
 module {
-  %fn_sum = func.func @sum(%0: !i32, %1: !i32) -> !i32 {
-    %2 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
-    ptr.store %0, %2
-    %3 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
-    ptr.store %1, %3
-    %4 = ptr.load %2 : !i32
-    %5 = ptr.load %3 : !i32
+  %fn_sum = func.func @sum(%p: !ptr.p<!i32>, %q: !ptr.p<!i32>, %0: !i32, %1: !i32) -> !i32 {
+    %4 = ptr.load %p : !i32
+    %5 = ptr.load %q : !i32
+    ptr.store %0, %p
+    ptr.store %1, %q
     %6 = addi %4, %5 : !i32
     func.return %6
   }
   module_end
 }
 
-// CHECK: asm.symbol {name = "sum", arg_regs = [%[[V0:[0-9]+]]:GPR, %[[V1:[0-9]+]]:GPR]
-// CHECK: riscv.sw {rs1 = %[[V2:[0-9]+]]:GPR, rs2 = %[[V0]]:GPR, imm = 0}
-// CHECK: riscv.sw {rs1 = %[[V3:[0-9]+]]:GPR, rs2 = %[[V1]]:GPR, imm = 0}
-// CHECK: riscv.lw {rd = %[[V4:[0-9]+]]:GPR, rs1 = %[[V2]]:GPR, imm = 0}
-// CHECK: riscv.lw {rd = %[[V5:[0-9]+]]:GPR, rs1 = %[[V3]]:GPR, imm = 0}
-// CHECK: riscv.addw {rd = %[[V6:[0-9]+]]:GPR, rs1 = %[[V4]]:GPR, rs2 = %[[V5]]:GPR}
+// CHECK: asm.symbol {name = "sum", arg_regs = [%[[P:[0-9]+]]:GPR, %[[Q:[0-9]+]]:GPR, %[[V0:[0-9]+]]:GPR, %[[V1:[0-9]+]]:GPR]
+// CHECK: riscv.lw {rd = %[[L0:[0-9]+]]:GPR, rs1 = %[[P]]:GPR, imm = 0}
+// CHECK: riscv.lw {rd = %[[L1:[0-9]+]]:GPR, rs1 = %[[Q]]:GPR, imm = 0}
+// CHECK: riscv.sw {rs1 = %[[P]]:GPR, rs2 = %[[V0]]:GPR, imm = 0}
+// CHECK: riscv.sw {rs1 = %[[Q]]:GPR, rs2 = %[[V1]]:GPR, imm = 0}
+// CHECK: riscv.addw {rd = %{{[0-9]+}}:GPR, rs1 = %[[L0]]:GPR, rs2 = %[[L1]]:GPR}
 // CHECK: asm.vret

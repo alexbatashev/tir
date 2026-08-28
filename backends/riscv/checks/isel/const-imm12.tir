@@ -53,10 +53,9 @@ module {
   // A constant both folded into a live consumer and returned by value: the
   // consumer keeps the folded immediate while one li materializes the
   // escaping use.
-  %fn_fold_and_escape = func.func @fold_and_escape(%0: !i64) -> !i64 {
+  %fn_fold_and_escape = func.func @fold_and_escape(%0: !i64, %3: !ptr.p<!i64>) -> !i64 {
     %1 = constant {value = 9} : !i64
     %2 = addi %0, %1 : !i64
-    %3 = ptr.alloca {size = 8, align = 8} : !ptr.p<!i64>
     ptr.store %2, %3
     func.return %1
   }

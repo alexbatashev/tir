@@ -1,10 +1,10 @@
 // RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
-// A tested loop's body is covered under the condition its test yields. That
-// condition is spelled over the ports' per-iteration heads, so it holds on every
-// iteration, not only the first: this body runs knowing its two carried values
-// are equal and subtracts one register from itself. Without the body's scope the
-// two ports stay distinct classes and the subtraction reads both.
+// A tested loop's body runs under the condition its test yields. That condition
+// is spelled over the ports' per-iteration heads, so it holds on every
+// iteration, not only the first: the simplifier the lowering prologue runs
+// spends it in the body, whose two carried values are therefore equal and whose
+// subtraction is the literal zero by the time selection sees it.
 
 module {
   %fn_equal_body = func.func @equal_body(%n: !i64, %acc: !i64) -> !i64 {
@@ -21,5 +21,7 @@ module {
 }
 
 // CHECK: x86_64.je
-// CHECK: ^bb{{[0-9]+}}(%[[CA:[0-9]+]]: !x86_64.GPR, %{{[0-9]+}}: !x86_64.GPR):
-// CHECK-NEXT: x86_64.sub {dst = %{{[0-9]+}}:GPR, dst_tied = %[[CA]]:GPR, src = %[[CA]]:GPR}
+// CHECK-NOT: x86_64.sub
+// CHECK: ^bb{{[0-9]+}}(%{{[0-9]+}}: !x86_64.GPR, %{{[0-9]+}}: !x86_64.GPR):
+// CHECK-NEXT: x86_64.mov_imm {dst = %[[ZERO:[0-9]+]]:GPR, imm = 0}
+// CHECK-NEXT: asm.vbr %[[ZERO]], %{{[0-9]+}} ^bb{{[0-9]+}}

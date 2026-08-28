@@ -3,7 +3,8 @@
 // A guard fact is inherited two levels down: the entry's true edge reaches the
 // jump-only block, and through it the block re-computing the identical compare.
 // Restructuring makes that compare the test of a gate nested in the first gate's
-// arm, and the arm's fact decides that test, so nothing is re-selected.
+// arm, and the simplifier the lowering prologue runs spends the arm's fact on
+// it, so selection reads a literal and re-selects nothing.
 
 module {
   %fn_nested = func.func @nested(%0: !i64, %1: !i64) -> !i64 {
@@ -32,5 +33,6 @@ module {
 // CHECK: riscv.blt {rs1 = %{{[0-9]+}}:GPR, rs2 = %{{[0-9]+}}:GPR, imm = ^[[ARM:bb[0-9]+]]}
 // CHECK-NEXT: asm.vbr ^bb{{[0-9]+}}
 // CHECK: ^[[ARM]]:
-// CHECK-NEXT: asm.vbr ^bb{{[0-9]+}}
+// CHECK-NEXT: riscv.addi {rd = %[[ONE:[0-9]+]]:GPR, rs1 = x0, imm = 1}
+// CHECK-NEXT: asm.vbr %[[ONE]] ^bb{{[0-9]+}}
 // CHECK-NOT: riscv.blt

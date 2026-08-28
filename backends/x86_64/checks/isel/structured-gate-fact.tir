@@ -1,9 +1,9 @@
 // RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
-// An arm is covered under the gate's own assumption, exactly as a block covered
-// under its dominating edge is: the then-arm of an equality gate knows its two
-// operands name one value, so the subtraction inside it reads that one register
-// twice.
+// An arm is entered only when the gate's decision holds, and the simplifier the
+// lowering prologue runs spends that fact there: the then-arm knows its two
+// operands name one value, so its subtraction is the literal zero by the time
+// selection sees it. The else-arm knows nothing and keeps its own constant.
 
 module {
   %fn_equal_arm = func.func @equal_arm(%a: !i64, %b: !i64) -> !i64 {
@@ -12,7 +12,7 @@ module {
       %s = subi %a, %b : !i64
       scf.yield %s
     } else {
-      %z = constant {value = 0} : !i64
+      %z = constant {value = 5} : !i64
       scf.yield %z
     }
     func.return %r
@@ -20,5 +20,10 @@ module {
   module_end
 }
 
-// CHECK: asm.symbol {name = "equal_arm", arg_regs = [%[[A:[0-9]+]]:GPR, %{{[0-9]+}}:GPR]
-// CHECK: x86_64.sub {dst = %{{[0-9]+}}:GPR, dst_tied = %[[A]]:GPR, src = %[[A]]:GPR}
+// CHECK: asm.symbol {name = "equal_arm", arg_regs = [%{{[0-9]+}}:GPR, %{{[0-9]+}}:GPR]
+// CHECK: x86_64.je {imm = ^[[ARM:bb[0-9]+]]}
+// CHECK-NOT: x86_64.sub
+// CHECK: ^[[ARM]]:
+// CHECK-NEXT: x86_64.mov_imm {dst = %[[ZERO:[0-9]+]]:GPR, imm = 0}
+// CHECK-NEXT: asm.vbr %[[ZERO]] ^bb{{[0-9]+}}
+// CHECK: x86_64.mov_imm {dst = %{{[0-9]+}}:GPR, imm = 5}

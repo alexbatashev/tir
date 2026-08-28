@@ -1,15 +1,18 @@
 // RUN: tir mc --march=armv8 --stage=isel %s | filecheck %s
 
+// A float load and a float store select through the same MemoryRead/MemoryWrite
+// interfaces integer ones do, at the FPR64 register class. The address is the
+// function's own, so the lowering prologue has nothing to forward.
+
 module {
-  %fn_roundtrip = func.func @roundtrip(%0: !f64) -> !f64 {
-    %1 = ptr.alloca {size = 8, align = 8} : !ptr.p<!f64>
-    ptr.store %0, %1
+  %fn_roundtrip = func.func @roundtrip(%1: !ptr.p<!f64>, %0: !f64) -> !f64 {
     %2 = ptr.load %1 : !f64
+    ptr.store %0, %1
     func.return %2
   }
   module_end
 }
 
-// CHECK: arm64.store_float_double {ft = %[[V0:[0-9]+]]:FPR64, rn = %[[V1:[0-9]+]]:GPRsp, imm = 0}
-// CHECK: arm64.load_float_double {ft = %[[V2:[0-9]+]]:FPR64, rn = %[[V1]]:GPRsp, imm = 0}
+// CHECK: arm64.load_float_double {ft = %{{[0-9]+}}:FPR64, rn = %[[V1:[0-9]+]]:GPR, imm = 0}
+// CHECK: arm64.store_float_double {ft = %{{[0-9]+}}:FPR64, rn = %[[V1]]:GPR, imm = 0}
 // CHECK: asm.vret

@@ -43,10 +43,13 @@ module {
 // CHECK: arm64.ldrh
 // CHECK: arm64.lslv_w
 // CHECK: arm64.asr_w {rd = %{{[0-9]+}}:GPR32, rn = %{{[0-9]+}}:GPR32, imm = 16}
-// CHECK: arm64.asr_w
-// CHECK: arm64.strb
-// CHECK: arm64.ldrb
-// CHECK: arm64.cbnz_w {rt = %{{[0-9]+}}:GPR32, imm = ^bb1}
+// CHECK: arm64.asr_w {rd = %{{[0-9]+}}:GPR32, rn = %{{[0-9]+}}:GPR32, imm = 7}
+// The byte the source round-trips through a slot is a mask by the time selection
+// sees it: the lowering prologue forwards the store into the load, and the
+// truncate-then-widen it leaves is `and 255`.
+// CHECK: arm64.movz {rd = %[[MASK:[0-9]+]]:GPR, imm = 255}
+// CHECK: arm64.and_w {rd = %[[BYTE:[0-9]+]]:GPR32, rn = %[[MASK]]:GPR, rm = %{{[0-9]+}}:GPR32}
+// CHECK: arm64.cbnz_w {rt = %[[BYTE]]:GPR32, imm = ^bb1}
 // CHECK-LABEL: asm.symbol {name = "crc_shift_u16"
 // CHECK: arm64.lsr_h
 // CHECK-LABEL: asm.symbol {name = "crc_shift_u8"

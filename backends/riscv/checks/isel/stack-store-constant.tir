@@ -1,12 +1,17 @@
 // RUN: tir mc --march=rv64i --stage=isel %s | filecheck %s
 
+// A constant stored to a stack slot: the store's value operand is a register, so
+// the zero is materialized rather than encoded into the sw. The slot's address
+// escapes into the call, which is why the store is still there to select.
+
 module {
-  %fn_f = func.func @f() -> !i32 {
+  %fn_sink = func.declare @sink(!ptr.p<!i32>) -> !unit
+  %fn_f = func.func @f() {
     %0 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
     %1 = constant {value = 0} : !i32
     ptr.store %1, %0
-    %2 = ptr.load %0 : !i32
-    func.return %2
+    func.call %fn_sink(%0 : !ptr.p<!i32>)
+    func.return
   }
   module_end
 }

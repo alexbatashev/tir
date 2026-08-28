@@ -36,12 +36,12 @@ module {
     %1 = fptoui %0 : !i64
     func.return %1
   }
-  %fn_convert_to_signed_i64_trunc_store = func.func @convert_to_signed_i64_trunc_store(%0: !ptr.p<!f64>, %1: !ptr.p<!i32>) -> !i32 {
+  %fn_convert_to_signed_i64_trunc_store = func.func @convert_to_signed_i64_trunc_store(%0: !ptr.p<!f64>, %1: !ptr.p<!i32>, %5: !ptr.p<!i32>) -> !i32 {
     %2 = ptr.load %0 : !f64
     %3 = fptosi %2 : !i64
     %4 = trunci %3 : !i32
     ptr.store %4, %1
-    %6 = ptr.load %1 : !i32
+    %6 = ptr.load %5 : !i32
     func.return %6
   }
   %fn_bits_to_double = func.func @bits_to_double(%0: !i64) -> !f64 {
