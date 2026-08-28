@@ -3,11 +3,15 @@
 //! The whole function's operations are lowered into one shared e-graph of
 //! semantic expressions ([`builder`]), saturated with the proved algebraic
 //! rewrites the vocabulary owns ([`tir::sem::rewrites`]), and then covered *per
-//! block* while traversing the
-//! dominating-edge assumption scopes — by the target's instruction patterns
+//! block* against that one graph — by the target's instruction patterns
 //! ([`pattern`]), e-matched by the shared [`tir_symbolic::egraph`] engine, via a
 //! PBQP instance over e-classes ([`cover`]). The solved cover becomes an emission
 //! plan ([`emit`]) the pass commits through the rewriter.
+//!
+//! Selection derives no facts. What a guarded region proves about the values it
+//! reads is the mid-end's — InstCombine spends it as rewrites, and the lowering
+//! prologue runs it — so a block here reads immediates and folded values out of
+//! the IR like any other operand.
 
 mod builder;
 mod cover;
@@ -21,17 +25,16 @@ use std::collections::{HashMap, HashSet};
 
 use tir::BlockHandle;
 use tir::{
-    AnalysisManager, BlockId, Conditional, Context, EntryGuard, GuardedLoop, OpHandle, OpId,
-    Operation, OperationRef, Pass, PassError, PassTarget, RegionId, Rewriter, Terminator, TypeId,
-    ValueId,
+    AnalysisManager, BlockId, Context, OpId, Operation, OperationRef, Pass, PassError, PassTarget,
+    RegionId, Rewriter, Terminator, TypeId, ValueId,
     analysis::{DefUse, DominatorTree, scopes},
     builtin::{trailing_state_operand, trailing_state_result},
     graph::{Dag, MutDag, NodeId, OperandConstraint},
     sem::{
         EquivalenceOracle, SemGraph, SmtOracle, SymKind, SymPayload, canonicalize_for_selection,
         definedness_condition,
-        egraph::{class_int_binding, class_width, complement_comparison},
-        infer_widths, template_node,
+        egraph::{class_int_binding, class_width},
+        infer_widths,
     },
 };
 use tir_adt::APInt;
@@ -60,62 +63,7 @@ use tir::sem::rewrites::{self, discover_rewrites};
 /// straight out of here however many blocks ask.
 struct FunctionMatches {
     by_root: HashMap<Id, Vec<(usize, EMatch<u32>)>>,
-    /// Value patterns rooted on a concrete operator, by that operator's key.
-    by_op: HashMap<u64, Vec<usize>>,
-    /// Value patterns that root on anything (a bare symbol, or a copy rule).
-    anywhere: Vec<usize>,
     specificity: Vec<usize>,
-}
-
-impl FunctionMatches {
-    /// The patterns worth searching at `class`: those rooted on an operator it
-    /// holds (or on the constant its scope assumes it to be), plus the
-    /// root-agnostic ones. Ascending index, so a class's matches come out in the
-    /// same pattern order the base search recorded them in.
-    fn patterns_rooting_at(&self, fs: &FunctionSelection, class: Id) -> Vec<usize> {
-        let mut indices = self.anywhere.clone();
-        let assumed = fs.egraph.assumed_const(class).into_iter();
-        for node in fs.egraph.nodes(class).iter().chain(assumed) {
-            indices.extend(self.by_op.get(&node.op_key()).into_iter().flatten());
-        }
-        indices.sort_unstable();
-        indices.dedup();
-        indices
-    }
-}
-
-/// The classes a block reads that its dominating assumption changed. Everywhere
-/// else the scoped e-graph is the base one node for node, so those classes'
-/// matches come from the function-wide [`InstructionSelectPass::base_value_matches`]
-/// and only these are searched again. Empty for a fact-free block and — the case
-/// that pays — for a block whose scope merged nothing it reads.
-#[derive(Default)]
-struct ChangedClasses {
-    /// Saturation seed order, so what the block proves is reproducible.
-    roots: Vec<Id>,
-    members: HashSet<Id>,
-}
-
-impl ChangedClasses {
-    /// The classes of `cone` the open scope changed. `cone` being closed downward,
-    /// intersecting it with the scope's whole affected set is the same as closing
-    /// upward inside it from the merges the block actually reads.
-    fn new(egraph: &SemEGraph, cone: &[Id]) -> Self {
-        let dirty: HashSet<Id> = egraph.scope_dirty().into_iter().collect();
-        let roots: Vec<Id> = cone
-            .iter()
-            .copied()
-            .filter(|class| dirty.contains(class))
-            .collect();
-        Self {
-            members: roots.iter().copied().collect(),
-            roots,
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.roots.is_empty()
-    }
 }
 
 /// A conditional-branch rule chosen for a destruction's test: the rule, its
@@ -570,8 +518,7 @@ pub struct BranchEmitters {
 }
 /// The whole function lowered into one shared, base-saturated e-graph, with the
 /// canonical side tables every block's solve reads. Built once when the pass
-/// visits the function op; each block then solves against it inside its own
-/// assumption scope (the dominating-edge facts).
+/// visits the function op; every block then solves against it as it stands.
 struct FunctionSelection {
     egraph: SemEGraph,
     pointer_width: Option<u32>,
@@ -603,54 +550,29 @@ struct FunctionSelection {
     /// Classes selected at their defining block because a surviving reader needs
     /// their register value.
     demand: HashSet<(Id, BlockId)>,
-    /// Each region-entry condition prepared against the base graph: the
-    /// condition's class and, when its definer is a comparison, the comparison
-    /// class with its kind and operand classes. Keyed by the condition value; the
-    /// per-block truth (`holds`) is applied when the scope asserts it.
-    prepared: HashMap<ValueId, ConditionExpr>,
-    /// The assumption a region's entry block is entered under, read off the
-    /// region-carrying operation's own interfaces (see [`region_entry_facts`]).
-    region_facts: HashMap<BlockId, (ValueId, bool)>,
     /// What each block must materialize for a destruction to branch on it.
     region_aux: HashMap<BlockId, Vec<(OpId, AuxSlot, Id)>>,
 }
 
 /// A boundary class resolved to concrete operands for a consumer: the proven
 /// constant it folds to as an immediate, and/or the register value legal under
-/// the dominance rule. A class can carry both (an assumption proves a value equal to
-/// its truth constant); a valueless (pure or rewrite-introduced) class neither.
+/// the dominance rule. A class can carry both (a value the graph proves equal to a
+/// literal); a valueless (pure or rewrite-introduced) class neither.
 struct Binding {
     int: Option<APInt>,
     value: Option<ValueId>,
 }
 
 impl FunctionSelection {
-    /// The base class ids a (scoped-canonical) class covers: the fact scope's
-    /// partition members, or the class itself when no scope is open. The side
-    /// tables are keyed by base reps, so every per-block query aggregates over
-    /// these — an assumption may merge a scoped class over several base keys, and
-    /// a query through the scoped rep must see all of them.
-    fn base_members(&self, class: Id) -> impl Iterator<Item = Id> + '_ {
-        let canon = self.egraph.find(class);
-        let members = self.egraph.scope_members(canon);
-        members
-            .is_empty()
-            .then_some(canon)
-            .into_iter()
-            .chain(members.iter().copied())
-    }
-
-    /// Whether any base member of `class` roots a lowered op (function-wide).
+    /// Whether `class` roots a lowered op (function-wide).
     fn is_op_root(&self, class: Id) -> bool {
-        self.base_members(class)
-            .any(|m| self.ops_by_root.contains_key(&m))
+        self.ops_by_root.contains_key(&self.egraph.find(class))
     }
 
-    /// Whether any base member of `class` is used as an operand by more than one
-    /// consumer (so a memory effect in it cannot be internalized).
+    /// Whether `class` is used as an operand by more than one consumer (so a
+    /// memory effect in it cannot be internalized).
     fn is_shared(&self, class: Id) -> bool {
-        self.base_members(class)
-            .any(|m| self.shared_classes.contains(&m))
+        self.shared_classes.contains(&self.egraph.find(class))
     }
 
     /// The classes `block` must materialize for a destruction to read them, in the
@@ -668,24 +590,20 @@ impl FunctionSelection {
     }
 
     fn placed_at(&self, class: Id, block: BlockId) -> bool {
-        self.base_members(class)
-            .any(|member| self.demand.contains(&(member, block)))
+        self.demand.contains(&(self.egraph.find(class), block))
     }
 
-    /// Whether any base member of `class` computes an IR value (a candidate for a
-    /// register binding). A class with none is pure / rewrite-introduced.
+    /// Whether `class` computes an IR value (a candidate for a register
+    /// binding). A class with none is pure / rewrite-introduced.
     fn has_values(&self, class: Id) -> bool {
-        self.base_members(class)
-            .any(|m| self.class_values.contains_key(&m))
+        self.class_values.contains_key(&self.egraph.find(class))
     }
 
-    /// Whether any IR value carried by a base member of `class` satisfies `pred`.
+    /// Whether any IR value carried by `class` satisfies `pred`.
     fn any_class_value(&self, class: Id, pred: impl Fn(&ValueId) -> bool) -> bool {
-        self.base_members(class).any(|m| {
-            self.class_values
-                .get(&m)
-                .is_some_and(|values| values.iter().any(&pred))
-        })
+        self.class_values
+            .get(&self.egraph.find(class))
+            .is_some_and(|values| values.iter().any(&pred))
     }
 
     /// Whether `block` holds an operation selection must emit for `class` — a
@@ -748,8 +666,9 @@ impl FunctionSelection {
     /// region, never for the region itself — the arms of a gate cannot read the
     /// name the gate publishes.
     fn region_ask(&self, context: &Context, block: BlockId, class: Id) -> Option<OpId> {
-        self.base_members(class)
-            .filter_map(|member| self.class_values.get(&member))
+        self.class_values
+            .get(&self.egraph.find(class))
+            .into_iter()
             .flatten()
             .filter_map(|value| match self.value_block.get(value) {
                 Some(&Some(held)) if held == block => self.region_use.get(value).copied(),
@@ -851,60 +770,51 @@ impl FunctionSelection {
             class = source;
         }
         let mut best: Option<((u8, usize, u32), ValueId)> = None;
-        for member in self.base_members(class) {
-            let Some(candidates) = self.class_values.get(&member) else {
-                continue;
-            };
-            for &v in candidates {
-                let key = match self.value_block.get(&v).copied().flatten() {
-                    None => {
-                        // A block argument lives in a register only where its own
-                        // block has run: mutually exclusive blocks may hold equal
-                        // arguments, but only one of them was written.
-                        if self
-                            .arg_block
-                            .get(&v)
-                            .is_some_and(|&owner| !dom.dominates(owner, block))
-                        {
-                            continue;
-                        }
-                        (1u8, 0usize, v.number())
+        for &v in self.class_values.get(&class).into_iter().flatten() {
+            let key = match self.value_block.get(&v).copied().flatten() {
+                None => {
+                    // A block argument lives in a register only where its own
+                    // block has run: mutually exclusive blocks may hold equal
+                    // arguments, but only one of them was written.
+                    if self
+                        .arg_block
+                        .get(&v)
+                        .is_some_and(|&owner| !dom.dominates(owner, block))
+                    {
+                        continue;
                     }
-                    Some(def_block) if def_block == block => {
-                        let def = self.value_to_def[&v];
-                        if !context.get_block(block).is_before(def, consumer) {
-                            continue;
-                        }
-                        if !bind_pending_tiles && self.op_root.contains_key(&def) {
-                            continue;
-                        }
-                        (0, self.op_position[&def], v.number())
-                    }
-                    Some(def_block) => {
-                        let def = self.value_to_def[&v];
-                        if !self.has_run_at(context, dom, def, def_block, block) {
-                            continue;
-                        }
-                        // A def the extraction places dominates by construction;
-                        // an op selection never touches (an alloca, a call)
-                        // survives with its original value.
-                        let survives = !self.op_root.contains_key(&def)
-                            && !context.get_op(def).is::<crate::builtin::ConstantOp>()
-                            && !context.get_op(def).is::<crate::builtin::ConstantFOp>();
-                        // Demand is what says a tile was placed for the value —
-                        // and it is asked of the member the value belongs to,
-                        // not of the whole class: a scope may merge a class the
-                        // block materialized with one it folded into an
-                        // encoding, and only the first leaves a register behind.
-                        if !survives && !self.demand.contains(&(member, def_block)) {
-                            continue;
-                        }
-                        (2, self.dom_distance(dom, block, def_block), v.number())
-                    }
-                };
-                if best.as_ref().is_none_or(|(best_key, _)| key < *best_key) {
-                    best = Some((key, v));
+                    (1u8, 0usize, v.number())
                 }
+                Some(def_block) if def_block == block => {
+                    let def = self.value_to_def[&v];
+                    if !context.get_block(block).is_before(def, consumer) {
+                        continue;
+                    }
+                    if !bind_pending_tiles && self.op_root.contains_key(&def) {
+                        continue;
+                    }
+                    (0, self.op_position[&def], v.number())
+                }
+                Some(def_block) => {
+                    let def = self.value_to_def[&v];
+                    if !self.has_run_at(context, dom, def, def_block, block) {
+                        continue;
+                    }
+                    // A def the extraction places dominates by construction;
+                    // an op selection never touches (an alloca, a call)
+                    // survives with its original value.
+                    let survives = !self.op_root.contains_key(&def)
+                        && !context.get_op(def).is::<crate::builtin::ConstantOp>()
+                        && !context.get_op(def).is::<crate::builtin::ConstantFOp>();
+                    // Demand is what says a tile was placed for the value.
+                    if !survives && !self.demand.contains(&(class, def_block)) {
+                        continue;
+                    }
+                    (2, self.dom_distance(dom, block, def_block), v.number())
+                }
+            };
+            if best.as_ref().is_none_or(|(best_key, _)| key < *best_key) {
+                best = Some((key, v));
             }
         }
         best.map(|(_, v)| v)
@@ -935,13 +845,6 @@ impl FunctionSelection {
         }
         usize::MAX
     }
-}
-
-/// A region-entry condition prepared against the base graph (see
-/// [`FunctionSelection::prepared`]).
-struct ConditionExpr {
-    condition: Id,
-    compare: Option<(Id, SymKind, Id, Id)>,
 }
 
 pub type OpLowering = fn(&Context, &OperationRef, &mut Rewriter) -> Result<bool, PassError>;
@@ -1321,9 +1224,8 @@ impl InstructionSelectPass {
     }
 
     /// Build the shared function e-graph and solve every block up front. Called
-    /// when the pass first visits the function op — a region's entry fact reads
-    /// its condition's *defining op*, which an enclosing block's commit would
-    /// replace by the time the guarded region solves.
+    /// when the pass first visits the function op: a block's solve reads the
+    /// operations of blocks a commit would already have replaced.
     fn solve_function(
         &mut self,
         context: &Context,
@@ -1337,32 +1239,19 @@ impl InstructionSelectPass {
         let dom = analyses.get::<DominatorTree>(context, root);
         let def_use = analyses.get::<DefUse>(context, root);
 
-        let mut fs = self.build_function_selection(context, op, &def_use);
-        // A fact-free block sees exactly the base graph, so every value pattern's
-        // e-match is block-independent: search once here and reuse for all such
-        // blocks (fact-bearing blocks re-search under their scope).
+        let fs = self.build_function_selection(context, op, &def_use);
+        // Every block sees exactly the base graph, so a value pattern's e-match is
+        // block-independent: search once here and reuse for every block.
         let base_matches = self.base_value_matches(&fs, context);
-        let mut visited = HashSet::new();
-        if let Some(root) = dom.root() {
-            self.solve_dominator_subtree(
-                context,
-                &mut fs,
-                &dom,
-                root,
-                false,
-                &base_matches,
-                &mut visited,
-            );
-        }
-        // Unreachable blocks are absent from the dominator tree. A region's
-        // blocks are absent for the same reason — the tree orders the function's
-        // own blocks, and nothing yet orders sibling arms.
-        for block_id in function_blocks(context, op, true) {
+        let blocks = function_blocks(context, op, true);
+        let mut solved_blocks = 0;
+        for &block_id in &blocks {
             let block = context.get_block(block_id);
-            if block.is_empty() || visited.contains(&block_id) {
+            if block.is_empty() {
                 continue;
             }
-            let plan = self.solve_block(context, &block, &mut fs, &dom, false, &base_matches);
+            solved_blocks += 1;
+            let plan = self.solve_block_inner(context, &block, &fs, &dom, &base_matches);
             self.plans.insert(block_id, plan);
         }
         telemetry::report(
@@ -1370,12 +1259,12 @@ impl InstructionSelectPass {
                 .clone()
                 .as_interface::<dyn tir::Symbol>()
                 .map_or_else(|| format!("{root:?}"), |symbol| symbol.symbol_name()),
-            visited.len(),
+            solved_blocks,
             fs.egraph.num_classes(),
         );
         // The regions were solved here, so the operations carrying them must not
         // solve graphs of their own when the walk reaches them.
-        for block_id in function_blocks(context, op, true) {
+        for &block_id in &blocks {
             for op_id in context.get_block(block_id).op_ids() {
                 if !context.get_op(op_id).regions().is_empty() {
                     self.solved.insert(op_id);
@@ -1385,50 +1274,6 @@ impl InstructionSelectPass {
         true
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn solve_dominator_subtree(
-        &mut self,
-        context: &Context,
-        fs: &mut FunctionSelection,
-        dom: &DominatorTree,
-        node: NodeId,
-        inherited_scope: bool,
-        base_matches: &FunctionMatches,
-        visited: &mut HashSet<BlockId>,
-    ) {
-        let Some(block_id) = dom.block(node) else {
-            return;
-        };
-        visited.insert(block_id);
-
-        // A block is covered under whatever its entry proves: for a region's
-        // entry block, the assumption the region-carrying operation enters that
-        // region under.
-        let own_fact = fs.region_facts.get(&block_id).copied();
-        if let Some((condition, holds)) = own_fact {
-            fs.egraph.push_context();
-            if let Some(expr) = fs.prepared.get(&condition) {
-                assert_fact(context, &mut fs.egraph, expr, holds);
-            }
-            fs.egraph.rebuild();
-        }
-        let scoped = inherited_scope || own_fact.is_some();
-
-        let block = context.get_block(block_id);
-        if !block.is_empty() {
-            let plan = self.solve_block(context, &block, fs, dom, scoped, base_matches);
-            self.plans.insert(block_id, plan);
-        }
-
-        let children: Vec<_> = dom.children(node).collect();
-        for child in children {
-            self.solve_dominator_subtree(context, fs, dom, child, scoped, base_matches, visited);
-        }
-        if own_fact.is_some() {
-            fs.egraph.pop_context();
-        }
-    }
-
     /// Search every value pattern over the base graph once, honoring the same
     /// legality a fact-free block's solve applies (boundary constraints, and
     /// interior nodes restricted to pure or function-wide op-root classes). A
@@ -1436,8 +1281,6 @@ impl InstructionSelectPass {
     fn base_value_matches(&self, fs: &FunctionSelection, context: &Context) -> FunctionMatches {
         let mut base = FunctionMatches {
             by_root: HashMap::new(),
-            by_op: HashMap::new(),
-            anywhere: Vec::new(),
             specificity: self
                 .compiled_patterns
                 .iter()
@@ -1449,14 +1292,6 @@ impl InstructionSelectPass {
                 continue;
             }
             let pattern_root = compiled.pattern.root();
-            match compiled.pattern.node(pattern_root) {
-                PatternNode::Node(node) if !compiled.is_copy() => base
-                    .by_op
-                    .entry(node.op_key())
-                    .or_default()
-                    .push(pattern_index),
-                _ => base.anywhere.push(pattern_index),
-            }
             for m in compiled.search_with_legality(
                 &fs.egraph,
                 context,
@@ -1513,8 +1348,6 @@ impl InstructionSelectPass {
         // memoization unifies classes across blocks (cross-block CSE). Class ids
         // are resolved through `find` afterwards because saturation may merge them.
         let mut egraph = SemEGraph::new();
-        let mut prepared: HashMap<ValueId, ConditionExpr> = HashMap::new();
-        let mut region_facts: HashMap<BlockId, (ValueId, bool)> = HashMap::new();
         let mut region_control = builder::RegionControl::default();
         let (value_to_class, mut roots_by_op, mut constant_candidates) = {
             let mut builder =
@@ -1531,21 +1364,6 @@ impl InstructionSelectPass {
                         continue;
                     }
                     builder.build_region_control(&inner, block_id, &mut region_control);
-                    for (region, condition, holds) in region_entry_facts(&inner) {
-                        let Some(entry) = context.get_region(region).iter(context.clone()).next()
-                        else {
-                            continue;
-                        };
-                        region_facts.insert(entry.id(), (condition, holds));
-                        if let std::collections::hash_map::Entry::Vacant(slot) =
-                            prepared.entry(condition)
-                        {
-                            slot.insert(ConditionExpr {
-                                condition: builder.build_from_value(condition),
-                                compare: builder.build_defining_compare(condition),
-                            });
-                        }
-                    }
                 }
             }
 
@@ -1743,44 +1561,8 @@ impl InstructionSelectPass {
             region_use,
             shared_classes,
             demand,
-            prepared,
-            region_facts,
             region_aux: region_control.aux,
         }
-    }
-
-    /// Solve one block against its live dominator scope, saturating and matching
-    /// only classes reachable from the block's roots.
-    #[allow(clippy::too_many_arguments)]
-    fn solve_block(
-        &self,
-        context: &Context,
-        block: &BlockHandle,
-        fs: &mut FunctionSelection,
-        dom: &DominatorTree,
-        scoped: bool,
-        base_matches: &FunctionMatches,
-    ) -> Result<BlockPlan, String> {
-        let mut changed = ChangedClasses::default();
-        if scoped {
-            let cone = rewrites::reachable_roots(&fs.egraph, block_root_seeds(block, fs));
-            changed = ChangedClasses::new(&fs.egraph, &cone);
-            if !changed.is_empty() {
-                rewrites::saturate_scope(
-                    context,
-                    &mut fs.egraph,
-                    &self.rewrites,
-                    Default::default(),
-                    changed.roots.clone(),
-                );
-                // Saturation mints classes and merges more, so what the block
-                // reads and what changed in it both have to be re-read.
-                let cone = rewrites::reachable_roots(&fs.egraph, cone);
-                changed = ChangedClasses::new(&fs.egraph, &cone);
-            }
-            telemetry::record_scoped_block(&changed);
-        }
-        self.solve_block_inner(context, block, fs, dom, &changed, base_matches)
     }
 
     /// Commit every block of the function and then destruct what carries regions:
@@ -1948,8 +1730,8 @@ impl InstructionSelectPass {
         Ok(())
     }
 
-    /// Solve `block` against the (already scoped) shared graph, restricting
-    /// matching and the cover to what `block` computes.
+    /// Solve `block` against the shared graph, restricting matching and the
+    /// cover to what `block` computes.
     #[allow(clippy::too_many_arguments)]
     fn solve_block_inner(
         &self,
@@ -1957,7 +1739,6 @@ impl InstructionSelectPass {
         block: &BlockHandle,
         fs: &FunctionSelection,
         dom: &DominatorTree,
-        changed: &ChangedClasses,
         base_matches: &FunctionMatches,
     ) -> Result<BlockPlan, String> {
         let block_id = block.id();
@@ -1993,7 +1774,6 @@ impl InstructionSelectPass {
             &op_refs,
             &block_op_by_root,
             &guard_classes,
-            changed,
             base_matches,
         );
 
@@ -2025,10 +1805,10 @@ impl InstructionSelectPass {
         let mut aux_deferred: HashMap<(OpId, AuxSlot), Vec<(u32, Id)>> = HashMap::new();
         for &(op, slot, class) in fs.region_aux.get(&block_id).into_iter().flatten() {
             let class = fs.egraph.find(class);
-            // The scope this block solves under may already decide the test — an
-            // enclosing region's entry fact proves a re-tested condition equal to its
-            // truth. Then no branch is selected and nothing is demanded: the
-            // destruction takes the edge the decision picks.
+            // The test may already be a literal — a re-tested condition the
+            // mid-end spent an enclosing region's fact on. Then no branch is
+            // selected and nothing is demanded: the destruction takes the edge
+            // the decision picks.
             if slot != AuxSlot::Advance
                 && let Some(known) = class_int_binding(&fs.egraph, class)
             {
@@ -2273,26 +2053,24 @@ impl InstructionSelectPass {
 
         let mut value_remaps = Vec::new();
         let mut remap_class_values = |class: Id, destination: ValueId| {
-            for member in fs.base_members(class) {
-                if let Some(values) = fs.class_values.get(&member) {
-                    value_remaps.extend(
-                        values
-                            .iter()
-                            .copied()
-                            .filter(|value| {
-                                *value != destination
-                                    && fs.value_block.get(value) == Some(&Some(block_id))
-                            })
-                            .map(|value| (value, destination)),
-                    );
-                }
+            if let Some(values) = fs.class_values.get(&fs.egraph.find(class)) {
+                value_remaps.extend(
+                    values
+                        .iter()
+                        .copied()
+                        .filter(|value| {
+                            *value != destination
+                                && fs.value_block.get(value) == Some(&Some(block_id))
+                        })
+                        .map(|value| (value, destination)),
+                );
             }
         };
         for (&class, &destination) in &destinations {
             remap_class_values(class, destination);
         }
-        // A demanded class satisfied by availability (a dominating placement, or
-        // a value the scope's facts merged in) schedules no tile, but its
+        // A demanded class satisfied by availability (a dominating placement)
+        // schedules no tile, but its
         // block-local values must still resolve to the available register. The
         // register is asked for where the values are read — before the region
         // reading them, where one does, so a name published by that very region
@@ -2394,7 +2172,7 @@ impl InstructionSelectPass {
         })
     }
 
-    /// Every conditional-branch rule match over the block's (scoped) graph,
+    /// Every conditional-branch rule match over the shared graph,
     /// indexed by condition class, so each guard resolves against its own hits
     /// without re-searching per guard.
     fn guard_branch_hits(
@@ -2555,7 +2333,6 @@ impl InstructionSelectPass {
     /// already covered binds it, which is the fixpoint the cover's class set is
     /// anyway — searching the block's whole reachable cone instead generates two
     /// orders of magnitude more matches than the cover has any use for.
-    #[allow(clippy::too_many_arguments)]
     fn collect_block_matches(
         &self,
         context: &Context,
@@ -2563,7 +2340,6 @@ impl InstructionSelectPass {
         op_refs: &HashMap<OpId, OperationRef>,
         block_op_by_root: &HashMap<Id, OpId>,
         guard_classes: &HashSet<Id>,
-        changed: &ChangedClasses,
         base: &FunctionMatches,
     ) -> (Vec<PbqpIselMatch>, Vec<Id>) {
         let mut covered: HashSet<Id> = block_op_by_root.keys().copied().collect();
@@ -2575,15 +2351,14 @@ impl InstructionSelectPass {
             // Domination groups a match with the others at its own root, so
             // pruning per class is the same verdict as pruning the whole block at
             // once — and it keeps what feeds the closure below down to survivors.
+            let cached = base.by_root.get(&class).map_or(&[][..], Vec::as_slice);
             let mut at_class = self.root_matches(
                 context,
                 fs,
                 op_refs,
                 block_op_by_root,
                 guard_classes,
-                changed,
-                base,
-                class,
+                cached,
             );
             prune_dominated_matches(&base.specificity, &mut at_class);
             for matched in &at_class {
@@ -2604,10 +2379,9 @@ impl InstructionSelectPass {
         (matches, covered)
     }
 
-    /// The value matches rooted at one class: read off the function-wide base
-    /// search where the block's assumption left the class alone, searched again
-    /// where it did not.
-    #[allow(clippy::too_many_arguments)]
+    /// The value matches rooted at one class, narrowed to what this block can
+    /// place. `cached` is that class's share of the function-wide base search:
+    /// every block sees the same graph, so the one search answers for all of them.
     fn root_matches(
         &self,
         context: &Context,
@@ -2615,46 +2389,12 @@ impl InstructionSelectPass {
         op_refs: &HashMap<OpId, OperationRef>,
         block_op_by_root: &HashMap<Id, OpId>,
         guard_classes: &HashSet<Id>,
-        changed: &ChangedClasses,
-        base: &FunctionMatches,
-        class: Id,
+        cached: &[(usize, EMatch<u32>)],
     ) -> Vec<PbqpIselMatch> {
-        let no_matches: &[(usize, EMatch<u32>)] = &[];
-        let mut fresh: Vec<(usize, EMatch<u32>)> = Vec::new();
-        let cached = if changed.members.contains(&class) {
-            for pattern_index in base.patterns_rooting_at(fs, class) {
-                let compiled = &self.compiled_patterns[pattern_index];
-                let pattern_root = compiled.pattern.root();
-                fresh.extend(
-                    compiled
-                        .search_roots_with_legality(
-                            &fs.egraph,
-                            context,
-                            [class],
-                            fs.pointer_width,
-                            &|node, bound| {
-                                value_match_allowed(
-                                    fs,
-                                    context,
-                                    compiled,
-                                    pattern_root,
-                                    node,
-                                    bound,
-                                )
-                            },
-                        )
-                        .into_iter()
-                        .map(|m| (pattern_index, m)),
-                );
-            }
-            no_matches
-        } else {
-            base.by_root.get(&class).map_or(no_matches, Vec::as_slice)
-        };
-        telemetry::record_root_matches(cached.len(), fresh.len());
+        telemetry::record_root_matches(cached.len());
 
         let mut matches = Vec::new();
-        for (pattern_index, m) in cached.iter().chain(&fresh) {
+        for (pattern_index, m) in cached {
             let pattern_index = *pattern_index;
             let compiled = &self.compiled_patterns[pattern_index];
             let rule = &self.rules[compiled.rule_index];
@@ -2823,54 +2563,29 @@ impl InstructionSelectPass {
     }
 }
 
-/// Whether incremental scoped matching is paying: how much of what a block reads
-/// its assumption changed, how many classes the cover actually reached, and how
-/// much of the candidate set came from the function-wide base search instead of a
-/// re-search. Printed as `tir-isel:` lines on stderr under `TIR_TIME_PASSES`,
+/// How much of a function selection had to look at: the blocks it solved, the
+/// classes its graph holds, and how many class-rooted candidate sets the cover
+/// reached. Printed as `tir-isel:` lines on stderr under `TIR_TIME_PASSES`,
 /// alongside the pass-timing table.
 mod telemetry {
     use std::cell::Cell;
 
-    use super::ChangedClasses;
-
-    const SCOPED: usize = 0;
-    const CLEAN: usize = 1;
-    const DIRTY_SUM: usize = 2;
-    const DIRTY_MAX: usize = 3;
-    const REUSED: usize = 4;
-    const RESEARCHED: usize = 5;
-    const COVERED: usize = 6;
+    const COVERED: usize = 0;
+    const REUSED: usize = 1;
 
     thread_local! {
-        static COUNTS: Cell<[usize; 7]> = const { Cell::new([0; 7]) };
+        static COUNTS: Cell<[usize; 2]> = const { Cell::new([0; 2]) };
     }
 
-    fn bump(update: impl Fn(&mut [usize; 7])) {
+    pub(super) fn record_root_matches(reused: usize) {
         if !crate::pass::timing::enabled() {
             return;
         }
         COUNTS.with(|counts| {
             let mut current = counts.get();
-            update(&mut current);
+            current[COVERED] += 1;
+            current[REUSED] += reused;
             counts.set(current);
-        });
-    }
-
-    pub(super) fn record_scoped_block(changed: &ChangedClasses) {
-        let size = changed.roots.len();
-        bump(|counts| {
-            counts[SCOPED] += 1;
-            counts[CLEAN] += usize::from(size == 0);
-            counts[DIRTY_SUM] += size;
-            counts[DIRTY_MAX] = counts[DIRTY_MAX].max(size);
-        });
-    }
-
-    pub(super) fn record_root_matches(reused: usize, researched: usize) {
-        bump(|counts| {
-            counts[COVERED] += 1;
-            counts[REUSED] += reused;
-            counts[RESEARCHED] += researched;
         });
     }
 
@@ -2878,12 +2593,10 @@ mod telemetry {
         if !crate::pass::timing::enabled() {
             return;
         }
-        let c = COUNTS.replace([0; 7]);
-        let dirty_avg = c[DIRTY_SUM].checked_div(c[SCOPED]).unwrap_or(0);
+        let c = COUNTS.replace([0; 2]);
         eprintln!(
-            "tir-isel: fn={function} blocks={blocks} classes={classes} scoped={} clean={} \
-             dirty_avg={dirty_avg} dirty_max={} covered={} reused={} researched={}",
-            c[SCOPED], c[CLEAN], c[DIRTY_MAX], c[COVERED], c[REUSED], c[RESEARCHED]
+            "tir-isel: fn={function} blocks={blocks} classes={classes} covered={} reused={}",
+            c[COVERED], c[REUSED]
         );
     }
 }
@@ -2923,24 +2636,6 @@ fn enclosing_carrier(context: &Context, from: BlockId, def_block: BlockId) -> Op
     }
 }
 
-/// Op order then destruction-auxiliary order, first occurrence kept: the seeds
-/// feed scoped saturation and match search, whose order must be reproducible.
-fn block_root_seeds(block: &BlockHandle, fs: &FunctionSelection) -> Vec<Id> {
-    let mut seen = HashSet::new();
-    let mut roots: Vec<Id> = Vec::new();
-    let candidates = block
-        .op_ids()
-        .into_iter()
-        .filter_map(|op| fs.op_root.get(&op).copied())
-        .chain(fs.aux_classes(block.id()));
-    for root in candidates {
-        if seen.insert(root) {
-            roots.push(root);
-        }
-    }
-    roots
-}
-
 /// Whether `class` may bind under `pattern_node` in a value match, before the
 /// per-block narrowing: boundary constraints (register / immediate / width), and
 /// interior nodes restricted to pure or function-wide op-root, non-shared classes
@@ -2964,66 +2659,6 @@ fn value_match_allowed(
     node::class_is_pure(&fs.egraph, class) || (fs.is_op_root(class) && !fs.is_shared(class))
 }
 
-/// The assumption each of `op`'s regions runs under, read off the operation's own
-/// interfaces: a [`Conditional`]'s guarded arm runs on its decision holding, and a
-/// tested loop's body runs on the condition its test region yields — which holds on
-/// every iteration, since the condition is spelled over the ports' per-iteration
-/// heads. Regions a structured operation states nothing about (a switch case, a
-/// loop's own test) carry no fact.
-fn region_entry_facts(op: &OpHandle) -> Vec<(RegionId, ValueId, bool)> {
-    if let Some(conditional) = op.clone().as_interface::<dyn Conditional>() {
-        return conditional.guarded_regions();
-    }
-    let Some(guard) = op.clone().as_interface::<dyn GuardedLoop>() else {
-        return Vec::new();
-    };
-    let EntryGuard::Region {
-        region: test,
-        condition,
-        ..
-    } = guard.entry_guard()
-    else {
-        return Vec::new();
-    };
-    op.regions()
-        .iter()
-        .filter(|&&region| region != test)
-        .map(|&region| (region, condition, true))
-        .collect()
-}
-
-/// Assert one entry fact in the current scope: the condition (and its defining
-/// comparison, when there is one) is assumed to equal its known truth value, the
-/// complement comparison the opposite, and an `eq`/`ne` guard makes its operands
-/// congruent. Facts, not unions into the constant class: the literal's own class
-/// and its users stay untouched, so the scope dirties only the condition's users.
-fn assert_fact(context: &Context, egraph: &mut SemEGraph, expr: &ConditionExpr, holds: bool) {
-    let truth = |holds: bool| {
-        template_node(
-            SymKind::Constant,
-            Some(SymPayload::Int(APInt::new(1, holds as u64))),
-            None,
-        )
-    };
-    egraph.assume_const(expr.condition, truth(holds));
-    if let Some((compare, kind, lhs, rhs)) = expr.compare {
-        egraph.assume_const(compare, truth(holds));
-        if let Some(complement) = complement_comparison(kind) {
-            let mut node = template_node(
-                complement,
-                None,
-                Some(tir::builtin::IntegerType::new(context, 1)),
-            );
-            node.children = vec![lhs, rhs];
-            let complement_class = egraph.add(node);
-            egraph.assume_const(complement_class, truth(!holds));
-        }
-        if (kind == SymKind::Eq && holds) || (kind == SymKind::Ne && !holds) {
-            egraph.union(lhs, rhs);
-        }
-    }
-}
-
 /// The closure of B's op-root and guard-condition classes under the bindings of
 impl Pass for InstructionSelectPass {
     fn name(&self) -> &'static str {
@@ -3042,9 +2677,8 @@ impl Pass for InstructionSelectPass {
         analyses: &AnalysisManager,
     ) -> Result<(), PassError> {
         // The function op is visited before any of its blocks' ops: build the
-        // shared graph and solve every block up front — a dominating-edge fact
-        // reads the guard condition's *defining op*, which a dominator's commit
-        // would otherwise have replaced by the time the dominated block solves.
+        // shared graph and solve every block up front, while every block still
+        // holds the operations a commit would replace.
         if !op.op().regions().is_empty() {
             if let Some(lowering) = &mut self.call_lowering {
                 lowering.prepare_function(context, op, rewriter)?;

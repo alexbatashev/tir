@@ -4,8 +4,9 @@
 // a dense switch, one guarded arm per test. The facts are the mid-end's now — an
 // arm that is entered only when `value` equals its case computes over that
 // literal — so every arm arrives at selection already folded and is spelled as
-// the single move it is. The chain above still pins its first two comparisons to
-// the registers holding 0 and 1.
+// the single move it is. Selection opens no scope of its own, so `value == 0` is
+// the compare against zero it is written as; the arm testing 1 still reads the
+// register the chain above pinned to it.
 
 int classify(int value, int flag)
 {
@@ -27,7 +28,7 @@ int classify(int value, int flag)
 }
 
 // CHECK: classify:
-// CHECK: cmp eax, edi
+// CHECK: test edi, edi
 // CHECK: mov eax, 100
 // CHECK: cmp ecx, edi
 // CHECK: mov eax, 102

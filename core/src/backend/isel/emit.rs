@@ -28,8 +28,9 @@ pub(crate) struct BlockPlan {
 pub(crate) enum AuxEmit {
     Branch(GuardBranch),
     Value(ValueId),
-    /// A test the block's assumptions already decided: the edge it picks is
-    /// taken unconditionally, and nothing is computed or branched on.
+    /// A test that is a literal by the time selection reads it — the mid-end
+    /// spent an enclosing region's fact on it: the edge it picks is taken
+    /// unconditionally, and nothing is computed or branched on.
     Decided(bool),
 }
 

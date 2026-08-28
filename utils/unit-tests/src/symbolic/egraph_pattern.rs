@@ -365,26 +365,3 @@ fn instantiate_builds_literal_constants() {
     let built_float = float_pat.instantiate(&mut g, &Substitution::new());
     assert_eq!(g.find(built_float), g.find(half));
 }
-
-#[test]
-fn int_leaf_matches_an_assumed_constant_under_the_scope() {
-    let mut g = EGraph::new();
-    let a = sym(&mut g, 0);
-    let b = sym(&mut g, 1);
-    let sum = add(&mut g, a, b);
-    g.rebuild();
-
-    let mut pattern: Pattern<Math, &'static str> = Pattern::new();
-    let x = pattern.var(Var::Symbol("x"));
-    let zero = pattern.var(Var::Int(APInt::from_i64(0)));
-    pattern.add(Math::Add([x, zero]));
-
-    assert!(pattern.search(&g).is_empty());
-    g.push_context();
-    g.assume_const(b, Math::Num(0));
-    let matches = pattern.search(&g);
-    assert_eq!(matches.len(), 1);
-    assert_eq!(g.find(matches[0].root), g.find(sum));
-    g.pop_context();
-    assert!(pattern.search(&g).is_empty());
-}

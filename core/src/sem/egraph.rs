@@ -19,17 +19,12 @@ use tir_adt::APInt;
 /// values a region or a function computes.
 pub type SemEGraph = EGraph<SemNode>;
 
-/// The constant a class is proven to hold: an integer literal member, or the
-/// value the open assumption scope proves it evaluates to.
+/// The constant a class is proven to hold: an integer literal member.
 pub(crate) fn class_int_binding(egraph: &SemEGraph, class: Id) -> Option<APInt> {
-    let int = |n: &SemNode| match &n.payload {
+    egraph.nodes(class).iter().find_map(|n| match &n.payload {
         Some(SemPayload::Expr(SymPayload::Int(v))) => Some(v.clone()),
         _ => None,
-    };
-    egraph
-        .assumed_const(class)
-        .and_then(int)
-        .or_else(|| egraph.nodes(class).iter().find_map(int))
+    })
 }
 
 /// An unsigned literal at its minimal width. Widths identify a constant class,
@@ -44,26 +39,21 @@ pub(crate) fn minimal_unsigned_apint(value: u64) -> APInt {
     APInt::new(width, value)
 }
 
-/// The negated comparison at the same operand order (`!(a < b)` is `a >= b`).
-pub(crate) fn complement_comparison(kind: SymKind) -> Option<SymKind> {
-    Some(match kind {
-        SymKind::Eq => SymKind::Ne,
-        SymKind::Ne => SymKind::Eq,
-        SymKind::Lt => SymKind::Ge,
-        SymKind::Ge => SymKind::Lt,
-        SymKind::Gt => SymKind::Le,
-        SymKind::Le => SymKind::Gt,
-        SymKind::ULt => SymKind::UGe,
-        SymKind::UGe => SymKind::ULt,
-        SymKind::UGt => SymKind::ULe,
-        SymKind::ULe => SymKind::UGt,
-        _ => return None,
-    })
-}
-
 /// Whether the kind is a boolean comparison.
 pub(crate) fn is_comparison(kind: SymKind) -> bool {
-    complement_comparison(kind).is_some()
+    matches!(
+        kind,
+        SymKind::Eq
+            | SymKind::Ne
+            | SymKind::Lt
+            | SymKind::Ge
+            | SymKind::Gt
+            | SymKind::Le
+            | SymKind::ULt
+            | SymKind::UGe
+            | SymKind::UGt
+            | SymKind::ULe
+    )
 }
 
 /// The bit-width of an IR integer or float type, or `None` for any other type.

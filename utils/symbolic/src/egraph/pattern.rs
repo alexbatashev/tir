@@ -319,15 +319,13 @@ impl<N: ENode, S: Clone + PartialEq> Pattern<N, S> {
     }
 }
 
-/// Whether `class` holds constant `target` (a childless leaf) or is assumed to
-/// evaluate to it in the open scope; `false` if `target` is `None`.
+/// Whether `class` holds constant `target` (a childless leaf); `false` if
+/// `target` is `None`.
 fn class_has_const<N: ENode>(eg: &EGraph<N>, target: Option<N>, class: Id) -> bool {
     let Some(target) = target else {
         return false;
     };
-    eg.assumed_const(class).is_some_and(|n| target.matches(n))
-        || eg
-            .nodes(class)
-            .iter()
-            .any(|n| n.children().is_empty() && target.matches(n))
+    eg.nodes(class)
+        .iter()
+        .any(|n| n.children().is_empty() && target.matches(n))
 }

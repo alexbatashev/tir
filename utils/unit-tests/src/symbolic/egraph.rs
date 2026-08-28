@@ -369,7 +369,6 @@ fn scope_merge_aggregates_nodes_in_base_order() {
     g.union(c, a);
     g.rebuild();
     let root = g.find(a);
-    assert_eq!(g.scope_members(root), &[a, c][..]);
     let nodes = g.nodes(root);
     assert!(matches!(nodes[0], Math::Sym(0)));
     assert!(matches!(nodes[1], Math::Sym(2)));
@@ -378,7 +377,6 @@ fn scope_merge_aggregates_nodes_in_base_order() {
 
     g.pop_context();
     assert_eq!(g.num_classes(), 3);
-    assert!(g.scope_members(root).is_empty());
     assert_eq!(g.nodes(g.find(a)).len(), 1);
 }
 
@@ -404,7 +402,6 @@ fn nested_pop_restores_outer_scope_partition() {
 
     assert_eq!(g.num_classes(), 3);
     assert_eq!(g.total_size(), 4);
-    assert_eq!(g.scope_members(outer), &[a, b][..]);
     assert_eq!(g.nodes(outer).len(), 2);
     assert!(!g.connected(c, d));
 
@@ -444,180 +441,4 @@ fn classes_iterate_scope_roots_at_first_member_position() {
     let seen: Vec<Id> = g.classes().map(|class| class.id()).collect();
     assert_eq!(seen, vec![g.find(a), b]);
     g.pop_context();
-}
-
-#[test]
-fn scope_dirty_is_empty_without_a_scope() {
-    let mut g = EGraph::new();
-    let a = sym(&mut g, 0);
-    let b = sym(&mut g, 1);
-    g.union(a, b);
-    g.rebuild();
-    assert!(g.scope_dirty().is_empty());
-}
-
-#[test]
-fn scope_dirty_holds_the_class_a_scoped_union_merged() {
-    let mut g = EGraph::new();
-    let a = sym(&mut g, 0);
-    let b = sym(&mut g, 1);
-    sym(&mut g, 2);
-    g.rebuild();
-
-    g.push_context();
-    g.union(a, b);
-    g.rebuild();
-    assert_eq!(g.scope_dirty(), vec![g.find(a)]);
-    g.pop_context();
-}
-
-#[test]
-fn scope_dirty_holds_a_class_minted_under_the_scope() {
-    let mut g = EGraph::new();
-    let a = sym(&mut g, 0);
-    let b = sym(&mut g, 1);
-    g.rebuild();
-
-    g.push_context();
-    let sum = add(&mut g, a, b);
-    assert_eq!(g.scope_dirty(), vec![g.find(sum)]);
-    g.pop_context();
-    assert!(g.scope_dirty().is_empty());
-}
-
-#[test]
-fn scope_dirty_drops_the_inner_scope_on_pop() {
-    let mut g = EGraph::new();
-    let a = sym(&mut g, 0);
-    let b = sym(&mut g, 1);
-    let c = sym(&mut g, 2);
-    let d = sym(&mut g, 3);
-    g.rebuild();
-
-    g.push_context();
-    g.union(a, b);
-    g.rebuild();
-    g.push_context();
-    g.union(c, d);
-    g.rebuild();
-    assert_eq!(g.scope_dirty(), vec![g.find(a), g.find(c)]);
-
-    g.pop_context();
-    assert_eq!(g.scope_dirty(), vec![g.find(a)]);
-    g.pop_context();
-    assert!(g.scope_dirty().is_empty());
-}
-
-#[test]
-fn scope_dirty_closes_upward_over_parents() {
-    // A parent's e-nodes re-canonicalize through the merge, so a pattern rooted
-    // there can match under the scope and not in the base graph.
-    let mut g = EGraph::new();
-    let a = sym(&mut g, 0);
-    let b = sym(&mut g, 1);
-    let sum = add(&mut g, a, b);
-    let outer = neg(&mut g, sum);
-    sym(&mut g, 2);
-    g.rebuild();
-
-    g.push_context();
-    g.union(a, b);
-    g.rebuild();
-    let mut expected = vec![g.find(a), g.find(sum), g.find(outer)];
-    expected.sort();
-    assert_eq!(g.scope_dirty(), expected);
-    g.pop_context();
-}
-
-#[test]
-fn assume_const_is_read_under_the_scope_and_gone_after_pop() {
-    let mut g = EGraph::new();
-    let a = sym(&mut g, 0);
-    g.rebuild();
-
-    assert!(g.assumed_const(a).is_none());
-    g.push_context();
-    g.assume_const(a, Math::Num(1));
-    assert!(matches!(g.assumed_const(a), Some(Math::Num(1))));
-    g.pop_context();
-    assert!(g.assumed_const(a).is_none());
-}
-
-#[test]
-fn nested_assumption_shadows_and_restores_the_outer_one() {
-    let mut g = EGraph::new();
-    let a = sym(&mut g, 0);
-    g.rebuild();
-
-    g.push_context();
-    g.assume_const(a, Math::Num(1));
-    g.push_context();
-    g.assume_const(a, Math::Num(0));
-    assert!(matches!(g.assumed_const(a), Some(Math::Num(0))));
-    g.pop_context();
-    assert!(matches!(g.assumed_const(a), Some(Math::Num(1))));
-    g.pop_context();
-    assert!(g.assumed_const(a).is_none());
-}
-
-#[test]
-fn assumption_follows_the_class_through_a_scoped_union() {
-    let mut g = EGraph::new();
-    let a = sym(&mut g, 0);
-    let b = sym(&mut g, 1);
-    g.rebuild();
-
-    g.push_context();
-    g.assume_const(a, Math::Num(1));
-    g.union(a, b);
-    g.rebuild();
-    assert!(matches!(g.assumed_const(b), Some(Math::Num(1))));
-    g.pop_context();
-    assert!(g.assumed_const(a).is_none());
-    assert!(g.assumed_const(b).is_none());
-}
-
-#[test]
-fn inner_union_rekeys_an_outer_assumption_and_pop_restores_it() {
-    let mut g = EGraph::new();
-    let a = sym(&mut g, 0);
-    let b = sym(&mut g, 1);
-    g.rebuild();
-
-    g.push_context();
-    g.assume_const(a, Math::Num(1));
-    g.push_context();
-    g.union(a, b);
-    g.rebuild();
-    assert!(matches!(g.assumed_const(b), Some(Math::Num(1))));
-    g.pop_context();
-    assert!(matches!(g.assumed_const(a), Some(Math::Num(1))));
-    assert!(g.assumed_const(b).is_none());
-    g.pop_context();
-}
-
-#[test]
-fn scope_dirty_holds_an_assumed_class_and_its_parents() {
-    let mut g = EGraph::new();
-    let a = sym(&mut g, 0);
-    let b = sym(&mut g, 1);
-    let sum = add(&mut g, a, b);
-    sym(&mut g, 2);
-    g.rebuild();
-
-    g.push_context();
-    g.assume_const(a, Math::Num(0));
-    let mut expected = vec![g.find(a), g.find(sum)];
-    expected.sort();
-    assert_eq!(g.scope_dirty(), expected);
-    g.pop_context();
-    assert!(g.scope_dirty().is_empty());
-}
-
-#[test]
-#[should_panic(expected = "open scope")]
-fn assume_const_without_a_scope_panics() {
-    let mut g = EGraph::new();
-    let a = sym(&mut g, 0);
-    g.assume_const(a, Math::Num(1));
 }

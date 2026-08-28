@@ -239,8 +239,8 @@ impl<'a> Destructor<'a> {
     }
 
     /// The cases a gate still tests, and whether the arm no case names is
-    /// reached. A test the arm's own scope decided either takes its case — no
-    /// later case and no default can run — or excludes it from the chain.
+    /// reached. A test that is a literal either takes its case — no later case
+    /// and no default can run — or excludes it from the chain.
     fn live_chain(
         &self,
         op: &OpHandle,

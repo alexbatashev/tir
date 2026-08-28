@@ -5,8 +5,9 @@ into target instructions. It is **e-graph + PBQP**: the whole function is lowere
 into one shared semantic e-graph, saturated with proved algebraic identities, and
 tiled against the target's instruction patterns; each block is then covered
 *separately* — the cheapest legal cover found by solving a Partitioned Boolean
-Quadratic Problem (PBQP) — inside an assumption scope carrying the entry facts of
-the regions that enclose it.
+Quadratic Problem (PBQP) — against that one graph. Selection derives no facts;
+what a guarded region proves is spent by the mid-end before it (see
+[Facts are the mid-end's](#facts-are-the-mid-ends)).
 
 Nothing in the pass hardcodes a semantics, cost, or rule. A target supplies a list
 of `Rule`s (a semantic pattern + an emitter) and an optional cost model; the pass
@@ -39,12 +40,11 @@ flowchart TB
     subgraph per_function["per function (FunctionSelection), up front"]
         ir["every block's IR"] -->|"1 - build (one SemDagBuilder)"| eg["shared SemEGraph\n(cross-block CSE)"]
         eg -->|"2 - saturate once\non the base graph"| sat["base-saturated e-graph"]
+        rules["rules"] -->|compile_isel_pattern| pats["CompiledIselPattern"]
+        sat -->|"3 - ematch the base graph once\n(base_value_matches)"| found["match list, by root class"]
+        pats --> found
         subgraph per_block["for each block B"]
-            facts["region entry fact (B)"] -->|"3 - push scope\n+ scoped saturate"| scoped["B's assumed graph"]
-            sat --> scoped
-            rules["rules"] -->|compile_isel_pattern| pats["CompiledIselPattern"]
-            scoped -->|"4 - ematch + prune,\nlegality restricted to B\n(collect_block_matches)"| matches["PbqpIselMatch list"]
-            pats --> matches
+            found -->|"4 - narrow + prune,\nlegality restricted to B\n(collect_block_matches)"| matches["PbqpIselMatch list"]
             matches -->|"5 - build_eclass_cover + pbqp::solve\n(B's class closure)"| cover["ClassCover"]
             cover -->|"6 - solve_block_inner\n(schedule_tiles + resolve_match)"| plan["BlockPlan"]
         end
@@ -54,11 +54,12 @@ flowchart TB
 
 The pass runs per function. Visiting the function op triggers `solve_function`,
 which builds one `FunctionSelection` — every block lowered into a single shared,
-base-saturated e-graph — and solves **every block up front**, walking the
-dominator tree so each block sees the facts of the regions enclosing it
-(`solve_dominator_subtree`, `solve_block`). Solving before any commit is required:
-a region's entry fact reads its condition's *defining op*, which an enclosing
-block's commit would replace. Plans are stored in `plans` keyed by `BlockId`;
+base-saturated e-graph — and solves **every block up front**, one loop over
+`function_blocks`. Every block sees that one graph, so the value patterns are
+e-matched once for the whole function (`base_value_matches`) and each block reads
+its share. Solving before any commit is required: a block's solve reads the
+operations of blocks a commit would already have replaced. Plans are stored in
+`plans` keyed by `BlockId`;
 `commit_function` then commits every block (`commit_block_solution`, guarded
 against re-entry by `emitted_blocks`) and runs the destruction over the function's
 region, so building, solving, and emitting each happen once.
@@ -179,7 +180,7 @@ edge to where it goes, with the arguments that edge carries substituted for its
 parameters. An arm that computes nothing therefore costs no block, and where every
 arm forwards to the same place with the same values there is nothing left to
 decide — the gate emits neither a test nor a trampoline, only the jump. A test
-the block's own scope *decided* goes further: the arm it excludes is reachable by
+that is a literal — *decided* — goes further: the arm it excludes is reachable by
 no edge, so it is never moved out of the operation's region and is erased with the
 gate, taking whatever is nested in it. A decided last case leaves the arm no case
 names unreached, and then the chain ends in that jump. This is the reason the
@@ -349,15 +350,7 @@ saturation (which may merge classes). All live on `FunctionSelection`.
 | `region_use: ValueId → OpId` | the earliest region-carrying op of a value's own block under whose regions the value is read — what the region reads has to have run before the region does |
 | `shared_classes: Set<Id>` | a value used as an operand by **>1 consumer** (counted function-wide); a memory effect here can never be internalized into a larger match (a pure value still can — duplication) |
 | `demand: Set<(Id, BlockId)>` | a class its defining block must leave in a register: some user is an operation selection does not cover (a call, a return — but not a test a destruction's branch recomputes), or a user in another block that cannot re-fold it as an immediate |
-| `prepared: ValueId → ConditionExpr` | each condition a scope may assert — a region's entry condition — prepared against the base graph (its class, and its defining comparison when there is one) |
-| `region_facts: BlockId → (ValueId, bool)` | the assumption a region's entry block is entered under, read off the region-carrying op's interfaces |
 | `region_aux: BlockId → Vec<(OpId, AuxSlot, Id)>` | what a block must leave a destruction to read: each test a branch selects on and the counter advance a back edge writes (see [What a destruction needs](#what-a-destruction-needs-and-where-it-comes-from)) |
-
-Because scoped assumptions merge classes, a per-block query through the *scoped*
-representative must reach every base key it covers. `FunctionSelection::base_members`
-returns the base ids a scoped-canonical class covers (the scope's partition members,
-or the class itself when no scope is open); every table lookup (`is_op_root`,
-`is_shared`, `has_values`, `placed_at`, register binding) aggregates over them.
 
 ## 2. Saturation with proved rewrites
 
@@ -468,7 +461,7 @@ instruction patterns still match them.
 > Saturation may merge classes, so `ops_by_root`, `class_values`, and the other
 > side tables are re-canonicalized through `egraph.find` afterwards; each keeps
 > **every** merged candidate (multi-valued, see §1). This base saturation runs
-> once per function; a fact-bearing block re-saturates inside its own scope.
+> once per function, and it is the only saturation selection does.
 
 ## 3. Patterns and matches
 
@@ -516,17 +509,13 @@ one bit offset. Each register boundary likewise binds the class its operand's
 register belongs to — a low-bit truncation reads its source's register, so the
 binding chases through it (`chase_low_extract`).
 
-The function-wide legality (boundary constraints, pure-or-op-root interiors) does
-not depend on the assumption scope, so every block reads its matches out of one
-function-wide base search (`base_value_matches`, indexed by root class). Matching
-is demand-driven: starting from B's op-root and guard classes, a class is
-searched only once a surviving match at an already-covered class binds it, which
-is exactly the closure the PBQP cover ranges over. A **fact-bearing** block
-re-searches only the classes its assumption changed — `EGraph::scope_dirty`
-(the scope's merges and minted classes, closed upward over parents, since a
-parent's nodes re-canonicalize through a merge) intersected with what the block
-reads — and outside that set the scoped graph is the base one node for node, so
-the base matches stand.
+The legality a match must satisfy (boundary constraints, pure-or-op-root
+interiors) is function-wide, and every block sees the same graph, so the value
+patterns are e-matched once for the whole function (`base_value_matches`, indexed
+by root class) and each block reads its share. Matching is demand-driven:
+starting from B's op-root and guard classes, a class is searched only once a
+surviving match at an already-covered class binds it, which is exactly the
+closure the PBQP cover ranges over.
 
 ### Semantic types and register storage
 
@@ -637,11 +626,11 @@ A **free** match — every binding is state, the root itself, or a structural
 boundary — constrains nothing: its compatibility rows are all-true and its
 effect footprint is empty. It therefore dominates *any* match at the same root
 class and result view offset that costs no less, whatever that match's
-boundaries. This is what keeps a constant class bounded: scoped assumptions
-merge every proven condition into its truth value's class, and without the
-free-tile rule each comparison node there roots hundreds of
-comparison-shaped alternatives (a 90 MB solve on one CoreMark function; the
-constant materializer prunes it to a handful).
+boundaries. This is what keeps a constant class bounded: a literal's class
+collects every term proven equal to it, and without the free-tile rule each
+comparison node there roots hundreds of comparison-shaped alternatives (a 90 MB
+solve on one CoreMark function; the constant materializer prunes it to a
+handful).
 
 ## 4. The PBQP cover
 
@@ -825,11 +814,10 @@ for the whole block and indexed by condition class (`guard_branch_hits`); each t
 then looks up its own hits and `best_guard_branch` picks the cheapest match rooted
 at its condition class whose operands all resolve at B (tie → most specific):
 
-- **Decided**: the condition class already holds a constant — the block's
-  assumption scope proved a re-tested condition equal to its truth (a nested gate's
-  test under an enclosing region's entry fact), or the test was written constant.
-  No branch rule is consulted and nothing joins `mm_overlay`, so the condition is
-  not materialized; destruction emits the single edge the decision picks
+- **Decided**: the test is a literal — the mid-end spent an enclosing region's
+  fact on a re-tested condition, or the test was written constant. No branch rule
+  is consulted and nothing joins `mm_overlay`, so the condition is not
+  materialized; destruction emits the single edge the decision picks
   (`AuxEmit::Decided`).
 - **Fused**: the branch instruction recomputes the condition from its operand
   registers, so those boundary classes — not the condition — join the block's
@@ -927,8 +915,8 @@ the rule's pattern; emission produces **two real instructions** — the rule's
 `prelude_emit` builds the flag definer (binding the compared operands), then
 `emit_fn` builds the branch (binding the taken target) — inserted adjacently
 ahead of the branch it defines the flags for. Everything else (the `Dead`
-alternative consuming the compare, boundary-forced materialization, region
-assumptions) is the same machinery as the fused single-instruction path.
+alternative consuming the compare, boundary-forced materialization) is the same
+machinery as the fused single-instruction path.
 
 Comparison proof is semantic-type aware. Integer flag definers use the ordinary
 bit-vector oracle. A definer whose operands belong to a TMDL `float` register
@@ -1009,59 +997,22 @@ where the demanded configuration changes). Demand slots are to that pass
 what virtual registers are to allocation: a recorded obligation, concretized
 later.
 
-## Region assumptions (scoped shared graph)
+## Facts are the mid-end's
 
-A region-carrying operation states what its regions run under, and it states it on
-its own interfaces (`region_entry_facts`): a `Conditional`'s guarded arm runs on
-its decision holding (`guarded_regions`), and a loop tested by a region runs its
-body on the condition that region yields (`GuardedLoop::entry_guard`). The
-condition of a tested loop is spelled over the ports' per-iteration heads, so it
-holds on **every** iteration and not merely the first. A region a structured
-operation says nothing about (a switch case, a loop's own test) carries no fact.
+Selection derives no facts and opens no assumption scope. What a guarded region
+proves about the values it reads — its condition's truth, the truth of the
+comparison defining it, the falsity of that comparison's complement, `lhs ≡ rhs`
+under a settled equality, and a tested loop's body guard — is InstCombine's
+(`passes/instcombine`), which owns the same scope machinery over the same e-graph
+type and spends each fact as an IR rewrite. `backend/pipeline.rs::module_prologue`
+runs it, next to the restructuring and state threading the same inputs need, so a
+function reaching selection has already had its facts spent however it arrived
+(`fcc` output, a `.tir` input, JIT text).
 
-The dominator tree is region-aware — a block flows into each region its operations
-carry — so a region's entry block is an ordinary node of the tree whose subtree is
-exactly that region, and the fact holds throughout that subtree.
-
-Because every block solves against the *one shared* graph, a block's facts are
-asserted in an **assumption scope** (`push_context`) private to its solve. The
-scope may hold **several** facts (one per enclosing region); `assert_fact` applies
-each, reading the condition's `prepared` `ConditionExpr`:
-
-- the condition class is *assumed* to evaluate to its known truth value (0/1)
-  (`EGraph::assume_const`),
-- the defining comparison is assumed the same truth, its *complement* comparison
-  (`!(a<b)` is `a>=b`) the opposite,
-- an `eq`-true / `ne`-false fact additionally asserts `lhs ≡ rhs` (a union), so
-  scope congruence merges everything computed from equal operands.
-
-A truth fact is a scoped side entry on the condition's own class, not a union
-with the literal's class. The alternative — merging every proven condition into
-the one hash-consed `1@1` class — made all of them equal to each other and to
-every literal `1` in the function, so a block's scope dirtied most of the
-function and a compare-shaped pattern matched the constant class once per
-enclosing scope. As a fact, the class keeps its identity and parents: readers
-that ask for a class's constant (`class_int_binding`, the matcher's integer
-leaves) see the fact exactly as they saw the merged literal, and `scope_dirty`
-holds only the condition, its users, and what the `lhs ≡ rhs` merge touched.
-
-After asserting, the block `rebuild`s and **saturates inside the scope**, so the
-rewrites propagate the facts. Consequences then fall out of the ordinary
-machinery: a re-computed identical (or complement, or operand-swapped-under-`eq`)
-compare's class now reads as a constant, so the compare op is erased with no tile and
-its test is *decided* (above) rather than branched on; a value consumer folds the
-known immediate
-(`RuleMatch` records *both* the int and register binding when a class carries
-both). The scope is popped once the subtree it covers is solved, leaving the
-shared graph assumption-free for the rest of the function.
-
-A scoped assumption may merge a class over several base keys. Because the side
-tables are keyed by base representatives, every per-block query aggregates over
-`base_members` (the scope's partition members of the scoped-canonical class, §1),
-so a query through the scoped representative still sees each base key it covers.
-This is the shared function-level graph the earlier per-block design anticipated —
-now realized, solving one block under its region facts while the base graph stays
-untouched.
+Selection therefore reads immediates and folded values out of the IR like any
+other operand: a re-tested condition is a `builtin.constant` by the time the
+seeder lowers it, so its class carries the literal and its test is *decided*
+(above) with no scope to consult.
 
 ## Binding resolution
 
@@ -1088,7 +1039,7 @@ class (chasing low-bit truncations to the class that owns the register):
      block was asked to place it (`placed_at`), or that selection never touched at
      all — closest dominator first, via `dom_distance`.
 
-A class may resolve to both (an assumption proves it equal to its truth constant). A
+A class may resolve to both (a value the graph proves equal to a literal). A
 class with candidate values but none legal is *unresolvable*, and the cover treats
 it as unavailable: the block tiles it itself.
 
