@@ -29,9 +29,13 @@ use tir_symbolic::egraph::{EGraph, Extraction, Id};
 
 use crate::analysis::scopes;
 use crate::{
-    AnalysisManager, BlockId, Conditional, ConstantLike, Context, LoopLike, MemoryRead,
-    MemoryWrite, OpId, OperationRef, Pass, PassError, PassTarget, RegionId, Rewriter, TypeId,
-    ValueId, builtin::StateType, func::FuncOp, utils::APInt,
+    AnalysisManager, BlockId, Conditional, ConstantLike, Context, EntryGuard, GuardedLoop,
+    LoopLike, MemoryRead, MemoryWrite, OpId, OperationRef, Pass, PassError, PassTarget, RegionId,
+    Rewriter, TypeId, ValueId,
+    attributes::AttributeValue,
+    builtin::{StateType, ops},
+    func::FuncOp,
+    utils::APInt,
 };
 
 use crate::sem::node::cost;
@@ -174,9 +178,43 @@ impl Driver<'_> {
             return Ok(());
         };
         if new_value != value && self.dominates_op(new_value, target.op().id) {
-            self.context.replace_value_uses(value, new_value);
+            self.replace_reads(value, new_value, target);
         }
         Ok(())
+    }
+
+    /// Rewire the readers of `value` under the region `target` sits in, except
+    /// the edges: a region exit forwarding `value` already carries it in a
+    /// register, and a literal there buys an instruction for nothing.
+    fn replace_reads(&self, value: ValueId, new_value: ValueId, target: &OperationRef) {
+        let Some(region) = self
+            .context
+            .get_op(target.op().id)
+            .parent_block()
+            .and_then(|block| self.context.parent_region(block))
+        else {
+            return;
+        };
+        let mut pending = vec![region];
+        while let Some(region) = pending.pop() {
+            for block in self.context.get_region(region).iter(self.context.clone()) {
+                for op_id in block.op_ids() {
+                    let op = self.context.get_op(op_id);
+                    pending.extend(op.regions());
+                    if scopes::region_exit_kind(&op).is_some() {
+                        continue;
+                    }
+                    let operands = op.operands();
+                    if operands.contains(&value) {
+                        let rebound = operands
+                            .iter()
+                            .map(|&operand| if operand == value { new_value } else { operand })
+                            .collect();
+                        self.context.set_op_operands(op_id, rebound);
+                    }
+                }
+            }
+        }
     }
 
     /// A cursor at `op`, for a rewrite to build in front of.
@@ -299,7 +337,7 @@ impl Driver<'_> {
         }
     }
 
-    /// Recurse into each nested region, assuming a guard's fact inside its region.
+    /// Recurse into each nested region, assuming its guard's fact inside it.
     fn recurse(&mut self, op_ids: &[OpId], rewriter: &mut Rewriter) -> Result<(), PassError> {
         for &op_id in op_ids {
             if !self.context.has_operation(op_id) {
@@ -309,11 +347,7 @@ impl Driver<'_> {
             if instance.regions().is_empty() {
                 continue;
             }
-            let guarded = instance
-                .clone()
-                .as_interface::<dyn Conditional>()
-                .map(|g| g.guarded_regions())
-                .unwrap_or_default();
+            let guarded = region_facts(&instance);
             for sub in instance.regions() {
                 match guarded.iter().find(|&&(r, ..)| r == sub) {
                     Some(&(_, value, holds)) => {
@@ -436,18 +470,51 @@ impl Driver<'_> {
     }
 
     /// Assume `value == holds` in the current context by unioning its class with the
-    /// matching boolean constant.
+    /// matching boolean constant. An equality the assumption settles says more than
+    /// the truth of the condition: the two operands name one value there, so their
+    /// classes are merged as well and every term over either is a term over the
+    /// cheapest form of both — the literal, where one side is one.
     fn inject(&mut self, value: ValueId, holds: bool) {
-        let cond = self
-            .value_class
-            .get(&value)
-            .copied()
-            .unwrap_or_else(|| self.eg.add(Node::input(value)));
+        let cond = self.class_of(value);
         let constant = self
             .eg
             .add(Node::constant(APInt::new(1, holds as u64), Prov::None));
         self.eg.union(cond, constant);
+        if let Some((lhs, rhs)) = self.settled_equality(value, holds) {
+            self.eg.union(lhs, rhs);
+        }
         self.eg.rebuild();
+    }
+
+    /// The operand classes a guard proves congruent: an `eq` that holds, or a
+    /// `ne` that does not.
+    fn settled_equality(&mut self, value: ValueId, holds: bool) -> Option<(Id, Id)> {
+        let op = self.context.get_value(value).defining_op()?;
+        let instance = self.context.get_op(op);
+        if !instance.is::<ops::CmpIOp>() {
+            return None;
+        }
+        let AttributeValue::Str(predicate) = instance.attr("predicate")? else {
+            return None;
+        };
+        let equal = match &*predicate {
+            "eq" => holds,
+            "ne" => !holds,
+            _ => return None,
+        };
+        let [lhs, rhs] = instance.operands()[..] else {
+            return None;
+        };
+        equal.then(|| (self.class_of(lhs), self.class_of(rhs)))
+    }
+
+    /// The class standing for `value`, anchoring it as an opaque leaf if the
+    /// seeding named none.
+    fn class_of(&mut self, value: ValueId) -> Id {
+        self.value_class
+            .get(&value)
+            .copied()
+            .unwrap_or_else(|| self.eg.add(Node::input(value)))
     }
 
     /// Rebuild the value of `class`'s cheapest node: an existing value is reused, a
@@ -676,6 +743,34 @@ impl Driver<'_> {
         let op = target.op().id;
         self.context.get_value(value).defining_op() == Some(op) || self.dominates_op(value, op)
     }
+}
+
+/// The assumption each of `op`'s regions runs under, read off the operation's own
+/// interfaces: a [`Conditional`]'s guarded arm runs on its decision holding, and a
+/// tested loop's body runs on the condition its test region yields — which holds on
+/// every iteration, since the condition is spelled over the ports' per-iteration
+/// heads. A region a structured operation states nothing about (a switch case, a
+/// loop's own test) carries no fact.
+fn region_facts(op: &crate::OpHandle) -> Vec<(RegionId, ValueId, bool)> {
+    if let Some(conditional) = op.clone().as_interface::<dyn Conditional>() {
+        return conditional.guarded_regions();
+    }
+    let Some(guard) = op.clone().as_interface::<dyn GuardedLoop>() else {
+        return Vec::new();
+    };
+    let EntryGuard::Region {
+        region: test,
+        condition,
+        ..
+    } = guard.entry_guard()
+    else {
+        return Vec::new();
+    };
+    op.regions()
+        .iter()
+        .filter(|&&region| region != test)
+        .map(|&region| (region, condition, true))
+        .collect()
 }
 
 /// How a literal is written down. A class holds one node per bit pattern however
