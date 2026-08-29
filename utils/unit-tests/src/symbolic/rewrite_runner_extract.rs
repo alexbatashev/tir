@@ -205,7 +205,7 @@ fn ties_keep_the_first_node_to_reach_the_minimum() {
     let extraction = g.extract_best(|_, node| unit(node));
     let root = g.find(ab);
     let chosen = extraction.node(root).unwrap();
-    assert_eq!(chosen.children(), g.nodes(root)[0].children());
+    assert_eq!(chosen.children(), g.nodes(root).next().unwrap().children());
 }
 
 #[test]
@@ -420,7 +420,11 @@ proptest::proptest! {
         semi.rebuild();
         semi.saturate(rules.iter().copied(), 30, 10_000);
 
-        proptest::prop_assert_eq!(naive.num_classes(), semi.num_classes());
+        // Not the class count: a driver that stops on the iteration limit
+        // rather than at a fixpoint stops wherever its own round schedule put
+        // it, and semi-naive reaches a growing graph's limit a round or so off
+        // the full search. What must agree is what the graph *proves* — the
+        // partition over the seeded roots and the cost of extracting them.
         for (i, &a) in naive_roots.iter().enumerate() {
             for (j, &b) in naive_roots.iter().enumerate() {
                 proptest::prop_assert_eq!(
@@ -458,7 +462,7 @@ fn deep_read_rule() -> Rewrite<Math, &'static str> {
         let Some(deep) = child_of_add(g, left, 0) else {
             return;
         };
-        if !g.nodes(deep).iter().any(|n| matches!(n, Math::Num(7))) {
+        if !g.nodes(deep).any(|n| matches!(n, Math::Num(7))) {
             return;
         }
         let marker = g.add(Math::Num(99));
@@ -468,13 +472,14 @@ fn deep_read_rule() -> Rewrite<Math, &'static str> {
 }
 
 fn child_of_add(g: &EGraph<Math>, class: Id, slot: usize) -> Option<Id> {
-    g.nodes(class).iter().find_map(|node| match node {
+    g.nodes(class).find_map(|node| match node {
         Math::Add(kids) => Some(g.find(kids[slot])),
         _ => None,
     })
 }
 
-/// `sym(1) => 7`, which is what lets `deep-read` stop declining — one round late.
+/// `sym(1) => 7`, which is what lets a declining applier stop declining — one
+/// round late.
 fn sym_becomes_seven() -> Rewrite<Math, &'static str> {
     let mut lhs: Pattern<Math, &'static str> = Pattern::new();
     lhs.add(Math::Sym(1));
@@ -508,14 +513,56 @@ fn applier_reading_past_the_pattern_is_still_re_searched() {
     semi.rebuild();
     semi.saturate(borrowed.iter().copied(), 30, 10_000);
 
-    let holds_marker = |g: &EGraph<Math>, root: Id| {
-        g.nodes(g.find(root))
-            .iter()
-            .any(|n| matches!(n, Math::Num(99)))
-    };
+    let holds_marker =
+        |g: &EGraph<Math>, root: Id| g.nodes(g.find(root)).any(|n| matches!(n, Math::Num(99)));
     assert!(holds_marker(&naive, naive_root), "naive must fire the rule");
     assert!(
         holds_marker(&semi, semi_root),
         "semi-naive skipped a rule whose applier reads past its pattern"
+    );
+}
+
+/// `neg(x)` where the applier declines until `x`'s class holds `7`, claiming
+/// [`Rewrite::reads_only_its_match`] — truthfully, since `x` is the operand the
+/// pattern binds, one edge below the root.
+fn operand_reading_rule() -> Rewrite<Math, &'static str> {
+    let mut lhs: Pattern<Math, &'static str> = Pattern::new();
+    let x = lhs.var(Var::Symbol("x"));
+    lhs.add(Math::Neg([x]));
+
+    let apply = move |g: &mut EGraph<Math>, subst: &Substitution<&'static str>, root: Id| {
+        let x = subst.get(&Var::Symbol("x")).expect("bound x");
+        if !g.nodes(g.find(x)).any(|n| matches!(n, Math::Num(7))) {
+            return;
+        }
+        let marker = g.add(Math::Num(99));
+        g.union(root, marker);
+    };
+    Rewrite::new("operand-read", lhs, Rhs::Apply(Box::new(apply))).reads_only_its_match()
+}
+
+#[test]
+fn an_applier_that_declines_is_re_offered_when_its_operand_class_grows() {
+    // The operand's class outweighs the constant's, so it is the survivor: the
+    // `neg` row still names the same class after the merge and nothing about it
+    // moved. Only the class it names *holds* something new, which no e-node the
+    // pattern binds records — so a round may not conclude it has already applied
+    // this match.
+    let mut g = EGraph::new();
+    let s0 = sym(&mut g, 0);
+    let s1 = sym(&mut g, 1);
+    let s2 = sym(&mut g, 2);
+    g.union(s0, s1);
+    g.union(s0, s2);
+    let root = neg(&mut g, s0);
+    g.rebuild();
+
+    let rules = [operand_reading_rule(), sym_becomes_seven()];
+    g.saturate(rules.iter(), 30, 10_000);
+
+    let marker = g.add(Math::Num(99));
+    assert!(
+        g.connected(root, marker),
+        "the fold its operand enabled one round earlier was never applied"
     );
 }

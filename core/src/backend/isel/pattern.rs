@@ -171,7 +171,6 @@ impl CompiledIselPattern {
             Some(OperandConstraint::Register) => true,
             Some(OperandConstraint::Immediate) => egraph
                 .nodes(class)
-                .iter()
                 .chain(egraph.assumed_const(class))
                 .any(|n| n.kind == SymKind::Constant),
             None => true,
@@ -268,7 +267,7 @@ impl CompiledIselPattern {
                 Some(EMatch {
                     root,
                     subst,
-                    bindings: vec![Some(source)],
+                    bindings: smallvec::smallvec![Some(source)],
                 })
             })
             .collect()

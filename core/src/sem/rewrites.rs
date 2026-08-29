@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use tir_symbolic::egraph::{Delta, EMatch, ENode, Id, Pattern, RoundStats, Timer};
+use tir_symbolic::egraph::{Delta, EMatch, ENode, Id, Pattern, RoundStats, Timer, trace_enabled};
 
 use super::egraph::SemEGraph;
 use super::node::SemNode;
@@ -97,7 +97,7 @@ fn saturate_impl(
     // and the next saturation of this graph may not trust it.
     let mut on_a_limit = true;
     for _ in 0..limits.max_iterations {
-        let mut stats = RoundStats::start(delta.as_ref());
+        let mut stats = RoundStats::start(eg, delta.as_ref());
         let mut matches = Vec::new();
         for (index, rw) in rewrites.iter().enumerate() {
             if rw.post_saturation {
@@ -106,22 +106,29 @@ fn saturate_impl(
             let frontier = delta.as_mut().filter(|_| rw.cone_bounded);
             let round = rw.searcher.round_roots(eg, roots.as_deref(), frontier);
             stats.searched(round.len(), delta.as_ref());
+            // No `only_new` here: every `IselRewrite` applier may decline — on a
+            // width guard, an immediate's range, a missing constant binding —
+            // and what stops it declining is the content of a class the pattern
+            // bound, which no e-node the match binds records.
             for m in rw.searcher.search_roots(eg, round) {
                 matches.push((index, m));
             }
         }
         if matches.is_empty() {
-            stats.finish();
+            stats.finish(eg);
             on_a_limit = false;
             break;
         }
 
         let before = (eg.num_classes(), eg.total_size());
         for (index, m) in &matches {
+            if trace_enabled() {
+                eprintln!("M {} {}", rewrites[*index].name, eg.find(m.root).index());
+            }
             stats.apply(eg, |eg| (rewrites[*index].apply)(ctx, eg, m));
         }
         eg.rebuild();
-        stats.finish();
+        stats.finish(eg);
         delta = eg.take_changed().map(Delta::new);
         if let Some(roots) = &mut roots {
             let dirty: HashSet<Id> = eg.scope_dirty().into_iter().collect();
@@ -132,7 +139,10 @@ fn saturate_impl(
         }
 
         if (eg.num_classes(), eg.total_size()) == before {
-            on_a_limit = false;
+            // The counts held, but a round that changed only facts changed
+            // nothing they count, and is not a fixpoint. `None` is the widest
+            // such log there is, so it counts too.
+            on_a_limit = delta.as_ref().is_none_or(|delta| !delta.is_empty());
             break;
         }
         if eg.num_classes() >= limits.max_classes {
