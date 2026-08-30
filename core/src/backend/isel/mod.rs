@@ -35,14 +35,14 @@ use tir::{
     },
 };
 use tir_adt::APInt;
-use tir_symbolic::egraph::{ENode, Id, PatternNode, Var};
+use tir_symbolic::egraph::{ENode, Id};
 
 pub use rules::{
     CapabilityKind, EmitAttr, EmitSpec, PatternRef, RegOperandSpec, ResultRegSpec, RuleSpec,
     build_rules, emit_with,
 };
-pub use tir::sem::{IselRewrite, SaturationLimits, SemEGraph, SemNode, SemPayload};
-pub use tir_symbolic::egraph::EMatch;
+pub use tir::sem::{SaturationLimits, SemEGraph, SemNode, SemPayload, Theory};
+pub use tir_relational::Match as IselMatch;
 
 use builder::{AuxSlot, SemDagBuilder};
 use cover::{
@@ -51,7 +51,7 @@ use cover::{
 };
 use emit::{AuxEmit, BlockPlan, GuardBranch, ScheduledEmit, resolve_match, schedule_tiles};
 use node::{is_low_extract_view, low_extract_source};
-use pattern::{CompiledIselPattern, compile_isel_pattern};
+use pattern::{CompiledIselPattern, PatternNode, compile_isel_pattern};
 use tir::sem::axioms::{self, verify_axioms};
 use tir::sem::rewrites::{self, discover_rewrites};
 
@@ -59,7 +59,7 @@ use tir::sem::rewrites::{self, discover_rewrites};
 /// class, each root's patterns in index order. A fact-free class reads its matches
 /// straight out of here however many blocks ask.
 struct FunctionMatches {
-    by_root: HashMap<Id, Vec<(usize, EMatch<u32>)>>,
+    by_root: HashMap<Id, Vec<(usize, IselMatch)>>,
     /// Value patterns rooted on a concrete operator, by that operator's key.
     by_op: HashMap<u64, Vec<usize>>,
     /// Value patterns that root on anything (a bare symbol, or a copy rule).
@@ -74,7 +74,7 @@ impl FunctionMatches {
     /// same pattern order the base search recorded them in.
     fn patterns_rooting_at(&self, fs: &FunctionSelection, class: Id) -> Vec<usize> {
         let mut indices = self.anywhere.clone();
-        let assumed = fs.egraph.assumed_const(class).into_iter();
+        let assumed = fs.egraph.const_of(class).into_iter();
         for node in fs.egraph.nodes(class).chain(assumed) {
             indices.extend(self.by_op.get(&node.op_key()).into_iter().flatten());
         }
@@ -857,13 +857,13 @@ impl FunctionSelection {
         let literal = self
             .egraph
             .assumed_const(class)
-            .and_then(|node| self.egraph.lookup(node))
+            .and_then(|node| self.egraph.const_class(node))
             .map(|id| self.egraph.find(id));
         let equal: Vec<Id> = self
             .egraph
             .nodes(class)
             .find(|node| node.sym() == Some(SymKind::Constant) && node.int().is_some())
-            .map(|node| self.egraph.assumed_classes(node).collect())
+            .map(|node| self.egraph.classes_assumed_const(node).collect())
             .unwrap_or_default();
         let mut best: Option<((u8, usize, u32), ValueId)> = None;
         for member in self.base_members(class).chain(literal).chain(equal) {
@@ -973,7 +973,7 @@ pub struct InstructionSelectPass {
     /// The target's own data layout, applying where the IR declares none.
     default_layout: Option<crate::attributes::AttributeValue>,
     /// Semantic invariants the program e-graph is saturated with before covering.
-    rewrites: Vec<IselRewrite>,
+    theory: Theory,
     /// Instructions that define a register implicitly; selection introduces one
     /// ahead of any op whose `implicit_uses` name a matching register.
     /// Target hooks for terminator lowering; branch selection is off without them
@@ -1242,7 +1242,7 @@ impl InstructionSelectPass {
             })
             .collect();
 
-        let rewrites = discover_rewrites();
+        let theory = discover_rewrites();
         let constant_materializer_ranges: Vec<_> = compiled_patterns
             .iter()
             .filter_map(CompiledIselPattern::constant_materializer_range)
@@ -1262,7 +1262,7 @@ impl InstructionSelectPass {
             constant_materializer_ranges,
             float_constant_materializer_widths,
             default_layout: None,
-            rewrites,
+            theory,
             branch_emitters: None,
             cost_model: Box::new(DefaultIselCostModel),
             op_lowerings: vec![],
@@ -1283,8 +1283,8 @@ impl InstructionSelectPass {
     }
 
     /// Install semantic invariants used to saturate the program e-graph.
-    pub fn with_rewrites(mut self, rewrites: Vec<IselRewrite>) -> Self {
-        self.rewrites = rewrites;
+    pub fn with_theory(mut self, theory: Theory) -> Self {
+        self.theory = theory;
         self
     }
 
@@ -1297,14 +1297,12 @@ impl InstructionSelectPass {
 
     /// Install additional semantic invariants.
     pub fn with_axioms(mut self, file: &str) -> Self {
-        let mut materializes_constants = false;
         for form in axioms::axiom_forms(file) {
             let axiom = axioms::parse_axiom(&form)
                 .unwrap_or_else(|e| panic!("invalid axiom `{form}`: {e}"));
-            materializes_constants |= axiom.materializes_constants();
-            self.rewrites.push(axiom.compile());
+            self.theory.push(axiom);
         }
-        if materializes_constants && !self.constant_materializer_ranges.is_empty() {
+        if self.theory.materializes_constants() && !self.constant_materializer_ranges.is_empty() {
             self.float_constant_materializer_widths.extend(
                 self.rules
                     .iter()
@@ -1463,9 +1461,9 @@ impl InstructionSelectPass {
             if self.rules[compiled.rule_index].kind != RuleKind::Value {
                 continue;
             }
-            let pattern_root = compiled.pattern.root();
-            match compiled.pattern.node(pattern_root) {
-                PatternNode::Node(node) if !compiled.is_copy() => base
+            let pattern_root = Id::from_raw(compiled.root() as u32);
+            match &compiled.nodes[compiled.root()] {
+                PatternNode::Template(node) if !compiled.is_copy() => base
                     .by_op
                     .entry(node.op_key())
                     .or_default()
@@ -1582,7 +1580,7 @@ impl InstructionSelectPass {
             roots_by_op.entry(op_id).or_insert(class);
         }
 
-        rewrites::saturate(context, &mut egraph, &self.rewrites, Default::default());
+        rewrites::saturate(context, &mut egraph, &self.theory, Default::default());
 
         crate::memstats::egraph_census("isel", &egraph);
 
@@ -1784,7 +1782,7 @@ impl InstructionSelectPass {
                 rewrites::saturate_scope(
                     context,
                     &mut fs.egraph,
-                    &self.rewrites,
+                    &self.theory,
                     Default::default(),
                     changed.roots.clone(),
                 );
@@ -2417,8 +2415,8 @@ impl InstructionSelectPass {
         context: &Context,
         fs: &FunctionSelection,
         guard_classes: &HashSet<Id>,
-    ) -> HashMap<Id, Vec<(usize, EMatch<u32>)>> {
-        let mut hits: HashMap<Id, Vec<(usize, EMatch<u32>)>> = HashMap::new();
+    ) -> HashMap<Id, Vec<(usize, IselMatch)>> {
+        let mut hits: HashMap<Id, Vec<(usize, IselMatch)>> = HashMap::new();
         for (pattern_index, compiled) in self.compiled_patterns.iter().enumerate() {
             if !matches!(
                 self.rules[compiled.rule_index].kind,
@@ -2457,7 +2455,7 @@ impl InstructionSelectPass {
         fs: &FunctionSelection,
         dom: &DominatorTree,
         at: (BlockId, OpId, BlockId),
-        candidates: &[(usize, EMatch<u32>)],
+        candidates: &[(usize, IselMatch)],
         deferred_classes: &HashSet<Id>,
     ) -> Option<FusedGuard> {
         let (block, consumer, taken) = at;
@@ -2475,12 +2473,15 @@ impl InstructionSelectPass {
                 .or_insert_with(|| compiled.register_symbols());
 
             let mut captures = CaptureBindings::new();
-            for (var, class) in m.subst.entries() {
-                let Var::Symbol(symbol) = var else { continue };
-                if compiled.is_state_symbol(*symbol) {
+            for &node in &compiled.captures {
+                let symbol = compiled.nodes[node as usize]
+                    .symbol()
+                    .expect("a capture names an operand");
+                if compiled.is_state_symbol(symbol) {
                     continue;
                 }
-                captures.bind(*symbol, fs.egraph.find(class));
+                let class = CompiledIselPattern::binding(m, node as usize);
+                captures.bind(symbol, fs.egraph.find(class));
             }
 
             // Every operand must resolve at B. A class carrying an immediate folds
@@ -2634,12 +2635,12 @@ impl InstructionSelectPass {
         base: &FunctionMatches,
         class: Id,
     ) -> Vec<PbqpIselMatch> {
-        let no_matches: &[(usize, EMatch<u32>)] = &[];
-        let mut fresh: Vec<(usize, EMatch<u32>)> = Vec::new();
+        let no_matches: &[(usize, IselMatch)] = &[];
+        let mut fresh: Vec<(usize, IselMatch)> = Vec::new();
         let cached = if changed.members.contains(&class) {
             for pattern_index in base.patterns_rooting_at(fs, class) {
                 let compiled = &self.compiled_patterns[pattern_index];
-                let pattern_root = compiled.pattern.root();
+                let pattern_root = Id::from_raw(compiled.root() as u32);
                 fresh.extend(
                     compiled
                         .search_roots_with_legality(
@@ -2673,9 +2674,11 @@ impl InstructionSelectPass {
             let pattern_index = *pattern_index;
             let compiled = &self.compiled_patterns[pattern_index];
             let rule = &self.rules[compiled.rule_index];
-            let pattern_root = compiled.pattern.root();
+            let pattern_root = Id::from_raw(compiled.root() as u32);
             let root = fs.egraph.find(m.root);
-            if compiled.is_copy() && fs.has_values(m.binding(pattern_root)) {
+            if compiled.is_copy()
+                && fs.has_values(CompiledIselPattern::binding(m, pattern_root.index()))
+            {
                 continue;
             }
             let block_op = block_op_by_root.get(&root).copied();
@@ -2693,12 +2696,14 @@ impl InstructionSelectPass {
             // Narrow the function-wide legality to B: a non-pure interior class
             // is legal only when its backing op is in B and it is not shared
             // (boundary constraints were already enforced during the search).
-            let interior_ok = (0..compiled.pattern.len()).all(|index| {
+            let interior_ok = (0..compiled.nodes.len()).all(|index| {
                 let node = Id::from_raw(index as u32);
                 if node == pattern_root || compiled.node_meta[node.index()].duplicable {
                     return true;
                 }
-                let class = fs.egraph.find(m.binding(node));
+                let class = fs
+                    .egraph
+                    .find(CompiledIselPattern::binding(m, node.index()));
                 node::class_is_pure(&fs.egraph, class)
                     || (block_op_by_root.contains_key(&class) && !fs.is_shared(class))
             });
@@ -2707,19 +2712,21 @@ impl InstructionSelectPass {
             }
 
             let mut captures = CaptureBindings::new();
-            for (var, class) in m.subst.entries() {
-                let Var::Symbol(symbol) = var else { continue };
-                if compiled.is_state_symbol(*symbol) {
+            for &node in &compiled.captures {
+                let symbol = compiled.nodes[node as usize]
+                    .symbol()
+                    .expect("a capture names an operand");
+                if compiled.is_state_symbol(symbol) {
                     continue;
                 }
-                captures.bind(*symbol, fs.egraph.find(class));
+                let class = CompiledIselPattern::binding(m, node as usize);
+                captures.bind(symbol, fs.egraph.find(class));
             }
 
             let mut structural_boundaries = HashSet::new();
             let mut value_boundaries = HashSet::new();
-            for index in 0..compiled.pattern.len() {
-                let PatternNode::Node(node) = compiled.pattern.node(Id::from_raw(index as u32))
-                else {
+            for index in 0..compiled.nodes.len() {
+                let PatternNode::Template(node) = &compiled.nodes[index] else {
                     continue;
                 };
                 for (operand, &child) in node.children.iter().enumerate() {
@@ -2734,7 +2741,7 @@ impl InstructionSelectPass {
                 }
             }
             structural_boundaries.retain(|node| !value_boundaries.contains(node));
-            let pattern_nodes: Vec<PatternNodeBinding> = (0..compiled.pattern.len())
+            let pattern_nodes: Vec<PatternNodeBinding> = (0..compiled.nodes.len())
                 .map(|index| Id::from_raw(index as u32))
                 .map(|pattern_node| {
                     let meta = &compiled.node_meta[pattern_node.index()];
@@ -2758,7 +2765,9 @@ impl InstructionSelectPass {
                     } else {
                         cover::BoundaryDemand::Structural
                     };
-                    let mut class = fs.egraph.find(m.binding(pattern_node));
+                    let mut class = fs
+                        .egraph
+                        .find(CompiledIselPattern::binding(m, pattern_node.index()));
                     // A register boundary on a low-extract view reads the
                     // chased source's register, so the cover's edges, the
                     // schedule's dependencies, and availability all target

@@ -58,6 +58,39 @@ pub trait Label: Debug + Clone {
         false
     }
 
+    /// This node's constant, spelled the one way the language spells that value
+    /// — `None` for a node that is not a ground constant. The *value*, not the
+    /// spelling, is what a class is known to be, so a typed and an untyped
+    /// spelling of one number must answer with the same term; otherwise a class
+    /// proven the number twice would look like a class proven two things.
+    ///
+    /// Seeds the engine's constant column, so a rule reads a class's constant as
+    /// a fact rather than by scanning its rows.
+    fn constant(&self) -> Option<Self> {
+        None
+    }
+
+    /// The type this node carries, as one word — the identity of the language's
+    /// type, not its shape. Seeds the engine's type column, so a rule reads the
+    /// type of a class it bound as a hole without scanning its rows.
+    fn type_key(&self) -> Option<u64> {
+        None
+    }
+
+    /// A field of the label read as one word: an integer payload, a type, an
+    /// attribute. The language numbers its own fields; the engine only moves
+    /// the word between an atom's read and a guard's argument.
+    fn scalar(&self, _field: u32) -> Option<u64> {
+        None
+    }
+
+    /// `template` with `fills` written into the named fields — how a head spells
+    /// a node whose payload a guard computed. `None` if the language cannot
+    /// spell it.
+    fn fill(template: &Self, fills: &[(u32, u64)]) -> Option<Self> {
+        fills.is_empty().then(|| template.clone())
+    }
+
     /// A unique node gets a fresh class on every insert and never hash-conses or
     /// congruence-merges (effectful ops, distinct unknowns); its operands still
     /// resolve through the union-find.
@@ -123,6 +156,12 @@ impl<L: Label> Labels<L> {
             .iter()
             .copied()
             .find(|&id| self.table[id.index()].matches(node))
+    }
+
+    /// The node interned under `id`. Its children are whatever the first node
+    /// with this label carried; nothing reads them.
+    pub(crate) fn node(&self, id: LabelId) -> &L {
+        &self.table[id.index()]
     }
 
     pub(crate) fn len(&self) -> usize {
