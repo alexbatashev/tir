@@ -120,6 +120,34 @@ fn roots_canonicalize_after_saturation() {
     assert_eq!(g.find(ab), g.find(ba));
 }
 
+/// A scope opened over a saturated graph starts its own saturation from the log
+/// its assumption left, not from a full search. The driver reads that log
+/// through `take_changed`, so what it reports there is the whole contract:
+/// `Some` of the assumption's own classes, rather than the `None` that asks for
+/// a full search.
+#[test]
+fn a_scope_over_a_fixpoint_starts_from_its_own_log() {
+    let mut g = EGraph::new();
+    let a = sym(&mut g, 0);
+    let b = sym(&mut g, 1);
+    let ab = add(&mut g, a, b);
+    add(&mut g, b, a);
+    g.saturate_rules(&[comm_rule()], &NoExterns, 30, 100_000);
+    assert_eq!(
+        g.take_changed(),
+        Some(Vec::new()),
+        "a saturation that reached a fixpoint leaves an empty log"
+    );
+
+    g.push_context();
+    let c = sym(&mut g, 2);
+    g.union(ab, c);
+    g.rebuild();
+
+    assert_eq!(g.take_changed(), Some(vec![g.find(ab)]));
+    g.pop_context();
+}
+
 // ── Extraction ─────────────────────────────────────────────────────────────
 
 /// Unit cost for operators, zero for leaves.
@@ -316,7 +344,7 @@ fn build(g: &mut EGraph<Math>, e: &Expr) -> Id {
 /// of equivalent spellings, so they break a cost tie differently.
 fn extracted_cost(
     g: &EGraph<Math>,
-    e: &tir_symbolic::egraph::Extraction<Math>,
+    e: &tir_symbolic::egraph::Extraction<'_, Math>,
     id: Id,
     seen: &mut Vec<Id>,
 ) -> Option<u64> {
@@ -471,4 +499,96 @@ fn a_sideways_rule_still_fires_on_a_row_a_later_round_minted() {
 
     let negated = g.add(Math::Neg([a]));
     assert!(g.connected(sum, negated));
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(200))]
+
+    /// A scope extracts by recomputing the classes its assumption dirtied and
+    /// reading the rest off the base extraction. The answer must be the one a
+    /// full pass over the scoped graph gives, node for node.
+    #[test]
+    fn refresh_equals_full_extraction(
+        exprs in proptest::collection::vec(expr_strategy(), 1..4),
+        pairs in proptest::collection::vec((0usize..64, 0usize..64), 0..4),
+    ) {
+        let rules = math_rules();
+        let mut g = EGraph::new();
+        for e in &exprs {
+            build(&mut g, e);
+        }
+        g.rebuild();
+        g.saturate_rules(&rules, &NoExterns, 30, 10_000);
+        let base = g.extract_best(|_, node| unit(node));
+
+        let classes: Vec<Id> = g.class_ids().collect();
+        g.push_context();
+        for &(a, b) in &pairs {
+            g.union(classes[a % classes.len()], classes[b % classes.len()]);
+        }
+        g.rebuild();
+        g.saturate_rules(&rules, &NoExterns, 30, 10_000);
+
+        let refreshed = base.refresh(&g, &g.scope_dirty(), |_, node| unit(node));
+        let full = g.extract_best(|_, node| unit(node));
+        for id in g.class_ids() {
+            proptest::prop_assert_eq!(
+                refreshed.node(id).map(|node| format!("{node:?}")),
+                full.node(id).map(|node| format!("{node:?}"))
+            );
+        }
+        g.pop_context();
+    }
+}
+
+proptest::proptest! {
+    // Three saturations and a full extraction per case, so fewer of them.
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(32))]
+
+    /// A scope nested in another refreshes the extraction its parent refreshed,
+    /// and recomputes only what it changed itself — the classes the parent
+    /// dirtied are already answered for. The answer must still be the one a full
+    /// pass over the doubly scoped graph gives.
+    #[test]
+    fn nested_refresh_equals_full_extraction(
+        exprs in proptest::collection::vec(expr_strategy(), 1..4),
+        outer in proptest::collection::vec((0usize..64, 0usize..64), 0..3),
+        inner in proptest::collection::vec((0usize..64, 0usize..64), 0..3),
+    ) {
+        let rules = math_rules();
+        let mut g = EGraph::new();
+        for e in &exprs {
+            build(&mut g, e);
+        }
+        g.rebuild();
+        g.saturate_rules(&rules, &NoExterns, 30, 10_000);
+        let base = g.extract_best(|_, node| unit(node));
+
+        let classes: Vec<Id> = g.class_ids().collect();
+        g.push_context();
+        for &(a, b) in &outer {
+            g.union(classes[a % classes.len()], classes[b % classes.len()]);
+        }
+        g.rebuild();
+        g.saturate_rules(&rules, &NoExterns, 30, 10_000);
+        let outer_extraction = base.refresh(&g, &g.innermost_dirty(), |_, node| unit(node));
+
+        g.push_context();
+        for &(a, b) in &inner {
+            g.union(classes[a % classes.len()], classes[b % classes.len()]);
+        }
+        g.rebuild();
+        g.saturate_rules(&rules, &NoExterns, 30, 10_000);
+        let refreshed = outer_extraction.refresh(&g, &g.innermost_dirty(), |_, node| unit(node));
+
+        let full = g.extract_best(|_, node| unit(node));
+        for id in g.class_ids() {
+            proptest::prop_assert_eq!(
+                refreshed.node(id).map(|node| format!("{node:?}")),
+                full.node(id).map(|node| format!("{node:?}"))
+            );
+        }
+        g.pop_context();
+        g.pop_context();
+    }
 }
