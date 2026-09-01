@@ -21,10 +21,11 @@ does the rest.
 | `sem/egraph.rs` | `SemEGraph` and the vocabulary's e-class readings (`class_int_binding`, widths, IR↔semantic types) |
 | `isel/node.rs` | what selection reads beyond that: low-bit register views, `class_value_binding`, `class_register_type` |
 | `isel/builder.rs` | `SemDagBuilder`: the function's IR ops → one shared semantic e-graph, including memory effects and the structured operations' own control (`build_region_control`) |
-| `isel/pattern.rs` | `compile_isel_pattern`: rule semantics → `tir_symbolic::egraph::Pattern`s + per-node metadata |
+| `isel/pattern.rs` | `compile_isel_pattern`: rule semantics → `tir_relational` query plans + per-node metadata |
 | `sem/axioms.rs` | s-expression axioms and their compilation into proved rewrites |
 | `defs/isel.sexp` | checked target-independent semantic invariants |
 | `sem/rewrites.rs` | theory-family selection and saturation driver |
+| `isel/matches.rs` | `Matches`: the function's value matches in columns, indexed by root class, with one frame per open assumption scope |
 | `isel/cover.rs` | PBQP construction, match dominance pruning, completeness check |
 | `isel/emit.rs` | `BlockPlan`: cover → an ordered tile schedule (`schedule_tiles`) with its operands resolved (`resolve_match`) |
 | `isel/destruct.rs` | `Destructor`: the structured regions become machine blocks, at emission |
@@ -473,14 +474,14 @@ instruction patterns still match them.
 ## 3. Patterns and matches
 
 Each `Rule`'s pattern is compiled once (`compile_isel_pattern`) into a
-`tir_symbolic::egraph::Pattern<SemNode, u32>`. Operand leaves become
+a `tir_relational::Plan<SemNode>`. Operand leaves become
 `Var::Symbol` holes (capture points — the match's substitution binds them);
 interior nodes become typed/untyped templates, with per-node register /
 immediate / width requirements kept in `node_meta`. `specificity` counts
 type-constrained nodes — the tie-breaker (see below).
 
 `collect_block_matches` e-matches every value pattern against the shared e-graph
-(via the `tir_symbolic::egraph` search engine — the same matcher instcombine uses
+(via the `tir_relational` evaluator — the same matcher instcombine uses
 — with operand constraints and match legality supplied as a legality callback),
 then **restricts every hit to the solving block B**: a match survives only if its
 root is a value B computes (an op of B, a class a destruction reads there, or a
@@ -518,15 +519,33 @@ binding chases through it (`chase_low_extract`).
 
 The function-wide legality (boundary constraints, pure-or-op-root interiors) does
 not depend on the assumption scope, so every block reads its matches out of one
-function-wide base search (`base_value_matches`, indexed by root class). Matching
-is demand-driven: starting from B's op-root and guard classes, a class is
-searched only once a surviving match at an already-covered class binds it, which
-is exactly the closure the PBQP cover ranges over. A **fact-bearing** block
-re-searches only the classes its assumption changed — `EGraph::scope_dirty`
-(the scope's merges and minted classes, closed upward over parents, since a
-parent's nodes re-canonicalize through a merge) intersected with what the block
-reads — and outside that set the scoped graph is the base one node for node, so
-the base matches stand.
+function-wide base search (`base_value_matches`), indexed by root class in
+`Matches`. Matching is demand-driven: starting from B's op-root and guard
+classes, a class is searched only once a surviving match at an already-covered
+class binds it, which is exactly the closure the PBQP cover ranges over.
+
+Entering an assumption scope saturates the assumption **once**, then opens a
+match frame over `Engine::innermost_dirty` — the scope's merges and minted
+classes, closed upward over parents, since a parent's nodes re-canonicalize
+through a merge. Outside that set the scoped graph is the base one node for node,
+so the base matches stand. Inside it a class is re-searched the first time any
+block under the scope asks for it, and that answer serves every later block;
+popping the scope drops the frame with the matches it added.
+
+Three properties make the frame sound, and each is structural rather than
+asserted. The changed set is a fixed point for the frame's lifetime, because
+`solve_block` takes `&FunctionSelection` and so cannot mutate the graph, and a
+nested scope's own frame shadows this one until its `pop_context` restores the
+graph exactly. `innermost_dirty` rather than `scope_dirty` is the right delta
+only because frames layer: each sits on the enclosing frame's answers, which sit
+on the base search. And the index keys on class ids, never row ids, because
+`pop_context` reuses row ids while class ids minted in a scope go dead and are
+never handed out again.
+
+The saturation runs once per scope rather than once per block because the
+engine's change log is a single consumable stream: a second saturation under the
+same assumption would find the assertion already drained and would narrow round 0
+to the first block's leavings.
 
 ### Semantic types and register storage
 

@@ -13,7 +13,7 @@ use tir::{
     },
 };
 use tir_adt::APInt;
-use tir_symbolic::egraph::{ENode, Id};
+use tir_relational::{ClassId as Id, Label as ENode};
 
 /// If the class is a low-bit truncation `Extract(v, hi, 0)`, its operand class
 /// `v`. Such a value *is* the low `hi+1` bits of `v`'s register — the framework's
@@ -36,17 +36,6 @@ pub(crate) fn low_extract_source(egraph: &SemEGraph, class: Id) -> Option<Id> {
 /// Whether the class is a low-bit truncation (see [`low_extract_source`]).
 pub(crate) fn is_low_extract_view(egraph: &SemEGraph, class: Id) -> bool {
     low_extract_source(egraph, class).is_some()
-}
-
-pub(crate) fn low_extract_width(egraph: &SemEGraph, class: Id) -> Option<u32> {
-    egraph.nodes(class).find_map(|node| {
-        if node.kind != SymKind::Extract || node.children().len() != 3 {
-            return None;
-        }
-        let hi = class_int_binding(egraph, egraph.find(node.children()[1]))?.to_u64();
-        let lo = class_int_binding(egraph, egraph.find(node.children()[2]))?.to_u64();
-        (lo == 0).then(|| u32::try_from(hi + 1).ok()).flatten()
-    })
 }
 
 /// The register value carrying a class: an input value, then the first IR value
