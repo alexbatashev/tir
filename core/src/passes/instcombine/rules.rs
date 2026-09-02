@@ -170,7 +170,6 @@ pub fn builtin_ruleset(context: &Context, seeded: &Seeded) -> Ruleset {
     }
     ruleset.push_query(state::pointer_derivation(), None);
     ruleset.push_query(state::forward_load(), None);
-    ruleset.push_query(state::eliminate_dead_store(), None);
     ruleset
 }
 

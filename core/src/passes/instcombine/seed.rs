@@ -146,7 +146,6 @@ impl Seeder<'_> {
         let instance = self.context.get_op(op);
 
         if !instance.regions().is_empty() {
-            self.export_states(&instance);
             if let Some(conditional) = instance.clone().as_interface::<dyn Conditional>() {
                 self.seed_gamma(&instance, conditional.as_ref());
                 return;
@@ -193,8 +192,6 @@ impl Seeder<'_> {
             let id = self.eg.add(Node::seeded(&instance, ty, commutative, args));
             self.bind_value(value, id);
             return;
-        } else {
-            self.export_states(&instance);
         }
 
         for result in instance.results().to_vec() {
@@ -376,19 +373,6 @@ impl Seeder<'_> {
                 carried.get(first + port).copied()
             })
             .collect()
-    }
-
-    /// Record the states `instance` observes as exported. The term graph models a
-    /// state only through the accesses on it, so a state any other operation takes
-    /// — returned, yielded out of a region, handed to a call — is observed by
-    /// something the graph cannot see, and no law may drop the write that left it.
-    fn export_states(&mut self, instance: &OpHandle) {
-        for operand in instance.operands().to_vec() {
-            if self.context.get_value(operand).ty() == self.state_ty {
-                let id = self.class_of(operand);
-                self.eg.mark(id, super::state::EXPORTED);
-            }
-        }
     }
 
     /// A join names the memory its inputs merge into, so its identity is the tuple

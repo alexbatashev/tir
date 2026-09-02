@@ -2,7 +2,9 @@
 
 // The load sits mid-chain: it publishes a state a later store reads. A read
 // leaves memory as it found it, so that state is the one it read, and once its
-// value is the value the store wrote the load has nothing left to do.
+// value is the value the store wrote the load has nothing left to do. Nothing
+// then reads what the first write left, and the second overwrites its extent,
+// so the second is the only write the function makes.
 
 module {
   %fn_f = func.func @f(%0: !ptr.p<!i32>, %1: !i32, %2: !i32) -> !i32 {
@@ -16,7 +18,7 @@ module {
 }
 
 // CHECK-LABEL: %{{[0-9]+}} = func.func @f
-// CHECK: ptr.store %[[V:[0-9]+]], %[[P:[0-9]+]] state(%[[S0:[0-9]+]] -> %[[S1:[0-9]+]])
+// CHECK: %[[ENTRY:[0-9]+]] = state.entry_state
+// CHECK-NEXT: ptr.store %2, %0 state(%[[ENTRY]] -> %[[S:[0-9]+]])
+// CHECK-NEXT: func.return %1 state(%[[S]])
 // CHECK-NOT: ptr.load
-// CHECK: ptr.store %{{[0-9]+}}, %[[P]] state(%[[S1]] -> %{{[0-9]+}})
-// CHECK: func.return %[[V]]

@@ -261,6 +261,18 @@ impl Driver<'_> {
         {
             return Ok(());
         }
+        // A write whose class a law rebuilt over an earlier state is this same
+        // write, taking the memory the writes it overwrites were handed. Moving
+        // it back over them leaves them with no reader, and the sweep takes them.
+        if let Some((taken, earlier)) = self.shortened_state(op_id) {
+            let operands = instance
+                .operands()
+                .iter()
+                .map(|&operand| if operand == taken { earlier } else { operand })
+                .collect();
+            self.context.set_op_operands(op_id, operands);
+            return Ok(());
+        }
         // A read leaves memory as it found it, so the state it publishes is the
         // state it read: its uses reroute to that operand and the read goes with
         // its value. Nothing else multi-result names one value to replace.
@@ -329,6 +341,89 @@ impl Driver<'_> {
             }
         }
         Ok(())
+    }
+
+    /// The state a write may take instead of the one it takes now: the state
+    /// handed to the run of writes above it that it overwrites whole.
+    ///
+    /// A write is stepped past on two conditions. It must name the extent this
+    /// one overwrites — the object its address is derived from, the offset into
+    /// it and the byte count, all read off the saturated graph, so `p + 4` and
+    /// `p + 2 + 2` are the one extent they are and an address the terms cannot
+    /// place stops the walk. And nothing else may read what it left: a second
+    /// reader keeps it alive, and it and this write would then both change the
+    /// one state between them, which is a memory only one of them may change.
+    fn shortened_state(&self, op_id: OpId) -> Option<(ValueId, ValueId)> {
+        let instance = self.context.get_op(op_id);
+        let write = instance.as_interface::<dyn MemoryWrite>()?;
+        let (taken, published) = (write.state_operand()?, write.state_result()?);
+        let extent = self.extent(published)?;
+
+        let (mut state, mut below, mut furthest) = (taken, op_id, None);
+        while let Some(defining) = self.context.get_value(state).defining_op() {
+            let Some(above) = self
+                .context
+                .get_op(defining)
+                .as_interface::<dyn MemoryWrite>()
+            else {
+                break;
+            };
+            if above.state_result() != Some(state)
+                || self.extent(state) != Some(extent)
+                || !self.read_only_by(state, below)
+            {
+                break;
+            }
+            let Some(next) = above.state_operand() else {
+                break;
+            };
+            (state, below, furthest) = (next, defining, Some(next));
+        }
+        furthest.map(|state| (taken, state))
+    }
+
+    /// The extent the write publishing `state` names: the object its address is
+    /// derived from, the byte offset into it, and the byte count. `None` where
+    /// the terms place none of it, which is every address the graph cannot read
+    /// back to an object it knows.
+    fn extent(&self, state: ValueId) -> Option<(Id, i64, u64)> {
+        let class = self.eg.find(*self.value_class.get(&state)?);
+        let node = self
+            .eg
+            .nodes(class)
+            .find(|node| node.prov == Prov::Value(state))?;
+        if node.sym() != Some(SymKind::StoreMemory) || node.children.len() != state::STORE_ARITY {
+            return None;
+        }
+        let (object, offset) = self.eg.object_of(node.children[state::ADDRESS])?;
+        let bytes = self
+            .eg
+            .nodes(self.eg.find(node.children[state::BYTES]))
+            .find_map(|node| node.int())?;
+        Some((self.eg.find(object), offset, bytes.to_u64()))
+    }
+
+    /// Whether `op` is the one operation reading `state`.
+    fn read_only_by(&self, state: ValueId, op: OpId) -> bool {
+        let Some(region) = self
+            .def_block(state)
+            .and_then(|block| self.context.parent_region(block))
+        else {
+            return false;
+        };
+        let mut pending = vec![region];
+        while let Some(region) = pending.pop() {
+            for block in self.context.get_region(region).iter(self.context.clone()) {
+                for other in block.op_ids() {
+                    let instance = self.context.get_op(other);
+                    pending.extend(instance.regions());
+                    if other != op && instance.operands().contains(&state) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
     }
 
     /// Whether the def of `value` is in scope at the operation `op` — what a
