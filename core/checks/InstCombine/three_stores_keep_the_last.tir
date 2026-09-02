@@ -1,10 +1,9 @@
 // RUN: tir opt --pass func.func(promote,thread-state,instcombine) --verify %s | filecheck %s
 
-// Three writes to one address, alternating values. Law S2 may take the first
-// pair; taking the next one as well would make the surviving stores congruent to
-// the ones it already retired, and the chain would fold back to the memory the
-// function was entered with — every write gone. The state the function returns
-// must still be the one the last write left.
+// Three writes to one address, alternating values. Law S2 rebuilds each write
+// over the state the one before it took, so the chain shortens a link at a time
+// until only the last write is left, on the state the function was entered with.
+// What it stores is what the function must be left holding.
 
 #data_layout = {types = {i32 = {abi = 32, size = 32}, i64 = {abi = 64, size = 64}, p = {abi = 64, size = 64}}}
 
@@ -21,7 +20,7 @@ module {data_layout = #data_layout} {
 }
 
 // CHECK-LABEL: %{{[0-9]+}} = func.func @thrice
-// CHECK: %[[ONE:[0-9]+]] = constant {value = 1}
-// CHECK: ptr.store %[[ONE]], %{{[0-9]+}} state(%{{[0-9]+}} -> %[[MID:[0-9]+]])
-// CHECK-NEXT: ptr.store %{{[0-9]+}}, %{{[0-9]+}} state(%[[MID]] -> %[[LAST:[0-9]+]])
+// CHECK: %[[ENTRY:[0-9]+]] = state.entry_state
+// CHECK: %[[ZERO:[0-9]+]] = constant {value = 0}
+// CHECK-NEXT: ptr.store %[[ZERO]], %{{[0-9]+}} state(%[[ENTRY]] -> %[[LAST:[0-9]+]])
 // CHECK-NEXT: func.return state(%[[LAST]])

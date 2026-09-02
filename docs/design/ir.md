@@ -409,13 +409,13 @@ missing edge is a divergence with a reproducer.
   branch only carries it along the edge it takes.
 - A read's published state *is* the state it observed, so a transform erasing a
   read hands its readers — joins included — the state it took.
-- A store is *dead* iff nothing that reads the bytes it wrote can tell the
-  memory it left from the memory before it: the chain is the barrier and the
-  extent is the question, and law S2 (§6.5) is that statement inside the e-graph
-  view. It is also dead where its own state is read by nothing at all — the
-  commit's sweep — and where the slot it writes has no reader, in which case the
+- A store is *dead* where its own state is read by nothing at all — the commit's
+  sweep — and where the slot it writes has no reader, in which case the
   allocation is dead too: with neither its address nor its state read, the object
-  is one nothing in the function can tell exists, and DCE takes it.
+  is one nothing in the function can tell exists, and DCE takes it. What leaves a
+  write unread is the commit (§6.5): it moves a write back over the run of writes
+  above it that name the extent it overwrites, where nothing else reads what they
+  left.
 
 ### 6.5 The state laws
 
@@ -431,11 +431,15 @@ address class alone, so `p + 4` and `p + 2 + 2` are the one extent they are.
 
 - **S1** load-over-store forwarding: `Load(Store(s,a,n,v), a, n) = v` at one
   IR type.
-- **S2** dead-store elimination: a write overwritten by the next write to
-  the same extent leaves the chain as it found it — where nothing on either
-  state reads those bytes, no second write to the extent precedes it, no
-  operation outside the term graph observes either state, and the state it
-  was handed is not a loop's carried port.
+- **S2** was dead-store elimination, stated as "the overwritten write leaves the
+  state it was handed". It is gone. That is a claim about who may observe a
+  memory, not an equality between two, and the negated conditions fencing it
+  could each be unsaid by a merge a round later — which dropped whole chains of
+  writes rather than the overwritten one. Dead-store elimination is now the
+  commit's: it asks the saturated graph whether two writes name one extent
+  (§6.4's placement, the same facts S1 reads), walks the chain in the IR where
+  the answer is yes and nothing else reads what a write left, and lets DCE take
+  what is then unread.
 - **S3** disjoint-chain commutation: structural; asserted by test.
 
 Every *other* memory equality remains an SMT obligation or does not exist.
@@ -563,7 +567,7 @@ and their single survivors:
 | `mem2reg` (both variants) | dominance/φ machinery obsolete by structure: the region tree *is* the dominance, and a local slot's value belongs on the ports construction should have put it on | `promote` (demand annotation) + `thread-state` + shared escape classifier |
 | mid-end DCE pass | a rewrite's cascade belongs to the commit that caused it | the commit's sweep (DCE remains for machine IR) |
 | `sccp` + `ConstantFacts` | a second engine for a fact the first one can state: constants are classes, reachability is a gate's own scope | the e-graph's scopes, hypothesis rounds included |
-| `dse` | same-chain overwrite is law S2 on terms; a slot with no reader is a dead definition | S2 (§6.5) + DCE on chains |
+| `dse` | same-chain overwrite is an extent question the placement facts answer; a slot with no reader is a dead definition | §6.5 + DCE on chains |
 | `scf_to_cfg` + `cfg_cleanup` | destruction lives inside emission and emits clean CFG once | destruction-at-emission |
 | three e-graph seeders (instcombine's, isel's `SemDagBuilder`, the sea view) | one program, one seeding | the §7.2 seeder |
 | eager `Value::uses` in the green core | derived data in ground truth | `DefUse` view |
