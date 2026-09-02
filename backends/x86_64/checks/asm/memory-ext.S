@@ -24,13 +24,13 @@ mem_ext:
 # CHECK-NEXT: x86_64.movsx8_load {dst = rax, base = rbx}
 # CHECK-NEXT: x86_64.movsx16_load {dst = rcx, base = rdx}
 # CHECK-NEXT: x86_64.movsxd_load {dst = rax, base = rbx}
-# CHECK-NEXT: x86_64.mov_load32_norex {dst = eax, base = rbx}
-# CHECK-NEXT: x86_64.mov_store32_norex {base = rbx, src = eax}
-# CHECK-NEXT: x86_64.mov_store16_norex {base = rbx, src = cx}
-# CHECK-NEXT: x86_64.mov_store8_norex {base = rbx, src = dl}
+# CHECK-NEXT: x86_64.mov_load32 {dst = eax, base = rbx}
+# CHECK-NEXT: x86_64.mov_store32 {base = rbx, src = eax}
+# CHECK-NEXT: x86_64.mov_store16 {base = rbx, src = cx}
+# CHECK-NEXT: x86_64.mov_store8 {base = rbx, src = dl}
 # CHECK-NEXT: x86_64.mov_load_disp {dst = rax, base = rbx, imm = 8}
 # CHECK-NEXT: x86_64.mov_store_disp {base = rcx, src = rdx, imm = 16}
-# CHECK-NEXT: x86_64.push_norex {reg = rbx}
+# CHECK-NEXT: x86_64.push {reg = rbx}
 # CHECK-NEXT: x86_64.push {reg = r12}
-# CHECK-NEXT: x86_64.pop_norex {reg = rbx}
+# CHECK-NEXT: x86_64.pop {reg = rbx}
 # CHECK-NEXT: x86_64.pop {reg = r12}

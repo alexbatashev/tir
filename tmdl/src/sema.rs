@@ -1298,6 +1298,10 @@ fn encoding_value_name(expr: &ast::Expr) -> Option<&str> {
             ast::Expr::Ident(id) => Some(id.name.as_str()),
             _ => None,
         },
+        ast::Expr::Cast(cast) => match &*cast.x {
+            ast::Expr::Ident(id) => Some(id.name.as_str()),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -2335,7 +2339,8 @@ fn check_encoding(
         diags.extend(
             check_shape(
                 instruction,
-                &shape.fields,
+                shape,
+                &ctx,
                 operands,
                 isa_params,
                 unit,
@@ -2353,12 +2358,14 @@ fn check_encoding(
 /// whether it fills whole encoding units.
 fn check_shape(
     instruction: &ast::Instruction,
-    encoding: &[ast::EncodingField],
+    shape: &crate::shapes::Shape,
+    ctx: &crate::shapes::Context,
     operands: &[&ast::Operand],
     isa_params: &HashMap<String, i64>,
     unit: Option<u16>,
     file_name: &str,
 ) -> Vec<(String, Diag)> {
+    let encoding = &shape.fields;
     let mut diags = vec![];
     for operand in operands {
         let width = match &operand.ty {
@@ -2391,6 +2398,27 @@ fn check_shape(
                         instruction.name,
                         skipped.join(", "),
                         operand.name
+                    ),
+                ),
+            ));
+        }
+
+        // Dropping the high bits is sound exactly when the guard that selects
+        // this shape has already asked whether the operand survives the narrow
+        // field, which is what makes a short immediate form the same
+        // instruction as the long one.
+        let spelled = top as u16 + 1;
+        if spelled < width && !guard_proves_fit(&shape.guard, ctx, &operand.name, spelled) {
+            diags.push((
+                file_name.to_string(),
+                Rich::custom(
+                    instruction.span,
+                    format!(
+                        "encoding of instruction '{}' spells only bits {top}..{dropped} of \
+                         operand '{}'; a shape that drops the high bits needs a condition \
+                         proving they are an extension, e.g. sext({} as bits<{spelled}>, \
+                         {width}) == {}",
+                        instruction.name, operand.name, operand.name, operand.name
                     ),
                 ),
             ));
@@ -2527,15 +2555,31 @@ fn check_pc_single_shape(
     if shapes.len() < 2 {
         return vec![];
     }
+    let is_pc = |expr: &ast::Expr| {
+        matches!(expr, ast::Expr::Path(path)
+            if matches!(item_cache.get(path.base.as_str()),
+                        Some(ast::Item::RegisterClass(class)) if class.is_program_counter()))
+    };
+    // Writing the program counter is fine — `jmp *reg` sets it from a register
+    // whatever the encoding looks like. Reading it is not: the value an
+    // instruction computes from it counts its own bytes, and the shape decides
+    // how many those are. A read is any mention outside an assignment's
+    // destination, including one buried in a call argument (`store(sp, 8,
+    // PC::pc + 3)`).
+    let mut written: Vec<Span> = Vec::new();
+    crate::utils::visit_exprs(&instruction.behavior, &mut |node| {
+        if let ast::Expr::Assign(assign) = node {
+            written.push(expr_span(&assign.dest));
+        }
+    });
     let reads_pc = {
         let mut found = false;
         crate::utils::visit_exprs(&instruction.behavior, &mut |node| {
-            if let ast::Expr::Path(path) = node
-                && let Some(ast::Item::RegisterClass(class)) = item_cache.get(path.base.as_str())
-                && class.is_program_counter()
-            {
-                found = true;
-            }
+            let span = expr_span(node);
+            let destination = written
+                .iter()
+                .any(|dest| dest.start <= span.start && span.end <= dest.end);
+            found |= is_pc(node) && !destination;
         });
         found
     };
@@ -2558,6 +2602,39 @@ fn check_pc_single_shape(
 
 /// Which bits of `name` the encoding spells, low bit first, or `None` when the
 /// encoding does not carry the operand at all.
+/// Whether every way of reaching this shape asks that `operand` survives the
+/// `spelled` bits it spells of it. Each clause of the guard is one way, so each
+/// has to make the test itself.
+fn guard_proves_fit(
+    guard: &crate::shapes::Guard,
+    ctx: &crate::shapes::Context,
+    operand: &str,
+    spelled: u16,
+) -> bool {
+    fn proves(predicate: &crate::shapes::Predicate, operand: &str, spelled: u16) -> bool {
+        use crate::shapes::Predicate;
+        match predicate {
+            Predicate::Fits {
+                op, bits, signed, ..
+            } => op == operand && (*bits == spelled || (!signed && *bits <= spelled)),
+            // Every conjunct holds, so any one of them proving it is enough.
+            Predicate::And(parts) => parts.iter().any(|part| proves(part, operand, spelled)),
+            // `if ~fits { wide } else { narrow }` reaches the narrow shape with
+            // the negation taken.
+            Predicate::Not(inner) => match &**inner {
+                Predicate::Not(inner) => proves(inner, operand, spelled),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+    guard.0.iter().all(|clause| {
+        let clause = crate::shapes::Guard(vec![clause.clone()]);
+        crate::shapes::lower_guard(&clause, ctx)
+            .is_ok_and(|predicate| proves(&predicate, operand, spelled))
+    })
+}
+
 fn covered_bits(encoding: &[ast::EncodingField], name: &str, width: u16) -> Option<Vec<bool>> {
     let mut covered = vec![false; usize::from(width)];
     let mut carried = false;
@@ -2569,6 +2646,7 @@ fn covered_bits(encoding: &[ast::EncodingField], name: &str, width: u16) -> Opti
         let (lo, hi) = match &field.value {
             ast::Expr::Slice(slc) => (slc.lo, slc.hi),
             ast::Expr::IndexAccess(idx) => (idx.index, idx.index),
+            ast::Expr::Cast(_) => (0, field.width.saturating_sub(1)),
             _ => (0, width.saturating_sub(1)),
         };
         for bit in lo..=hi {

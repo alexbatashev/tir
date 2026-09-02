@@ -478,12 +478,21 @@ pub fn verify_smt(sh: &Shell, isa: &str, args: impl Iterator<Item = String>) -> 
         selected.push(instr);
     }
 
-    for instr in selected {
+    for instr in &selected {
         let (instruction_report, timing, line) =
             verify_instruction(&tools, spec, &out_dir, &inventory.flat, instr)?;
         println!("{line}");
         report.merge(instruction_report);
         report.instructions.push(timing);
+    }
+
+    // What an encoding owes its decoder, whichever shape it took: the word the
+    // instruction encodes to reads back as that instruction.
+    for instr in &selected {
+        match prove_roundtrip(&tools, &out_dir, &smt_path, instr)? {
+            true => report.roundtrip_proved.push(instr.name.clone()),
+            false => report.roundtrip_open.push(instr.name.clone()),
+        }
     }
     report.wall_ms = started.elapsed().as_millis();
 
@@ -495,6 +504,14 @@ pub fn verify_smt(sh: &Shell, isa: &str, args: impl Iterator<Item = String>) -> 
         anyhow::bail!(
             "SMT equivalence check found {} divergence(s)",
             report.failed
+        );
+    }
+    let uncovered = report.uncovered_shapes();
+    if !uncovered.is_empty() {
+        anyhow::bail!(
+            "{} encoding shape(s) came out of no verified case: {}",
+            uncovered.len(),
+            uncovered.join(", ")
         );
     }
     Ok(())
@@ -679,8 +696,18 @@ struct Instruction {
     uses_reservation: bool,
     pc_source_operands: Vec<usize>,
     memory_accesses: Vec<MemoryAccessMetadata>,
-    encoding: Vec<EncodingField>,
+    /// The fixed bit maps this instruction encodes to, each with the guard over
+    /// the operands that selects it. Every ISA but x86 has exactly one.
+    shapes: Vec<Shape>,
     flat_execute: Option<HashMap<String, String>>,
+}
+
+#[derive(Clone, Debug)]
+struct Shape {
+    name: String,
+    width_bits: u32,
+    guard: tmdl::shapes::Predicate,
+    encoding: Vec<EncodingField>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -719,8 +746,16 @@ struct RawInstruction {
     pc_source_operands: Vec<usize>,
     memory_accesses: Vec<MemoryAccessMetadata>,
     trap_kinds: Vec<String>,
-    encoding: Vec<RawEncodingField>,
+    shapes: Vec<RawShape>,
     flat_execute: Option<HashMap<String, String>>,
+}
+
+#[derive(Deserialize)]
+struct RawShape {
+    name: String,
+    width_bits: u32,
+    guard: tmdl::shapes::Predicate,
+    fields: Vec<RawEncodingField>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -760,8 +795,29 @@ struct RawEncodingField {
 }
 
 impl Instruction {
-    fn width_bytes(&self) -> u32 {
-        self.width_bits / 8
+    /// The shape an operand tuple encodes to: the first whose guard holds, as
+    /// the encoder picks it. The guards partition the operand domain, so
+    /// "first" only decides which of two equal answers is taken.
+    fn shape_for(&self, case: &[u64]) -> Option<&Shape> {
+        let value = |name: &str| {
+            self.operands
+                .iter()
+                .position(|(operand, _)| operand == name)
+                .and_then(|index| case.get(index).copied())
+                .unwrap_or(0)
+        };
+        self.shapes
+            .iter()
+            .find(|shape| shape.guard.holds(&value))
+            .or(self.shapes.first())
+    }
+
+    /// The bytes one operand tuple encodes to. Shapes differ in width, and the
+    /// program counter moves by the one the encoder picked, not by the widest.
+    fn width_bytes(&self, case: &[u64]) -> u32 {
+        self.shape_for(case)
+            .map_or(self.width_bits, |shape| shape.width_bits)
+            / 8
     }
 }
 
@@ -812,27 +868,39 @@ fn parse_inventory(json: &str) -> anyhow::Result<Inventory> {
                     Ok((operand.name, kind))
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
-            let encoding = raw
-                .encoding
+            let shapes = raw
+                .shapes
                 .into_iter()
-                .map(|field| {
-                    let operand_index = field
-                        .operand
-                        .map(|name| {
-                            operands
-                                .iter()
-                                .position(|(operand, _)| operand == &name)
-                                .ok_or_else(|| {
-                                    anyhow!("encoding references unknown operand {name}")
+                .map(|shape| {
+                    let encoding = shape
+                        .fields
+                        .into_iter()
+                        .map(|field| {
+                            let operand_index = field
+                                .operand
+                                .map(|name| {
+                                    operands
+                                        .iter()
+                                        .position(|(operand, _)| operand == &name)
+                                        .ok_or_else(|| {
+                                            anyhow!("encoding references unknown operand {name}")
+                                        })
                                 })
+                                .transpose()?;
+                            Ok(EncodingField {
+                                word_low: field.word_low,
+                                word_high: field.word_high,
+                                operand_index,
+                                operand_low: field.operand_low,
+                                value: field.value.parse()?,
+                            })
                         })
-                        .transpose()?;
-                    Ok(EncodingField {
-                        word_low: field.word_low,
-                        word_high: field.word_high,
-                        operand_index,
-                        operand_low: field.operand_low,
-                        value: field.value.parse()?,
+                        .collect::<anyhow::Result<Vec<_>>>()?;
+                    Ok(Shape {
+                        name: shape.name,
+                        width_bits: shape.width_bits,
+                        guard: shape.guard,
+                        encoding,
                     })
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
@@ -846,7 +914,7 @@ fn parse_inventory(json: &str) -> anyhow::Result<Inventory> {
                 uses_reservation: raw.uses_reservation,
                 pc_source_operands: raw.pc_source_operands,
                 memory_accesses: raw.memory_accesses,
-                encoding,
+                shapes,
                 flat_execute: raw.flat_execute,
             })
         })
@@ -1000,15 +1068,6 @@ fn operand_case_is_valid(spec: &IsaSpec, instr: &Instruction, case: &[u64]) -> b
         ("riscv32", "cshiftleftlogicalimm") => value(0) != 0 && value(1) < 32,
         (name, "cshiftleftlogicalimm") if name.starts_with("riscv") => value(0) != 0,
         (name, "cloadwordsp" | "cloaddoublesp") if name.starts_with("riscv") => value(0) != 0,
-        (
-            "x86_64",
-            "movload" | "mov32load" | "movsxdload" | "movsx8load" | "movsx16load" | "movzx8load"
-            | "movzx16load",
-        ) => !matches!(value(1) & 7, 4 | 5),
-        ("x86_64", "movstore" | "mov32store" | "mov16store" | "mov8store") => {
-            !matches!(value(0) & 7, 4 | 5)
-        }
-        ("x86_64", "movstoredisp") => value(0) & 7 != 4,
         _ => true,
     }
 }
@@ -1058,14 +1117,19 @@ fn encode_words(instr: &Instruction, cases: &[Vec<u64>]) -> Vec<u128> {
     cases
         .iter()
         .map(|case| {
-            instr.encoding.iter().fold(0u128, |word, field| {
-                let width = field.word_high - field.word_low + 1;
-                let source = field
-                    .operand_index
-                    .map_or(field.value, |index| u128::from(case[index]));
-                let piece = (source >> field.operand_low) & bit_mask(width);
-                word | (piece << field.word_low)
-            })
+            instr
+                .shape_for(case)
+                .map(|shape| shape.encoding.as_slice())
+                .unwrap_or_default()
+                .iter()
+                .fold(0u128, |word, field| {
+                    let width = field.word_high - field.word_low + 1;
+                    let source = field
+                        .operand_index
+                        .map_or(field.value, |index| u128::from(case[index]));
+                    let piece = (source >> field.operand_low) & bit_mask(width);
+                    word | (piece << field.word_low)
+                })
         })
         .collect()
 }
@@ -1074,12 +1138,17 @@ fn encode_words(instr: &Instruction, cases: &[Vec<u64>]) -> Vec<u128> {
 /// equivalence check uses what the encoding can express: lossy immediate
 /// fields drop bits (branch immediates force bit 0, ARM unsigned-offset
 /// loads/stores store the byte offset scaled down by the access size).
-fn decode_operands(instr: &Instruction, words: &[u128]) -> Vec<Vec<u64>> {
-    words
+fn decode_operands(instr: &Instruction, cases: &[Vec<u64>], words: &[u128]) -> Vec<Vec<u64>> {
+    cases
         .iter()
-        .map(|word| {
+        .zip(words)
+        .map(|(case, word)| {
             let mut operands = vec![0u64; instr.operands.len()];
-            for field in &instr.encoding {
+            let shape = instr.shape_for(case);
+            let fields = shape
+                .map(|shape| shape.encoding.as_slice())
+                .unwrap_or_default();
+            for field in fields {
                 let Some(index) = field.operand_index else {
                     continue;
                 };
@@ -1087,9 +1156,257 @@ fn decode_operands(instr: &Instruction, words: &[u128]) -> Vec<Vec<u64>> {
                 let piece = (word >> field.word_low) & bit_mask(width);
                 operands[index] |= (piece << field.operand_low) as u64;
             }
+            // Bits the shape leaves out of the word are the ones its guard
+            // pins: a base register the SIB byte names by a fixed pattern is
+            // one, and the guard says which.
+            for (index, (name, _)) in instr.operands.iter().enumerate() {
+                let covered: u64 = fields
+                    .iter()
+                    .filter(|field| field.operand_index == Some(index))
+                    .map(|field| {
+                        let width = field.word_high - field.word_low + 1;
+                        (bit_mask(width) << field.operand_low) as u64
+                    })
+                    .fold(0, |acc, mask| acc | mask);
+                if let Some(shape) = shape {
+                    for (lo, hi, value) in slice_constraints(&shape.guard, name) {
+                        let mask = (bit_mask(hi - lo + 1) << lo) as u64;
+                        operands[index] |= (value as u64) << lo & mask & !covered;
+                    }
+                }
+            }
+            // A shape the guard picked because the value fits a narrow field
+            // spells only that field. The bits it left out are the extension of
+            // the ones it spelled, which is how the hardware reads the word
+            // back, so the case the model is checked against carries them.
+            for (index, (name, kind)) in instr.operands.iter().enumerate() {
+                let OperandKind::Bits(declared, _) = kind else {
+                    continue;
+                };
+                let carried = fields
+                    .iter()
+                    .filter(|field| field.operand_index == Some(index))
+                    .map(|field| field.operand_low + field.word_high - field.word_low + 1)
+                    .max()
+                    .unwrap_or(0);
+                if carried == 0 || carried >= *declared {
+                    continue;
+                }
+                let signed = shape.is_some_and(|shape| signed_fit(&shape.guard, name, carried));
+                if signed && operands[index] & (1 << (carried - 1)) != 0 {
+                    operands[index] |= (!bit_mask(carried) & bit_mask(*declared)) as u64;
+                }
+            }
             operands
         })
         .collect()
+}
+
+/// The `x[hi..lo] == k` tests the guard makes of `operand`, which fix those
+/// bits for every operand tuple the shape covers.
+fn slice_constraints(guard: &tmdl::shapes::Predicate, operand: &str) -> Vec<(u32, u32, u128)> {
+    use tmdl::shapes::Predicate;
+    match guard {
+        Predicate::SliceEq { op, lo, hi, value } if op == operand => {
+            vec![(u32::from(*lo), u32::from(*hi), *value)]
+        }
+        // Only a conjunction pins bits: one arm of a disjunction does not.
+        Predicate::And(parts) => parts
+            .iter()
+            .flat_map(|part| slice_constraints(part, operand))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// An operand tuple the guard of `shape` accepts, built from `base` by making
+/// each test the guard makes come out the way that shape needs. Breaking a
+/// disjunction means choosing which arm to break, and an arm a sibling test
+/// needs back is a dead end, so every combination of those choices is tried.
+/// `None` when a test is one this cannot arrange, or when no combination lands
+/// in `shape`.
+fn case_reaching(instr: &Instruction, shape: &Shape, base: &[u64]) -> Option<Vec<u64>> {
+    (0..CHOICE_LIMIT).find_map(|choices| {
+        let mut case = base.to_vec();
+        let mut choices = Choices(choices);
+        satisfy(&shape.guard, instr, &mut case, true, &mut choices)?;
+        // The guard has to hold outright: `shape_for` falls back to the first
+        // shape when none does. And the encoder takes the first shape whose
+        // guard holds, so a tuple an earlier shape also accepts is not a tuple
+        // that reaches this one.
+        (shape.guard.holds(&reader(instr, &case)) && case_admitted(instr, &case)).then_some(())?;
+        instr
+            .shape_for(&case)
+            .filter(|held| std::ptr::eq(*held, shape))?;
+        Some(case)
+    })
+}
+
+/// Reads an operand out of `case` by name, the way a guard asks for it.
+fn reader<'a>(instr: &'a Instruction, case: &'a [u64]) -> impl Fn(&str) -> u64 + 'a {
+    move |name: &str| {
+        instr
+            .operands
+            .iter()
+            .position(|(operand, _)| operand == name)
+            .and_then(|slot| case.get(slot).copied())
+            .unwrap_or(0)
+    }
+}
+
+/// Whether every operand of `case` holds a value its declaration admits. The
+/// sampled cases go through the same test, so a synthesized one that skipped it
+/// would put the instruction through an operand it does not have.
+fn case_admitted(instr: &Instruction, case: &[u64]) -> bool {
+    instr
+        .operands
+        .iter()
+        .zip(case)
+        .all(|((_, kind), value)| match kind {
+            OperandKind::Reg { .. } => true,
+            OperandKind::Int(constraint) => constraint.admitted(*value) == Some(*value),
+            OperandKind::Bits(width, constraint) => {
+                constraint.admitted(*value) == Some(*value)
+                    && *value & !(bit_mask(*width) as u64) == 0
+            }
+        })
+}
+
+/// How many combinations of branch choices `case_reaching` tries. Guards on
+/// this side of a machine model nest a handful of tests deep, and a walk that
+/// needs more than this is one to write a case for by hand.
+const CHOICE_LIMIT: u64 = 4096;
+
+/// Which arm to take at each choice point, read off one number a digit at a
+/// time, so counting from zero walks every combination.
+struct Choices(u64);
+
+impl Choices {
+    fn pick(&mut self, arity: usize) -> usize {
+        if arity == 0 {
+            return 0;
+        }
+        let arity = arity as u64;
+        let taken = self.0 % arity;
+        self.0 /= arity;
+        taken as usize
+    }
+}
+
+/// Move `case` to where `predicate` takes the value `want`.
+fn satisfy(
+    predicate: &tmdl::shapes::Predicate,
+    instr: &Instruction,
+    case: &mut [u64],
+    want: bool,
+    choices: &mut Choices,
+) -> Option<()> {
+    use tmdl::shapes::{CmpOp, Predicate};
+    let index = |op: &str| instr.operands.iter().position(|(name, _)| name == op);
+    // A test the tuple already answers the wanted way is a test to leave alone:
+    // moving an operand for it would undo the work of a neighbouring test.
+    if predicate.holds(&reader(instr, case)) == want {
+        return Some(());
+    }
+    match predicate {
+        Predicate::Always => want.then_some(()),
+        Predicate::Not(inner) => satisfy(inner, instr, case, !want, choices),
+        // Every conjunct has to hold; to break the conjunction, breaking any
+        // one is enough, and which one is a choice.
+        Predicate::And(parts) if want => parts
+            .iter()
+            .try_for_each(|part| satisfy(part, instr, case, true, choices)),
+        Predicate::And(parts) => satisfy(
+            parts.get(choices.pick(parts.len()))?,
+            instr,
+            case,
+            false,
+            choices,
+        ),
+        Predicate::Or(parts) if want => satisfy(
+            parts.get(choices.pick(parts.len()))?,
+            instr,
+            case,
+            true,
+            choices,
+        ),
+        Predicate::Or(parts) => parts
+            .iter()
+            .try_for_each(|part| satisfy(part, instr, case, false, choices)),
+        Predicate::Bit { op, bit } => {
+            let slot = &mut case[index(op)?];
+            match want {
+                true => *slot |= 1 << bit,
+                false => *slot &= !(1 << bit),
+            }
+            Some(())
+        }
+        Predicate::SliceEq { op, lo, hi, value } => {
+            let slot = &mut case[index(op)?];
+            let mask = (bit_mask(u32::from(hi - lo + 1)) << lo) as u64;
+            let value = ((*value << lo) as u64) & mask;
+            *slot = match want {
+                true => (*slot & !mask) | value,
+                // Any other pattern of those bits will do.
+                false => (*slot & !mask) | ((value ^ mask) & mask),
+            };
+            Some(())
+        }
+        Predicate::Cmp {
+            op,
+            cmp_width,
+            cmp,
+            value,
+            ..
+        } => {
+            let slot = &mut case[index(op)?];
+            let mask = bit_mask(u32::from(*cmp_width)) as u64;
+            let value = (*value as u64) & mask;
+            let hit = match (cmp, want) {
+                (CmpOp::Eq, true) | (CmpOp::Ne, false) => value,
+                (CmpOp::Eq, false) | (CmpOp::Ne, true) => value.wrapping_add(1) & mask,
+                (CmpOp::Lt | CmpOp::ULt, true) | (CmpOp::Ge | CmpOp::UGe, false) => {
+                    value.checked_sub(1)? & mask
+                }
+                (CmpOp::Le | CmpOp::ULe, true) | (CmpOp::Gt | CmpOp::UGt, false) => value,
+                (CmpOp::Gt | CmpOp::UGt, true) | (CmpOp::Le | CmpOp::ULe, false) => {
+                    value.wrapping_add(1) & mask
+                }
+                (CmpOp::Ge | CmpOp::UGe, true) | (CmpOp::Lt | CmpOp::ULt, false) => value,
+            };
+            *slot = hit;
+            Some(())
+        }
+        Predicate::Fits { op, bits, .. } => {
+            let slot = &mut case[index(op)?];
+            *slot = match want {
+                // The largest value the narrow field holds.
+                true => bit_mask(u32::from(bits.checked_sub(1)?)) as u64,
+                // One bit past it, which the field cannot hold either way.
+                false => 1u64.checked_shl(u32::from(*bits))?,
+            };
+            Some(())
+        }
+    }
+}
+
+/// Whether the guard asks that `operand` survives `bits` bits as a signed
+/// value, which is what makes the bits the shape drops recoverable.
+fn signed_fit(guard: &tmdl::shapes::Predicate, operand: &str, bits: u32) -> bool {
+    use tmdl::shapes::Predicate;
+    match guard {
+        Predicate::Fits {
+            op,
+            bits: n,
+            signed,
+            ..
+        } => *signed && op == operand && u32::from(*n) == bits,
+        Predicate::And(parts) | Predicate::Or(parts) => {
+            parts.iter().any(|part| signed_fit(part, operand, bits))
+        }
+        Predicate::Not(inner) => signed_fit(inner, operand, bits),
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1115,8 +1432,7 @@ fn cache_fingerprint(tools: &Tools) -> u64 {
 fn sail_traces(
     tools: &Tools,
     out_dir: &Path,
-    instr: &Instruction,
-    words: &[u128],
+    words: &[(u128, u32)],
 ) -> anyhow::Result<HashMap<u128, Option<Vec<Vec<tir_verify::TraceEvent>>>>> {
     let fingerprint = cache_fingerprint(tools);
     let cache_path = |word| {
@@ -1126,7 +1442,8 @@ fn sail_traces(
     };
     let mut result = HashMap::new();
     let mut missing = Vec::new();
-    for &word in words {
+    let mut widths = Vec::new();
+    for &(word, width) in words {
         if result.contains_key(&word) {
             continue;
         }
@@ -1134,11 +1451,13 @@ fn sail_traces(
             Ok(json) => {
                 result.insert(word, Some(serde_json::from_slice(&json)?));
             }
-            Err(_) => missing.push(word),
+            Err(_) => {
+                missing.push(word);
+                widths.push(width);
+            }
         }
     }
     if !missing.is_empty() {
-        let widths = vec![instr.width_bits; missing.len()];
         let mut executed = tools.verifier.execute(&missing, &widths)?;
         for word in missing {
             let traces = executed.remove(&word);
@@ -1539,7 +1858,7 @@ fn build_query(
     // Fixed-width ISAs align the PC to the concrete instruction width. x86
     // pins the PC to a concrete aligned value in its config instead.
     if spec.align_pc {
-        let alignment_bits = instr.width_bytes().trailing_zeros();
+        let alignment_bits = instr.width_bytes(case).trailing_zeros();
         if alignment_bits > 0 {
             let _ = writeln!(
                 q,
@@ -1574,7 +1893,7 @@ fn build_query(
     } else {
         // Registers feeding an indirect jump obey the target instruction
         // alignment, so misaligned-fetch trap paths are vacuous.
-        let alignment_bits = instr.width_bytes().trailing_zeros();
+        let alignment_bits = instr.width_bytes(case).trailing_zeros();
         for &i in &instr.pc_source_operands {
             if let OperandKind::Reg { class, idx_width } = &instr.operands[i].1 {
                 let reg = flat_read_register(
@@ -1600,7 +1919,7 @@ fn build_query(
         q.push('\n');
     }
     let gw = spec.gpr_idx_width();
-    let width_bytes = instr.width_bytes();
+    let width_bytes = instr.width_bytes(case);
     let slot_access = |i: usize, state: &str| {
         let (_, class, slot, w) = spec.extra_regs[i];
         flat_read_register(model, class, state, &format!("(_ bv{} {})", slot, w))
@@ -1828,6 +2147,11 @@ struct Report {
     excluded_paths: usize,
     excluded_reasons: HashMap<String, usize>,
     unsupported: Vec<String>,
+    /// Instructions whose encoding is proved to decode back to itself, and
+    /// those where the solver could not show it. Two instructions with the same
+    /// bytes land in the second list: the word cannot say which one it was.
+    roundtrip_proved: Vec<String>,
+    roundtrip_open: Vec<String>,
     failures: Vec<String>,
     instructions: Vec<InstructionTiming>,
 }
@@ -1853,11 +2177,31 @@ impl Report {
         self.failures.append(&mut other.failures);
     }
 
+    /// The shapes no operand tuple verified. Each is an encoding of a real
+    /// instruction that nothing here checked, so the job does not pass with one
+    /// outstanding.
+    fn uncovered_shapes(&self) -> Vec<&str> {
+        self.instructions
+            .iter()
+            .flat_map(|timing| timing.shape_cases.iter())
+            .filter(|(_, cases)| *cases == 0)
+            .map(|(shape, _)| shape.as_str())
+            .collect()
+    }
+
     fn print(&self) {
         println!("\n=== TMDL vs Sail SMT equivalence ===");
         println!("verified paths:  {}", self.verified);
         println!("divergences:     {}", self.failed);
         println!("solver unknown:  {}", self.unknown);
+        println!(
+            "round trips:     {} proved, {} open",
+            self.roundtrip_proved.len(),
+            self.roundtrip_open.len()
+        );
+        if !self.roundtrip_open.is_empty() {
+            println!("  open: {}", self.roundtrip_open.join(", "));
+        }
         println!(
             "excluded paths:  {} (outside the machine-mode/no-trap assumptions)",
             self.excluded_paths
@@ -1866,6 +2210,16 @@ impl Report {
         reasons.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
         for (reason, n) in reasons {
             println!("  {:5}x {}", n, reason);
+        }
+        let shapes: usize = self.instructions.iter().map(|t| t.shape_cases.len()).sum();
+        let uncovered = self.uncovered_shapes();
+        println!(
+            "encoding shapes: {} verified, {} unchecked",
+            shapes - uncovered.len(),
+            uncovered.len()
+        );
+        if !uncovered.is_empty() {
+            println!("  unchecked: {}", uncovered.join(", "));
         }
         if !self.unsupported.is_empty() {
             println!(
@@ -1883,6 +2237,9 @@ impl Report {
 struct InstructionTiming {
     instruction: String,
     cases: usize,
+    /// Cases per encoding shape whose paths the solver agreed with. A zero
+    /// here is a shape nothing verified.
+    shape_cases: Vec<(String, usize)>,
     paths: usize,
     encode_ms: u128,
     decode_ms: u128,
@@ -1908,19 +2265,57 @@ fn verify_instruction(
         .into_iter()
         .filter(|case| operand_case_is_valid(spec, instr, case))
         .collect::<Vec<_>>();
+    // A shape the sampled cases never reach is a shape nothing verifies, so
+    // each one that comes up empty gets a case built to satisfy its guard.
+    let mut cases = cases;
+    for shape in &instr.shapes {
+        let covered = cases.iter().any(|case| {
+            instr
+                .shape_for(case)
+                .is_some_and(|held| std::ptr::eq(held, shape))
+        });
+        if covered {
+            continue;
+        }
+        let Some(base) = cases.first() else { continue };
+        let Some(case) = case_reaching(instr, shape, base) else {
+            continue;
+        };
+        if operand_case_is_valid(spec, instr, &case) {
+            cases.push(case);
+        }
+    }
     timing.cases = cases.len();
+    // Which shape encodes each case, so the report can say what every shape
+    // came out of at the end.
+    let shape_of_case: Vec<Option<usize>> = cases
+        .iter()
+        .map(|case| {
+            let held = instr.shape_for(case)?;
+            instr
+                .shapes
+                .iter()
+                .position(|shape| std::ptr::eq(shape, held))
+        })
+        .collect();
+    let mut verified_by_case = vec![0usize; cases.len()];
     let started = Instant::now();
     let words = encode_words(instr, &cases);
     timing.encode_ms = started.elapsed().as_millis();
+    let word_widths: Vec<(u128, u32)> = cases
+        .iter()
+        .zip(&words)
+        .map(|(case, word)| (*word, instr.width_bytes(case) * 8))
+        .collect();
     let decode_started = Instant::now();
-    let cases = decode_operands(instr, &words);
+    let cases = decode_operands(instr, &cases, &words);
     timing.decode_ms = decode_started.elapsed().as_millis();
     let mut line = String::new();
     let isla_started = Instant::now();
-    let traces_by_word = sail_traces(tools, out_dir, instr, &words)?;
+    let traces_by_word = sail_traces(tools, out_dir, &word_widths)?;
     timing.isla_ms = isla_started.elapsed().as_millis();
 
-    for (case, word) in cases.iter().zip(&words) {
+    for (index, (case, word)) in cases.iter().zip(&words).enumerate() {
         let Some(traces) = traces_by_word.get(word).and_then(Option::as_ref) else {
             report.excluded_paths += 1;
             *report
@@ -2001,6 +2396,7 @@ fn verify_instruction(
                 line.push('-');
             } else if equivalence_status == Some("unsat") {
                 report.verified += 1;
+                verified_by_case[index] += 1;
                 line.push('.');
             } else if equivalence_status == Some("sat") {
                 report.failed += 1;
@@ -2026,6 +2422,23 @@ fn verify_instruction(
             }
         }
     }
+    // Every shape is its own encoding of the instruction, so the report counts
+    // the cases each one came out of that the solver agreed with. Reaching a
+    // shape is not verifying it: a case whose word Isla could not run leaves
+    // its shape as unchecked as no case at all.
+    timing.shape_cases = instr
+        .shapes
+        .iter()
+        .enumerate()
+        .map(|(index, shape)| {
+            let verified = shape_of_case
+                .iter()
+                .zip(&verified_by_case)
+                .filter(|(held, paths)| **held == Some(index) && **paths > 0)
+                .count();
+            (shape.name.clone(), verified)
+        })
+        .collect();
     timing.total_ms = total_started.elapsed().as_millis();
     Ok((report, timing, format!("{:24}{}", instr.name, line)))
 }
@@ -2052,6 +2465,40 @@ fn run_z3(tools: &Tools, path: &Path) -> anyhow::Result<std::process::Output> {
         String::from_utf8_lossy(&second.stderr)
     );
     Ok(second)
+}
+
+/// Ask the solver whether `roundtrip_<instr>` holds for every operand tuple.
+/// The obligation is emitted by the SMT backend next to the model; a `sat`
+/// answer is an operand tuple whose word decodes to something else.
+fn prove_roundtrip(
+    tools: &Tools,
+    out_dir: &Path,
+    model: &Path,
+    instr: &Instruction,
+) -> anyhow::Result<bool> {
+    let mut query = std::fs::read_to_string(model)?;
+    let mut args = Vec::new();
+    for (name, kind) in &instr.operands {
+        let width = match kind {
+            OperandKind::Reg { idx_width, .. } => *idx_width,
+            _ => 64,
+        };
+        let _ = writeln!(query, "(declare-const rt_{name} (_ BitVec {width}))");
+        args.push(format!("rt_{name}"));
+    }
+    let call = match args.is_empty() {
+        true => format!("roundtrip_{}", instr.name),
+        false => format!("(roundtrip_{} {})", instr.name, args.join(" ")),
+    };
+    let _ = writeln!(query, "(assert (not {call}))\n(check-sat)");
+    let path = out_dir
+        .join("queries")
+        .join(format!("{}_roundtrip.smt2", instr.name));
+    std::fs::write(&path, query)?;
+    let output = run_solver(tools, &path)?;
+    Ok(solver_statuses(&output)
+        .last()
+        .is_some_and(|s| s == "unsat"))
 }
 
 fn solver_statuses(output: &std::process::Output) -> Vec<String> {
@@ -2170,10 +2617,13 @@ mod tests {
             "uses_reservation": false, "pc_source_operands": [],
             "memory_accesses": [{"kind": "load", "bytes": 4, "address": "(read_gpr st rd)", "flat_address": "(select st0_gpr rd)"}],
             "trap_kinds": ["misaligned_load"],
-            "encoding": [
-              {"word_low": 7, "word_high": 11, "operand": "rd", "operand_low": 0, "value": "0"},
-              {"word_low": 0, "word_high": 6, "operand": null, "operand_low": 0, "value": "3"}
-            ],
+            "shapes": [{
+              "name": "load", "width_bits": 32, "guard": "always",
+              "fields": [
+                {"word_low": 7, "word_high": 11, "operand": "rd", "operand_low": 0, "value": "0"},
+                {"word_low": 0, "word_high": 6, "operand": null, "operand_low": 0, "value": "3"}
+              ]
+            }],
             "execute": "(write_gpr st rd (_ bv0 64))",
             "flat_execute": {"gpr": "st0_gpr", "mem": "st0_mem", "resv": "st0_resv", "resa": "st0_resa", "pc": "st0_pc"}
           }]
@@ -2195,9 +2645,10 @@ mod tests {
             instruction.memory_accesses[0].flat_address,
             "(select st0_gpr rd)"
         );
-        let words = encode_words(instruction, &[vec![5, 0]]);
+        let cases = [vec![5, 0]];
+        let words = encode_words(instruction, &cases);
         assert_eq!(words, [5 << 7 | 3]);
-        assert_eq!(decode_operands(instruction, &words)[0][0], 5);
+        assert_eq!(decode_operands(instruction, &cases, &words)[0][0], 5);
     }
 
     // A boundary case the operand's `#[align]`/`#[nonzero]` exclude is not a
@@ -2261,7 +2712,7 @@ mod tests {
             uses_reservation: false,
             pc_source_operands: vec![],
             memory_accesses: vec![],
-            encoding: vec![],
+            shapes: vec![],
             flat_execute: Some(HashMap::new()),
         };
         let trace = analyze_trace(
