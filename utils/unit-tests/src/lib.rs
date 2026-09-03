@@ -121,6 +121,7 @@ mod core {
     mod encodings;
     mod fixtures;
     mod float;
+    mod instcombine;
     mod isel;
     mod isel_rules;
     mod layout;
