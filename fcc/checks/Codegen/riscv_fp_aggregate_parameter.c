@@ -1,6 +1,6 @@
-// RUN: fcc compile --march riscv64 --mabi lp64d --stage ir -o - %s | filecheck %s
-// RUN: fcc compile --march riscv64 --mabi lp64d --stage asm -o - %s | filecheck %s --check-prefix=ASM
-// RUN: fcc compile --march riscv64 --mabi lp64 --stage ir -o - %s | filecheck %s --check-prefix=SOFT
+// RUN: fcc compile -O2 --march riscv64 --mabi lp64d --stage ir -o - %s | filecheck %s
+// RUN: fcc compile -O2 --march riscv64 --mabi lp64d --stage asm -o - %s | filecheck %s --check-prefix=ASM
+// RUN: fcc compile -O2 --march riscv64 --mabi lp64 --stage ir -o - %s | filecheck %s --check-prefix=SOFT
 
 struct Scalar {
     double value;

@@ -1,7 +1,7 @@
-// RUN: fcc compile --stage obj --march riscv64 -o - %S/../Inputs/structs.c | tir readobj - | filecheck %s --check-prefix=RV
-// RUN: fcc compile --stage obj --march arm64 -o - %S/../Inputs/structs.c | tir readobj - | filecheck %s --check-prefix=A64
-// RUN: fcc compile --stage asm --march riscv64 -o - %S/../Inputs/structs.c | filecheck %s --check-prefix=RVASM
-// RUN: fcc compile --stage asm --march arm64 -o - %S/../Inputs/structs.c | filecheck %s --check-prefix=A64ASM
+// RUN: fcc compile -O2 --stage obj --march riscv64 -o - %S/../Inputs/structs.c | tir readobj - | filecheck %s --check-prefix=RV
+// RUN: fcc compile -O2 --stage obj --march arm64 -o - %S/../Inputs/structs.c | tir readobj - | filecheck %s --check-prefix=A64
+// RUN: fcc compile -O2 --stage asm --march riscv64 -o - %S/../Inputs/structs.c | filecheck %s --check-prefix=RVASM
+// RUN: fcc compile -O2 --stage asm --march arm64 -o - %S/../Inputs/structs.c | filecheck %s --check-prefix=A64ASM
 
 // RV: Machine: EM_RISCV (243)
 // RV: Symbol read:

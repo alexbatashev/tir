@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use super::actions::{DriverOptions, InputFile, StopPhase, build_actions};
+use super::actions::{DriverOptions, InputFile, OptLevel, StopPhase, build_actions};
 use super::exec::execute;
 use crate::lang_options::LangOptions;
 
@@ -62,6 +62,9 @@ pub struct CompileArgs {
     /// Report memory statistics on stderr, as `TIR_MEM_STATS=1` does.
     #[arg(long = "mem-report")]
     mem_report: bool,
+    /// Optimisation level: 0 (no mid-end round), 1, 2 or 3.
+    #[arg(short = 'O', value_name = "LEVEL", default_value_t = 0)]
+    opt_level: u8,
     /// Mid-end pass pipeline in MLIR-style syntax, e.g.
     /// `func.func(thread-state,instcombine)`. Replaces the default function
     /// pipeline; frontend lowering and the backend are unaffected.
@@ -147,6 +150,12 @@ pub(super) fn lower(args: CompileArgs) -> DriverOptions {
         lib_dirs: Vec::new(),
         libs: Vec::new(),
         pipeline: args.pipeline,
+        opt_level: match args.opt_level {
+            0 => OptLevel::O0,
+            1 => OptLevel::O1,
+            2 => OptLevel::O2,
+            _ => OptLevel::O3,
+        },
         shuffle_machine_order: args.shuffle_machine_order,
         dry_run: false,
     }

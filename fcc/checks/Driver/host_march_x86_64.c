@@ -1,5 +1,5 @@
 // REQUIRES: x86_64
-// RUN: fcc cc -S -o - %s | filecheck %s
+// RUN: fcc cc -O2 -S -o - %s | filecheck %s
 
 // Without -march, compiling targets the host architecture.
 

@@ -1,5 +1,5 @@
-// RUN: fcc compile --march arm64 --mabi aapcs64 --stage ir -o - %s | filecheck %s
-// RUN: fcc compile --march arm64 --mabi aapcs64 --stage asm -o - %s | filecheck %s --check-prefix=ASM
+// RUN: fcc compile -O2 --march arm64 --mabi aapcs64 --stage ir -o - %s | filecheck %s
+// RUN: fcc compile -O2 --march arm64 --mabi aapcs64 --stage asm -o - %s | filecheck %s --check-prefix=ASM
 
 struct Large {
     long values[3];

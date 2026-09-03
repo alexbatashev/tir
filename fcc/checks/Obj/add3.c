@@ -1,6 +1,6 @@
-// RUN: fcc compile --stage obj --march riscv64 -o - %S/../Inputs/add3.c | tir readobj - | filecheck %s
-// RUN: fcc compile --stage obj --march arm64 -o - %S/../Inputs/add3.c | tir readobj - | filecheck %s --check-prefix=A64
-// RUN: fcc compile --stage asm --march riscv64 -o - %S/../Inputs/add3.c | filecheck %s --check-prefix=ASM
+// RUN: fcc compile -O2 --stage obj --march riscv64 -o - %S/../Inputs/add3.c | tir readobj - | filecheck %s
+// RUN: fcc compile -O2 --stage obj --march arm64 -o - %S/../Inputs/add3.c | tir readobj - | filecheck %s --check-prefix=A64
+// RUN: fcc compile -O2 --stage asm --march riscv64 -o - %S/../Inputs/add3.c | filecheck %s --check-prefix=ASM
 
 // The bare riscv64 march enables the generic everything-on profile, so the
 // return sequence compresses to the 2-byte c.jr.

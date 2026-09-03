@@ -4,7 +4,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use super::actions::{DriverOptions, InputFile, StopPhase, build_actions};
+use super::actions::{DriverOptions, InputFile, OptLevel, StopPhase, build_actions};
 use super::exec::execute;
 use crate::lang_options::LangOptions;
 
@@ -66,6 +66,7 @@ where
     let mut lib_dirs = Vec::new();
     let mut libs = Vec::new();
     let mut dry_run = false;
+    let mut opt_level = OptLevel::O0;
     let mut warned = HashSet::new();
 
     let mut i = 0;
@@ -99,6 +100,8 @@ where
             mcpu = Some(value.to_string());
         } else if let Some(value) = arg.strip_prefix("-mabi=") {
             mabi = Some(value.to_string());
+        } else if arg.starts_with("-O") {
+            opt_level = opt_level_of(arg, &mut warned);
         } else if is_value_taking_warn(arg) {
             warn_once(&mut warned, arg);
             if arg == "-MF" || arg == "-MT" || arg == "-MQ" {
@@ -137,6 +140,7 @@ where
         lib_dirs,
         libs,
         pipeline: None,
+        opt_level,
         shuffle_machine_order: false,
         dry_run,
     })
@@ -173,9 +177,34 @@ fn is_value_taking_warn(arg: &str) -> bool {
     arg.starts_with("-MF") || arg.starts_with("-MT") || arg.starts_with("-MQ")
 }
 
+/// The level a `-O` spelling selects. `-Os`, `-Oz` and a bare `-O` are `-O2`
+/// until code size is a KPI of its own; `-Ofast` is `-O3` without its
+/// arithmetic licences, which TIR does not take.
+fn opt_level_of(arg: &str, warned: &mut HashSet<String>) -> OptLevel {
+    match arg {
+        "-O0" => OptLevel::O0,
+        "-O1" => OptLevel::O1,
+        "-O2" => OptLevel::O2,
+        "-O3" => OptLevel::O3,
+        "-Ofast" => {
+            warn_aliased(warned, arg, "-O3");
+            OptLevel::O3
+        }
+        _ => {
+            warn_aliased(warned, arg, "-O2");
+            OptLevel::O2
+        }
+    }
+}
+
+fn warn_aliased(warned: &mut HashSet<String>, arg: &str, level: &str) {
+    if warned.insert(arg.to_string()) {
+        eprintln!("fcc: warning: treating '{arg}' as '{level}'");
+    }
+}
+
 fn is_ignored_flag(arg: &str) -> bool {
     matches!(arg, "-pipe" | "-pthread")
-        || arg.starts_with("-O")
         || arg.starts_with("-g")
         || arg.starts_with("-W")
         || arg.starts_with("-f")

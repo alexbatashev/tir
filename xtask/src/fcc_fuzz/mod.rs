@@ -30,20 +30,20 @@ use harness::{FccVariant, Outcome};
 /// neutral orderings of the registered passes; a correct compiler must give
 /// identical behavior under each.
 const EXTRA_PIPELINES: [&str; 4] = [
-    "func.func(promote,thread-state,instcombine,affine,instcombine)",
-    "func.func(promote,thread-state,affine,instcombine)",
-    "func.func(promote,thread-state,instcombine,instcombine)",
+    "func.func(promote),fixpoint<3>(func.func(thread-state,instcombine,affine,instcombine))",
+    "func.func(promote),fixpoint<3>(func.func(thread-state,affine,instcombine))",
+    "func.func(promote),fixpoint<3>(func.func(thread-state,instcombine,instcombine))",
     // Scheduling with nothing folded before it and nothing after: the rebuilt
     // nest has to be right on its own, not because a later pass tidied it.
-    "func.func(promote,thread-state,affine)",
+    "func.func(promote),fixpoint<3>(func.func(thread-state,affine))",
 ];
 
 /// The pipeline that proves the state edges are the whole memory order: every
 /// block is re-linearized by another topological order of the value and state
 /// DAG, once on the threaded IR and once more on what the optimizers left. A
 /// divergence under it is an edge the threader did not draw.
-const SHUFFLE_PIPELINE: &str = "func.func(promote,thread-state,shuffle-state,instcombine,\
-                                shuffle-state,affine,shuffle-state)";
+const SHUFFLE_PIPELINE: &str = "func.func(promote),fixpoint<3>(func.func(thread-state,\
+                                shuffle-state,instcombine,shuffle-state,affine,shuffle-state))";
 
 const CORPUS_DIRS: [&str; 3] = ["fcc/checks", "fcc/tests", "utils/unit-tests/src/fcc/corpus"];
 
@@ -179,7 +179,7 @@ fn reproduce_command(seed: u64, reduced: &triage::Reduced) -> String {
     format!(
         "cargo xtask fcc-fuzz --seed {seed} --iterations 1\n\n\
          # ...or straight at the minimal case above, saved as case.c:\n\
-         fcc compile --stage obj --march x86_64{flags} -o case.o case.c"
+         fcc compile -O2 --stage obj --march x86_64{flags} -o case.o case.c"
     )
 }
 
@@ -350,7 +350,7 @@ fn run_corpus(
 
 fn corpus_reproduce_command(path: &str, reduced: &triage::Reduced) -> String {
     let flags = fcc_flags(&reduced.variant);
-    format!("fcc compile --stage obj --march x86_64{flags} -o case.o {path}")
+    format!("fcc compile -O2 --stage obj --march x86_64{flags} -o case.o {path}")
 }
 
 /// Corpus paths are reported relative to the checkout so they are clickable;

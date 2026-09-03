@@ -154,6 +154,7 @@ fn run_compile(
         command
             .args([
                 "compile",
+                "-O2",
                 "-std=gnu17",
                 "--stage",
                 "asm",

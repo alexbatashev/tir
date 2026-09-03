@@ -1,4 +1,4 @@
-// RUN: fcc compile --stage asm --march x86_64 -o - %s | filecheck %s
+// RUN: fcc compile -O2 --stage asm --march x86_64 -o - %s | filecheck %s
 
 // The shape that used to make instruction selection quadratic: an `||` chain and
 // a dense switch, one guarded arm per test. The facts are the mid-end's now — an

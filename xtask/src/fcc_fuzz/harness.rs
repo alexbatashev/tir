@@ -209,7 +209,7 @@ fn compile_and_run(
             let object = work_dir.join(format!("{stem}-{tag}.o"));
             let mut compile = Command::new(fcc);
             compile
-                .args(["compile", "--stage", "obj", "--march", "x86_64"])
+                .args(["compile", "-O2", "--stage", "obj", "--march", "x86_64"])
                 .arg("-o")
                 .arg(&object)
                 .args(spec.args());
