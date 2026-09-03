@@ -4,6 +4,46 @@ use std::path::{Path, PathBuf};
 
 use crate::lang_options::LangOptions;
 
+/// What `-O<n>` selects. The level is read in exactly one place — the row it
+/// names in [`OptLevel::rounds`] — so nothing downstream branches on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OptLevel {
+    #[default]
+    O0,
+    O1,
+    O2,
+    O3,
+}
+
+/// The mid-end a level asks for: how many times a round may repeat, and
+/// whether loop scheduling is part of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rounds {
+    pub cap: u8,
+    pub affine: bool,
+}
+
+impl OptLevel {
+    /// The row for this level, or `None` where the level runs no round at all.
+    pub fn rounds(self) -> Option<Rounds> {
+        match self {
+            OptLevel::O0 => None,
+            OptLevel::O1 => Some(Rounds {
+                cap: 1,
+                affine: false,
+            }),
+            OptLevel::O2 => Some(Rounds {
+                cap: 3,
+                affine: true,
+            }),
+            OptLevel::O3 => Some(Rounds {
+                cap: 5,
+                affine: true,
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopPhase {
     Preprocess,
@@ -37,6 +77,7 @@ pub struct DriverOptions {
     pub lib_dirs: Vec<PathBuf>,
     pub libs: Vec<String>,
     pub pipeline: Option<String>,
+    pub opt_level: OptLevel,
     /// The `shuffle-machine-order` oracle (see
     /// [`tir::backend::pipeline::Oracles`]).
     pub shuffle_machine_order: bool,

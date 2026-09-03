@@ -42,7 +42,8 @@ fn parse_run_pipeline_print_roundtrip() {
         "expected allocas before promotion:\n{before}"
     );
 
-    let spec = CString::new("func.func(promote,thread-state,instcombine)").unwrap();
+    let spec = CString::new("func.func(promote),fixpoint<3>(func.func(thread-state,instcombine))")
+        .unwrap();
     let pm = unsafe { tir_pipeline_parse(spec.as_ptr()) };
     assert!(!pm.is_null(), "pipeline parse failed: {}", last_error());
     assert!(

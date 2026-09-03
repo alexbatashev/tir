@@ -216,18 +216,29 @@ pub(super) fn emit_machine_code(
         // selection and change the program's observable behavior.
         pm.nest::<tir::func::FuncOp>()
             .add_pass(tir::passes::InstCombinePass::new());
-    } else {
-        let function_pipeline = pm.nest::<tir::func::FuncOp>();
+    } else if let Some(rounds) = opts.opt_level.rounds() {
         // Construction's last step: the locals the frontend spelled as slots
-        // become the values the regions carry on ports.
-        function_pipeline.add_pass(tir::passes::PromotePass::new());
-        function_pipeline.add_pass(tir::passes::ThreadStatePass::new());
-        function_pipeline.add_pass(tir::passes::InstCombinePass::new());
-        // Loop scheduling reads the chains too, and what it leaves behind — a
-        // rebuilt nest, an unrolled body — is address arithmetic nobody has
-        // folded yet, so the simplifier runs once more over it.
-        function_pipeline.add_pass(tir::passes::AffineSchedulePass::new());
-        function_pipeline.add_pass(tir::passes::InstCombinePass::new());
+        // become the values the regions carry on ports. It opens no allocation
+        // and answers no fact a round derives, so it runs once, ahead of them.
+        pm.nest::<tir::func::FuncOp>()
+            .add_pass(tir::passes::PromotePass::new());
+        let round = pm.fixpoint(rounds.cap).nest::<tir::func::FuncOp>();
+        round.add_pass(tir::passes::ThreadStatePass::new());
+        round.add_pass(tir::passes::InstCombinePass::new());
+        if rounds.affine {
+            // Loop scheduling reads the chains too, and what it leaves behind — a
+            // rebuilt nest, an unrolled body — is address arithmetic nobody has
+            // folded yet, so the simplifier runs once more over it.
+            round.add_pass(tir::passes::AffineSchedulePass::new());
+            round.add_pass(tir::passes::InstCombinePass::new());
+        }
+    } else {
+        // -O0 runs no round. What is left is the normalising simplifier every
+        // pipeline needs: instruction selection reads unfolded address
+        // arithmetic as a different program, which is a backend defect this
+        // level inherits.
+        pm.nest::<tir::func::FuncOp>()
+            .add_pass(tir::passes::InstCombinePass::new());
     }
     // Data lowering consumes the δ ops, so the functions that name them must
     // hold symbol addresses of their own by then.

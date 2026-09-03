@@ -1,4 +1,4 @@
-// RUN: fcc cc -S -march=x86_64 -mcpu=tiger-lake -o - %s | filecheck %s
+// RUN: fcc cc -O2 -S -march=x86_64 -mcpu=tiger-lake -o - %s | filecheck %s
 // RUN: not fcc cc -S -march=x86_64 -mcpu=nehalem -o - %s 2>&1 | filecheck %s --check-prefix=UNKNOWN
 
 // -mcpu names one of the target's machine models — the same set `tir sched

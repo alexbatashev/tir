@@ -90,7 +90,9 @@ pub fn compile_asm(source: &Path) -> String {
 }
 
 pub fn compile_asm_with_pipeline(source: &Path, pipeline: Option<&str>) -> String {
-    let mut args = vec!["compile", "--march", "x86_64", "--stage", "asm", "-o", "-"];
+    let mut args = vec![
+        "compile", "-O2", "--march", "x86_64", "--stage", "asm", "-o", "-",
+    ];
     if let Some(pipeline) = pipeline {
         args.extend(["--pipeline", pipeline]);
     }

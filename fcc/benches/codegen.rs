@@ -195,8 +195,10 @@ fn bench_promote(c: &mut Criterion) {
                 (ctx, module)
             },
             |(ctx, module)| {
-                let mut pm =
-                    tir::parse_pipeline("func.func(promote,thread-state,instcombine)").unwrap();
+                let mut pm = tir::parse_pipeline(
+                    "func.func(promote),fixpoint<3>(func.func(thread-state,instcombine))",
+                )
+                .unwrap();
                 pm.run(&ctx, ctx.get_op(module.id())).unwrap();
             },
             BatchSize::SmallInput,

@@ -1,4 +1,4 @@
-// RUN: fcc compile --stage asm --march x86_64 -o - %s | filecheck %s
+// RUN: fcc compile -O2 --stage asm --march x86_64 -o - %s | filecheck %s
 
 // The loop writes one loop-invariant value to one loop-invariant address, so
 // unrolling it leaves copies whose stored values all fold to the one constant.

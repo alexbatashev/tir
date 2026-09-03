@@ -184,6 +184,14 @@ impl Driver<'_> {
         let Some(&class) = self.value_class.get(&value) else {
             return Ok(());
         };
+        // Nothing to rewire means nothing to build: materializing a spelling for
+        // readers that are all region exits leaves a literal the commit's sweep
+        // erases again, which is an edit that changes nothing and a round that
+        // never reaches its fixpoint.
+        let readers = self.rewritable_readers(value, target);
+        if readers.is_empty() {
+            return Ok(());
+        }
         self.replacing.set(Some(value));
         let spelled =
             self.materialize(extraction, class, ty, target, rewriter, &mut HashMap::new());
@@ -192,23 +200,25 @@ impl Driver<'_> {
             return Ok(());
         };
         if new_value != value && self.dominates_op(new_value, target.op().id) {
-            self.replace_reads(value, new_value, target);
+            self.replace_reads(&readers, value, new_value);
         }
         Ok(())
     }
 
-    /// Rewire the readers of `value` under the region `target` sits in, except
-    /// the edges: a region exit forwarding `value` already carries it in a
-    /// register, and a literal there buys an instruction for nothing.
-    fn replace_reads(&self, value: ValueId, new_value: ValueId, target: &OperationRef) {
+    /// The operations under the region `target` sits in that read `value` and
+    /// that a rewrite may rebind. Region exits are not among them: an exit
+    /// forwarding `value` already carries it in a register, and a literal there
+    /// buys an instruction for nothing.
+    fn rewritable_readers(&self, value: ValueId, target: &OperationRef) -> Vec<OpId> {
         let Some(region) = self
             .context
             .get_op(target.op().id)
             .parent_block()
             .and_then(|block| self.context.parent_region(block))
         else {
-            return;
+            return Vec::new();
         };
+        let mut readers = Vec::new();
         let mut pending = vec![region];
         while let Some(region) = pending.pop() {
             for block in self.context.get_region(region).iter(self.context.clone()) {
@@ -218,16 +228,29 @@ impl Driver<'_> {
                     if scopes::region_exit_kind(&op).is_some() {
                         continue;
                     }
-                    let operands = op.operands();
-                    if operands.contains(&value) {
-                        let rebound = operands
-                            .iter()
-                            .map(|&operand| if operand == value { new_value } else { operand })
-                            .collect();
-                        self.context.set_op_operands(op_id, rebound);
+                    if op.operands().contains(&value) {
+                        readers.push(op_id);
                     }
                 }
             }
+        }
+        readers
+    }
+
+    /// Rebind `value` to `new_value` in every reader a rewrite may take.
+    fn replace_reads(&self, readers: &[OpId], value: ValueId, new_value: ValueId) {
+        for &op_id in readers {
+            if !self.context.has_operation(op_id) {
+                continue;
+            }
+            let rebound = self
+                .context
+                .get_op(op_id)
+                .operands()
+                .iter()
+                .map(|&operand| if operand == value { new_value } else { operand })
+                .collect();
+            self.context.set_op_operands(op_id, rebound);
         }
     }
 
