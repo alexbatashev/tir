@@ -44,11 +44,45 @@ pub struct Options {
     pub baseline: Option<PathBuf>,
 }
 
+/// One case timed at both ends of the contract: the cheapest correct compile,
+/// and the optimising one. Each fcc time is paired with the gcc time at the
+/// same level, because that is the pair the KPI is about.
 #[derive(Serialize, Deserialize)]
 pub struct Sample {
     pub path: String,
-    pub fcc_ms: f64,
-    pub gcc_ms: f64,
+    pub fcc_o0_ms: f64,
+    pub gcc_o0_ms: f64,
+    pub fcc_o2_ms: f64,
+    pub gcc_o2_ms: f64,
+}
+
+#[derive(Clone, Copy)]
+enum Level {
+    O0,
+    O2,
+}
+
+impl Level {
+    fn flag(self) -> &'static str {
+        match self {
+            Level::O0 => "-O0",
+            Level::O2 => "-O2",
+        }
+    }
+
+    fn fcc_ms(self, sample: &Sample) -> f64 {
+        match self {
+            Level::O0 => sample.fcc_o0_ms,
+            Level::O2 => sample.fcc_o2_ms,
+        }
+    }
+
+    fn gcc_ms(self, sample: &Sample) -> f64 {
+        match self {
+            Level::O0 => sample.gcc_o0_ms,
+            Level::O2 => sample.gcc_o2_ms,
+        }
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -56,7 +90,8 @@ pub struct Results {
     pub samples: Vec<Sample>,
 }
 
-/// Times fcc and `gcc -O0` on every passing torture execute case and the
+/// Times fcc and gcc at both `-O0` and `-O2` on every passing torture execute
+/// case and the
 /// coremark translation units, one at a time so the numbers are wall time on an
 /// idle machine. Fails when a case does not compile or when the fcc sum over
 /// the cases both runs share grew more than [`REGRESSION_THRESHOLD`] over the
@@ -93,14 +128,22 @@ pub fn run(sh: &Shell, root: &Path, options: Options) -> anyhow::Result<()> {
     let mut results = Results::default();
     let mut failed = Vec::new();
     for (index, case) in cases.iter().enumerate() {
-        let fcc_ms = time_compile(&fcc, &[], case);
-        let gcc_ms = time_compile(Path::new("gcc"), &["-O0"], case);
-        match (fcc_ms, gcc_ms) {
-            (Some(fcc_ms), Some(gcc_ms)) => results.samples.push(Sample {
-                path: case.label.clone(),
-                fcc_ms,
-                gcc_ms,
-            }),
+        let times = (
+            time_compile(&fcc, &["-O0"], case),
+            time_compile(Path::new("gcc"), &["-O0"], case),
+            time_compile(&fcc, &["-O2"], case),
+            time_compile(Path::new("gcc"), &["-O2"], case),
+        );
+        match times {
+            (Some(fcc_o0_ms), Some(gcc_o0_ms), Some(fcc_o2_ms), Some(gcc_o2_ms)) => {
+                results.samples.push(Sample {
+                    path: case.label.clone(),
+                    fcc_o0_ms,
+                    gcc_o0_ms,
+                    fcc_o2_ms,
+                    gcc_o2_ms,
+                })
+            }
             _ => failed.push(case.label.clone()),
         }
         if (index + 1) % 50 == 0 || index + 1 == cases.len() {
@@ -114,15 +157,21 @@ pub fn run(sh: &Shell, root: &Path, options: Options) -> anyhow::Result<()> {
     }
     if let Some(baseline) = &options.baseline {
         let baseline: Results = serde_json::from_str(&fs::read_to_string(baseline)?)?;
-        let (before, after) = shared_sums(&baseline, &results);
-        println!(
-            "fcc sum vs baseline over shared cases: {:.1} s -> {:.1} s ({:+.1} %)",
-            before / 1e3,
-            after / 1e3,
-            (after / before - 1.0) * 100.0
-        );
-        if after > before * REGRESSION_THRESHOLD {
-            anyhow::bail!("fcc bench: compile time regressed against the baseline");
+        for level in [Level::O0, Level::O2] {
+            let (before, after) = shared_sums(level, &baseline, &results);
+            println!(
+                "fcc {} sum vs baseline over shared cases: {:.1} s -> {:.1} s ({:+.1} %)",
+                level.flag(),
+                before / 1e3,
+                after / 1e3,
+                (after / before - 1.0) * 100.0
+            );
+            if after > before * REGRESSION_THRESHOLD {
+                anyhow::bail!(
+                    "fcc bench: compile time at {} regressed against the baseline",
+                    level.flag()
+                );
+            }
         }
     }
     if let Some(output) = &options.output {
@@ -176,15 +225,19 @@ fn fetch_coremark(sh: &Shell, root: &Path) -> anyhow::Result<PathBuf> {
     Ok(checkout)
 }
 
-fn fcc_sum(results: &Results) -> f64 {
-    results.samples.iter().map(|sample| sample.fcc_ms).sum()
+fn fcc_sum(level: Level, results: &Results) -> f64 {
+    results
+        .samples
+        .iter()
+        .map(|sample| level.fcc_ms(sample))
+        .sum()
 }
 
-fn median_ratio(results: &Results) -> f64 {
+fn median_ratio(level: Level, results: &Results) -> f64 {
     let mut ratios = results
         .samples
         .iter()
-        .map(|sample| sample.fcc_ms / sample.gcc_ms)
+        .map(|sample| level.fcc_ms(sample) / level.gcc_ms(sample))
         .collect::<Vec<_>>();
     ratios.sort_by(|a, b| a.total_cmp(b));
     match ratios.len() {
@@ -194,11 +247,11 @@ fn median_ratio(results: &Results) -> f64 {
     }
 }
 
-fn shared_sums(baseline: &Results, current: &Results) -> (f64, f64) {
+fn shared_sums(level: Level, baseline: &Results, current: &Results) -> (f64, f64) {
     let before = baseline
         .samples
         .iter()
-        .map(|sample| (sample.path.as_str(), sample.fcc_ms))
+        .map(|sample| (sample.path.as_str(), level.fcc_ms(sample)))
         .collect::<HashMap<_, _>>();
     current
         .samples
@@ -206,7 +259,7 @@ fn shared_sums(baseline: &Results, current: &Results) -> (f64, f64) {
         .filter_map(|sample| {
             before
                 .get(sample.path.as_str())
-                .map(|ms| (ms, sample.fcc_ms))
+                .map(|ms| (ms, level.fcc_ms(sample)))
         })
         .fold((0.0, 0.0), |(b, a), (before, after)| {
             (b + before, a + after)
@@ -214,20 +267,27 @@ fn shared_sums(baseline: &Results, current: &Results) -> (f64, f64) {
 }
 
 fn report(results: &Results) -> String {
-    let gcc_sum: f64 = results.samples.iter().map(|sample| sample.gcc_ms).sum();
-    let mut out = format!(
-        "fcc bench: {} cases, fcc {:.1} s, gcc -O0 {:.1} s, median ratio {:.1}x\n",
-        results.samples.len(),
-        fcc_sum(results) / 1e3,
-        gcc_sum / 1e3,
-        median_ratio(results)
-    );
+    let mut out = format!("fcc bench: {} cases\n", results.samples.len());
+    for level in [Level::O0, Level::O2] {
+        let gcc_sum: f64 = results
+            .samples
+            .iter()
+            .map(|sample| level.gcc_ms(sample))
+            .sum();
+        out.push_str(&format!(
+            "  fcc {flag} {:.1} s, gcc {flag} {:.1} s, median ratio {:.1}x\n",
+            fcc_sum(level, results) / 1e3,
+            gcc_sum / 1e3,
+            median_ratio(level, results),
+            flag = level.flag(),
+        ));
+    }
     let mut slowest = results.samples.iter().collect::<Vec<_>>();
-    slowest.sort_by(|a, b| b.fcc_ms.total_cmp(&a.fcc_ms));
+    slowest.sort_by(|a, b| b.fcc_o2_ms.total_cmp(&a.fcc_o2_ms));
     for sample in slowest.iter().take(SLOWEST_SHOWN) {
         out.push_str(&format!(
             "  {:>9.1} ms  {:>7.1} ms  {}\n",
-            sample.fcc_ms, sample.gcc_ms, sample.path
+            sample.fcc_o2_ms, sample.gcc_o2_ms, sample.path
         ));
     }
     out

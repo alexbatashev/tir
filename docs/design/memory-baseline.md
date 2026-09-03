@@ -9,10 +9,13 @@ one at a time, strictly serially:
 fcc -O2 -Ilinux -Iposix -I. -DFLAGS_STR='"-O2"' -DITERATIONS=0 -c <file>
 ```
 
-`-O2` is not yet honoured by the driver (it warns and ignores), so these are the
-default pipeline's numbers: lower-cir → mem2reg → instcombine → scf-to-cfg →
-instruction-select → register-allocation → emission. Peak RSS is the kernel's
-`VmHWM`, cross-checked against `/usr/bin/time -v`.
+These numbers predate `-O2` being honoured by the driver, so they are the
+pipeline that ran unconditionally at the time: lower-cir → mem2reg →
+instcombine → scf-to-cfg → instruction-select → register-allocation →
+emission. `-O2` now selects a round of the mid-end repeated up to three times;
+a level below it runs fewer passes, not more, so the peak these numbers report
+still bounds it. Peak RSS is the kernel's `VmHWM`, cross-checked against
+`/usr/bin/time -v`.
 
 ## Per-file peak RSS
 
