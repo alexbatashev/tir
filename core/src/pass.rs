@@ -50,10 +50,13 @@ macro_rules! register_pass {
 
 /// Parse an MLIR-style pass pipeline into a [`PassManager`].
 ///
-/// The grammar is a comma-separated list of elements, where each element is
-/// either a registered pass name or an op-nesting `op(inner-pipeline)`. The op
-/// name may be dialect-qualified (`func.func`) or bare (`func`). Example:
-/// `func.func(instcombine)` runs `instcombine` nested inside every function.
+/// The grammar is a comma-separated list of elements, where each element is a
+/// registered pass name, an op-nesting `op(inner-pipeline)`, or a capped
+/// fixpoint `fixpoint<N>(inner-pipeline)`. The op name may be
+/// dialect-qualified (`func.func`) or bare (`func`). Example:
+/// `func.func(instcombine)` runs `instcombine` nested inside every function;
+/// `fixpoint<3>(func.func(instcombine))` repeats that up to three times, or
+/// until a round changes nothing.
 pub fn parse_pipeline(spec: &str) -> Result<PassManager, String> {
     let mut parser = PipelineParser {
         bytes: spec.as_bytes(),
@@ -111,9 +114,49 @@ impl PipelineParser<'_> {
         }
     }
 
+    /// `<N>` after `fixpoint`, the iteration cap.
+    fn parse_cap(&mut self) -> Result<u8, String> {
+        if self.pos >= self.bytes.len() || self.bytes[self.pos] != b'<' {
+            return Err("expected '<cap>' after 'fixpoint'".to_string());
+        }
+        self.pos += 1;
+        let start = self.pos;
+        while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_digit() {
+            self.pos += 1;
+        }
+        let digits = String::from_utf8_lossy(&self.bytes[start..self.pos]).into_owned();
+        let cap: u8 = digits
+            .parse()
+            .map_err(|_| format!("invalid fixpoint cap '{digits}'"))?;
+        if cap == 0 {
+            return Err("fixpoint cap must be at least 1".to_string());
+        }
+        if self.pos >= self.bytes.len() || self.bytes[self.pos] != b'>' {
+            return Err("missing '>' in fixpoint cap".to_string());
+        }
+        self.pos += 1;
+        Ok(cap)
+    }
+
     fn parse_element(&mut self, pm: &mut PassManager) -> Result<(), String> {
         self.skip_ws();
         let name = self.parse_ident()?;
+        if name == "fixpoint" {
+            let cap = self.parse_cap()?;
+            self.skip_ws();
+            if self.pos >= self.bytes.len() || self.bytes[self.pos] != b'(' {
+                return Err("expected '(' after 'fixpoint<cap>'".to_string());
+            }
+            self.pos += 1;
+            let nested = pm.fixpoint(cap);
+            self.parse_list(nested)?;
+            self.skip_ws();
+            if self.pos >= self.bytes.len() || self.bytes[self.pos] != b')' {
+                return Err("missing ')' in pass pipeline".to_string());
+            }
+            self.pos += 1;
+            return Ok(());
+        }
         self.skip_ws();
         if self.pos < self.bytes.len() && self.bytes[self.pos] == b'(' {
             self.pos += 1;
@@ -532,6 +575,10 @@ enum PassNode {
         op_name: String,
         manager: PassManager,
     },
+    Fixpoint {
+        cap: u8,
+        manager: PassManager,
+    },
 }
 
 pub struct PassManager {
@@ -566,6 +613,21 @@ impl PassManager {
     /// Nest a sub-pipeline under every operation of type `T`.
     pub fn nest<T: Operation>(&mut self) -> &mut PassManager {
         self.nest_parsed(format!("{}.{}", T::dialect(), T::name()))
+    }
+
+    /// Repeat a sub-pipeline until it stops changing the IR, at most `cap`
+    /// times. "Changed" is the version of the operation the fixpoint runs on
+    /// (see [`Context::op_version`]): every edit under it bumps that stamp, so
+    /// a round that rebuilds nothing rebuilds no analysis either.
+    pub fn fixpoint(&mut self, cap: u8) -> &mut PassManager {
+        self.passes.push(PassNode::Fixpoint {
+            cap,
+            manager: PassManager::new(),
+        });
+        match self.passes.last_mut() {
+            Some(PassNode::Fixpoint { manager, .. }) => manager,
+            _ => unreachable!("fixpoint entry just added"),
+        }
     }
 
     fn nest_parsed(&mut self, op_name: impl Into<String>) -> &mut PassManager {
@@ -669,6 +731,17 @@ impl PassManager {
                     }
                     Ok(())
                 })
+            }
+            PassNode::Fixpoint { cap, manager } => {
+                let mut current = root.clone();
+                for _ in 0..*cap {
+                    let version_before = context.op_version(current.op.id);
+                    current = manager.run_with(context, current, rewriter, analyses)?;
+                    if context.op_version(current.op.id) == version_before {
+                        break;
+                    }
+                }
+                Ok(())
             }
         }
     }

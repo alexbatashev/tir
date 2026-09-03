@@ -567,3 +567,65 @@ fn cloning_a_region_with_a_mapping_binds_arguments_and_outside_values() {
     let add = context.get_op(body.op_ids()[0]);
     assert_eq!(add.operands().as_slice(), vec![y, z]);
 }
+
+/// Edits the function on its first `edits` runs, then leaves it alone. Counts
+/// every run so a fixpoint's iteration count is observable.
+struct CountingPass {
+    runs: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    edits: u32,
+}
+
+impl Pass for CountingPass {
+    fn name(&self) -> &'static str {
+        "counting"
+    }
+
+    fn target(&self) -> PassTarget {
+        PassTarget::operation::<FuncOp>()
+    }
+
+    fn run(
+        &mut self,
+        op: &OperationRef,
+        _context: &Context,
+        _rewriter: &mut Rewriter,
+        _analyses: &AnalysisManager,
+    ) -> Result<(), PassError> {
+        let run = self.runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        if run <= self.edits {
+            let func = op.as_op::<FuncOp>().expect("target guarantees FuncOp");
+            func.body()
+                .set_attr("round", tir::attributes::AttributeValue::Int(run as i64));
+        }
+        Ok(())
+    }
+}
+
+fn count_fixpoint_runs(cap: u8, edits: u32) -> u32 {
+    let context = Context::with_default_dialects();
+    let func = function_with_one_argument(&context);
+    let runs = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let mut pm = PassManager::new();
+    pm.fixpoint(cap).add_pass(CountingPass {
+        runs: runs.clone(),
+        edits,
+    });
+    pm.run(&context, context.get_op(func.id()))
+        .expect("the counting pass keeps the IR valid");
+    runs.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[test]
+fn a_fixpoint_stops_when_the_version_stops_moving() {
+    assert_eq!(count_fixpoint_runs(10, 3), 4);
+}
+
+#[test]
+fn a_fixpoint_stops_at_its_cap() {
+    assert_eq!(count_fixpoint_runs(2, 3), 2);
+}
+
+#[test]
+fn a_fixpoint_runs_a_pass_that_changes_nothing_once() {
+    assert_eq!(count_fixpoint_runs(10, 0), 1);
+}
