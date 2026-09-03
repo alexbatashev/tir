@@ -1561,7 +1561,6 @@ execute/20111208-1.c
 execute/20111212-1.c
 execute/20111227-1.c
 execute/20120105-1.c
-execute/20120111-1.c
 execute/20120207-1.c
 execute/20120427-1.c
 execute/20120427-2.c
