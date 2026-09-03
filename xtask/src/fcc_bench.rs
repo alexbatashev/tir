@@ -50,9 +50,15 @@ pub struct Options {
 #[derive(Serialize, Deserialize)]
 pub struct Sample {
     pub path: String,
+    // A baseline written before the levels existed carries one fcc time and one
+    // gcc time, which were this pipeline's `-O0`.
+    #[serde(alias = "fcc_ms")]
     pub fcc_o0_ms: f64,
+    #[serde(alias = "gcc_ms")]
     pub gcc_o0_ms: f64,
+    #[serde(default)]
     pub fcc_o2_ms: f64,
+    #[serde(default)]
     pub gcc_o2_ms: f64,
 }
 
@@ -259,6 +265,8 @@ fn shared_sums(level: Level, baseline: &Results, current: &Results) -> (f64, f64
         .filter_map(|sample| {
             before
                 .get(sample.path.as_str())
+                // A baseline with no time at this level says nothing about it.
+                .filter(|ms| **ms > 0.0)
                 .map(|ms| (ms, level.fcc_ms(sample)))
         })
         .fold((0.0, 0.0), |(b, a), (before, after)| {

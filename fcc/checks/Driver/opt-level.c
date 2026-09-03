@@ -1,3 +1,4 @@
+// REQUIRES: x86_64
 // The level picks a mid-end, and the mid-end is observable: `x + 0` survives
 // the level that runs no round and folds under every level that runs one.
 // RUN: fcc cc -O0 -S -o - %s | filecheck %s --check-prefix=O0

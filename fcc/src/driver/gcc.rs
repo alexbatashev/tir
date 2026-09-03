@@ -100,7 +100,7 @@ where
             mcpu = Some(value.to_string());
         } else if let Some(value) = arg.strip_prefix("-mabi=") {
             mabi = Some(value.to_string());
-        } else if arg.starts_with("-O") {
+        } else if is_opt_flag(arg) {
             opt_level = opt_level_of(arg, &mut warned);
         } else if is_value_taking_warn(arg) {
             warn_once(&mut warned, arg);
@@ -177,6 +177,16 @@ fn is_value_taking_warn(arg: &str) -> bool {
     arg.starts_with("-MF") || arg.starts_with("-MT") || arg.starts_with("-MQ")
 }
 
+/// Whether `arg` is a `-O` spelling and not a flag that merely starts that way
+/// (`-ObjC`).
+fn is_opt_flag(arg: &str) -> bool {
+    match arg.strip_prefix("-O") {
+        Some("") | Some("s") | Some("z") | Some("fast") => true,
+        Some(rest) => rest.chars().all(|c| c.is_ascii_digit()),
+        None => false,
+    }
+}
+
 /// The level a `-O` spelling selects. `-Os`, `-Oz` and a bare `-O` are `-O2`
 /// until code size is a KPI of its own; `-Ofast` is `-O3` without its
 /// arithmetic licences, which TIR does not take.
@@ -185,7 +195,13 @@ fn opt_level_of(arg: &str, warned: &mut HashSet<String>) -> OptLevel {
         "-O0" => OptLevel::O0,
         "-O1" => OptLevel::O1,
         "-O2" => OptLevel::O2,
-        "-O3" => OptLevel::O3,
+        // gcc clamps every level above 3 to 3.
+        _ if arg
+            .strip_prefix("-O")
+            .is_some_and(|n| n.parse::<u32>().is_ok_and(|n| n >= 3)) =>
+        {
+            OptLevel::O3
+        }
         "-Ofast" => {
             warn_aliased(warned, arg, "-O3");
             OptLevel::O3
@@ -204,7 +220,7 @@ fn warn_aliased(warned: &mut HashSet<String>, arg: &str, level: &str) {
 }
 
 fn is_ignored_flag(arg: &str) -> bool {
-    matches!(arg, "-pipe" | "-pthread")
+    matches!(arg, "-pipe" | "-pthread" | "-ObjC" | "-ObjC++")
         || arg.starts_with("-g")
         || arg.starts_with("-W")
         || arg.starts_with("-f")

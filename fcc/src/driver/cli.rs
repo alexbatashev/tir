@@ -63,7 +63,12 @@ pub struct CompileArgs {
     #[arg(long = "mem-report")]
     mem_report: bool,
     /// Optimisation level: 0 (no mid-end round), 1, 2 or 3.
-    #[arg(short = 'O', value_name = "LEVEL", default_value_t = 0)]
+    #[arg(
+        short = 'O',
+        value_name = "LEVEL",
+        default_value_t = 0,
+        value_parser = clap::value_parser!(u8).range(0..=3)
+    )]
     opt_level: u8,
     /// Mid-end pass pipeline in MLIR-style syntax, e.g.
     /// `func.func(thread-state,instcombine)`. Replaces the default function
