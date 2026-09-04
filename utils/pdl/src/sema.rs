@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use tir_symbolic::lang::{SymKind, op_kind};
+
 use crate::Diagnostic;
 use crate::ast::*;
 
@@ -33,7 +35,18 @@ pub fn analyze(file: &File) -> Vec<Diagnostic> {
         let mut binders = HashSet::new();
         let mut widths = HashSet::new();
         collect_lhs_bindings(&rule.lhs, &mut binders, &mut widths, &mut diagnostics);
+        validate_operators(&rule.lhs, &mut diagnostics);
+        validate_operators(&rule.rhs, &mut diagnostics);
+        validate_lhs_shape(rule, &mut diagnostics);
         validate_rhs(&rule.rhs, &binders, &widths, &mut diagnostics);
+        validate_rhs_shape(&rule.rhs, rule, &mut diagnostics);
+        if grows_theta_under_theta(&rule.rhs) {
+            diagnostics.push(Diagnostic::new(
+                format!("rule '{}' unrolls a theta under itself", rule.name),
+                "a theta operand may not hold another theta on the right-hand side",
+                rule.rhs.span,
+            ));
+        }
         for guard in &rule.guards {
             validate_expr(guard, &binders, &widths, &mut diagnostics);
         }
@@ -63,6 +76,7 @@ fn collect_lhs_bindings<'a>(
                 collect_lhs_bindings(operand, binders, widths, diagnostics);
             }
         }
+        TermKind::Value(expr) => collect_width_names(expr, widths),
         TermKind::Binder { name, ty } => {
             let repeated = !binders.insert(name);
             if repeated && ty.is_some() {
@@ -129,7 +143,9 @@ fn validate_rhs(
             }
         }
         TermKind::Binder { name, ty } => {
-            if !binders.contains(name.as_str()) {
+            // A bare name on the right is a binder reference, or a width the
+            // left-hand side bound, which materializes as a constant.
+            if !binders.contains(name.as_str()) && !widths.contains(name.as_str()) {
                 diagnostics.push(unbound(name, term.span));
             }
             if ty.is_some() {
@@ -144,8 +160,133 @@ fn validate_rhs(
             validate_expr(width, binders, widths, diagnostics);
             validate_expr(value, binders, widths, diagnostics);
         }
-        TermKind::Integer(_) | TermKind::String(_) => {}
+        TermKind::Value(expr) => validate_expr(expr, binders, widths, diagnostics),
+        TermKind::Keep(inner) => validate_rhs(inner, binders, widths, diagnostics),
+        TermKind::Root | TermKind::String(_) => {}
     }
+}
+
+/// Every `#name` names a semantic operator, at an operand count that operator
+/// takes.
+fn validate_operators(term: &Term, diagnostics: &mut Vec<Diagnostic>) {
+    match &term.kind {
+        TermKind::Operation {
+            operator, operands, ..
+        } => {
+            if let Operator::Semantic(name) = operator {
+                match op_kind(name) {
+                    None => diagnostics.push(Diagnostic::new(
+                        format!("unknown semantic operator '#{name}'"),
+                        "this name is not a semantic operator",
+                        term.span,
+                    )),
+                    Some(kind) if !kind.accepts_arity(operands.len()) => {
+                        diagnostics.push(Diagnostic::new(
+                            format!("'#{name}' takes {} operands", kind.arity()),
+                            format!("this term has {}", operands.len()),
+                            term.span,
+                        ));
+                    }
+                    Some(_) => {}
+                }
+            }
+            for operand in operands {
+                validate_operators(operand, diagnostics);
+            }
+        }
+        TermKind::Keep(inner) => validate_operators(inner, diagnostics),
+        _ => {}
+    }
+}
+
+/// A left-hand side is an operation, or the bare constant binder of a
+/// materialize rule. `root` and `keep` are right-hand-side forms.
+fn validate_lhs_shape(rule: &Rule, diagnostics: &mut Vec<Diagnostic>) {
+    forbid_rhs_forms(&rule.lhs, diagnostics);
+    if !matches!(rule.lhs.kind, TermKind::Operation { .. }) && !rule.materializes() {
+        diagnostics.push(Diagnostic::new(
+            "left-hand side must be an operation or a constant binder",
+            "a bare term matches every class",
+            rule.lhs.span,
+        ));
+    }
+}
+
+fn forbid_rhs_forms(term: &Term, diagnostics: &mut Vec<Diagnostic>) {
+    match &term.kind {
+        TermKind::Root => diagnostics.push(Diagnostic::new(
+            "`root` cannot appear on the left-hand side",
+            "`root` names the class the rule matched",
+            term.span,
+        )),
+        TermKind::Keep(_) => diagnostics.push(Diagnostic::new(
+            "`keep` cannot appear on the left-hand side",
+            "`keep` marks a right-hand-side node as an instruction",
+            term.span,
+        )),
+        TermKind::Operation { operands, .. } => {
+            for operand in operands {
+                forbid_rhs_forms(operand, diagnostics);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `keep` wraps an operation, and only a materialize rule has anything to keep.
+fn validate_rhs_shape(term: &Term, rule: &Rule, diagnostics: &mut Vec<Diagnostic>) {
+    match &term.kind {
+        TermKind::Keep(inner) => {
+            if !rule.materializes() {
+                diagnostics.push(Diagnostic::new(
+                    "`keep` is only meaningful in a materialize rule",
+                    "the left-hand side must be a bare constant binder",
+                    term.span,
+                ));
+            }
+            if !matches!(inner.kind, TermKind::Operation { .. }) {
+                diagnostics.push(Diagnostic::new(
+                    "`keep` wraps an operation",
+                    "there is no instruction to keep here",
+                    term.span,
+                ));
+            }
+            validate_rhs_shape(inner, rule, diagnostics);
+        }
+        TermKind::Operation { operands, .. } => {
+            for operand in operands {
+                validate_rhs_shape(operand, rule, diagnostics);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether a `#theta` on the right-hand side has another `#theta` below it, which
+/// re-grows the shape it matched and never saturates.
+fn grows_theta_under_theta(term: &Term) -> bool {
+    match &term.kind {
+        TermKind::Operation {
+            operator, operands, ..
+        } if is_theta(operator) => operands.iter().any(contains_theta),
+        TermKind::Operation { operands, .. } => operands.iter().any(grows_theta_under_theta),
+        TermKind::Keep(inner) => grows_theta_under_theta(inner),
+        _ => false,
+    }
+}
+
+fn contains_theta(term: &Term) -> bool {
+    match &term.kind {
+        TermKind::Operation {
+            operator, operands, ..
+        } => is_theta(operator) || operands.iter().any(contains_theta),
+        TermKind::Keep(inner) => contains_theta(inner),
+        _ => false,
+    }
+}
+
+fn is_theta(operator: &Operator) -> bool {
+    matches!(operator, Operator::Semantic(name) if op_kind(name) == Some(SymKind::Theta))
 }
 
 fn validate_expr(

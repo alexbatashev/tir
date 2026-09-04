@@ -14,6 +14,14 @@ pub enum Token {
     Rule,
     #[token("where")]
     Where,
+    #[token("proof")]
+    Proof,
+    #[token("phase")]
+    Phase,
+    #[token("root")]
+    Root,
+    #[token("keep")]
+    Keep,
     #[token("const")]
     Const,
     #[token("int")]

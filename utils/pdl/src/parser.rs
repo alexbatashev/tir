@@ -61,10 +61,10 @@ fn rule<'src, I>() -> impl Parser<'src, I, Rule, Error<'src>>
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
-    let name = identifier()
+    let name = name_part()
         .then(
             just(Token::Minus)
-                .ignore_then(identifier())
+                .ignore_then(name_part())
                 .repeated()
                 .collect::<Vec<_>>(),
         )
@@ -88,6 +88,29 @@ where
         )
         .or_not()
         .map(Option::unwrap_or_default);
+    let proof = just(Token::Proof)
+        .ignore_then(identifier().try_map(|name, span| match name.as_str() {
+            "smt" => Ok(Proof::Smt),
+            "trusted" => Ok(Proof::Trusted),
+            "definitional" => Ok(Proof::Definitional),
+            _ => Err(Rich::custom(
+                span,
+                "proof mode is `smt`, `trusted` or `definitional`",
+            )),
+        }))
+        .or_not();
+    let phase = just(Token::Phase)
+        .ignore_then(
+            identifier()
+                .then_ignore(just(Token::Minus))
+                .then(identifier())
+                .try_map(|(head, tail), span| match (head.as_str(), tail.as_str()) {
+                    ("post", "saturation") => Ok(()),
+                    _ => Err(Rich::custom(span, "the only phase is `post-saturation`")),
+                }),
+        )
+        .or_not()
+        .map(|phase| phase.is_some());
 
     just(Token::Rule)
         .ignore_then(name)
@@ -96,15 +119,21 @@ where
         .then(direction)
         .then(term())
         .then(guards)
+        .then(proof)
+        .then(phase)
         .then_ignore(just(Token::Semicolon))
-        .map_with(|((((name, lhs), direction), rhs), guards), extra| Rule {
-            name,
-            lhs,
-            direction,
-            rhs,
-            guards,
-            span: extra.span(),
-        })
+        .map_with(
+            |((((((name, lhs), direction), rhs), guards), proof), post_saturation), extra| Rule {
+                name,
+                lhs,
+                direction,
+                rhs,
+                guards,
+                proof,
+                post_saturation,
+                span: extra.span(),
+            },
+        )
         .labelled("rewrite rule")
 }
 
@@ -120,7 +149,7 @@ where
                 .map(|(dialect, name)| Operator::Dialect { dialect, name }),
             just(Token::Hash)
                 .ignore_then(identifier())
-                .map(Operator::Gate),
+                .map(Operator::Semantic),
         ));
         let attributes = attribute()
             .separated_by(just(Token::Comma))
@@ -156,10 +185,27 @@ where
                 ty: None,
                 span: extra.span(),
             });
-        let integer = integer().map_with(|value, extra| Term {
-            kind: TermKind::Integer(value),
+        let root = just(Token::Root).map_with(|_, extra| Term {
+            kind: TermKind::Root,
             ty: None,
             span: extra.span(),
+        });
+        let keep = just(Token::Keep)
+            .ignore_then(term.clone())
+            .map_with(|inner, extra| Term {
+                kind: TermKind::Keep(Box::new(inner)),
+                ty: None,
+                span: extra.span(),
+            });
+        // A bare name is a binder; anything else an expression can be is an
+        // integer over widths and literals.
+        let value = expression().try_map(|expr, span| match expr.kind {
+            ExprKind::Name(_) => Err(Rich::custom(span, "a bare name is a binder")),
+            _ => Ok(Term {
+                kind: TermKind::Value(expr),
+                ty: None,
+                span,
+            }),
         });
         let string = select! { Token::String(value) => value }.map_with(|value, extra| Term {
             kind: TermKind::String(value),
@@ -174,7 +220,7 @@ where
                 span: extra.span(),
             });
 
-        choice((operation, constant, integer, string, binder)).labelled("term")
+        choice((operation, constant, root, keep, string, value, binder)).labelled("term")
     })
     .boxed()
 }
@@ -378,6 +424,26 @@ where
             },
         })
         .boxed()
+}
+
+/// A hyphenated rule name's parts. Keywords are legal here: a rule called
+/// `wide-const-split` names an axiom, not a `const` term.
+fn name_part<'src, I>() -> impl Parser<'src, I, String, Error<'src>> + Clone
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    select! {
+        Token::Identifier(value) => value,
+        Token::Group => "group".to_string(),
+        Token::Rule => "rule".to_string(),
+        Token::Where => "where".to_string(),
+        Token::Proof => "proof".to_string(),
+        Token::Phase => "phase".to_string(),
+        Token::Root => "root".to_string(),
+        Token::Keep => "keep".to_string(),
+        Token::Const => "const".to_string(),
+        Token::Int => "int".to_string(),
+    }
 }
 
 fn identifier<'src, I>() -> impl Parser<'src, I, String, Error<'src>> + Clone

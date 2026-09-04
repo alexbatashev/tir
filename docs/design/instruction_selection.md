@@ -22,8 +22,9 @@ does the rest.
 | `isel/node.rs` | what selection reads beyond that: low-bit register views, `class_value_binding`, `class_register_type` |
 | `isel/builder.rs` | `SemDagBuilder`: the function's IR ops → one shared semantic e-graph, including memory effects and the structured operations' own control (`build_region_control`) |
 | `isel/pattern.rs` | `compile_isel_pattern`: rule semantics → `tir_relational` query plans + per-node metadata |
-| `sem/axioms.rs` | s-expression axioms and their compilation into proved rewrites |
-| `defs/isel.sexp` | checked target-independent semantic invariants |
+| `sem/axioms.rs` | axioms and their compilation into proved rewrites |
+| `sem/axioms/pdl.rs` | building an axiom from a PDL rule |
+| `defs/isel.pdl` | checked target-independent semantic invariants |
 | `sem/rewrites.rs` | theory-family selection and saturation driver |
 | `isel/matches.rs` | `Matches`: the function's value matches in columns, indexed by root class, with one frame per open assumption scope |
 | `isel/cover.rs` | PBQP construction, match dominance pruning, completeness check |
@@ -364,22 +365,21 @@ or the class itself when no scope is open); every table lookup (`is_op_root`,
 
 Before tiling, the e-graph is saturated with target-independent algebraic
 identities (`self.rewrites`). These are **not** hand-written selection rules;
-they describe equivalent forms of the operation semantics as s-expression
-axioms (`sem/axioms.rs`):
+they describe equivalent forms of the operation semantics as PDL rules
+(`sem/axioms.rs`):
 
 ```
-(axiom sext-bridge
-  (vars (x n)) (root w) (where (< n w))
-  (lhs (sext x w))
-  (rhs (ashr (shl x (- w n)) (- w n))))
+rule sext-bridge: #sext(x: int<N>, W) : int<W>
+  => #ashr(#shl(x, W - N), W - N)
+  where N < W;
 ```
 
-The checked `core/defs/isel.sexp` theory is installed for every target. Target
+The checked `core/defs/isel.pdl` theory is installed for every target. Target
 support is considered later: instruction patterns match whichever members of
 an equivalence class they can implement.
 
-Most axioms participate in iterative saturation. An axiom declaring
-`(phase post-saturation)` is applied once after that fixpoint instead. The
+Most axioms participate in iterative saturation. A rule declaring
+`phase post-saturation` is applied once after that fixpoint instead. The
 zero-comparison shape axioms use it: their `zext(const(0, 1), W)` form exists
 for zero-register branch matching without feeding back through the boolean
 `*-via-if` identities and multiplying equivalent comparison forms.
@@ -397,49 +397,39 @@ An axiom whose RHS nests a `Theta` under a `Theta` unrolls the loop, so it
 would never saturate; the loader rejects it structurally, naming the axiom.
 Unrolling is a structural transform on the IR, not a rewrite rule.
 
-### `isel.sexp` syntax
+### The rule language
 
-The file contains one `theory` form with any number of axioms:
+PDL is the one rule language, and it names two vocabularies that stay apart by
+syntax. `dialect.op(...)` matches an op identity; `#name(...)` matches a
+semantic operator, which is any `SymKind`. An axiom is written in the second.
 
-```scheme
-(theory
-  (axiom sext-bridge
-    (vars (x n)) (root w) (where (< n w))
-    (lhs (sext x w))
-    (rhs (ashr (shl x (- w n)) (- w n)))))
+```
+rule name: lhs => rhs [where guard, ...] [proof smt|trusted|definitional]
+                      [phase post-saturation];
+rule name: lhs <=> rhs ...;
 ```
 
-Full-line comments begin with `;`. Unknown sections or operators reject the
-theory when it is loaded.
+- A binder's type declares a capture and binds its e-class width: `x: int<N>`
+  captures a value, `v: const<W>` captures one whose class holds a constant.
+  Reusing a width name requires equal widths.
+- The left-hand side's own type binds or checks the matched root width. A rule
+  whose whole left-hand side is a bare `v: const<W>` matches every constant
+  class, which is how a target decomposes a wide constant in place.
+- An untyped binder is an anonymous wildcard. An integer or width expression as
+  an operand matches a constant of that value.
+- The right-hand side may name captures, `root` for the matched class, semantic
+  operator terms, bare width expressions as untyped immediates, `const<W>(e)`
+  for a specifically sized constant, and `keep` to mark a node a materialize
+  rule emits as an instruction rather than folding to the constant it computes.
+- `where` takes `a < b` and `a == b` over width expressions, and `fits(v, n)` /
+  `ufits(v, n)` (optionally negated) over a captured constant's magnitude.
+- `proof` states how the equivalence is discharged: `smt` bit-blasts it under
+  `TIR_VERIFY_AXIOMS`, `trusted` asserts it, `definitional` marks a law of an
+  algebra the prover has no model for. The default is `smt` for a rule written
+  only in semantic operators and `trusted` once an op term appears.
 
-```scheme
-(axiom name
-  (vars (value width) ...)
-  (consts (value width) ...)
-  (root width-or-literal)
-  (phase post-saturation)
-  (where (< width-expr width-expr) (= width-expr width-expr) ...)
-  (lhs pattern)
-  (rhs template))
-```
-
-- `vars` is optional; it declares captured values and binds their e-class
-  widths. Reusing a width name requires equal widths.
-- `consts` is optional and works like `vars`, but the matched e-class must
-  contain a constant.
-- `root` binds or checks the matched root width.
-- `phase` is optional; `post-saturation` applies the axiom once after the
-  saturation fixpoint instead of inside it.
-- `where` is optional and accepts `<` and `=` guards over width expressions.
-- `lhs` is the e-matched semantic pattern. Declared variables are captures;
-  undeclared atoms are anonymous wildcards. Integer and width-expression
-  operands match constants of that value.
-- `rhs` may reference declared variables, `root`, semantic operator forms,
-  bare width-expression constants, or `(const value-expr width)` for a
-  specifically sized constant.
-
-Width expressions are integer literals, bound width names, `(- a b)`, and
-`(ones e)`. Semantic operator names use the same fixed-arity vocabulary as the
+Width expressions are integer literals, bound width names, `a - b`, and
+`ones(e)`. Semantic operator names use the same fixed-arity vocabulary as the
 op semantic-expression DSL.
 
 The compiled applier resolves the axiom's width names from the matched classes
@@ -450,10 +440,18 @@ This is a refinement proof: whenever the LHS is defined, the RHS must also be
 defined and equal. The proof models each operand as the low `n` bits of a
 full-width register the RHS reads whole, covering the undefined upper register
 bits the emitted instructions actually see. Ordinary compiles trust the
-checked-in theory: the proofs validate the target description rather than feed
+checked-in rules: the proofs validate the target description rather than feed
 selection, so they run in the verification test runs (unit tests call
-`Axiom::prove` and `prove_guarded_relaxations` directly; CI sets
-`TIR_VERIFY_AXIOMS` on a test job), not on every compile.
+`Axiom::prove` and `prove_guarded_relaxations` directly; the nightly
+`verify-axioms` job runs the whole suite with `TIR_VERIFY_AXIOMS=1`), not on
+every compile.
+
+The obligation is an assertion about a match that passed every filter, not a
+filter itself, so it is discharged only at widths the axiom can actually fire
+at. A materialize axiom guarded on `!fits(v, 12)` has a right-hand side that
+computes `W - 12`, which is undefined at `W = 8`; since an 8-bit constant
+always fits a signed 12-bit immediate, the axiom never applies there and is
+never proved there.
 The extension axiom asserts:
 
 ```

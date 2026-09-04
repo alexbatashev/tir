@@ -43,6 +43,28 @@ jobs:
             target/ci/xtask
           retention-days: 1
 
+  # The axiom proofs validate the target description rather than feed selection,
+  # so a compile does not run them and pre-commit cannot afford to. Nightly is
+  # where an unsound rewrite rule gets caught.
+  verify-axioms:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: "0"
+      TIR_VERIFY_AXIOMS: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rui314/setup-mold@v1
+      - uses: taiki-e/install-action@nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build
+          # Restore only: `build-and-package` above is the writer of this key,
+          # and a second writer whose steps differ makes the cache churn.
+          save-if: "false"
+      - run: cargo nextest run --workspace --locked --cargo-profile ci
+
   lints:
     runs-on: ubuntu-latest
     env:
@@ -240,7 +262,16 @@ jobs:
   # those do get one issue per job.
   report:
     if: always()
-    needs: [build-and-package, lints, corpus, differential-fuzz, fcc-bench, libfuzzer]
+    needs:
+      [
+        build-and-package,
+        verify-axioms,
+        lints,
+        corpus,
+        differential-fuzz,
+        fcc-bench,
+        libfuzzer,
+      ]
     runs-on: ubuntu-latest
     permissions:
       contents: read
