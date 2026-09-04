@@ -178,9 +178,6 @@ fn validate_lhs(term: &Term, diagnostics: &mut Vec<Diagnostic>) {
         ..
     } = &term.kind
     {
-        if matches!(operator, Operator::Gate(name) if name != "gamma") {
-            diagnostics.push(unsupported("gate patterns other than #gamma", term.span));
-        }
         if let Operator::Dialect { dialect, name } = operator
             && rust_operation(operator).is_none()
         {
@@ -239,8 +236,8 @@ fn validate_rhs(
             if !root {
                 return;
             }
-            if matches!(operator, Operator::Gate(_)) {
-                diagnostics.push(unsupported("gate emission", term.span));
+            if matches!(operator, Operator::Semantic(_)) {
+                diagnostics.push(unsupported("semantic operator emission", term.span));
             }
             if let Operator::Dialect { dialect, name } = operator {
                 match rust_operation(operator) {
@@ -272,7 +269,7 @@ fn validate_rhs(
             validate_number_expr(value, binders, diagnostics);
         }
         TermKind::Binder { .. } => {}
-        TermKind::Integer(_) | TermKind::String(_) => {
+        TermKind::Value(_) | TermKind::String(_) | TermKind::Root | TermKind::Keep(_) => {
             diagnostics.push(unsupported("this right-hand-side term", term.span));
         }
     }
@@ -536,7 +533,10 @@ impl PatternGenerator {
                 }
                 Some(var)
             }
-            TermKind::Integer(value) => {
+            TermKind::Value(Expr {
+                kind: ExprKind::Integer(value),
+                ..
+            }) => {
                 let var = self.var();
                 self.literals.push(Literal { var, value: *value });
                 Some(var)
@@ -555,7 +555,10 @@ impl PatternGenerator {
                         let path = rust_operation(operator)?.path;
                         quote! { Node::pattern::<#path>(vec![#(#children),*]) }
                     }
-                    Operator::Gate(_) => quote! { Node::gamma_pattern(vec![#(#children),*]) },
+                    Operator::Semantic(name) => {
+                        let kind = sym_kind_path(name)?;
+                        quote! { Node::sym_pattern(#kind, vec![#(#children),*]) }
+                    }
                 };
                 self.atoms.push(quote! {
                     Atom::Node {
@@ -567,9 +570,15 @@ impl PatternGenerator {
                 });
                 Some(class)
             }
-            TermKind::Constant { .. } | TermKind::String(_) => None,
+            _ => None,
         }
     }
+}
+
+/// The `SymKind` path a `#name` term patterns on.
+fn sym_kind_path(name: &str) -> Option<TokenStream> {
+    let kind = format_ident!("{}", format!("{:?}", tir_symbolic::lang::op_kind(name)?));
+    Some(quote! { SymKind::#kind })
 }
 
 /// What one rule's atoms, guards and head are built out of, plus the host
@@ -759,7 +768,7 @@ fn generate_rhs(
             });
             Some(into)
         }
-        TermKind::Integer(_) | TermKind::String(_) => None,
+        _ => None,
     }
 }
 
@@ -808,7 +817,7 @@ fn rhs_operand(
             });
             Some(into)
         }
-        TermKind::Integer(_) | TermKind::Operation { .. } | TermKind::String(_) => None,
+        _ => None,
     }
 }
 

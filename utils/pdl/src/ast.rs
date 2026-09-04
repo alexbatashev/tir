@@ -25,7 +25,57 @@ pub struct Rule {
     pub direction: Direction,
     pub rhs: Term,
     pub guards: Vec<Expr>,
+    /// `None` takes the namespace default: [`Proof::Smt`] for a rule whose terms
+    /// are all semantic, [`Proof::Trusted`] once a dialect op term appears.
+    pub proof: Option<Proof>,
+    pub post_saturation: bool,
     pub span: Span,
+}
+
+/// How a rule's equivalence is discharged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Proof {
+    /// Bit-blasted and checked under `TIR_VERIFY_AXIOMS`.
+    Smt,
+    /// Asserted by the target description; nothing checks it.
+    Trusted,
+    /// A law of an algebra the prover has no model for, such as memory.
+    Definitional,
+}
+
+impl Rule {
+    /// The stated proof mode, or the default for the rule's vocabulary.
+    pub fn proof(&self) -> Proof {
+        self.proof.unwrap_or_else(|| {
+            if names_dialect_op(&self.lhs) || names_dialect_op(&self.rhs) {
+                Proof::Trusted
+            } else {
+                Proof::Smt
+            }
+        })
+    }
+
+    /// Whether the left-hand side is a bare constant binder, which matches every
+    /// constant class so a wide constant can be decomposed in place.
+    pub fn materializes(&self) -> bool {
+        matches!(
+            &self.lhs.kind,
+            TermKind::Binder {
+                ty: Some(BindingType::Constant(_)),
+                ..
+            }
+        )
+    }
+}
+
+fn names_dialect_op(term: &Term) -> bool {
+    match &term.kind {
+        TermKind::Operation {
+            operator, operands, ..
+        } => matches!(operator, Operator::Dialect { .. }) || operands.iter().any(names_dialect_op),
+        TermKind::Keep(inner) => names_dialect_op(inner),
+        _ => false,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,18 +102,26 @@ pub enum TermKind {
         name: String,
         ty: Option<BindingType>,
     },
-    Integer(i64),
+    /// An integer expression over widths and literals. On a left-hand side it
+    /// matches a constant class equal to the expression; on a right-hand side it
+    /// materializes one.
+    Value(Expr),
     String(String),
     Constant {
         width: Expr,
         value: Expr,
     },
+    /// The matched root class. Right-hand side only.
+    Root,
+    /// A right-hand-side node a materialize rule keeps as an instruction instead
+    /// of folding to the constant it computes.
+    Keep(Box<Term>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Operator {
     Dialect { dialect: String, name: String },
-    Gate(String),
+    Semantic(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

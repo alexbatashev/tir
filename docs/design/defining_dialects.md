@@ -293,6 +293,24 @@ Semantic expressions are used by instruction selection, algebraic rewrites, and
 the simulator. If an operation has a result, the generated semantic expression
 records the concrete result type from the owning context.
 
+### Rules over an operation
+
+Rewrite rules are written in PDL, one language over two vocabularies told apart
+by syntax. `builtin.addi(x, y)` matches your operation by identity;
+`#add(x, y)` matches the semantic operator it lowers to. A rule may name both,
+which is how a dialect states its bridge to the semantics the e-graph reasons
+over:
+
+```
+rule add-zero: builtin.addi(x: int<W>, 0) => x;
+rule addi-is-add: builtin.addi(x: int<W>, y) <=> #add(x, y) proof trusted;
+```
+
+`core/src/passes/instcombine/rules.pdl` holds the peephole rules,
+`core/defs/isel.pdl` the target-independent semantic invariants, and each
+backend its own rule file. The language is described in
+`docs/design/instruction_selection.md`.
+
 ## TMDL-Generated Dialects
 
 Target ISAs are usually too large to maintain as hand-written Rust. A TMDL file

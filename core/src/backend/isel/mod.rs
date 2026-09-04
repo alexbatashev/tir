@@ -1230,11 +1230,11 @@ impl InstructionSelectPass {
         self
     }
 
-    /// Install additional semantic invariants.
-    pub fn with_axioms(mut self, file: &str) -> Self {
-        for form in axioms::axiom_forms(file) {
-            let axiom = axioms::parse_axiom(&form)
-                .unwrap_or_else(|e| panic!("invalid axiom `{form}`: {e}"));
+    /// Install a target's own semantic invariants, as a PDL rule set.
+    pub fn with_rules(mut self, file: &str) -> Self {
+        let axioms = axioms::pdl::axioms_from_pdl(file)
+            .unwrap_or_else(|e| panic!("invalid target rule set: {e}"));
+        for axiom in axioms {
             self.theory.push(axiom);
         }
         if self.theory.materializes_constants() && !self.constant_materializer_ranges.is_empty() {

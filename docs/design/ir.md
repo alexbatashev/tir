@@ -499,9 +499,9 @@ outside identity.
   meet.
 - Region arguments and unmodeled ops anchor.
 
-**Saturation** runs one driver over three rule sources: the PDL-authored
-peephole ruleset, the axiom theory (SMT-verified rewrites, including target
-rules generated from TMDL), and the state laws (§6.5). Loop unrolling is
+**Saturation** runs one driver over three rule sources, all of them PDL: the
+peephole ruleset, the axiom theory (SMT-verified rewrites, plus each target's
+own rule file), and the state laws (§6.5). Loop unrolling is
 banned as a saturation rule (non-terminating); it is a structural clone via
 the tree-edit API.
 

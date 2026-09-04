@@ -1,0 +1,176 @@
+// Target-independent instruction-selection invariants.
+
+rule sext-bridge: #sext(x: int<N>, W) : int<W>
+  => #ashr(#shl(x, W - N), W - N)
+  where N < W;
+
+rule zext-mask: #zext(x: int<N>, W) : int<W>
+  => #and(ones(N), x)
+  where N < W;
+
+rule zext-shifts: #zext(x: int<N>, W) : int<W>
+  => #lshr(#shl(x, W - N), W - N)
+  where N < W;
+
+rule if-same: #if(c: int<1>, x: int<W>, x) : int<W>
+  => x;
+
+rule if-then-condition: #if(c: int<1>, c, x: int<1>) : int<1>
+  => #if(c, const<1>(1), x);
+
+rule if-else-condition: #if(c: int<1>, x: int<1>, c) : int<1>
+  => #if(c, x, const<1>(0));
+
+rule theta-same: #theta(x: int<W>, x) : int<W>
+  => x;
+
+// Zero-register comparison shapes: applied once after the saturation fixpoint,
+// so the synthetic zero cannot feed back through the boolean `*-via-if`
+// identities and multiply equivalent comparison forms.
+rule eq-zero: #eq(x: int<W>, 0) : int<1>
+  => #eq(x, #zext(const<1>(0), W))
+  phase post-saturation;
+
+rule ne-zero: #ne(x: int<W>, 0) : int<1>
+  => #ne(x, #zext(const<1>(0), W))
+  phase post-saturation;
+
+rule lt-zero: #lt(x: int<W>, 0) : int<1>
+  => #lt(x, #zext(const<1>(0), W))
+  phase post-saturation;
+
+rule zero-lt: #lt(0, x: int<W>) : int<1>
+  => #lt(#zext(const<1>(0), W), x)
+  phase post-saturation;
+
+rule le-zero: #le(x: int<W>, 0) : int<1>
+  => #le(x, #zext(const<1>(0), W))
+  phase post-saturation;
+
+rule zero-le: #le(0, x: int<W>) : int<1>
+  => #le(#zext(const<1>(0), W), x)
+  phase post-saturation;
+
+rule gt-zero: #gt(x: int<W>, 0) : int<1>
+  => #gt(x, #zext(const<1>(0), W))
+  phase post-saturation;
+
+rule zero-gt: #gt(0, x: int<W>) : int<1>
+  => #gt(#zext(const<1>(0), W), x)
+  phase post-saturation;
+
+rule ge-zero: #ge(x: int<W>, 0) : int<1>
+  => #ge(x, #zext(const<1>(0), W))
+  phase post-saturation;
+
+rule zero-ge: #ge(0, x: int<W>) : int<1>
+  => #ge(#zext(const<1>(0), W), x)
+  phase post-saturation;
+
+rule ult-zero: #ult(x: int<W>, 0) : int<1>
+  => #ult(x, #zext(const<1>(0), W))
+  phase post-saturation;
+
+rule zero-ult: #ult(0, x: int<W>) : int<1>
+  => #ult(#zext(const<1>(0), W), x)
+  phase post-saturation;
+
+rule ule-zero: #ule(x: int<W>, 0) : int<1>
+  => #ule(x, #zext(const<1>(0), W))
+  phase post-saturation;
+
+rule zero-ule: #ule(0, x: int<W>) : int<1>
+  => #ule(#zext(const<1>(0), W), x)
+  phase post-saturation;
+
+rule ugt-zero: #ugt(x: int<W>, 0) : int<1>
+  => #ugt(x, #zext(const<1>(0), W))
+  phase post-saturation;
+
+rule zero-ugt: #ugt(0, x: int<W>) : int<1>
+  => #ugt(#zext(const<1>(0), W), x)
+  phase post-saturation;
+
+rule uge-zero: #uge(x: int<W>, 0) : int<1>
+  => #uge(x, #zext(const<1>(0), W))
+  phase post-saturation;
+
+rule zero-uge: #uge(0, x: int<W>) : int<1>
+  => #uge(#zext(const<1>(0), W), x)
+  phase post-saturation;
+
+rule neg-sub: #neg(x: int<W>) : int<W>
+  => #sub(0, x);
+
+rule neg-mul: #neg(x: int<W>) : int<W>
+  => #mul(ones(W), x);
+
+rule not-sub: #not(x: int<W>) : int<W>
+  => #sub(ones(W), x);
+
+rule not-sub-one: #not(x: int<W>) : int<W>
+  => #sub(#sub(0, x), 1);
+
+rule not-xor: #not(x: int<W>) : int<W>
+  => #xor(ones(W), x);
+
+rule not-add-sub: #not(x: int<W>) : int<W>
+  => #sub(0, #add(1, x));
+
+rule eq-via-if: #eq(a, b) : int<1>
+  => #if(root, #zext(const<1>(1), const<1>(1)), #zext(const<1>(0), const<1>(1)));
+
+rule ne-via-if: #ne(a, b) : int<1>
+  => #if(root, #zext(const<1>(1), const<1>(1)), #zext(const<1>(0), const<1>(1)));
+
+rule lt-via-if: #lt(a, b) : int<1>
+  => #if(root, #zext(const<1>(1), const<1>(1)), #zext(const<1>(0), const<1>(1)));
+
+rule le-via-if: #le(a, b) : int<1>
+  => #if(root, #zext(const<1>(1), const<1>(1)), #zext(const<1>(0), const<1>(1)));
+
+rule gt-via-if: #gt(a, b) : int<1>
+  => #if(root, #zext(const<1>(1), const<1>(1)), #zext(const<1>(0), const<1>(1)));
+
+rule ge-via-if: #ge(a, b) : int<1>
+  => #if(root, #zext(const<1>(1), const<1>(1)), #zext(const<1>(0), const<1>(1)));
+
+rule ult-via-if: #ult(a, b) : int<1>
+  => #if(root, #zext(const<1>(1), const<1>(1)), #zext(const<1>(0), const<1>(1)));
+
+rule ule-via-if: #ule(a, b) : int<1>
+  => #if(root, #zext(const<1>(1), const<1>(1)), #zext(const<1>(0), const<1>(1)));
+
+rule ugt-via-if: #ugt(a, b) : int<1>
+  => #if(root, #zext(const<1>(1), const<1>(1)), #zext(const<1>(0), const<1>(1)));
+
+rule uge-via-if: #uge(a, b) : int<1>
+  => #if(root, #zext(const<1>(1), const<1>(1)), #zext(const<1>(0), const<1>(1)));
+
+rule and-via-if: #and(a: int<1>, b: int<1>) : int<1>
+  => #if(root, #zext(const<1>(1), const<1>(1)), #zext(const<1>(0), const<1>(1)));
+
+rule xor-via-if: #xor(a: int<1>, b: int<1>) : int<1>
+  => #if(root, #zext(const<1>(1), const<1>(1)), #zext(const<1>(0), const<1>(1)));
+
+rule eq-via-cmp: #eq(a: int<W>, b: int<W>) : int<1>
+  => #ult(#xor(a, b), 1);
+
+rule ne-via-cmp: #ne(a: int<W>, b: int<W>) : int<1>
+  => #xor(#ult(#xor(a, b), 1), const<1>(1));
+
+rule ge-via-cmp: #ge(a: int<W>, b: int<W>) : int<1>
+  => #xor(#lt(a, b), const<1>(1));
+
+rule le-via-cmp: #le(a: int<W>, b: int<W>) : int<1>
+  => #xor(#lt(b, a), const<1>(1));
+
+rule uge-via-cmp: #uge(a: int<W>, b: int<W>) : int<1>
+  => #xor(#ult(a, b), const<1>(1));
+
+rule ule-via-cmp: #ule(a: int<W>, b: int<W>) : int<1>
+  => #xor(#ult(b, a), const<1>(1));
+
+rule sub-via-add-neg: #sub(a: int<W>, c: const<W>) : int<W>
+  => #add(a, #neg(c));
+

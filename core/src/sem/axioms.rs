@@ -1,40 +1,37 @@
 //! Target-independent selection axioms: the algebraic bridges of
-//! [`super::rewrites`] declared as s-expressions instead of hand-written
-//! appliers. Debug builds use the [`SmtOracle`] to validate every concrete
-//! width instantiation before asserting it. Release builds trust the declared
-//! invariants.
+//! [`super::rewrites`] declared as PDL rules instead of hand-written appliers.
+//! Debug builds use the [`SmtOracle`] to validate every concrete width
+//! instantiation before asserting it. Release builds trust the declared
+//! invariants. [`pdl`] turns a rule into the [`Axiom`] below.
 //!
 //! ```text
-//! (axiom <name>
-//!   (vars (<var> <width>)...)    ; pattern vars whose class width binds <width>
-//!   (root <width|int>)           ; the matched root class's width
-//!   (where (< <a> <b>) (= <a> <b>)...) ; guards over bound widths
-//!   (lhs (<kind> <operand>...))  ; matched shape; undeclared atoms are wildcards,
-//!                                ;   integer/`(- ..)`/`(ones ..)` operands match a
-//!                                ;   `Constant` class equal to the expression
-//!   (rhs <template>))            ; equivalent form unioned with the root
+//! rule sext-bridge: #sext(x: int<N>, W) : int<W>
+//!   => #ashr(#shl(x, W - N), W - N)
+//!   where N < W;
 //! ```
 //!
-//! An RHS template references declared vars, `root` (the matched class),
-//! nested `(<kind> ...)` nodes, and integer expressions over bound widths
-//! (names, `-`, `(ones <e>)` for `2^e - 1`). A bare expression is an untyped
-//! immediate ([`ConstWidth::Register`]); `(const <expr> <width>)` pins the
-//! width. Node kinds are the op-sem surface's fixed-arity vocabulary
-//! ([`op_kind`]).
+//! A typed binder is a capture whose class width binds the width name; an
+//! untyped one is an anonymous wildcard. The left-hand side's own type binds
+//! the matched root's width. Integer and width expressions as operands match a
+//! `Constant` class equal to the expression. A right-hand side names captures,
+//! `root` (the matched class), nested `#` nodes, and integer expressions over
+//! bound widths (names, `-`, `ones(e)` for `2^e - 1`). A bare expression is an
+//! untyped immediate ([`ConstWidth::Register`]); `const<W>(e)` pins the width.
+//! Operator names are the op-sem surface's fixed-arity vocabulary.
 //!
-//! The proof obligation depends on what the RHS reads. Referencing only
-//! `root`, the lemma quantifies over an opaque root value of the root's width
-//! (`eq-via-if`: *any* 1-bit `c` equals `If(c, 1, 0)`, whatever the operand
-//! widths). Referencing vars, each var of class width `n` is realized as the
-//! low `n` bits of a fresh register-wide symbol that the RHS reads whole — so
-//! the proof also covers the undefined upper register bits the emitted
-//! instructions actually see.
+//! The proof obligation depends on what the right-hand side reads. Referencing
+//! only `root`, the lemma quantifies over an opaque root value of the root's
+//! width (`eq-via-if`: *any* 1-bit `c` equals `If(c, 1, 0)`, whatever the
+//! operand widths). Referencing captures, each capture of class width `n` is
+//! realized as the low `n` bits of a fresh register-wide symbol that the
+//! right-hand side reads whole — so the proof also covers the undefined upper
+//! register bits the emitted instructions actually see.
 //!
 //! An axiom over a loop-carried `theta` is proved by induction instead: the
 //! identity is discharged once with every `theta` read as its `init` port (the
-//! base case) and once as its `next` port (the step). An RHS that nests a
-//! `theta` under a `theta` unrolls the loop and never saturates, so it is
-//! rejected at parse.
+//! base case) and once as its `next` port (the step). A right-hand side that
+//! nests a `theta` under a `theta` unrolls the loop and never saturates, which
+//! PDL's sema rejects.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex, OnceLock};
@@ -44,10 +41,11 @@ use tir_adt::APInt;
 use tir_relational::ClassId as Id;
 use tir_relational::{Atom, Cmp, ColumnId, Expr, Guard, HeadOp, LabelFill, Plan, Query, Source};
 
+pub(crate) mod pdl;
+
 use crate::builtin::{FloatType, IntegerType};
 use crate::sem::{
-    EquivalenceOracle, SemExpr, SemGraph, SmtOracle, SymKind, SymPayload, Value, con, execute, op,
-    op_kind, parse, sym,
+    EquivalenceOracle, SemGraph, SmtOracle, SymKind, SymPayload, Value, con, execute, op, sym,
 };
 use crate::{Context, TypeId, graph::NodeId};
 
@@ -242,246 +240,6 @@ pub struct Axiom {
     materialize: bool,
 }
 
-fn atom(e: &SemExpr) -> Option<&str> {
-    match e {
-        SemExpr::Atom(a) => Some(a),
-        SemExpr::List(_) => None,
-    }
-}
-
-/// Split an axiom file (`;` line comments, one `(axiom ...)` form per
-/// balanced-paren span) into its forms.
-pub(crate) fn axiom_forms(file: &str) -> Vec<String> {
-    let text: String = file
-        .lines()
-        .filter(|line| !line.trim_start().starts_with(';'))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let mut forms = Vec::new();
-    let mut depth = 0usize;
-    let mut start = None;
-    for (i, c) in text.char_indices() {
-        match c {
-            '(' => {
-                if depth == 0 {
-                    start = Some(i);
-                }
-                depth += 1;
-            }
-            ')' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0
-                    && let Some(s) = start.take()
-                {
-                    forms.push(text[s..=i].to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    forms
-}
-
-pub(crate) fn parse_axiom(text: &str) -> Result<Axiom, String> {
-    axiom_from_expr(&parse(text).ok_or("malformed s-expression")?)
-}
-
-pub(crate) fn axiom_from_expr(parsed: &SemExpr) -> Result<Axiom, String> {
-    let SemExpr::List(items) = parsed else {
-        return Err("expected a top-level list".into());
-    };
-    let [head, name, sections @ ..] = items.as_slice() else {
-        return Err("expected (axiom <name> <section>...)".into());
-    };
-    if atom(head) != Some("axiom") {
-        return Err("expected the `axiom` keyword".into());
-    }
-    let name = atom(name).ok_or("axiom name must be an atom")?.to_string();
-
-    let mut width_names: Vec<String> = Vec::new();
-    let binding = |w: &str, width_names: &mut Vec<String>| {
-        if let Ok(v) = w.parse::<u64>() {
-            WidthBinding::Lit(v)
-        } else {
-            WidthBinding::Name(intern(width_names, w))
-        }
-    };
-
-    let mut vars: Vec<(String, WidthBinding)> = Vec::new();
-    let mut const_vars: Vec<usize> = Vec::new();
-    let mut root_width = None;
-    let mut guards = Vec::new();
-    let mut value_guards = Vec::new();
-    let mut lhs_expr = None;
-    let mut rhs_expr = None;
-    let mut post_saturation = false;
-
-    for section in sections {
-        let SemExpr::List(parts) = section else {
-            return Err("axiom sections must be lists".into());
-        };
-        let [SemExpr::Atom(section_head), rest @ ..] = parts.as_slice() else {
-            return Err("axiom section must start with a keyword".into());
-        };
-        match section_head.as_str() {
-            "vars" | "consts" => {
-                for entry in rest {
-                    let SemExpr::List(pair) = entry else {
-                        return Err("var entries must be (<var> <width>)".into());
-                    };
-                    let [SemExpr::Atom(v), SemExpr::Atom(w)] = pair.as_slice() else {
-                        return Err("var entries must be (<var> <width>)".into());
-                    };
-                    let w = binding(w, &mut width_names);
-                    if section_head == "consts" {
-                        const_vars.push(vars.len());
-                    }
-                    vars.push((v.clone(), w));
-                }
-            }
-            "root" => {
-                let [SemExpr::Atom(w)] = rest else {
-                    return Err("root section must be (root <width>)".into());
-                };
-                root_width = Some(binding(w, &mut width_names));
-            }
-            "phase" => {
-                let [SemExpr::Atom(phase)] = rest else {
-                    return Err("phase section must be (phase post-saturation)".into());
-                };
-                if phase != "post-saturation" {
-                    return Err(format!("unknown phase `{phase}`"));
-                }
-                post_saturation = true;
-            }
-            "where" => {
-                for g in rest {
-                    let SemExpr::List(parts) = g else {
-                        return Err("guards must be (< <a> <b>) or ([u]fits <var> <bits>)".into());
-                    };
-                    // `(not ...)` unwraps to its inner guard; only `[u]fits` may
-                    // be negated, which the match below enforces.
-                    let (parts, negated) = match parts.as_slice() {
-                        [SemExpr::Atom(kw), SemExpr::List(inner)] if kw == "not" => {
-                            (inner.as_slice(), true)
-                        }
-                        parts => (parts, false),
-                    };
-                    match parts {
-                        [SemExpr::Atom(kw), SemExpr::Atom(var), SemExpr::Atom(bits)]
-                            if kw == "fits" || kw == "ufits" =>
-                        {
-                            value_guards.push(parse_value_guard(
-                                var,
-                                bits,
-                                kw == "ufits",
-                                negated,
-                                &vars,
-                            )?);
-                        }
-                        [SemExpr::Atom(cmp), a, b] if !negated => {
-                            let a = parse_width_expr(a, &width_names)?;
-                            let b = parse_width_expr(b, &width_names)?;
-                            guards.push(match cmp.as_str() {
-                                "<" => Guard_::Lt(a, b),
-                                "=" => Guard_::Eq(a, b),
-                                other => return Err(format!("unknown guard `{other}`")),
-                            });
-                        }
-                        _ => {
-                            return Err("guards must be (< <a> <b>), ([u]fits <var> <bits>), \
-                                 or (not ([u]fits <var> <bits>))"
-                                .into());
-                        }
-                    }
-                }
-            }
-            "lhs" => {
-                let [e] = rest else {
-                    return Err("lhs section must hold one pattern".into());
-                };
-                lhs_expr = Some(e);
-            }
-            "rhs" => {
-                let [e] = rest else {
-                    return Err("rhs section must hold one template".into());
-                };
-                rhs_expr = Some(e);
-            }
-            other => return Err(format!("unknown section `{other}`")),
-        }
-    }
-
-    let lhs = parse_node(
-        lhs_expr.ok_or("missing lhs section")?,
-        Side::Lhs,
-        &vars,
-        &width_names,
-    )?;
-    // A bare `consts` var as the LHS root marks a materialize axiom: it matches
-    // every constant class so a wide constant can be decomposed in place.
-    let materialize = matches!(&lhs, AxNode::Hole(_, Some(i)) if const_vars.contains(i));
-    if !materialize && !matches!(lhs, AxNode::Node(..)) {
-        return Err("lhs must be a pattern node, not a bare atom".into());
-    }
-    let root_width = root_width.ok_or("missing root section")?;
-    let rhs = parse_node(
-        rhs_expr.ok_or("missing rhs section")?,
-        Side::Rhs,
-        &vars,
-        &width_names,
-    )?;
-
-    let mut uses_root = false;
-    let mut used_vars = HashSet::new();
-    references(&rhs, &mut uses_root, &mut used_vars);
-    if uses_root && !used_vars.is_empty() {
-        return Err("rhs may reference `root` or vars, not both".into());
-    }
-    let mut lhs_holes = Vec::new();
-    holes_of(&lhs, &mut lhs_holes);
-    for &i in &used_vars {
-        if !lhs_holes.iter().any(|(_, v)| *v == Some(i)) {
-            return Err(format!("rhs var `{}` never bound by the lhs", vars[i].0));
-        }
-    }
-    if !used_vars.is_empty() {
-        // The proof realizes the whole LHS, so every hole needs a known width.
-        for (name, var) in &lhs_holes {
-            if var.is_none() && !width_names.contains(name) {
-                return Err(format!("lhs atom `{name}` must be declared to be provable"));
-            }
-        }
-    }
-    let obligation = if contains_kind(&lhs, SymKind::Theta) || contains_kind(&rhs, SymKind::Theta) {
-        // An RHS theta nested under a theta re-grows the shape it matched, so
-        // saturation would never reach a fixpoint. Unrolling is a structural
-        // transform, not a rewrite rule.
-        if grows_theta_under_theta(&rhs) {
-            return Err(format!("axiom `{name}` unrolls a theta under itself"));
-        }
-        ProofObligation::ThetaInvariant
-    } else {
-        ProofObligation::Equivalence
-    };
-
-    Ok(Axiom {
-        name,
-        width_names,
-        vars,
-        const_vars,
-        root_width,
-        guards,
-        value_guards,
-        lhs,
-        rhs,
-        uses_root,
-        obligation,
-        post_saturation,
-        materialize,
-    })
-}
-
 fn contains_kind(node: &AxNode, expected: SymKind) -> bool {
     match node {
         AxNode::Node(kind, children) => {
@@ -492,154 +250,11 @@ fn contains_kind(node: &AxNode, expected: SymKind) -> bool {
     }
 }
 
-/// Whether a `theta` in `node` has another `theta` below it.
-fn grows_theta_under_theta(node: &AxNode) -> bool {
-    match node {
-        AxNode::Node(SymKind::Theta, children) => children
-            .iter()
-            .any(|child| contains_kind(child, SymKind::Theta)),
-        AxNode::Node(_, children) => children.iter().any(grows_theta_under_theta),
-        AxNode::Keep(inner) => grows_theta_under_theta(inner),
-        _ => false,
-    }
-}
-
-fn parse_value_guard(
-    var: &str,
-    bits: &str,
-    unsigned: bool,
-    negated: bool,
-    vars: &[(String, WidthBinding)],
-) -> Result<ValueGuard, String> {
-    let var = vars
-        .iter()
-        .position(|(v, _)| v == var)
-        .ok_or_else(|| format!("fits var `{var}` is not declared"))?;
-    let bits = bits
-        .parse::<u32>()
-        .map_err(|_| "fits bit count must be an integer".to_string())?;
-    if !(1..=64).contains(&bits) {
-        return Err("fits bit count must be in 1..=64".to_string());
-    }
-    Ok(ValueGuard {
-        var,
-        bits,
-        unsigned,
-        negated,
-    })
-}
-
 fn intern(names: &mut Vec<String>, name: &str) -> usize {
     names.iter().position(|n| n == name).unwrap_or_else(|| {
         names.push(name.to_string());
         names.len() - 1
     })
-}
-
-fn parse_width_expr(e: &SemExpr, width_names: &[String]) -> Result<WidthExpr, String> {
-    match e {
-        SemExpr::Atom(a) => {
-            if let Ok(v) = a.parse::<u64>() {
-                Ok(WidthExpr::Lit(v))
-            } else if let Some(i) = width_names.iter().position(|n| n == a) {
-                Ok(WidthExpr::Name(i))
-            } else {
-                Err(format!("unknown width `{a}`"))
-            }
-        }
-        SemExpr::List(parts) => match parts.as_slice() {
-            [SemExpr::Atom(minus), a, b] if minus == "-" => Ok(WidthExpr::Sub(
-                Box::new(parse_width_expr(a, width_names)?),
-                Box::new(parse_width_expr(b, width_names)?),
-            )),
-            [SemExpr::Atom(ones), e] if ones == "ones" => {
-                Ok(WidthExpr::Ones(Box::new(parse_width_expr(e, width_names)?)))
-            }
-            _ => Err("width expressions are atoms, (- <a> <b>), or (ones <e>)".into()),
-        },
-    }
-}
-
-/// Parse one template tree; atoms resolve to holes on the LHS and to var
-/// references / constants on the RHS, node heads through the shared op-sem
-/// vocabulary ([`op_kind`]).
-fn parse_node(
-    e: &SemExpr,
-    side: Side,
-    vars: &[(String, WidthBinding)],
-    width_names: &[String],
-) -> Result<AxNode, String> {
-    match e {
-        SemExpr::Atom(a) => {
-            if a == "root" {
-                return match side {
-                    Side::Lhs => Err("`root` cannot appear in the lhs".into()),
-                    Side::Rhs => Ok(AxNode::Root),
-                };
-            }
-            let var = vars.iter().position(|(v, _)| v == a);
-            match side {
-                Side::Lhs if a.parse::<u64>().is_ok() => {
-                    Ok(AxNode::ConstMatch(parse_width_expr(e, width_names)?))
-                }
-                Side::Lhs => Ok(AxNode::Hole(a.clone(), var)),
-                Side::Rhs => match var {
-                    Some(i) => Ok(AxNode::Hole(a.clone(), Some(i))),
-                    None => Ok(AxNode::Const(
-                        parse_width_expr(e, width_names)?,
-                        ConstWidth::Register,
-                    )),
-                },
-            }
-        }
-        SemExpr::List(parts) => {
-            let [SemExpr::Atom(head), rest @ ..] = parts.as_slice() else {
-                return Err("template nodes must be (<kind> <operand>...)".into());
-            };
-            match head.as_str() {
-                "-" | "ones" if side == Side::Lhs => {
-                    Ok(AxNode::ConstMatch(parse_width_expr(e, width_names)?))
-                }
-                "-" | "ones" if side == Side::Rhs => Ok(AxNode::Const(
-                    parse_width_expr(e, width_names)?,
-                    ConstWidth::Register,
-                )),
-                "keep" if side == Side::Rhs => {
-                    let [inner] = rest else {
-                        return Err("keep form is (keep <node>)".into());
-                    };
-                    let inner = parse_node(inner, side, vars, width_names)?;
-                    if !matches!(inner, AxNode::Node(..)) {
-                        return Err("keep wraps a node, not a bare atom".into());
-                    }
-                    Ok(AxNode::Keep(Box::new(inner)))
-                }
-                "const" if side == Side::Rhs => {
-                    let [value, SemExpr::Atom(width)] = rest else {
-                        return Err("const form is (const <expr> <width>)".into());
-                    };
-                    let width: u32 = width
-                        .parse()
-                        .map_err(|_| "const width must be an integer")?;
-                    Ok(AxNode::Const(
-                        parse_width_expr(value, width_names)?,
-                        ConstWidth::Fixed(width),
-                    ))
-                }
-                _ => {
-                    let kind = op_kind(head).ok_or_else(|| format!("unknown kind `{head}`"))?;
-                    if kind.arity() != rest.len() {
-                        return Err(format!("`{head}` expects {} operands", kind.arity()));
-                    }
-                    let children = rest
-                        .iter()
-                        .map(|c| parse_node(c, side, vars, width_names))
-                        .collect::<Result<_, _>>()?;
-                    Ok(AxNode::Node(kind, children))
-                }
-            }
-        }
-    }
 }
 
 /// What the RHS reads: the matched root and/or declared vars.

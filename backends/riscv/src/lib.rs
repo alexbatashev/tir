@@ -585,7 +585,7 @@ fn create_isel_pass_for(
         .filter(|f| !COMPRESSED_FEATURES.contains(f))
         .collect();
     tir::backend::isel::InstructionSelectPass::new(get_isel_rules(context, &features))
-        .with_axioms(include_str!("isel-materialize.axioms"))
+        .with_rules(include_str!("isel-materialize.pdl"))
         .with_branch_emitters(tir::backend::isel::BranchEmitters {
             uncond: tir::backend::emit_uncond_branch,
             cond_nonzero: emit_branch_nonzero,

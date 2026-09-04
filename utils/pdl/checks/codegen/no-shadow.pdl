@@ -2,8 +2,8 @@
 // variables by number, so there is nothing to shadow.
 // RUN: tir-pdl %s --emit rust | filecheck %s
 
-rule shadow-root: builtin.subi(root: int<W>, root) => const<W>(0);
+rule shadow-context: builtin.subi(context: int<W>, context) => const<W>(0);
 
-// CHECK-NOT: let root =
+// CHECK-NOT: let context =
 // CHECK: root: 1u32
-// CHECK-NOT: let root =
+// CHECK-NOT: let context =

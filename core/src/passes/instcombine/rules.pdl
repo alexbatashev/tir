@@ -8,4 +8,4 @@ rule mul-pow2-to-shl:
   where popcount(c) == 1, c != 1;
 rule sub-self: builtin.subi(x: int<W>, x) => const<W>(0);
 
-rule gamma-same: #gamma(c, x, x) => x;
+rule if-same: #if(c, x, x) => x;

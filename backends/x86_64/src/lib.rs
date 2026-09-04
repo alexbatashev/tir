@@ -762,7 +762,7 @@ mod isa {
                 context,
                 self.config.features(),
             ))
-            .with_axioms(include_str!("isel.axioms"))
+            .with_rules(include_str!("isel.pdl"))
             .with_branch_emitters(tir::backend::isel::BranchEmitters {
                 uncond: tir::backend::emit_uncond_branch,
                 cond_nonzero: emit_branch_nonzero,
