@@ -603,7 +603,10 @@ impl tir_relational::Externs<SemNode> for Interpretation<'_> {
             }
             proof if proof >= call::VERIFY => {
                 if verify_axioms() {
-                    self.axioms[(proof - call::VERIFY) as usize].verify(args);
+                    let axiom = &self.axioms[(proof - call::VERIFY) as usize];
+                    // The scalars past the widths are there to order the guard,
+                    // not to key the proof.
+                    axiom.verify(&args[..axiom.width_names.len()]);
                 }
                 true
             }
@@ -877,6 +880,7 @@ impl<'a> Lowering<'a> {
             let constant = self.constant(class);
             self.const_values.insert(var, constant);
         }
+        let mut gated_on: Vec<Expr> = Vec::new();
         for predicate in &axiom.value_guards {
             let class = self.declared[predicate.var];
             let (value, _) = *self
@@ -884,6 +888,7 @@ impl<'a> Lowering<'a> {
                 .get(&predicate.var)
                 .expect("a value predicate names a constant var");
             let width = self.width_of(class);
+            gated_on.extend([Expr::Scalar(value), Expr::Scalar(width)]);
             self.guards.push(Guard::Extern {
                 call: call::FITS,
                 terms: SmallVec::new(),
@@ -899,11 +904,26 @@ impl<'a> Lowering<'a> {
         }
         // The obligation is a debug-build check on the target description, not
         // an input to selection, so it is only in the rule when it is asked for.
+        //
+        // It is an assertion about a match that passed every filter, not a
+        // filter itself, so it has to be discharged after them. The planner
+        // schedules a guard as soon as everything it reads is bound, so the
+        // obligation reads every scalar the value predicates read as well as
+        // the widths: that makes it ready no earlier than they are, and they
+        // are pushed first, so they are the ones picked. Without this it is
+        // discharged at widths the axiom can never fire at. A materialize axiom
+        // guarded on a constant too wide for the target immediate was proved at
+        // every narrower width too, where its width arithmetic is undefined.
         if verify_axioms() {
             self.guards.push(Guard::Extern {
                 call: call::VERIFY + index as u32,
                 terms: SmallVec::new(),
-                args: self.widths.iter().map(|&w| Expr::Scalar(w)).collect(),
+                args: self
+                    .widths
+                    .iter()
+                    .map(|&w| Expr::Scalar(w))
+                    .chain(gated_on)
+                    .collect(),
                 out: SmallVec::new(),
             });
         }

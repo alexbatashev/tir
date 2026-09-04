@@ -442,8 +442,16 @@ full-width register the RHS reads whole, covering the undefined upper register
 bits the emitted instructions actually see. Ordinary compiles trust the
 checked-in rules: the proofs validate the target description rather than feed
 selection, so they run in the verification test runs (unit tests call
-`Axiom::prove` and `prove_guarded_relaxations` directly; CI sets
-`TIR_VERIFY_AXIOMS` on a test job), not on every compile.
+`Axiom::prove` and `prove_guarded_relaxations` directly; the nightly
+`verify-axioms` job runs the whole suite with `TIR_VERIFY_AXIOMS=1`), not on
+every compile.
+
+The obligation is an assertion about a match that passed every filter, not a
+filter itself, so it is discharged only at widths the axiom can actually fire
+at. A materialize axiom guarded on `!fits(v, 12)` has a right-hand side that
+computes `W - 12`, which is undefined at `W = 8`; since an 8-bit constant
+always fits a signed 12-bit immediate, the axiom never applies there and is
+never proved there.
 The extension axiom asserts:
 
 ```
