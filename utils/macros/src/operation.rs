@@ -1,7 +1,8 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{Expr, ExprStruct, Ident, Member, Path, TypePath, parse::Parse, parse_macro_input};
+use syn::{Expr, Ident, Path, Token, TypePath, braced, parse::Parse, parse_macro_input};
 
+use crate::binds::{Binds, BindsCode, Counted, OpShape};
 use crate::utils::{expr_as_path_vec, expr_as_string, field_name, op_fn_ident};
 
 pub fn construct_operation(item: TokenStream) -> TokenStream {
@@ -18,9 +19,45 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         sem,
         custom_verifier,
         state,
+        binds,
+        counted,
     } = parse_macro_input!(item as Operation);
 
     let builder_name = format_ident!("{}Builder", struct_name.to_string());
+    let binds_code = binds.as_ref().map(|binds| {
+        assert!(
+            operands.iter().all(|operand| !operand.ty.starts_with('?')),
+            "binds: aligns fixed or variadic operand groups, not optional ones"
+        );
+        assert!(
+            attributes.is_empty() || custom_format,
+            "binds: the generic syntax spells no attributes; declare a custom format"
+        );
+        let operand_shape: Vec<(String, bool)> = operands
+            .iter()
+            .map(|operand| (operand.name.clone(), operand.variadic))
+            .collect();
+        let region_shape: Vec<(String, bool)> = regions
+            .iter()
+            .map(|region| (region.name.clone(), region.variadic))
+            .collect();
+        crate::binds::emit(
+            binds,
+            counted.as_ref(),
+            &OpShape {
+                struct_name: &struct_name,
+                builder_name: &builder_name,
+                spelled: format!("{dialect}.{name}"),
+                operands: &operand_shape,
+                regions: &region_shape,
+                custom_format,
+            },
+        )
+    });
+    assert!(
+        counted.is_none() || binds.is_some(),
+        "counted: needs the Theta binding it pins"
+    );
     // `state:` names which single dependency ports memory order threads through
     // the op — absent in un-threaded IR — and only decides which accessors the
     // op gets; every builder takes dependencies the same way.
@@ -45,26 +82,34 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     let op_fn_name = op_fn_ident(&name);
     let operand_names: Vec<String> = operands.iter().map(|o| o.name.clone()).collect();
 
-    let printer = if custom_format {
-        make_custom_printer()
-    } else {
-        make_generic_printer(&dialect, &name, &operand_names, &regions, has_results)
+    let BindsCode {
+        interfaces: binds_interfaces,
+        impls: binds_impls,
+        verify: binds_verify,
+        printer: binds_printer,
+        parser: binds_parser,
+    } = binds_code.unwrap_or_default();
+
+    let printer = match binds_printer {
+        Some(printer) => printer,
+        None if custom_format => make_custom_printer(),
+        None => make_generic_printer(&dialect, &name, &operand_names, &regions, has_results),
     };
 
     let region_accessors = make_region_accessors(&regions);
     let region_pieces = make_region_pieces(&regions);
 
-    let parser = if custom_format {
-        make_custom_parser()
-    } else {
-        make_parser(
+    let parser = match binds_parser {
+        Some(parser) => parser,
+        None if custom_format => make_custom_parser(),
+        None => make_parser(
             &builder_name,
             &regions,
             &operand_names,
             &attributes,
             has_results,
             result_variadic,
-        )
+        ),
     };
 
     let attribute_verifier = make_attribute_verifier(&attributes);
@@ -96,6 +141,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     if derive_constant_fold {
         interfaces.push(syn::parse_quote!(tir::ConstantFold));
     }
+    interfaces.extend(binds_interfaces);
 
     let (sem_hooks_impl, semantic_expr_method, as_sem_expr_impl) =
         make_sem_impls(&sem, &struct_name, &operands, has_results);
@@ -168,6 +214,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         &results,
         &regions,
         same_type,
+        &binds_verify,
     );
 
     let predicate_setters: Vec<_> = attributes
@@ -214,6 +261,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
 
         #(#interface_impls)*
         #verifiable_impl
+        #binds_impls
         #sem_hooks_impl
         #as_sem_expr_impl
         #constant_fold_impl
@@ -346,6 +394,7 @@ fn emit_opdef_verifier(
     results: &[ValueSpec],
     regions: &[Region],
     same_type: bool,
+    binds_verify: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     let region_kinds: Vec<_> = regions
         .iter()
@@ -376,7 +425,9 @@ fn emit_opdef_verifier(
                     region_kinds: &[#(tir::RegionKind::#region_kinds),*],
                     same_type: #same_type,
                 };
-                tir::verify_opdef_operands(context, &self.0, <Self as tir::Operation>::name(), &SPEC)
+                tir::verify_opdef_operands(context, &self.0, <Self as tir::Operation>::name(), &SPEC)?;
+                #binds_verify
+                Ok(())
             }
             fn verify_attributes(&self, context: &tir::Context) -> Result<(), tir::Error> {
                 tir::verify_opdef_attributes(
@@ -1111,6 +1162,58 @@ struct Operation {
     sem: Option<Sem>,
     custom_verifier: bool,
     state: StatePorts,
+    binds: Option<Binds>,
+    counted: Option<Counted>,
+}
+
+/// One `key: value` of the declaration. `binds:` and `counted:` are read as
+/// their own grammars (`~` is no Rust operator); everything else is an
+/// expression.
+enum Field {
+    Expr(Expr),
+    Binds(Binds),
+    Counted(Counted),
+}
+
+/// The declaration as written: the op's struct name and its fields in order.
+struct Fields {
+    struct_name: Ident,
+    fields: Vec<(String, Field)>,
+}
+
+impl Fields {
+    fn expr(&self, key: &str) -> Option<&Expr> {
+        self.fields.iter().find_map(|(name, field)| match field {
+            Field::Expr(expr) if name == key => Some(expr),
+            _ => None,
+        })
+    }
+}
+
+impl Parse for Fields {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let struct_name: Ident = input.parse()?;
+        let content;
+        braced!(content in input);
+        let mut fields = vec![];
+        while !content.is_empty() {
+            let key: Ident = content.parse()?;
+            content.parse::<Token![:]>()?;
+            let field = match key.to_string().as_str() {
+                "binds" => Field::Binds(content.parse()?),
+                "counted" => Field::Counted(content.parse()?),
+                _ => Field::Expr(content.parse()?),
+            };
+            fields.push((key.to_string(), field));
+            if !content.is_empty() {
+                content.parse::<Token![,]>()?;
+            }
+        }
+        Ok(Fields {
+            struct_name,
+            fields,
+        })
+    }
 }
 
 /// A parsed `sem = "..."` declaration: the raw s-expression source plus the
@@ -1151,160 +1254,53 @@ struct ValueSpec {
 
 impl Parse for Operation {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let struct_: ExprStruct = input.parse()?;
-
-        let struct_name = struct_.path.require_ident()?.clone();
-
-        let name = struct_
-            .fields
-            .iter()
-            .find_map(|f| match &f.member {
-                Member::Named(ident) => {
-                    if ident.to_string().as_str() == "name" {
-                        Some(expr_as_string(&f.expr))
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .unwrap();
-
-        let dialect = struct_
-            .fields
-            .iter()
-            .find_map(|f| match &f.member {
-                Member::Named(ident) => {
-                    if ident.to_string().as_str() == "dialect" {
-                        Some(expr_as_string(&f.expr))
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .unwrap();
-
-        let regions = struct_
-            .fields
-            .iter()
-            .find_map(|f| match &f.member {
-                Member::Named(ident) => {
-                    if ident.to_string().as_str() == "regions" {
-                        get_regions(&f.expr)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
+        let mut declared: Fields = input.parse()?;
+        let struct_name = declared.struct_name.clone();
+        let name = expr_as_string(declared.expr("name").expect("an operation has a name"));
+        let dialect = expr_as_string(
+            declared
+                .expr("dialect")
+                .expect("an operation belongs to a dialect"),
+        );
+        let regions = declared
+            .expr("regions")
+            .and_then(get_regions)
             .unwrap_or_default();
-
-        let attributes = struct_
-            .fields
-            .iter()
-            .find_map(|f| match &f.member {
-                Member::Named(ident) => {
-                    if ident.to_string().as_str() == "attributes" {
-                        get_attributes(&f.expr)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
+        let attributes = declared
+            .expr("attributes")
+            .and_then(get_attributes)
             .unwrap_or_default();
-
-        let operands = struct_
-            .fields
-            .iter()
-            .find_map(|f| match &f.member {
-                Member::Named(ident) => {
-                    if ident.to_string().as_str() == "operands" {
-                        get_value_specs(&f.expr)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
+        let operands = declared
+            .expr("operands")
+            .and_then(get_value_specs)
             .unwrap_or_default();
-
-        let results = struct_
-            .fields
-            .iter()
-            .find_map(|f| match &f.member {
-                Member::Named(ident) => {
-                    if ident.to_string().as_str() == "results" {
-                        get_value_specs(&f.expr)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
+        let results = declared
+            .expr("results")
+            .and_then(get_value_specs)
             .unwrap_or_default();
-
-        let interfaces = struct_
-            .fields
-            .iter()
-            .find_map(|f| match &f.member {
-                Member::Named(ident) => {
-                    if ident.to_string().as_str() == "interfaces" {
-                        Some(expr_as_path_vec(&f.expr))
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
+        let interfaces = declared
+            .expr("interfaces")
+            .map(expr_as_path_vec)
             .unwrap_or_default();
-
-        let custom_format = struct_
-            .fields
-            .iter()
-            .find_map(|f| match &f.member {
-                Member::Named(ident) => {
-                    if ident.to_string().as_str() == "format" {
-                        Some(expr_as_string(&f.expr) == "custom")
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .unwrap_or(false);
-
-        let custom_verifier = struct_
-            .fields
-            .iter()
-            .find_map(|f| match &f.member {
-                Member::Named(ident) => {
-                    if ident.to_string().as_str() == "verifier" {
-                        Some(expr_as_string(&f.expr) == "true")
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .unwrap_or(false);
-
-        let state = struct_
-            .fields
-            .iter()
-            .find_map(|f| match &f.member {
-                Member::Named(ident) if ident == "state" => {
-                    Some(StatePorts::parse(&expr_as_string(&f.expr)))
-                }
-                _ => None,
-            })
+        let custom_format = declared
+            .expr("format")
+            .is_some_and(|expr| expr_as_string(expr) == "custom");
+        let custom_verifier = declared
+            .expr("verifier")
+            .is_some_and(|expr| expr_as_string(expr) == "true");
+        let state = declared
+            .expr("state")
+            .map(|expr| StatePorts::parse(&expr_as_string(expr)))
             .unwrap_or_default();
-
-        let sem = struct_.fields.iter().find_map(|f| match &f.member {
-            Member::Named(ident) if ident == "sem" => parse_sem(&f.expr),
-            _ => None,
-        });
+        let sem = declared.expr("sem").and_then(parse_sem);
+        let (mut binds, mut counted) = (None, None);
+        for (_, field) in declared.fields.drain(..) {
+            match field {
+                Field::Binds(spec) => binds = Some(spec),
+                Field::Counted(spec) => counted = Some(spec),
+                Field::Expr(_) => {}
+            }
+        }
 
         Ok(Operation {
             struct_name,
@@ -1319,6 +1315,8 @@ impl Parse for Operation {
             sem,
             custom_verifier,
             state,
+            binds,
+            counted,
         })
     }
 }

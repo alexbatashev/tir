@@ -66,7 +66,7 @@ pub fn print_region(
     }
     let numbers = region_block_numbers(region, context);
     fmt.push_region_block_numbers(numbers);
-    fmt.writeln(" {")?;
+    fmt.writeln(open_brace(fmt))?;
     fmt.push();
     for (index, block) in region.iter(context.clone()).enumerate() {
         // The entry block is implicit, so its label appears only when needed to
@@ -93,24 +93,53 @@ fn print_nodes_region(
     context: &Context,
     region: &RegionHandle,
 ) -> Result<(), std::fmt::Error> {
+    print_nodes_region_with(
+        fmt,
+        context,
+        region,
+        &[],
+        &region.value_results(),
+        &region.dep_results(),
+    )
+}
+
+/// [`print_region`] for an unordered region whose owner spells part of it
+/// itself: `hidden` operations are left out and the `->` line names `results`
+/// and `dep_results` in place of the region's own. A counted loop prints this
+/// way, its parser putting the pinned comparison and increment back.
+pub fn print_nodes_region_with(
+    fmt: &mut IRFormatter,
+    context: &Context,
+    region: &RegionHandle,
+    hidden: &[crate::OpId],
+    results: &[crate::ValueId],
+    dep_results: &[crate::ValueId],
+) -> Result<(), std::fmt::Error> {
     let ops =
         crate::region::topological_order(context, region.id()).unwrap_or_else(|_| region.op_ids());
-    fmt.writeln(" {")?;
+    fmt.writeln(open_brace(fmt))?;
     fmt.push();
     for op in ops {
-        context.get_op(op).as_dyn_op().print(fmt)?;
+        if !hidden.contains(&op) {
+            context.get_op(op).as_dyn_op().print(fmt)?;
+        }
     }
     fmt.write("->")?;
-    let values = region.value_results();
-    if !values.is_empty() {
+    if !results.is_empty() {
         fmt.write(" ")?;
-        crate::dependency::print_value_list(fmt, &values)?;
+        crate::dependency::print_value_list(fmt, results)?;
     }
-    crate::dependency::print_dep_list(fmt, &region.dep_results(), true)?;
+    crate::dependency::print_dep_list(fmt, dep_results, true)?;
     fmt.writeln("")?;
     fmt.pop();
     fmt.writeln("}")?;
     Ok(())
+}
+
+/// A region opening at the start of a line (a gamma's second arm) takes no
+/// leading space; one continuing an op line does.
+fn open_brace(fmt: &IRFormatter) -> &'static str {
+    if fmt.at_line_start() { "{" } else { " {" }
 }
 
 pub fn print_op_region(

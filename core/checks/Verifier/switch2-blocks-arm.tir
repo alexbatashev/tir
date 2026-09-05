@@ -1,0 +1,16 @@
+// RUN: not tir opt --verify %s 2>&1 | filecheck %s
+
+// The new gamma's arms are unordered regions; a block-structured arm parses
+// but does not verify.
+
+module {
+  %fn_main = func.func @main(%0: !i32) {
+    scf.switch2 %0 {
+      scf.yield
+    }
+    func.return
+  }
+  module_end
+}
+
+// CHECK: switch2 declares a Nodes region, but holds blocks

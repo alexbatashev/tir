@@ -52,6 +52,12 @@ impl<'a> IRFormatter<'a> {
             .unwrap_or_else(|| block.number())
     }
 
+    /// Whether the next write opens a line, so a caller can choose between
+    /// `{` and ` {`.
+    pub fn at_line_start(&self) -> bool {
+        self.new_line
+    }
+
     pub fn push(&mut self) {
         self.padding += 1;
     }

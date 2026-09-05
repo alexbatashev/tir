@@ -7,6 +7,7 @@ pub use linkme;
 pub mod analysis;
 pub mod attributes;
 pub mod backend;
+pub mod binding;
 mod block;
 mod clone;
 pub use clone::clone_region_with_mapping;

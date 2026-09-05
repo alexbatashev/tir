@@ -1,0 +1,18 @@
+// RUN: not tir opt --verify %s 2>&1 | filecheck %s
+
+// The first arm decides the result types; every other arm must agree.
+
+module {
+  %fn_main = func.func @main(%0: !i32, %1: !i32, %2: !i64) -> !i32 {
+    %3 = scf.switch2 %0 args(%1) (%4) {
+      -> %4
+    }
+    (%5) {
+      -> %2
+    }
+    func.return %3
+  }
+  module_end
+}
+
+// CHECK: scf.switch2 arm 1 value 0 must have the type of result 0

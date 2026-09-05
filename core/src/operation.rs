@@ -565,6 +565,12 @@ pub fn verify_opdef_operands(
 
         let mut cursor = 0usize;
         for (idx, field) in operand_fields.iter().enumerate() {
+            if !field.variadic && segment_sizes[idx] != 1 {
+                return Err(crate::Error::VerificationError(format!(
+                    "{op_name} operand '{}' takes one value, got {}",
+                    field.name, segment_sizes[idx]
+                )));
+            }
             for k in 0..segment_sizes[idx] {
                 verify_def_value(
                     context,

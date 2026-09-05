@@ -1,0 +1,14 @@
+// RUN: not tir opt --verify %s 2>&1 | filecheck %s
+
+module {
+  %fn_main = func.func @main(%0: !i32, %1: !i64) -> !i32 {
+    %2 = scf.loop (%3 = %0) {
+      %4 = constant {value = 0} : !i1
+      -> %4, %1, %3
+    }
+    func.return %2
+  }
+  module_end
+}
+
+// CHECK: scf.loop continue value 0 must have the type of port 0

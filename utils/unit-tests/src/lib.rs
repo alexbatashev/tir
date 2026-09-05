@@ -114,6 +114,7 @@ mod core {
     mod arith;
     mod backend;
     mod binary;
+    mod binding;
     mod context;
     mod dependence;
     mod dialects;

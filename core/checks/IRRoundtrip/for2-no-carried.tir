@@ -1,0 +1,20 @@
+// RUN: tir opt --verify %s | filecheck %s
+
+// A loop carrying nothing but its counter produces only the counter's final
+// value, and its body names nothing.
+
+module {
+  %fn_main = func.func @main(%0: !i32, %1: !i32) -> !i32 {
+    %2 = constant {value = 1} : !i32
+    %3 = scf.for2 %4 = %0 to %1 step %2 {
+      ->
+    }
+    func.return %3
+  }
+  module_end
+}
+
+// CHECK: %[[R:[0-9]+]] = scf.for2 %{{[0-9]+}} = %{{[0-9]+}} to %{{[0-9]+}} step %{{[0-9]+}} {
+// CHECK-NEXT: ->
+// CHECK-NEXT: }
+// CHECK-NEXT: func.return %[[R]]

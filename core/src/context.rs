@@ -709,7 +709,8 @@ impl ContextInstance {
         }
     }
 
-    /// `region`'s block list changed.
+    /// `region`'s contents changed: its block list, or an unordered region's
+    /// operations or results.
     fn edit_region(&mut self, region: RegionId) {
         if let Some(op) = self.region(region).and_then(Region::parent_op) {
             self.edit_subtree(op);
@@ -1297,6 +1298,40 @@ impl Context {
         let region = self.create_region();
         self.set_region_nodes(region.id(), ports, dep_ports, ops, results, dep_results);
         region
+    }
+
+    /// Put `op` into the unordered `region`. Nothing about the position means
+    /// anything: the region's dependencies say what runs before what.
+    pub fn add(&self, region: RegionId, op: OpId) {
+        let mut inner = self.0.write();
+        match inner.region_mut(region).map(Region::body_mut) {
+            Some(crate::region::RegionBody::Nodes { ops, .. }) => ops.push(op),
+            _ => panic!("only an unordered region takes an operation without a position"),
+        }
+        debug_assert!(
+            slab_get(&inner.op_parent, op.index()).is_none(),
+            "an operation joins an unordered region from nowhere else",
+        );
+        slab_put(&mut inner.op_parent, op.index(), Parent::Region(region));
+        inner.edit_region(region);
+    }
+
+    /// Name the values the unordered `region` produces, the trailing
+    /// `dep_results` of them dependencies.
+    pub fn set_region_results(&self, region: RegionId, results: Vec<ValueId>, dep_results: usize) {
+        let mut inner = self.0.write();
+        match inner.region_mut(region).map(Region::body_mut) {
+            Some(crate::region::RegionBody::Nodes {
+                results: held,
+                dep_results: held_deps,
+                ..
+            }) => {
+                *held = results;
+                *held_deps = dep_results as u32;
+            }
+            _ => panic!("only an unordered region names its results"),
+        }
+        inner.edit_region(region);
     }
 
     /// Make an empty region unordered; see [`Context::create_nodes_region`].

@@ -105,6 +105,10 @@ impl Region {
         &self.body
     }
 
+    pub(crate) fn body_mut(&mut self) -> &mut RegionBody {
+        &mut self.body
+    }
+
     pub(crate) fn blocks(&self) -> &[BlockId] {
         match &self.body {
             RegionBody::Blocks(blocks) => blocks,
