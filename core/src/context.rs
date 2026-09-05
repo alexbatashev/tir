@@ -498,15 +498,49 @@ impl ContextInstance {
     /// segments: an appended or dropped value operand belongs to the trailing
     /// variadic group.
     fn adjust_last_segment(&mut self, op: OpId, delta: i64) {
-        let segment_sizes = self.names.intern("operand_segment_sizes");
-        if let Some(attribute) = self
-            .op_attrs_mut(op)
-            .iter_mut()
-            .find(|attribute| attribute.name == segment_sizes)
-            && let crate::attributes::AttributeValue::Array(sizes) = &mut attribute.value
+        if let Some(sizes) = self.segment_sizes_mut(op)
             && let Some(crate::attributes::AttributeValue::UInt(last)) = sizes.last_mut()
         {
             *last = (*last as i64 + delta) as u64;
+        }
+    }
+
+    /// The `operand_segment_sizes` an op with a variadic group records, for
+    /// editing; `None` for a fixed-arity op.
+    fn segment_sizes_mut(&mut self, op: OpId) -> Option<&mut [crate::attributes::AttributeValue]> {
+        let segment_sizes = self.names.intern("operand_segment_sizes");
+        match &mut self
+            .op_attrs_mut(op)
+            .iter_mut()
+            .find(|attribute| attribute.name == segment_sizes)?
+            .value
+        {
+            crate::attributes::AttributeValue::Array(sizes) => Some(sizes),
+            _ => None,
+        }
+    }
+
+    /// Grow by one the declared operand group whose value operands end at
+    /// `index`, the last such group when several end there (an empty variadic
+    /// group after a fixed one). A fixed-arity op tracks no segments.
+    fn grow_segment_ending_at(&mut self, op: OpId, index: usize) {
+        let Some(sizes) = self.segment_sizes_mut(op) else {
+            return;
+        };
+        let mut end = 0;
+        let mut chosen = None;
+        for (position, size) in sizes.iter().enumerate() {
+            if let crate::attributes::AttributeValue::UInt(size) = size {
+                end += *size as usize;
+                if end == index {
+                    chosen = Some(position);
+                }
+            }
+        }
+        if let Some(crate::attributes::AttributeValue::UInt(size)) =
+            chosen.and_then(|position| sizes.get_mut(position))
+        {
+            *size += 1;
         }
     }
 
@@ -709,7 +743,8 @@ impl ContextInstance {
         }
     }
 
-    /// `region`'s block list changed.
+    /// `region`'s contents changed: its block list, or an unordered region's
+    /// operations or results.
     fn edit_region(&mut self, region: RegionId) {
         if let Some(op) = self.region(region).and_then(Region::parent_op) {
             self.edit_subtree(op);
@@ -1299,6 +1334,40 @@ impl Context {
         region
     }
 
+    /// Put `op` into the unordered `region`. Nothing about the position means
+    /// anything: the region's dependencies say what runs before what.
+    pub fn add(&self, region: RegionId, op: OpId) {
+        let mut inner = self.0.write();
+        match inner.region_mut(region).map(Region::body_mut) {
+            Some(crate::region::RegionBody::Nodes { ops, .. }) => ops.push(op),
+            _ => panic!("only an unordered region takes an operation without a position"),
+        }
+        debug_assert!(
+            slab_get(&inner.op_parent, op.index()).is_none(),
+            "an operation joins an unordered region from nowhere else",
+        );
+        slab_put(&mut inner.op_parent, op.index(), Parent::Region(region));
+        inner.edit_region(region);
+    }
+
+    /// Name the values the unordered `region` produces, the trailing
+    /// `dep_results` of them dependencies.
+    pub fn set_region_results(&self, region: RegionId, results: Vec<ValueId>, dep_results: usize) {
+        let mut inner = self.0.write();
+        match inner.region_mut(region).map(Region::body_mut) {
+            Some(crate::region::RegionBody::Nodes {
+                results: held,
+                dep_results: held_deps,
+                ..
+            }) => {
+                *held = results;
+                *held_deps = dep_results as u32;
+            }
+            _ => panic!("only an unordered region names its results"),
+        }
+        inner.edit_region(region);
+    }
+
     /// Make an empty region unordered; see [`Context::create_nodes_region`].
     /// The parser uses this: which kind a region is only becomes clear once its
     /// body has been read.
@@ -1625,6 +1694,9 @@ impl Context {
         init: Option<ValueId>,
         latch: impl FnMut(RegionId, Option<ValueId>) -> Option<ValueId>,
     ) -> ValueId {
+        if self.has_declared_binding(op) {
+            return self.grow_declared_port(op, ty, init, latch, false);
+        }
         self.grow_port_with(
             op,
             init,
@@ -1643,6 +1715,9 @@ impl Context {
         init: Option<ValueId>,
         latch: impl FnMut(RegionId, Option<ValueId>) -> Option<ValueId>,
     ) -> ValueId {
+        if self.has_declared_binding(op) {
+            return self.grow_declared_port(op, TypeId::DEPENDENCY, init, latch, true);
+        }
         self.grow_port_with(
             op,
             init,
@@ -1688,8 +1763,105 @@ impl Context {
         self.get_op(op).value_operands().len() - 1
     }
 
+    /// Whether `op` declares its ports through a `binds:` binding, which
+    /// [`Context::grow_port`] reads instead of walking blocks and terminators.
+    fn has_declared_binding(&self, op: OpId) -> bool {
+        let handle = self.get_op(op);
+        handle.has_interface::<dyn crate::Theta>() || handle.has_interface::<dyn crate::Gamma>()
+    }
+
+    /// Put `value` at position `index` of `op`'s value operands, or of its
+    /// dependency operands when `dependency`. A value joins the declared
+    /// operand group ending at `index`, so the segment sizes stay in step.
+    pub(crate) fn insert_operand_at(
+        &self,
+        op: OpId,
+        index: usize,
+        value: ValueId,
+        dependency: bool,
+    ) {
+        let mut inner = self.0.write();
+        let Some(instance) = inner.op(op) else {
+            return;
+        };
+        let values = (instance.operand_count - instance.dep_operand_count) as usize;
+        inner.insert_operand(op, if dependency { values + index } else { index }, value);
+        if dependency {
+            inner.op_mut(op).expect("live op").dep_operand_count += 1;
+        } else {
+            inner.grow_segment_ending_at(op, index);
+        }
+        inner.edit_op(op);
+    }
+
+    /// Put `port` at position `index` of the unordered `region`'s value ports,
+    /// or of its dependency ports when `dependency`.
+    pub(crate) fn insert_region_port(
+        &self,
+        region: RegionId,
+        index: usize,
+        port: Value,
+        dependency: bool,
+    ) {
+        let mut inner = self.0.write();
+        let id = port.id();
+        match inner.region_mut(region).map(Region::body_mut) {
+            Some(crate::region::RegionBody::Nodes {
+                ports, dep_ports, ..
+            }) => {
+                let values = ports.len() - *dep_ports as usize;
+                ports.insert(if dependency { values + index } else { index }, port);
+                if dependency {
+                    *dep_ports += 1;
+                }
+            }
+            _ => panic!("only an unordered region takes a port by position"),
+        }
+        slab_put(&mut inner.value_region, id.index(), region);
+        inner.edit_region(region);
+    }
+
+    /// Name `value` at position `index` of the unordered `region`'s value
+    /// results, or of its dependency results when `dependency`.
+    pub(crate) fn insert_region_result(
+        &self,
+        region: RegionId,
+        index: usize,
+        value: ValueId,
+        dependency: bool,
+    ) {
+        let mut inner = self.0.write();
+        match inner.region_mut(region).map(Region::body_mut) {
+            Some(crate::region::RegionBody::Nodes {
+                results,
+                dep_results,
+                ..
+            }) => {
+                let values = results.len() - *dep_results as usize;
+                results.insert(if dependency { values + index } else { index }, value);
+                if dependency {
+                    *dep_results += 1;
+                }
+            }
+            _ => panic!("only an unordered region names its results by position"),
+        }
+        inner.edit_region(region);
+    }
+
+    /// Take `op` out of the unordered `region` without erasing it; the inverse
+    /// of [`Context::add`].
+    pub fn remove_from_region(&self, region: RegionId, op: OpId) {
+        let mut inner = self.0.write();
+        match inner.region_mut(region).map(Region::body_mut) {
+            Some(crate::region::RegionBody::Nodes { ops, .. }) => ops.retain(|held| *held != op),
+            _ => panic!("only an unordered region holds an operation without a position"),
+        }
+        clear_slot(&mut inner.op_parent, op.index());
+        inner.edit_region(region);
+    }
+
     /// Give `op` one more value result of type `ty`.
-    fn append_result(&self, op: OpId, ty: TypeId) -> ValueId {
+    pub(crate) fn append_result(&self, op: OpId, ty: TypeId) -> ValueId {
         let result = self.create_value(ty, Some(op)).id();
         let mut inner = self.0.write();
         if inner.op(op).is_some() {

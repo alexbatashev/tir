@@ -114,14 +114,17 @@ mod core {
     mod arith;
     mod backend;
     mod binary;
+    mod binding;
     mod context;
     mod dependence;
     mod dialects;
     mod dominance;
+    mod edits;
     mod encodings;
     mod fixtures;
     mod float;
     mod instcombine;
+    mod interfaces;
     mod isel;
     mod isel_rules;
     mod layout;

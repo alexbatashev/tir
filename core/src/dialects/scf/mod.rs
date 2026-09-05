@@ -9,7 +9,11 @@ use crate::Any as AnyConstraint;
 use crate::Value;
 use crate::parse::common::Cursor;
 
+pub mod nodes;
+pub use nodes::{For2Op, For2OpBuilder, LoopOp, LoopOpBuilder, Switch2Op, Switch2OpBuilder};
+
 pub mod ops {
+    pub use super::nodes::{for2, r#loop, switch2};
     pub use super::{
         BreakOp, ConditionOp, ContinueOp, ForOp, IfOp, SwitchOp, WhileOp, YieldOp, r#break,
         condition, r#continue, r#for, r#if, switch, r#while, r#yield,
@@ -28,6 +32,9 @@ dialect! {
             BreakOp,
             ContinueOp,
             YieldOp,
+            LoopOp,
+            Switch2Op,
+            For2Op,
         ],
         types: [],
     }
@@ -81,7 +88,7 @@ impl tir::GuardedLoop for ForOp {
     }
 }
 
-impl LoopOp for ForOp {
+impl StructuredLoop for ForOp {
     fn loop_results(&self) -> Vec<ValueId> {
         self.0.results().to_vec()
     }
@@ -208,7 +215,7 @@ impl tir::GuardedLoop for WhileOp {
     }
 }
 
-impl LoopOp for WhileOp {
+impl StructuredLoop for WhileOp {
     fn loop_results(&self) -> Vec<ValueId> {
         self.0.results().to_vec()
     }
@@ -812,7 +819,7 @@ fn expect_token(
 
 /// The per-op specifics a structured loop exposes for μ-gate construction, printing,
 /// and verification: its results, init operands, and body block.
-trait LoopOp: Operation {
+trait StructuredLoop: Operation {
     fn loop_results(&self) -> Vec<ValueId>;
     fn init_operands(&self) -> Vec<ValueId>;
     fn body_block(&self) -> tir::BlockHandle;
@@ -862,7 +869,7 @@ impl CarriedPorts {
 /// The values a loop body yields on its back edge: the next iteration's carried values.
 /// A body that leaves through an exit terminator reports the values that exit carries,
 /// which follow its scope token.
-fn latched_values(op: &impl LoopOp) -> Vec<ValueId> {
+fn latched_values(op: &impl StructuredLoop) -> Vec<ValueId> {
     let context = op.loop_context();
     let body = op.body_block();
     exit_values(&context.get_op(*body.op_ids().last().unwrap())).to_vec()
@@ -926,7 +933,7 @@ fn print_port_list(
 fn print_loop_tail(
     fmt: &mut tir::IRFormatter,
     context: &Context,
-    op: &impl LoopOp,
+    op: &impl StructuredLoop,
 ) -> Result<(), std::fmt::Error> {
     let results = op.loop_results();
     if results.is_empty() {
@@ -1281,7 +1288,10 @@ fn verify_counter_type(context: &Context, op: &ForOp) -> Result<(), Error> {
 /// Verify a loop's carried ports: the init operands, the body's carried arguments, the
 /// yielded values and the results must all have the same arity, matching pairwise in
 /// type.
-fn verify_loop_carried<T: LoopOp + Operation>(context: &Context, op: &T) -> Result<(), Error> {
+fn verify_loop_carried<T: StructuredLoop + Operation>(
+    context: &Context,
+    op: &T,
+) -> Result<(), Error> {
     let label = format!("{}.{}", T::dialect(), T::name());
     let body = op.body_block();
     let terminator = context.get_op(*body.op_ids().last().unwrap());

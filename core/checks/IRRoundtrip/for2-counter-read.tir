@@ -1,0 +1,23 @@
+// RUN: tir opt --verify %s | filecheck %s
+
+// A body reading the incremented counter keeps the increment in the text; the
+// parser reuses it rather than adding a second one, so the round trip is a
+// fixed point.
+
+module {
+  %fn_main = func.func @main(%0: !i32, %1: !i32, %2: !i32, %3: !i32) -> !i32 {
+    %4, %5 = scf.for2 %6 = %0 to %1 step %2 (%7 = %3) {
+      %8 = addi %6, %2 : !i32
+      %9 = addi %7, %8 : !i32
+      -> %9
+    }
+    func.return %5
+  }
+  module_end
+}
+
+// CHECK: scf.for2 %[[C:[0-9]+]] = %{{[0-9]+}} to %{{[0-9]+}} step %[[S:[0-9]+]] (%[[A:[0-9]+]] = %{{[0-9]+}}) {
+// CHECK-NEXT: %[[N:[0-9]+]] = addi %[[C]], %[[S]] : !i32
+// CHECK-NEXT: %[[R:[0-9]+]] = addi %[[A]], %[[N]] : !i32
+// CHECK-NEXT: -> %[[R]]
+// CHECK-NEXT: }

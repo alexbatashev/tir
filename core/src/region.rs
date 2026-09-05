@@ -105,6 +105,10 @@ impl Region {
         &self.body
     }
 
+    pub(crate) fn body_mut(&mut self) -> &mut RegionBody {
+        &mut self.body
+    }
+
     pub(crate) fn blocks(&self) -> &[BlockId] {
         match &self.body {
             RegionBody::Blocks(blocks) => blocks,
@@ -322,7 +326,7 @@ impl RegionHandle {
 
 /// The region a value belongs to: the one whose port it is, the one holding the
 /// block whose argument it is, or the one holding the operation defining it.
-fn defining_region(context: &Context, value: ValueId) -> Option<RegionId> {
+pub(crate) fn defining_region(context: &Context, value: ValueId) -> Option<RegionId> {
     if let Some(region) = context.region_of_port(value) {
         return Some(region);
     }

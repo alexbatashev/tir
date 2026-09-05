@@ -1,6 +1,8 @@
 use crate::attributes::AttributeValue;
 use crate::symbol_table::visibility_of;
-use crate::{Context, Error, IRFormatter, Operation, Symbol, TypeId, Visibility, operation};
+use crate::{
+    Context, Error, Global, IRFormatter, Operation, Symbol, TypeId, Visibility, operation,
+};
 
 use crate as tir;
 
@@ -15,13 +17,24 @@ operation! {
         dialect: "builtin",
         format: "custom",
         verifier: "true",
-        interfaces: [Symbol],
+        interfaces: [Symbol, Global],
         attributes: A {
             sym_name: "Str",
         },
         results: R {
             result: "crate::ptr::PtrType",
         },
+    }
+}
+
+impl Global for GlobalOp {
+    fn address(&self) -> crate::ValueId {
+        self.result()
+    }
+
+    fn initializer(&self) -> Option<Vec<u8>> {
+        self.bytes()
+            .or_else(|| self.size().map(|size| vec![0; size as usize]))
     }
 }
 
@@ -296,9 +309,11 @@ operation! {
         results: R {
             result: "crate::ptr::PtrType",
         },
-        interfaces: [crate::Pure],
+        interfaces: [crate::Pure, crate::Speculatable],
     }
 }
+
+impl crate::Speculatable for SymAddrOp {}
 
 impl crate::Pure for SymAddrOp {}
 

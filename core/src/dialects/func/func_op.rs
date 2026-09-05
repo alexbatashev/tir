@@ -4,7 +4,7 @@ use crate::operation;
 use crate::symbol_table::{symbol_name_of, visibility_of};
 
 use crate as tir;
-use crate::{Context, Error, Operation, RegionExit, Symbol, Terminator, Visibility};
+use crate::{Callable, Context, Error, Operation, RegionExit, Symbol, Terminator, Visibility};
 
 operation! {
     FuncOp {
@@ -12,7 +12,7 @@ operation! {
         dialect: "func",
         format: "custom",
         verifier: "true",
-        interfaces: [Symbol],
+        interfaces: [Symbol, Callable],
         attributes: A {
             sym_name: "Str",
             ret_type: "Type",
@@ -88,6 +88,24 @@ impl FuncOpBuilder {
                     .into(),
             ),
         )
+    }
+}
+
+impl Callable for FuncOp {
+    fn body(&self) -> Option<tir::RegionId> {
+        Some(self.body_region().id())
+    }
+
+    fn value(&self) -> tir::ValueId {
+        self.fn_value()
+    }
+
+    fn params(&self) -> Vec<tir::TypeId> {
+        self.parameters().iter().map(tir::Value::ty).collect()
+    }
+
+    fn result(&self) -> tir::TypeId {
+        self.ret_type()
     }
 }
 

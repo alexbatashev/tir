@@ -1,3 +1,4 @@
+mod binds;
 mod dialect;
 mod operation;
 mod ty;

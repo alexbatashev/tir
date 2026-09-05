@@ -1,7 +1,7 @@
 use crate::Any;
 use crate::attributes::AttributeValue;
 use crate::builtin::{FnType, UnitType};
-use crate::{Context, Error, Operation, ValueId, operation};
+use crate::{Apply, Context, Error, Operation, ValueId, operation};
 
 use crate as tir;
 
@@ -19,6 +19,17 @@ operation! {
             result: "Any",
         },
         state: "in_out",
+        interfaces: [Apply],
+    }
+}
+
+impl Apply for CallOp {
+    fn callee(&self) -> ValueId {
+        CallOp::callee(self)
+    }
+
+    fn args(&self) -> std::ops::Range<usize> {
+        1..self.value_operands().len()
     }
 }
 

@@ -155,9 +155,11 @@ tir::operation! {
         results: R {
             result: "crate::ptr::PtrType",
         },
-        interfaces: [crate::Pure],
+        interfaces: [crate::Pure, crate::Speculatable],
     }
 }
+
+impl crate::Speculatable for FnToPtrOp {}
 
 impl crate::Pure for FnToPtrOp {}
 
@@ -173,8 +175,10 @@ tir::operation! {
         results: R {
             result: "crate::builtin::FnType",
         },
-        interfaces: [crate::Pure],
+        interfaces: [crate::Pure, crate::Speculatable],
     }
 }
+
+impl crate::Speculatable for PtrToFnOp {}
 
 impl crate::Pure for PtrToFnOp {}

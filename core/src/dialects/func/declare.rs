@@ -1,7 +1,9 @@
 use crate::attributes::AttributeValue;
 use crate::builtin::FnType;
 use crate::symbol_table::visibility_of;
-use crate::{Context, Error, IRFormatter, Operation, Symbol, TypeId, Visibility, operation};
+use crate::{
+    Callable, Context, Error, IRFormatter, Operation, Symbol, TypeId, Visibility, operation,
+};
 
 use crate as tir;
 
@@ -12,7 +14,7 @@ operation! {
         name: "declare",
         dialect: "func",
         format: "custom",
-        interfaces: [Symbol],
+        interfaces: [Symbol, Callable],
         attributes: A {
             sym_name: "Str",
         },
@@ -41,6 +43,28 @@ impl Symbol for DeclareOp {
 
     fn is_definition(&self) -> bool {
         false
+    }
+}
+
+impl Callable for DeclareOp {
+    fn body(&self) -> Option<tir::RegionId> {
+        None
+    }
+
+    fn value(&self) -> tir::ValueId {
+        self.fn_value()
+    }
+
+    fn params(&self) -> Vec<TypeId> {
+        self.signature()
+            .expect("a declaration's result is a function type")
+            .0
+    }
+
+    fn result(&self) -> TypeId {
+        self.signature()
+            .expect("a declaration's result is a function type")
+            .1
     }
 }
 

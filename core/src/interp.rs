@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use tir_adt::{APFloat, APInt};
 
 use crate::{
-    BlockId, Conditional, ConstantLike, Context, CountedLoop, DataLayout, LoopLike, OpId,
-    Operation, RegionId, Symbol, ValueId,
+    BlockId, Conditional, ConstantLike, Context, CountedLoop, DataLayout, Gamma, LoopLike, OpId,
+    Operation, RegionId, Symbol, Theta, ValueId,
     builtin::{
         ConstantFOp, ConstantOp, FloatType, IntegerType, MakeTupleOp, TokenType, TupleGetOp,
         UnitType,
@@ -377,6 +377,14 @@ impl Interpreter<'_> {
             let flow = self.exec_call(op_id)?;
             return self.exec_value_flow(op_id, flow);
         }
+        if let Some(theta) = instance.clone().as_interface::<dyn Theta>() {
+            let flow = self.exec_theta(&instance, theta.as_ref())?;
+            return self.exec_value_flow(op_id, flow);
+        }
+        if let Some(gamma) = instance.clone().as_interface::<dyn Gamma>() {
+            let flow = self.exec_gamma(&instance, gamma.as_ref())?;
+            return self.exec_value_flow(op_id, flow);
+        }
         if instance.is::<crate::cfg::BranchOp>() || instance.is::<crate::cfg::CondBranchOp>() {
             return Ok(Some(self.exec_branch(&instance)?));
         }
@@ -525,6 +533,84 @@ impl Interpreter<'_> {
                 flow => return Ok(flow),
             }
         }
+    }
+
+    /// A θ by its definitional semantics: each iteration is a fresh invocation
+    /// of the body that binds the ports, evaluates the predicate's cone, and
+    /// then only the cone the predicate selects: the continue values, which the
+    /// next iteration carries, or the exit values, which the op produces. An
+    /// operation demanded by several cones runs once per iteration; one in no
+    /// cone never runs.
+    fn exec_theta(&mut self, instance: &crate::OpHandle, theta: &dyn Theta) -> Result<Flow> {
+        let body = theta.body();
+        let binding = theta.carried();
+        let region = self.context.get_region(body);
+        let ports: Vec<ValueId> = region.value_arguments()[binding.ports.clone()]
+            .iter()
+            .map(|port| port.id())
+            .collect();
+        let results = region.value_results();
+        let dep_results = region.dep_results();
+        let chains = dep_results.len() / 2;
+        let predicate = theta.predicate();
+        let continue_cone: Vec<ValueId> = results[binding.continue_.clone()]
+            .iter()
+            .chain(&dep_results[..chains])
+            .copied()
+            .collect();
+        let exit_cone: Vec<ValueId> = results[binding.exit.clone()]
+            .iter()
+            .chain(&dep_results[chains..])
+            .copied()
+            .collect();
+
+        let mut carried: Vec<Value> = instance.value_operands()[binding.operands.clone()]
+            .iter()
+            .map(|&init| self.value_of(init))
+            .collect::<Result<_>>()?;
+        loop {
+            for (port, value) in ports.iter().zip(&carried) {
+                self.env.insert(*port, value.clone());
+            }
+            let mut evaluated = std::collections::HashSet::new();
+            self.demand(predicate, body, &mut evaluated)?;
+            let again = self.value_of(predicate)?.to_i64().unwrap_or_default() != 0;
+            let cone = if again { &continue_cone } else { &exit_cone };
+            for &value in cone {
+                self.demand(value, body, &mut evaluated)?;
+            }
+            let values = cone[..cone.len() - chains]
+                .iter()
+                .map(|&value| self.value_of(value))
+                .collect::<Result<Vec<_>>>()?;
+            if !again {
+                return Ok(Flow::Values(values));
+            }
+            carried = values;
+        }
+    }
+
+    /// A γ: the predicate indexes the arms, past the end selecting the last;
+    /// the chosen arm reads the forwarded operands through its ports and its
+    /// results are the op's.
+    fn exec_gamma(&mut self, instance: &crate::OpHandle, gamma: &dyn Gamma) -> Result<Flow> {
+        let arms = gamma.arms();
+        let binding = gamma.forwarded();
+        let chosen = self
+            .value_of(gamma.predicate())?
+            .to_i64()
+            .unwrap_or_default();
+        let arm = arms[usize::try_from(chosen).unwrap_or(0).min(arms.len() - 1)];
+        let ports = self.context.get_region(arm).value_arguments();
+        let inputs = instance.value_operands();
+        for (port, &input) in ports[binding.ports.clone()]
+            .iter()
+            .zip(&inputs[binding.operands.clone()])
+        {
+            let value = self.value_of(input)?;
+            self.env.insert(port.id(), value);
+        }
+        self.exec_nodes_region(arm)
     }
 
     fn enter_loop_body(

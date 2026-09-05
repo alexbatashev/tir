@@ -117,9 +117,11 @@ operation! {
         results: R {
             result: "crate::builtin::TupleType",
         },
-        interfaces: [crate::interp::Interp],
+        interfaces: [crate::interp::Interp, crate::Speculatable],
     }
 }
+
+impl crate::Speculatable for MakeTupleOp {}
 
 impl MakeTupleOp {
     fn custom_print(&self, fmt: &mut IRFormatter) -> Result<(), std::fmt::Error> {
@@ -212,9 +214,11 @@ operation! {
         results: R {
             result: "AnyConstraint",
         },
-        interfaces: [crate::interp::Interp],
+        interfaces: [crate::interp::Interp, crate::Speculatable],
     }
 }
+
+impl crate::Speculatable for TupleGetOp {}
 
 impl TupleGetOp {
     pub fn tuple(&self) -> crate::ValueId {
