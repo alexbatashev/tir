@@ -13,6 +13,8 @@ mod clone;
 pub use clone::clone_region_with_mapping;
 mod context;
 pub mod dependency;
+mod edits;
+pub use edits::Wrap;
 mod diagnostics;
 mod dialect;
 mod dialects;

@@ -227,3 +227,110 @@ fn step_region_admits_no_break() {
     )
     .expect_err("a for step region only falls through");
 }
+
+const LABELED_LOOPS: &str = r#"module {
+  %fn_main = func.func @main() {
+    cir.while {label = "outer"} cond {
+      %0 = constant {value = 1} : !i1
+      cir.condition %0
+    } body {
+      cir.for cond {
+        %1 = constant {value = 1} : !i1
+        cir.condition %1
+      } step {
+        cir.yield
+      } body {
+        %2 = constant {value = 1} : !i1
+        scf.if %2 {
+          cir.break
+        } else {
+          cir.continue {label = "outer"}
+        }
+        cir.yield
+      }
+      cir.yield
+    }
+    func.return
+  }
+  module_end
+}"#;
+
+#[test]
+fn a_loop_label_round_trips() {
+    let printed = roundtrip(LABELED_LOOPS);
+    assert!(
+        printed.contains("cir.while {label = \"outer\"} cond {"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("cir.continue {label = \"outer\"}"),
+        "{printed}"
+    );
+}
+
+/// Every op under `op`, outermost first.
+fn subtree(context: &Context, op: tir::OpId) -> Vec<tir::OpId> {
+    let mut found = vec![op];
+    let mut index = 0;
+    while index < found.len() {
+        for region in context.get_op(found[index]).regions() {
+            found.extend(context.get_region(region).op_ids());
+        }
+        index += 1;
+    }
+    found
+}
+
+fn find<T: Operation>(context: &Context, module: &ModuleOp) -> tir::OpId {
+    subtree(context, module.id())
+        .into_iter()
+        .find(|&op| context.get_op(op).is::<T>())
+        .expect("the module holds the op")
+}
+
+#[test]
+fn a_break_leaves_the_innermost_loop_and_a_labeled_continue_its_label() {
+    let context = cir_context();
+    let module = parse_ir::<ModuleOp>(&context, LABELED_LOOPS).expect("parse module");
+    let resolve = |exit| tir::analysis::exits::resolve_exit_target(&context, exit);
+
+    assert_eq!(
+        resolve(find::<fcc::cir::BreakOp>(&context, &module)).ok(),
+        Some(find::<fcc::cir::ForOp>(&context, &module))
+    );
+    assert_eq!(
+        resolve(find::<fcc::cir::ContinueOp>(&context, &module)).ok(),
+        Some(find::<fcc::cir::WhileOp>(&context, &module))
+    );
+}
+
+#[test]
+fn an_exit_with_no_loop_to_leave_is_an_error() {
+    let context = cir_context();
+    let module = parse_ir::<ModuleOp>(
+        &context,
+        r#"module {
+  %fn_main = func.func @main() {
+    %0 = constant {value = 1} : !i1
+    scf.if %0 {
+      cir.break {label = "missing"}
+    } else {
+      scf.yield
+    }
+    func.return
+  }
+  module_end
+}"#,
+    )
+    .expect("parse module");
+
+    let error = tir::analysis::exits::resolve_exit_target(
+        &context,
+        find::<fcc::cir::BreakOp>(&context, &module),
+    )
+    .expect_err("nothing carries the label");
+    assert!(
+        error.to_string().contains("scope labeled missing"),
+        "{error}"
+    );
+}

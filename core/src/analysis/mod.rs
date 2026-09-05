@@ -3,6 +3,7 @@ pub mod alias_facts;
 pub mod defuse;
 mod dominance;
 pub mod escape_facts;
+pub mod exits;
 mod manager;
 pub mod scopes;
 pub mod slots;

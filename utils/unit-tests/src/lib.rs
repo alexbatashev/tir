@@ -119,6 +119,7 @@ mod core {
     mod dependence;
     mod dialects;
     mod dominance;
+    mod edits;
     mod encodings;
     mod fixtures;
     mod float;
