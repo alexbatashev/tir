@@ -135,9 +135,11 @@ operation! {
         results: R {
             result: "crate::builtin::FloatType",
         },
-        interfaces: [crate::interp::Interp],
+        interfaces: [crate::interp::Interp, crate::Speculatable],
     }
 }
+
+impl crate::Speculatable for ConstantFOp {}
 
 fn float_format_node(
     op: &tir::OpHandle,
@@ -171,8 +173,11 @@ operation! {
             result: "crate::builtin::FloatType",
         },
         sem: "(set result (sitofp input $float_exponent $float_mantissa))",
+        interfaces: [crate::Speculatable],
     }
 }
+
+impl crate::Speculatable for SIToFPOp {}
 
 impl SIToFPOp {
     fn float_exponent(
@@ -207,8 +212,11 @@ operation! {
             result: "crate::builtin::FloatType",
         },
         sem: "(set result (uitofp input $float_exponent $float_mantissa))",
+        interfaces: [crate::Speculatable],
     }
 }
+
+impl crate::Speculatable for UIToFPOp {}
 
 impl UIToFPOp {
     fn float_exponent(
@@ -247,8 +255,11 @@ operation! {
             result: "crate::Integer<1>",
         },
         sem: "(set result $cmp_expr)",
+        interfaces: [crate::Speculatable],
     }
 }
+
+impl crate::Speculatable for CmpFOp {}
 
 pub use tir_symbolic::sem::cmpf_semantics;
 
@@ -279,8 +290,11 @@ operation! {
             result: "crate::builtin::IntegerType",
         },
         sem: "(set result (fptosi input))",
+        interfaces: [crate::Speculatable],
     }
 }
+
+impl crate::Speculatable for FPToSIOp {}
 
 operation! {
     FPToUIOp {
@@ -293,8 +307,11 @@ operation! {
             result: "crate::builtin::IntegerType",
         },
         sem: "(set result (fptoui input))",
+        interfaces: [crate::Speculatable],
     }
 }
+
+impl crate::Speculatable for FPToUIOp {}
 
 impl ConstantFOpBuilder {
     /// The constant, held as `f64`; every supported format embeds in it exactly.
@@ -314,10 +331,12 @@ operation! {
         results: R {
             result: "crate::builtin::FloatType",
         },
-        interfaces: [Commutative, SameOperandAndResultType],
+        interfaces: [Commutative, SameOperandAndResultType, crate::Speculatable],
         sem: "(set result (fadd lhs rhs))",
     }
 }
+
+impl crate::Speculatable for AddFOp {}
 
 impl Commutative for AddFOp {}
 impl SameOperandAndResultType for AddFOp {}
@@ -333,10 +352,12 @@ operation! {
         results: R {
             result: "crate::builtin::FloatType",
         },
-        interfaces: [SameOperandAndResultType],
+        interfaces: [SameOperandAndResultType, crate::Speculatable],
         sem: "(set result (fsub lhs rhs))",
     }
 }
+
+impl crate::Speculatable for SubFOp {}
 
 impl SameOperandAndResultType for SubFOp {}
 
@@ -351,10 +372,12 @@ operation! {
         results: R {
             result: "crate::builtin::FloatType",
         },
-        interfaces: [Commutative, SameOperandAndResultType],
+        interfaces: [Commutative, SameOperandAndResultType, crate::Speculatable],
         sem: "(set result (fmul lhs rhs))",
     }
 }
+
+impl crate::Speculatable for MulFOp {}
 
 impl Commutative for MulFOp {}
 impl SameOperandAndResultType for MulFOp {}

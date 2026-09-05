@@ -220,6 +220,11 @@ pub trait CountedLoop {
     fn upper_bound(&self) -> ValueId;
     /// What the counter gains each iteration.
     fn step(&self) -> ValueId;
+    /// The body port carrying the counter, for a loop whose counter is a value
+    /// of the IR; `None` where the counter exists only as the recurrence above.
+    fn induction(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// A [`BranchTerminator`] whose successor edges run under a known boolean fact — e.g.
@@ -277,6 +282,110 @@ pub trait MemoryWrite {
     }
     /// The memory state the write produces, absent until state has been threaded.
     fn state_result(&self) -> Option<ValueId> {
+        None
+    }
+}
+
+/// Where one carried value sits on each side of a structured op: index ranges
+/// into the value partitions of the op's operands, the region's ports, the
+/// region's results (the values the next iteration takes, then the values the
+/// op produces when it stops) and the op's results. The ranges have one
+/// length and the values at one offset share a type, which is what an op's
+/// `binds:` declaration states and its verifier checks. Dependencies are not
+/// declared: a loop carries `m` of them through `m` dep operands, `m` dep
+/// ports, `2m` dep region results and `m` dep results, and a gamma forwards
+/// its dep operands to every arm.
+///
+/// A gamma has no next iteration, so its `continue_` range is empty; its
+/// `ports` and `exit` ranges apply to every arm alike.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Binding {
+    pub operands: std::ops::Range<usize>,
+    pub ports: std::ops::Range<usize>,
+    pub continue_: std::ops::Range<usize>,
+    pub exit: std::ops::Range<usize>,
+    pub results: std::ops::Range<usize>,
+}
+
+/// A structured conditional over unordered arms (γ): the predicate picks the
+/// arm, every arm reads the forwarded operands through its own ports, and the
+/// chosen arm's results become the op's.
+pub trait Gamma {
+    fn predicate(&self) -> ValueId;
+    fn arms(&self) -> Vec<RegionId>;
+    /// Operands to arm ports, and arm results to op results.
+    fn forwarded(&self) -> Binding;
+}
+
+/// A structured loop over an unordered body (θ): the body reads the carried
+/// values through its ports and produces a predicate, the values the next
+/// iteration carries, and the values the op produces once the predicate is
+/// false.
+pub trait Theta {
+    fn body(&self) -> RegionId;
+    fn carried(&self) -> Binding;
+    /// The body result deciding whether another iteration runs.
+    fn predicate(&self) -> ValueId;
+}
+
+/// A λ node: a function definition or declaration, read through the value a
+/// call takes as its callee.
+pub trait Callable {
+    /// The body, absent for a declaration.
+    fn body(&self) -> Option<RegionId>;
+    fn value(&self) -> ValueId;
+    fn params(&self) -> Vec<TypeId>;
+    fn result(&self) -> TypeId;
+}
+
+/// An application of a callable to a run of the op's value operands.
+pub trait Apply {
+    fn callee(&self) -> ValueId;
+    /// The indices of the arguments among the op's value operands.
+    fn args(&self) -> std::ops::Range<usize>;
+}
+
+/// A δ node: a data object with an address, and an initializer image when it
+/// defines one here.
+pub trait Global {
+    fn address(&self) -> ValueId;
+    fn initializer(&self) -> Option<Vec<u8>>;
+}
+
+/// An operation that cannot trap, so it may run whether or not control would
+/// have reached it: a loop cone may hoist it, and a lowering may evaluate it on
+/// a path the source did not take.
+pub trait Speculatable {}
+
+/// What a non-local exit leaves: the loop or switch nearest around it, or the
+/// enclosing scope carrying `label`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExitTarget {
+    InnermostLoop,
+    InnermostSwitch,
+    Label(String),
+}
+
+/// An operation leaving an enclosing structured op from inside its subtree
+/// (a `break` or `continue`), naming the target by kind or label rather than by
+/// a token value, and carrying the values the target's ports take.
+pub trait NonLocalExit {
+    fn target(&self) -> ExitTarget;
+    fn values(&self) -> Vec<ValueId>;
+}
+
+/// Which kind of structured op a `break` or `continue` may leave.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExitScopeKind {
+    Loop,
+    Switch,
+}
+
+/// An operation a [`NonLocalExit`] can target: what kind of scope it is, and
+/// the label it carries, if any.
+pub trait ExitScope {
+    fn exit_scope(&self) -> ExitScopeKind;
+    fn label(&self) -> Option<String> {
         None
     }
 }

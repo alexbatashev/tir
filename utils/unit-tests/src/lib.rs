@@ -122,6 +122,7 @@ mod core {
     mod fixtures;
     mod float;
     mod instcombine;
+    mod interfaces;
     mod isel;
     mod isel_rules;
     mod layout;

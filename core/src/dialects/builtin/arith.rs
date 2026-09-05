@@ -16,9 +16,11 @@ operation! {
         results: R {
             result: "crate::builtin::IntegerType",
         },
-        interfaces: [ConstantLike, crate::interp::Interp],
+        interfaces: [ConstantLike, crate::interp::Interp, crate::Speculatable],
     }
 }
+
+impl crate::Speculatable for ConstantOp {}
 
 impl ConstantOpBuilder {
     pub fn value(self, v: i64) -> Self {
@@ -53,10 +55,12 @@ operation! {
         results: R {
             result: "crate::builtin::IntegerType",
         },
-        interfaces: [Commutative, SameOperandAndResultType, IntegerArithmetic],
+        interfaces: [Commutative, SameOperandAndResultType, IntegerArithmetic, crate::Speculatable],
         sem: "(set result (add lhs rhs))",
     }
 }
+
+impl crate::Speculatable for AddIOp {}
 
 impl Commutative for AddIOp {}
 impl SameOperandAndResultType for AddIOp {}
@@ -73,10 +77,12 @@ operation! {
         results: R {
             result: "crate::builtin::IntegerType",
         },
-        interfaces: [SameOperandAndResultType, IntegerArithmetic],
+        interfaces: [SameOperandAndResultType, IntegerArithmetic, crate::Speculatable],
         sem: "(set result (sub lhs rhs))",
     }
 }
+
+impl crate::Speculatable for SubIOp {}
 
 impl SameOperandAndResultType for SubIOp {}
 impl IntegerArithmetic for SubIOp {}
@@ -92,10 +98,12 @@ operation! {
         results: R {
             result: "crate::builtin::IntegerType",
         },
-        interfaces: [Commutative, SameOperandAndResultType, OpCost, IntegerArithmetic],
+        interfaces: [Commutative, SameOperandAndResultType, OpCost, IntegerArithmetic, crate::Speculatable],
         sem: "(set result (mul lhs rhs))",
     }
 }
+
+impl crate::Speculatable for MulIOp {}
 
 impl Commutative for MulIOp {}
 impl SameOperandAndResultType for MulIOp {}
@@ -200,10 +208,12 @@ operation! {
         results: R {
             result: "crate::builtin::IntegerType",
         },
-        interfaces: [Commutative, SameOperandAndResultType, IntegerArithmetic],
+        interfaces: [Commutative, SameOperandAndResultType, IntegerArithmetic, crate::Speculatable],
         sem: "(set result (and lhs rhs))",
     }
 }
+
+impl crate::Speculatable for AndIOp {}
 
 impl Commutative for AndIOp {}
 impl SameOperandAndResultType for AndIOp {}
@@ -220,10 +230,12 @@ operation! {
         results: R {
             result: "crate::builtin::IntegerType",
         },
-        interfaces: [Commutative, SameOperandAndResultType, IntegerArithmetic],
+        interfaces: [Commutative, SameOperandAndResultType, IntegerArithmetic, crate::Speculatable],
         sem: "(set result (or lhs rhs))",
     }
 }
+
+impl crate::Speculatable for OrIOp {}
 
 impl Commutative for OrIOp {}
 impl SameOperandAndResultType for OrIOp {}
@@ -240,10 +252,12 @@ operation! {
         results: R {
             result: "crate::builtin::IntegerType",
         },
-        interfaces: [Commutative, SameOperandAndResultType, IntegerArithmetic],
+        interfaces: [Commutative, SameOperandAndResultType, IntegerArithmetic, crate::Speculatable],
         sem: "(set result (xor lhs rhs))",
     }
 }
+
+impl crate::Speculatable for XOrIOp {}
 
 impl Commutative for XOrIOp {}
 impl SameOperandAndResultType for XOrIOp {}
@@ -260,10 +274,12 @@ operation! {
         results: R {
             result: "crate::builtin::IntegerType",
         },
-        interfaces: [SameOperandAndResultType, IntegerArithmetic],
+        interfaces: [SameOperandAndResultType, IntegerArithmetic, crate::Speculatable],
         sem: "(set result (shl lhs rhs))",
     }
 }
+
+impl crate::Speculatable for ShlIOp {}
 
 impl SameOperandAndResultType for ShlIOp {}
 impl IntegerArithmetic for ShlIOp {}
@@ -279,10 +295,12 @@ operation! {
         results: R {
             result: "crate::builtin::IntegerType",
         },
-        interfaces: [SameOperandAndResultType, IntegerArithmetic],
+        interfaces: [SameOperandAndResultType, IntegerArithmetic, crate::Speculatable],
         sem: "(set result (lshr lhs rhs))",
     }
 }
+
+impl crate::Speculatable for ShrUIOp {}
 
 impl SameOperandAndResultType for ShrUIOp {}
 impl IntegerArithmetic for ShrUIOp {}
@@ -298,10 +316,12 @@ operation! {
         results: R {
             result: "crate::builtin::IntegerType",
         },
-        interfaces: [SameOperandAndResultType, IntegerArithmetic],
+        interfaces: [SameOperandAndResultType, IntegerArithmetic, crate::Speculatable],
         sem: "(set result (ashr lhs rhs))",
     }
 }
+
+impl crate::Speculatable for ShrSIOp {}
 
 impl SameOperandAndResultType for ShrSIOp {}
 impl IntegerArithmetic for ShrSIOp {}
@@ -321,8 +341,11 @@ operation! {
             result: "crate::Integer<1>",
         },
         sem: "(set result $cmp_expr)",
+        interfaces: [crate::Speculatable],
     }
 }
+
+impl crate::Speculatable for CmpIOp {}
 
 impl CmpIOp {
     /// The comparison in canonical form: `sgt`/`sle`/`ugt`/`ule` become the
@@ -384,8 +407,11 @@ operation! {
             result: "crate::builtin::IntegerType",
         },
         sem: "(set result (sext input))",
+        interfaces: [crate::Speculatable],
     }
 }
+
+impl crate::Speculatable for ExtSIOp {}
 
 operation! {
     ExtUIOp {
@@ -398,8 +424,11 @@ operation! {
             result: "crate::builtin::IntegerType",
         },
         sem: "(set result (zext input))",
+        interfaces: [crate::Speculatable],
     }
 }
+
+impl crate::Speculatable for ExtUIOp {}
 
 operation! {
     TruncIOp {
@@ -412,8 +441,11 @@ operation! {
             result: "crate::builtin::IntegerType",
         },
         sem: "(set result (trunc input))",
+        interfaces: [crate::Speculatable],
     }
 }
+
+impl crate::Speculatable for TruncIOp {}
 
 operation! {
     BitcastOp {
@@ -427,8 +459,11 @@ operation! {
             result: "Any",
         },
         sem: "(set result (bitcast input))",
+        interfaces: [crate::Speculatable],
     }
 }
+
+impl crate::Speculatable for BitcastOp {}
 
 impl tir::Verifiable for BitcastOp {
     fn verify_impl(&self, context: &Context) -> Result<(), Error> {
