@@ -446,20 +446,47 @@ fn topological_order_picking(
     )))
 }
 
-/// Every value an operation reads, its nested regions included: what a region
-/// holds is one node of its dependence graph, whatever it holds inside. A
-/// value a nested region names as its result outright is read too.
+/// Every value an operation reads from the scope holding it, its nested
+/// regions included: what a region holds is one node of its dependence graph,
+/// whatever it holds inside. A value a nested region names as its result is
+/// read only when the region forwards it from outside; one the region produces
+/// is a definition, and naming it here would let a caller entering a block on
+/// what it reads mint an argument for a value defined inside the loop, cutting
+/// the chain that produced it.
 pub(crate) fn values_read(context: &Context, op: OpId) -> Vec<ValueId> {
     let instance = context.get_op(op);
     let mut values = instance.operands().to_vec();
+    // The operands above stand as they are: an operation naming its own result
+    // is the shortest dependency cycle there is, and subtracting what this
+    // operation defines would hide it from the order that reports one.
+    let mut nested = Vec::new();
+    let mut defined = std::collections::HashSet::new();
     for region in instance.regions() {
-        let region = context.get_region(region);
-        values.extend(region.results());
-        for child in region.op_ids() {
-            values.extend(values_read(context, child));
+        collect_region_reads(context, region, &mut nested, &mut defined);
+    }
+    nested.retain(|value| !defined.contains(value));
+    values.extend(nested);
+    values
+}
+
+/// What `region` and everything under it reads, and what the same span defines.
+fn collect_region_reads(
+    context: &Context,
+    region: RegionId,
+    values: &mut Vec<ValueId>,
+    defined: &mut std::collections::HashSet<ValueId>,
+) {
+    let handle = context.get_region(region);
+    values.extend(handle.results());
+    defined.extend(handle.ports().iter().map(crate::Value::id));
+    for child in handle.op_ids() {
+        let child = context.get_op(child);
+        values.extend(child.operands().iter().copied());
+        defined.extend(child.results());
+        for nested in child.regions() {
+            collect_region_reads(context, nested, values, defined);
         }
     }
-    values
 }
 
 /// One operation actually on a cycle, rather than merely downstream of one:

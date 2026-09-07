@@ -29,6 +29,10 @@ int main(void) { puts("same output"); return 17; }
     /// or a `do` becomes: the step and the trailing condition still run on a
     /// `continue`, and a `break` skips both.
     scalar_loop_control_matches_host_compiler => (include_str!("corpus/scalar/loop_control.c"));
+    /// An effect inside a nested loop runs on every iteration of the inner loop.
+    /// The inner body's state chain reaches the op that leaves it, so destructure
+    /// demands the effect from the continue edge rather than dropping it.
+    scalar_nested_loop_effects_matches_host_compiler => (include_str!("corpus/scalar/nested_loop_effects.c"));
     /// `do` loops become `scf.while` with the condition appended to the body, which
     /// only holds while `break` and `continue` keep their meaning.
     do_while_control_matches_host_compiler => (r#"int printf(const char *format, ...);

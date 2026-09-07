@@ -345,6 +345,7 @@ impl Lowering<'_> {
         let results = self.context.get_region(region).results();
         let demanded = self.cone(region, &results);
         let order = self.order(region)?;
+        self.require_effects_demanded(&order, &demanded)?;
         self.ops(rewriter, region, &order, &demanded, block)
     }
 
@@ -464,6 +465,33 @@ impl Lowering<'_> {
             pending.extend(self.inputs(op));
         }
         cone
+    }
+
+    /// Refuse a region whose cones leave an effect out. [`Self::ops`] moves
+    /// only what a cone holds, so an operation in none of them is not deferred,
+    /// it is dropped, and the blocks come out running a body the source never
+    /// wrote. An operation leaving no dependency behind computes a value and is
+    /// free to go when nothing reads it.
+    fn require_effects_demanded(
+        &self,
+        order: &[OpId],
+        placed: &HashSet<OpId>,
+    ) -> Result<(), PassError> {
+        for &op in order {
+            if placed.contains(&op) {
+                continue;
+            }
+            let op = self.context.get_op(op);
+            if op.dep_results().is_empty() {
+                continue;
+            }
+            return Err(PassError::InvalidRuleSet(format!(
+                "{}.{} leaves a dependency no result demands",
+                op.dialect(),
+                op.name()
+            )));
+        }
+        Ok(())
     }
 
     /// Move the operations of `region` that are in `placed`, in `order`, into
@@ -705,6 +733,13 @@ impl Lowering<'_> {
         let continue_only: HashSet<OpId> = continue_cone.difference(&header_ops).copied().collect();
         let exit_only: HashSet<OpId> = exit_cone.difference(&header_ops).copied().collect();
         let order = self.order(body)?;
+        let placed: HashSet<OpId> = header_ops
+            .iter()
+            .chain(continue_only.iter())
+            .chain(exit_only.iter())
+            .copied()
+            .collect();
+        self.require_effects_demanded(&order, &placed)?;
 
         let header_end = self.ops(rewriter, body, &order, &header_ops, header)?;
         // A cone that computes nothing is not a block either: the header's own
