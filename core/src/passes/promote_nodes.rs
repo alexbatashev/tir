@@ -112,38 +112,60 @@ fn promotable(
     state
         .stores
         .iter()
-        .filter_map(|&store| entered_on(context, *context.get_op(store).dep_operands().first()?))
+        .flat_map(|&store| entered_states(context, store))
         .all(|entered| written_before(context, slot, entered, &writers))
         .then_some(ty)
 }
 
-/// The memory the region holding `state` was entered on, along the chain
-/// `state` sits on: the port that chain enters its region on names an operand
-/// of the loop or gate carrying it. `None` where the chain starts in the
-/// region itself, which is the body of the function.
-fn entered_on(context: &Context, state: ValueId) -> Option<ValueId> {
-    let mut current = state;
+/// The memory each loop and gate `store` sits under was entered on, along the
+/// chain the store is on: where that chain crosses a region boundary, the port
+/// it enters on names one operand of the loop or gate carrying it, and the walk
+/// carries on from there in the enclosing region. Empty for a store the body
+/// holds directly, which no port has to be entered on.
+fn entered_states(context: &Context, store: OpId) -> Vec<ValueId> {
+    let mut states = Vec::new();
+    let Some(&first) = context.get_op(store).dep_operands().first() else {
+        return states;
+    };
+    let mut current = first;
     loop {
         let Some(def) = context.get_value(current).defining_op() else {
-            let region = context.region_of_port(current)?;
+            let Some(region) = context.region_of_port(current) else {
+                return states;
+            };
             let handle = context.get_region(region);
             let ports: Vec<ValueId> = handle
                 .dep_arguments()
                 .iter()
                 .map(crate::Value::id)
                 .collect();
-            let owner = context.get_op(handle.parent_op()?);
-            return owner
+            let Some(owner) = handle.parent_op() else {
+                return states;
+            };
+            let Some(&entered) = context
+                .get_op(owner)
                 .dep_operands()
                 .get(dep_index(&ports, current))
-                .copied();
+            else {
+                return states;
+            };
+            states.push(entered);
+            current = entered;
+            continue;
         };
         let instance = context.get_op(def);
-        current = if instance.regions().is_empty() {
-            *instance.dep_operands().first()?
+        let next = if instance.regions().is_empty() {
+            instance.dep_operands().first().copied()
         } else {
-            instance.dep_operands()[dep_index(&instance.dep_results(), current)]
+            instance
+                .dep_operands()
+                .get(dep_index(&instance.dep_results(), current))
+                .copied()
         };
+        match next {
+            Some(next) => current = next,
+            None => return states,
+        }
     }
 }
 
