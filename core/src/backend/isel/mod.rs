@@ -262,6 +262,20 @@ impl RegisterRequirement {
         self.view_offset
     }
 
+    /// The width of the register class this operand names, which is the width a
+    /// tile defines when the requirement is a result.
+    pub fn width(&self) -> u32 {
+        self.capability.width
+    }
+
+    /// The width the operand's instruction reads its register at, when it reads
+    /// it whole. A value the producer defined at any other width does not answer
+    /// it: the bits outside what the producer wrote are undefined, and the bits
+    /// beyond what this reads are dropped.
+    pub fn whole_width(&self) -> Option<u32> {
+        self.whole.then_some(self.capability.width)
+    }
+
     pub fn accepts(&self, ty: &tir::sem::SemType) -> bool {
         use tir::sem::{SemType, Width};
         if !self.capability.accepts(ty) {
@@ -2514,6 +2528,7 @@ impl InstructionSelectPass {
                         is_state: meta.is_state,
                         demand: meta.demand,
                         view_offset: meta.view_offset(),
+                        whole_width: meta.whole_width(),
                     }
                 })
                 .collect();
@@ -2538,6 +2553,7 @@ impl InstructionSelectPass {
             let result_view_offset = rule
                 .result_register
                 .map_or(0, |requirement| requirement.view_offset());
+            let result_width = rule.result_register.map(|requirement| requirement.width());
             if result_view_offset != 0 && fs.has_values(root) {
                 continue;
             }
@@ -2567,6 +2583,7 @@ impl InstructionSelectPass {
                 bindings,
                 cost,
                 result_view_offset,
+                result_width,
             });
         }
         matches
