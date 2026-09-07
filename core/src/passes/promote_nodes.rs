@@ -67,6 +67,7 @@ impl Pass for PromoteNodesPass {
                 reach: HashMap::new(),
                 grown: HashSet::new(),
                 kept: false,
+                substituted: HashMap::new(),
             };
             promoter.promote(&state, rewriter)?;
         }
@@ -247,6 +248,8 @@ struct Promoter<'a> {
     grown: HashSet<(OpId, usize)>,
     /// Whether a read of what nothing wrote stands, keeping the allocation.
     kept: bool,
+    /// What this sweep has already handed each retired value on to.
+    substituted: HashMap<ValueId, ValueId>,
 }
 
 impl Promoter<'_> {
@@ -263,7 +266,9 @@ impl Promoter<'_> {
                         .as_interface::<dyn MemoryRead>()
                         .expect("a collected load reads")
                         .read_value();
+                    let value = self.retired(value);
                     self.replace(load, read, value);
+                    self.substituted.insert(read, value);
                     dead.push(load);
                 }
                 Reach::Undefined => self.kept = true,
@@ -271,9 +276,10 @@ impl Promoter<'_> {
         }
         for &op in &dead {
             let instance = context.get_op(op);
-            let observed = instance.dep_operands()[0];
+            let observed = self.retired(instance.dep_operands()[0]);
             for left in instance.dep_results() {
                 self.replace(op, left, observed);
+                self.substituted.insert(left, observed);
             }
         }
         let alloca = state.alloca.filter(|_| !self.kept);
@@ -281,6 +287,22 @@ impl Promoter<'_> {
             rewriter.erase_op(&OperationRef::new(context.get_op(op)))?;
         }
         Ok(())
+    }
+
+    /// What `value` stands for once this sweep is done with it. The walk reads
+    /// the chain as it was found, so a load can reach a value another load of
+    /// the same slot defines; that load is erased here too, and handing its
+    /// result on would leave a live operand naming a value that no longer
+    /// exists.
+    fn retired(&self, value: ValueId) -> ValueId {
+        let mut current = value;
+        while let Some(&next) = self.substituted.get(&current) {
+            if next == current {
+                break;
+            }
+            current = next;
+        }
+        current
     }
 
     /// Hand every reader of `old`, a value `op` defines, `new` instead —
