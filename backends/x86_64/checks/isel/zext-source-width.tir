@@ -1,0 +1,46 @@
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
+
+// The class both gates test carries no IR type — a rewrite introduced it — so
+// the width a tile reads it at is the only thing that pins it. `mov r8, imm8`
+// writes one byte and leaves the rest of the register whatever the last writer
+// put there, so a reader of the whole 32-bit register (`movzxd`, `cmp r64,
+// imm32`) may not read what it defines: the materializer and every whole read
+// of what it materialized have to name one width.
+
+module {
+  %fn_clip = func.func @clip(%v: !i32) -> !i32 {
+    %a = constant {value = 0} : !i32
+    %b = constant {value = 0} : !i32
+    %c1 = cmpi %a, %b {predicate = "ne"} : !i1
+    cfg.cond_br %c1, ^bb1, ^bb2
+  ^bb1:
+    %m1 = constant {value = 255} : !i32
+    %r1 = andi %v, %m1 : !i32
+    cfg.br ^bb3(%r1 : !i32)
+  ^bb2:
+    %m2 = constant {value = 65535} : !i32
+    %r2 = andi %v, %m2 : !i32
+    cfg.br ^bb3(%r2 : !i32)
+  ^bb3(%r: !i32):
+    %d = constant {value = 1} : !i32
+    %e = constant {value = 0} : !i32
+    %c2 = cmpi %d, %e {predicate = "ne"} : !i1
+    cfg.cond_br %c2, ^bb4, ^bb5
+  ^bb4:
+    %m3 = constant {value = 255} : !i32
+    %r3 = andi %r, %m3 : !i32
+    cfg.br ^bb6(%r3 : !i32)
+  ^bb5:
+    %m4 = constant {value = 65535} : !i32
+    %r4 = andi %r, %m4 : !i32
+    cfg.br ^bb6(%r4 : !i32)
+  ^bb6(%rr: !i32):
+    func.return %rr
+  }
+  module_end
+}
+
+// CHECK: x86_64.mov_imm8 {dst = %[[Z:[0-9]+]]:GPR8, imm = 1}
+// CHECK-NEXT: x86_64.cmp_imm8 {dst = %[[Z]]:GPR8, imm = 0}
+// CHECK: x86_64.cmp_imm8 {dst = %[[Z]]:GPR8, imm = 1}
+// CHECK-NOT: x86_64.movzxd
