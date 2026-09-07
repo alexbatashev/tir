@@ -466,9 +466,25 @@ impl Seeder<'_> {
 /// Whether `state` names the memory `port` does: the reads between them left
 /// it as they found it, and a merge of one chain's fork of them names the state
 /// they all observed.
+///
+/// A fork's join reaches every read of it, so the walk is over a DAG and has to
+/// remember what it has answered; without that a run of forks costs one path
+/// per read of each.
 fn names_same_memory(context: &Context, state: ValueId, port: ValueId) -> bool {
+    names_same_memory_seen(context, state, port, &mut HashSet::new())
+}
+
+fn names_same_memory_seen(
+    context: &Context,
+    state: ValueId,
+    port: ValueId,
+    seen: &mut HashSet<ValueId>,
+) -> bool {
     if state == port {
         return true;
+    }
+    if !seen.insert(state) {
+        return false;
     }
     let Some(op) = context.get_value(state).defining_op() else {
         return false;
@@ -479,14 +495,14 @@ fn names_same_memory(context: &Context, state: ValueId, port: ValueId) -> bool {
         && read.state_result() == Some(state)
         && let Some(taken) = read.state_operand()
     {
-        return names_same_memory(context, taken, port);
+        return names_same_memory_seen(context, taken, port, seen);
     }
     instance.is::<JoinOp>()
         && instance.dep_results().as_slice() == [state]
         && instance
             .dep_operands()
             .iter()
-            .all(|&input| names_same_memory(context, input, port))
+            .all(|&input| names_same_memory_seen(context, input, port, seen))
 }
 
 /// A pure value op the e-graph may reason about: one result, no regions, and a declared semantic expression.
