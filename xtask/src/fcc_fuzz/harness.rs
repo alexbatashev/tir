@@ -153,7 +153,13 @@ pub enum Outcome {
         actual: Behavior,
     },
     /// A variant could not be compiled or run; reported but not a divergence.
-    Errored { variant: String, message: String },
+    /// `crashed` separates the compiler dying from it declining the program:
+    /// one is a defect to file, the other a limit to note.
+    Errored {
+        variant: String,
+        message: String,
+        crashed: bool,
+    },
 }
 
 /// Compile `source` under every variant, run each binary, and compare against
@@ -180,9 +186,10 @@ pub fn run_variants(
                     actual: behavior,
                 },
             },
-            Err(message) => Outcome::Errored {
+            Err(failed) => Outcome::Errored {
                 variant: variant.name.clone(),
-                message,
+                message: failed.message,
+                crashed: failed.crashed,
             },
         };
         results.push((variant.name.clone(), outcome));
@@ -195,7 +202,7 @@ fn compile_and_run(
     source: &Path,
     variant: &Variant,
     work_dir: &Path,
-) -> Result<Behavior, String> {
+) -> Result<Behavior, Failed> {
     let stem = source
         .file_stem()
         .and_then(|s| s.to_str())
@@ -218,8 +225,11 @@ fn compile_and_run(
 
             let mut link = Command::new("cc");
             link.arg(&object).arg("-o").arg(&executable);
-            run_command(&mut link, "cc")?;
-            return run_program(&executable);
+            // The linker dying is not the compiler under test dying, and
+            // filing it against fcc would send a reader after the wrong
+            // program.
+            run_command(&mut link, "cc").map_err(Failed::reported)?;
+            return run_program(&executable).map_err(Failed::from);
         }
         Backend::Gcc => {
             let mut command = Command::new(variant.compiler());
@@ -233,21 +243,54 @@ fn compile_and_run(
         }
     };
     run_command(&mut command, variant.compiler())?;
-    run_program(&executable)
+    run_program(&executable).map_err(Failed::from)
 }
 
-fn run_command(command: &mut Command, what: &str) -> Result<(), String> {
+/// Why a variant produced no behavior, and whether the compiler died getting
+/// there rather than reporting.
+pub struct Failed {
+    pub message: String,
+    pub crashed: bool,
+}
+
+impl Failed {
+    /// The same failure, but not the compiler under test dying.
+    fn reported(self) -> Self {
+        Self {
+            crashed: false,
+            ..self
+        }
+    }
+}
+
+impl From<String> for Failed {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            crashed: false,
+        }
+    }
+}
+
+/// Whether a finished process died rather than reported: killed by a signal,
+/// which leaves no exit code, or panicking, which says so on stderr. An exit
+/// code with a diagnostic behind it is the compiler declining the program.
+fn is_crash(code: Option<i32>, stderr: &str) -> bool {
+    code.is_none() || stderr.contains("panicked at")
+}
+
+fn run_command(command: &mut Command, what: &str) -> Result<(), Failed> {
     let output = timed_output(command, COMPILE_TIMEOUT)
-        .map_err(|e| format!("{what}: {e}"))?
-        .ok_or_else(|| format!("{what} timed out after {COMPILE_TIMEOUT:?}"))?;
+        .map_err(|e| Failed::from(format!("{what}: {e}")))?
+        .ok_or_else(|| Failed::from(format!("{what} timed out after {COMPILE_TIMEOUT:?}")))?;
     if output.status.success() {
         return Ok(());
     }
-    Err(format!(
-        "{what} failed ({}):\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
-    ))
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(Failed {
+        message: format!("{what} failed ({}):\n{}", output.status, stderr.trim()),
+        crashed: is_crash(output.status.code(), &stderr),
+    })
 }
 
 /// Run a command to completion, or `None` if it exceeded `timeout`.
@@ -333,4 +376,19 @@ pub fn first_difference(expected: &Behavior, actual: &Behavior) -> Option<String
         return None;
     }
     Some("outputs differ within the last line".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panic_or_a_signal_is_a_crash_and_a_diagnostic_is_not() {
+        assert!(is_crash(
+            Some(101),
+            "thread 'main' panicked at core/src/context.rs:1190"
+        ));
+        assert!(is_crash(None, "killed"));
+        assert!(!is_crash(Some(1), "fcc: error: --march is required"));
+    }
 }

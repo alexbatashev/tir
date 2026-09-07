@@ -46,13 +46,14 @@ impl Reduced {
             .variant
             .pipeline
             .as_deref()
-            .and_then(|pipeline| pipeline.split_once('('))
-            .and_then(|(_, rest)| rest.strip_suffix(')'))
-            .map(|inner| {
-                inner
-                    .split(',')
-                    .filter(|pass| !STRUCTURAL_PASSES.contains(pass))
-                    .collect()
+            .map(|pipeline| {
+                let mut passes = Vec::new();
+                for pass in leaf_passes(pipeline) {
+                    if !STRUCTURAL_PASSES.contains(&pass) && !passes.contains(&pass) {
+                        passes.push(pass);
+                    }
+                }
+                passes
             })
             .unwrap_or_default();
         if self.variant.shuffle_machine_order {
@@ -66,6 +67,26 @@ impl Reduced {
             None => "fcc's default pipeline".to_string(),
         }
     }
+}
+
+/// The passes a pipeline runs, in the order it names them. A token opening a
+/// nest of its own — `func.func`, `fixpoint<3>` — schedules passes rather than
+/// being one, so a reader looking for what to go and fix is not sent after it.
+fn leaf_passes(pipeline: &str) -> Vec<&str> {
+    let mut passes = Vec::new();
+    let mut start = 0;
+    for (index, delimiter) in pipeline.match_indices(['(', ')', ',']) {
+        let token = pipeline[start..index].trim();
+        if delimiter != "(" && !token.is_empty() {
+            passes.push(token);
+        }
+        start = index + delimiter.len();
+    }
+    let token = pipeline[start..].trim();
+    if !token.is_empty() {
+        passes.push(token);
+    }
+    passes
 }
 
 /// Shrink `source` and `pipeline` to the smallest pair that still diverges.
@@ -120,6 +141,59 @@ pub fn bisect(
         pipeline: Some(shortest),
         ..variant.clone()
     }
+}
+
+/// Shrink a program that makes fcc crash. A crash needs no reference compiler
+/// to judge it and no pipeline to bisect — every variant reaching it is the
+/// same defect — so the program is all there is to reduce, and undefined
+/// behavior is beside the point: no input entitles the compiler to die.
+pub fn crash(fcc: &Path, source: &str, variant: &FccVariant, work_dir: &Path) -> Reduced {
+    let original_lines = source.lines().count();
+    let mut spent = 0;
+    let source = reduce::reduce(source, &mut |candidate| {
+        if spent >= BUDGET {
+            return false;
+        }
+        spent += 1;
+        crashes(fcc, candidate, variant, work_dir)
+    });
+    Reduced {
+        shrunk_from: Some(original_lines),
+        subject: source.clone(),
+        artifact: source,
+        variant: variant.clone(),
+    }
+}
+
+/// Whether `source` still makes fcc die under `variant`.
+fn crashes(fcc: &Path, source: &str, variant: &FccVariant, work_dir: &Path) -> bool {
+    let path = work_dir.join("crash.c");
+    if std::fs::write(&path, source).is_err() {
+        return false;
+    }
+    let variants = [Variant::fcc(variant.clone())];
+    harness::run_variants(fcc, &path, &variants, work_dir)
+        .into_iter()
+        .any(|(_, outcome)| matches!(outcome, Outcome::Errored { crashed: true, .. }))
+}
+
+/// Build the record to file for a crash that has already been shrunk.
+pub fn crash_failure(
+    job: &str,
+    summary: String,
+    reproduce: String,
+    reduced: &Reduced,
+    variant: &str,
+    message: &str,
+) -> Failure {
+    let details = format!(
+        "`{variant}` does not finish on the case below.\n\
+         \n\
+         ```\n{}\n```{}",
+        message.trim(),
+        shrink_note(reduced),
+    );
+    record(job, summary, reproduce, reduced, details)
 }
 
 /// Does this candidate still expose the defect? A divergence only counts on a
@@ -195,14 +269,30 @@ pub fn failure(
         expected.describe(),
         actual.describe(),
         reduced.culprit(),
-        match reduced.shrunk_from {
-            Some(before) => format!(
-                "\n- Shrunk from {before} lines to {}",
-                reduced.artifact.lines().count()
-            ),
-            None => String::new(),
-        },
+        shrink_note(reduced),
     );
+    record(job, summary, reproduce, reduced, details)
+}
+
+/// How much the reducer took off, where it ran.
+fn shrink_note(reduced: &Reduced) -> String {
+    match reduced.shrunk_from {
+        Some(before) => format!(
+            "\n- Shrunk from {before} lines to {}",
+            reduced.artifact.lines().count()
+        ),
+        None => String::new(),
+    }
+}
+
+/// The record every filed defect is, whatever found it.
+fn record(
+    job: &str,
+    summary: String,
+    reproduce: String,
+    reduced: &Reduced,
+    details: String,
+) -> Failure {
     Failure {
         job: job.to_string(),
         summary,
@@ -211,5 +301,28 @@ pub fn failure(
         details,
         artifact: reduced.artifact.clone(),
         language: "c".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reduced(pipeline: &str) -> Reduced {
+        Reduced {
+            artifact: String::new(),
+            subject: String::new(),
+            variant: FccVariant::pipeline(pipeline),
+            shrunk_from: None,
+        }
+    }
+
+    #[test]
+    fn culprit_names_the_leaf_passes_of_a_nested_pipeline() {
+        let reduced = reduced(
+            "func.func(promote-nodes),fixpoint<3>(func.func(verify-deps,instcombine-nodes))",
+        );
+
+        assert_eq!(reduced.culprit(), "promote-nodes + instcombine-nodes");
     }
 }

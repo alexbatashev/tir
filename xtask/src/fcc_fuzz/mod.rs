@@ -117,8 +117,30 @@ pub fn run(sh: &Shell, root: &Path, options: &Options) -> anyhow::Result<()> {
         for (_, outcome) in harness::run_variants(&fcc, &source, &variants(seed), &program_dir) {
             match outcome {
                 Outcome::Agree => {}
-                Outcome::Errored { variant, message } => {
-                    eprintln!("seed {seed}: {variant} errored: {message}");
+                Outcome::Errored {
+                    variant,
+                    message,
+                    crashed,
+                } => {
+                    // A reference compiler declining the program says nothing
+                    // about fcc, and fcc declining one with a diagnostic is a
+                    // front end limit the torture baseline tracks. fcc dying is
+                    // neither: no input entitles it to, so it is filed like any
+                    // other defect rather than printed and forgotten.
+                    if !crashed || !is_fcc(&variant) {
+                        eprintln!("seed {seed}: {variant} errored: {message}");
+                        continue;
+                    }
+                    let reduced = triage::crash(&fcc, &source_text, &blamed(&variant), &triage_dir);
+                    let failure = triage::crash_failure(
+                        "differential-fuzz",
+                        format!("Crash: fcc dies on {}", reduced.culprit()),
+                        reproduce_command(seed, &reduced),
+                        &reduced,
+                        &variant,
+                        &message,
+                    );
+                    record(&failures_dir, &failure, &mut filed)?;
                 }
                 Outcome::Diverged {
                     variant,
@@ -178,6 +200,12 @@ fn reproduce_command(seed: u64, reduced: &triage::Reduced) -> String {
          # ...or straight at the minimal case above, saved as case.c:\n\
          fcc compile -O2 --stage obj --march x86_64{flags} -o case.o case.c"
     )
+}
+
+/// Whether a variant name is one of fcc's own, rather than a reference
+/// compiler's.
+fn is_fcc(variant: &str) -> bool {
+    variant == "fcc-default" || variant.starts_with("fcc:")
 }
 
 /// The fcc variant a divergence names, recovered from the variant's own name.
