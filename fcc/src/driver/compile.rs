@@ -11,20 +11,12 @@ use crate::toolchain::system_include_dirs;
 
 /// Build the predefined-macro map from `-D` arguments. Each value is lexed to a
 /// single token, mirroring how `#define NAME VALUE` is stored.
-pub(super) fn build_defines(defines: &[String]) -> HashMap<String, Token> {
-    use logos::Logos;
+pub(super) fn build_defines(defines: &[String]) -> HashMap<String, String> {
     defines
         .iter()
-        .map(|d| {
-            let (name, value) = match d.split_once('=') {
-                Some((n, v)) => (n.to_string(), v.to_string()),
-                None => (d.to_string(), "1".to_string()),
-            };
-            let tok = Token::lexer(value.trim())
-                .next()
-                .and_then(|r| r.ok())
-                .unwrap_or(Token::Hash);
-            (name, tok)
+        .map(|d| match d.split_once('=') {
+            Some((name, value)) => (name.to_string(), value.to_string()),
+            None => (d.to_string(), "1".to_string()),
         })
         .collect()
 }
@@ -271,11 +263,10 @@ pub(super) fn emit_machine_code(
 /// Preprocess `source`, reporting any `#error`/`#warning` diagnostics. Exits if
 /// any of them is an error.
 fn add_default_defines(
-    defines: &mut HashMap<String, Token>,
+    defines: &mut HashMap<String, String>,
     options: LangOptions,
     march: Option<&str>,
 ) {
-    use logos::Logos;
     let mut predefined = vec![
         ("__GNUC__", "4"),
         ("__GNUC_MINOR__", "2"),
@@ -297,16 +288,13 @@ fn add_default_defines(
         predefined.push(("__unix__", "1"));
     }
     for (name, value) in predefined {
-        defines.entry(name.to_string()).or_insert_with(|| {
-            Token::lexer(value)
-                .next()
-                .and_then(|r| r.ok())
-                .unwrap_or(Token::Hash)
-        });
+        defines
+            .entry(name.to_string())
+            .or_insert_with(|| value.to_string());
     }
     defines
         .entry("__VERSION__".to_string())
-        .or_insert_with(|| Token::StringLiteral(format!("fcc {}", env!("CARGO_PKG_VERSION"))));
+        .or_insert_with(|| format!("\"fcc {}\"", env!("CARGO_PKG_VERSION")));
     let stdc_version = match options.std_version {
         crate::lang_options::StdVersion::C89 => None,
         crate::lang_options::StdVersion::C99 => Some("199901L"),
@@ -317,27 +305,38 @@ fn add_default_defines(
     if let Some(value) = stdc_version {
         defines
             .entry("__STDC_VERSION__".to_string())
-            .or_insert_with(|| {
-                Token::lexer(value)
-                    .next()
-                    .and_then(|result| result.ok())
-                    .unwrap()
-            });
+            .or_insert_with(|| value.to_string());
+    }
+    // The type macros name a type, not a value, so their replacement is more
+    // than one token. Without them a declaration reading `__SIZE_TYPE__` is an
+    // identifier list, and every call through it passes the wrong width.
+    let (size_ty, signed_ty) = match march.unwrap_or(std::env::consts::ARCH) {
+        "riscv32" => ("unsigned int", "int"),
+        _ => ("unsigned long", "long"),
+    };
+    for (name, value) in [
+        ("__SIZE_TYPE__", size_ty),
+        ("__UINTPTR_TYPE__", size_ty),
+        ("__PTRDIFF_TYPE__", signed_ty),
+        ("__INTPTR_TYPE__", signed_ty),
+        ("__WCHAR_TYPE__", "int"),
+    ] {
+        defines
+            .entry(name.to_string())
+            .or_insert_with(|| value.to_string());
     }
     let arch_define = match march.unwrap_or(std::env::consts::ARCH) {
         "aarch64" | "arm64" => "__arm64__",
         "x86_64" => "__x86_64__",
         _ => return,
     };
-    defines
-        .entry(arch_define.to_string())
-        .or_insert(Token::Hash);
+    defines.entry(arch_define.to_string()).or_default();
 }
 
 pub(super) fn preprocess(
     name: &str,
     source: &str,
-    mut defines: HashMap<String, Token>,
+    mut defines: HashMap<String, String>,
     undefines: &[String],
     include_dirs: &[PathBuf],
     options: LangOptions,
