@@ -1,10 +1,10 @@
 // RUN: tir opt --pass restructure-nodes --verify %s | filecheck %s
 
-// `noalias` is not `alloca`. A slot keeps its chain past a pointer the facts
-// cannot read back because escape analysis proves no such pointer reaches it;
-// nothing proves that of a parameter — the caller may have handed the function
-// a pointer based on it — so one unresolved access puts both qualified
-// parameters back on the conservative chain.
+// A `noalias` parameter whose address never leaves its own accesses is as
+// private as a slot: the caller guarantees nothing else the function reaches
+// names that memory, so a pointer the facts cannot read back names neither
+// parameter. The unresolved load opens the world chain and both qualified
+// parameters keep chains of their own.
 
 module {
   %fn_f = func.func @f(%0: !ptr.p, %1: !ptr.p) noalias [0, 1] {
@@ -15,10 +15,12 @@ module {
   }
   module_end
 }
-// CHECK-LABEL: %{{[0-9]+}} = func.func @f
-// CHECK-NEXT: | %[[ENTRY:[0-9]+]] = state.entry_state
-// CHECK-NEXT: %{{[0-9]+}} | %[[A:[0-9]+]] = ptr.load %{{[0-9]+}} | %[[ENTRY]] : !ptr.p
-// CHECK-NEXT: %{{[0-9]+}} | %[[B:[0-9]+]] = ptr.load %{{[0-9]+}} | %[[ENTRY]] : !i32
-// CHECK-NEXT: | %{{[0-9]+}} = state.join | %[[A]], %[[B]]
-// CHECK-NEXT: | %[[S:[0-9]+]] = ptr.store %{{[0-9]+}}, %{{[0-9]+}} | %{{[0-9]+}}
-// CHECK-NEXT: -> | %[[S]]
+// CHECK-LABEL: %{{[0-9]+}} = func.func @f(%[[P0:[0-9]+]]: !ptr.p, %[[P1:[0-9]+]]: !ptr.p)
+// CHECK-NEXT: | %[[E0:[0-9]+]] = state.entry_state
+// CHECK-NEXT: %[[PTR:[0-9]+]] | %[[A:[0-9]+]] = ptr.load %[[P0]] | %[[E0]] : !ptr.p
+// CHECK-NEXT: | %[[E1:[0-9]+]] = state.entry_state
+// CHECK-NEXT: | %[[WORLD:[0-9]+]] = state.entry_state
+// CHECK-NEXT: %[[VAL:[0-9]+]] | %[[B:[0-9]+]] = ptr.load %[[PTR]] | %[[WORLD]] : !i32
+// CHECK-NEXT: | %[[S:[0-9]+]] = ptr.store %[[VAL]], %[[P1]] | %[[E1]]
+// CHECK-NEXT: | %[[EXIT:[0-9]+]] = state.join | %[[A]], %[[S]], %[[B]]
+// CHECK-NEXT: -> | %[[EXIT]]

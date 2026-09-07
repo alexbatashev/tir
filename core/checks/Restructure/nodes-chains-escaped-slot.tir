@@ -1,0 +1,31 @@
+// RUN: tir opt --pass restructure-nodes,verify-deps --verify %s | filecheck %s
+
+// The slot's address is handed to a call, so a pointer of unknown provenance
+// may name it: its chain is one the world reaches, joined with the world's at
+// every write and at the call. The read after the call observes what the call
+// left the slot's chain holding, not what the write before it did.
+
+module {
+  %fn_h = func.declare @h(!ptr.p<!i32>) -> !unit
+  %fn_f = func.func @f(%v: !i32) -> !i32 {
+    %a = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    ptr.store %v, %a
+    func.call %fn_h(%a : !ptr.p<!i32>)
+    %x = ptr.load %a : !i32
+    func.return %x
+  }
+  module_end
+}
+
+// CHECK: %{{[0-9]+}} = func.func @f(%[[V:[0-9]+]]: !i32) -> !i32 {
+// CHECK: | %[[EA:[0-9]+]] = state.entry_state
+// CHECK-NEXT: | %[[EW:[0-9]+]] = state.entry_state
+// CHECK-NEXT: | %[[IN:[0-9]+]] = state.join | %[[EA]], %[[EW]]
+// CHECK-NEXT: | %[[S:[0-9]+]] = ptr.store %[[V]], %[[A:[0-9]+]] | %[[IN]]
+// CHECK-NEXT: | %[[A1:[0-9]+]], %[[W1:[0-9]+]] = state.split | %[[S]]
+// CHECK-NEXT: | %[[CIN:[0-9]+]] = state.join | %[[W1]], %[[A1]]
+// CHECK-NEXT: | %[[C:[0-9]+]] = func.call %{{[0-9]+}}(%[[A]] : !ptr.p<!i32>) | %[[CIN]]
+// CHECK-NEXT: | %[[W2:[0-9]+]], %[[A2:[0-9]+]] = state.split | %[[C]]
+// CHECK-NEXT: %[[X:[0-9]+]] | %[[R:[0-9]+]] = ptr.load %[[A]] | %[[A2]] : !i32
+// CHECK-NEXT: | %[[OUT:[0-9]+]] = state.join | %[[R]], %[[W2]]
+// CHECK-NEXT: -> %[[X]] | %[[OUT]]

@@ -18,4 +18,6 @@ module {
 // CHECK-LABEL: %{{[0-9]+}} = func.func @f
 // CHECK: %[[SLOT:[0-9]+]] = ptr.alloca
 // CHECK: | %[[STORED:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[SLOT]] | %{{[0-9]+}}
-// CHECK: | %{{[0-9]+}} = func.call %{{[0-9]+}}(%[[SLOT]] {{.*}} | %[[STORED]]
+// CHECK-NEXT: | %[[P0:[0-9]+]], %[[P1:[0-9]+]] = state.split | %[[STORED]]
+// CHECK-NEXT: | %[[JOINED:[0-9]+]] = state.join | %[[P1]], %[[P0]]
+// CHECK-NEXT: %{{[0-9]+}} | %{{[0-9]+}} = func.call %{{[0-9]+}}(%[[SLOT]] {{.*}} | %[[JOINED]]

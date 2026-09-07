@@ -16,7 +16,7 @@ use super::liveness::Liveness;
 use super::ports::Ports;
 use crate::attributes::Predicate;
 use crate::builtin::{AddIOpBuilder, CmpIOpBuilder, ConstantOpBuilder, IntegerType};
-use crate::state::EntryStateOpBuilder;
+use crate::state::{EntryStateOpBuilder, JoinOpBuilder};
 use crate::{
     Context, CountedLoop, OpId, Operation, PassError, RegionId, Theta, TypeId, Value, ValueId, scf,
 };
@@ -44,7 +44,7 @@ pub fn emit(
     for (parameter, port) in parameters.iter().zip(&ports) {
         env.insert(cfg.value_var[&parameter.id()], port.id());
     }
-    if let Some(chain) = cfg.chain {
+    for &chain in &cfg.chains {
         let root = EntryStateOpBuilder::new(context).dep_result().build();
         context.add(body, root.id());
         env.insert(chain, root.result());
@@ -155,7 +155,9 @@ impl Emitter<'_> {
     }
 
     /// The exit leaves nothing behind but the values it carried: they are the
-    /// region's results, with the memory it hands back trailing.
+    /// region's results, with the memory it hands back trailing. Every chain
+    /// the caller can reach is handed back as one state, so the callable
+    /// exports one dependency however many chains the body ran on.
     fn exit(
         &self,
         op: OpId,
@@ -163,7 +165,7 @@ impl Emitter<'_> {
         region: RegionId,
         env: &mut Env,
     ) -> Result<(), PassError> {
-        let (results, deps) = match args {
+        let (mut results, mut deps) = match args {
             Some(args) => {
                 let args = self.ports.deps_last(args);
                 (
@@ -182,6 +184,17 @@ impl Emitter<'_> {
                 (results, handle.dep_operands().len())
             }
         };
+        if deps > 1 {
+            let chains = results.split_off(results.len() - deps);
+            let mut join = JoinOpBuilder::new(self.context).dep_result();
+            for chain in chains {
+                join = join.dep_operand(chain);
+            }
+            let join = join.build();
+            self.context.add(region, join.id());
+            results.push(join.result());
+            deps = 1;
+        }
         self.context.set_region_results(region, results, deps);
         Ok(())
     }

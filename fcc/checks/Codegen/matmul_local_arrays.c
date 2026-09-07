@@ -2,16 +2,13 @@
 // RUN: tir opt --pass func.func(promote-nodes,verify-deps,instcombine-nodes,affine) /tmp/fcc-matmul-local.tir | filecheck %s
 // RUN: fcc compile --stage asm --march x86_64 -o - %s | filecheck %s --check-prefix=ASM
 
-// The affine view's own case: three local arrays are three memories, every
-// subscript is a form over the counters, and the only pair is `C[i][j]` against
-// itself. With per-object chains the nest was reordered, `k` out of the
-// innermost position so the read of `b` walks a row (10 % fewer cycles on the
-// corpus; every tiling ran slower). Today the nest stays `i, j, k`: the `j`
-// counter is stored to its slot in the `j` loop and reloaded inside the `k`
-// loop, promote-nodes does not forward a port across that loop boundary, so
-// the `b` subscript is built from a `ptr.load` and the affine view sees a
-// memory read where it needs a form over the counters. It refuses the
-// interchange. This pins that reload and the unmoved order.
+// The affine view's own case: three local arrays are three memories, so they
+// are three chains, every subscript is a form over the counters, and the only
+// pair is `C[i][j]` against itself. Nothing has to be assumed about aliasing
+// for the nest to be reordered, and it is: `k` moves out of the innermost
+// position so that the read of `b` walks a row rather than a column. Measured
+// on the corpus, that order runs the kernel in 10 % fewer cycles; every tiling
+// of it ran slower, and the model buys none here.
 //
 // `int` rather than `float` because fcc's float lowering is broken today: a
 // `float` load comes back as `!i64` and the arithmetic on it is integer
@@ -40,13 +37,11 @@ void matmul_local_arrays(int *out)
 // CHECK-LABEL: func.func @matmul_local_arrays
 // CHECK: scf.for
 // CHECK: scf.for
-// CHECK: scf.for %[[I:[0-9]+]] = {{.*}}
-// CHECK: scf.for %[[J:[0-9]+]] = {{.*}}
-// CHECK: ptr.store %[[J]], %[[JSLOT:[0-9]+]] |
-// CHECK: scf.for %[[K:[0-9]+]] = {{.*}}
-// CHECK: extsi %[[I]]
-// CHECK-NEXT: %[[JL:[0-9]+]] | %{{[0-9]+}} = ptr.load %[[JSLOT]] |
-// CHECK-NEXT: extsi %[[JL]]
+// CHECK: scf.for %[[I:[0-9]+]] = %{{[0-9]+}} to %{{[0-9]+}} step %{{[0-9]+}}
+// CHECK-NEXT: scf.for %[[K:[0-9]+]] = %{{[0-9]+}} to %{{[0-9]+}} step %{{[0-9]+}}
+// CHECK-NEXT: scf.for %[[J:[0-9]+]] = %{{[0-9]+}} to %{{[0-9]+}} step %{{[0-9]+}}
+// CHECK-NEXT: extsi %[[I]]
+// CHECK-NEXT: extsi %[[J]]
 // CHECK-NEXT: extsi %[[K]]
 
 // ASM: matmul_local_arrays:

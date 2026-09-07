@@ -9,9 +9,9 @@
 
 // The unordered pipeline: `raise-loops` then `restructure-nodes`. A counted
 // `for` becomes `scf.for` with the counter as its only value port, written
-// back to the slot the body reads, and the memory chain threaded through the
-// body off a dependency port. Both forms compute the same sum, zero trips
-// included.
+// back to the slot the body reads, and each slot's chain threaded through the
+// body off a dependency port of its own. Both forms compute the same sum, zero
+// trips included.
 
 int count(int n) {
     int i;
@@ -24,12 +24,14 @@ int count(int n) {
 
 // CHECK: %{{[0-9]+}} = func.func @count
 // CHECK-NOT: scf.loop
+// CHECK: %{{[0-9]+}} | %{{[0-9]+}} = ptr.load %{{[0-9]+}} | %{{[0-9]+}} : !i32
 // CHECK: %[[LB:[0-9]+]] | %{{[0-9]+}} = ptr.load %[[SLOT:[0-9]+]] | %{{[0-9]+}} : !i32
-// CHECK: %[[FIN:[0-9]+]] | %[[M:[0-9]+]] = scf.for %[[IV:[0-9]+]] = %[[LB]] to %{{[0-9]+}} step %{{[0-9]+}} (| %[[D:[0-9]+]] = %{{[0-9]+}}) {
+// CHECK: %[[FIN:[0-9]+]] | %[[M:[0-9]+]], %{{[0-9]+}} = scf.for %[[IV:[0-9]+]] = %[[LB]] to %{{[0-9]+}} step %{{[0-9]+}} (| %[[D:[0-9]+]] = %{{[0-9]+}}, %{{[0-9]+}} = %{{[0-9]+}}) {
+// CHECK-NEXT: %{{[0-9]+}} | %{{[0-9]+}} = ptr.load %{{[0-9]+}} | %{{[0-9]+}} : !i32
 // CHECK-NEXT: | %{{[0-9]+}} = ptr.store %[[IV]], %[[SLOT]] | %[[D]]
-// CHECK: -> | %{{[0-9]+}}
+// CHECK: -> | %{{[0-9]+}}, %{{[0-9]+}}
 // CHECK-NEXT: }
-// CHECK-NEXT: | %{{[0-9]+}} = ptr.store %[[FIN]], %[[SLOT]] | %[[M]]
+// CHECK: | %{{[0-9]+}} = ptr.store %[[FIN]], %[[SLOT]] | %[[M]]
 // CHECK: -> %{{[0-9]+}} | %{{[0-9]+}}
 // CHECK-NEXT: }
 

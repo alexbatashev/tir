@@ -200,10 +200,56 @@ pub fn object_base(context: &Context, address: ValueId) -> Option<Base> {
             return Some(Base::Alloca(current));
         } else if instance.is::<GlobalOp>() {
             return Some(Base::Global(current));
+        } else if let Some(read) = instance.clone().as_interface::<dyn MemoryRead>()
+            && read.read_value() == current
+            && let Some(held) = only_pointer_held(context, read.read_location())
+        {
+            current = held;
         } else {
             return None;
         }
     }
+}
+
+/// The one pointer a slot ever holds, where reading it back can only give that
+/// pointer: a fresh allocation whose address never leaves its own accesses and
+/// which exactly one write, of the whole slot, ever names. That is what a
+/// frontend spilling a pointer parameter it never assigns again leaves behind,
+/// and reading through the spill is how the object the parameter names reaches
+/// the accesses derived from it.
+fn only_pointer_held(context: &Context, slot: ValueId) -> Option<ValueId> {
+    let allocation = context.get_value(slot).defining_op()?;
+    if !context
+        .get_op(allocation)
+        .has_interface::<dyn PromotableAllocation>()
+    {
+        return None;
+    }
+    let mut held = None;
+    for user in context.users_of(slot) {
+        let instance = context.get_op(user);
+        let write = instance.clone().as_interface::<dyn MemoryWrite>();
+        let location = write
+            .as_ref()
+            .map(|write| write.write_location())
+            .or_else(|| {
+                instance
+                    .clone()
+                    .as_interface::<dyn MemoryRead>()
+                    .map(|read| read.read_location())
+            });
+        if location != Some(slot) || instance.operands().iter().filter(|&&v| v == slot).count() != 1
+        {
+            return None;
+        }
+        if let Some(write) = write {
+            if held.is_some() {
+                return None;
+            }
+            held = Some(write.written_value());
+        }
+    }
+    held.filter(|_| accessed_only(context, slot))
 }
 
 /// The region `value` is a parameter of: its own port, or an argument of the

@@ -32,7 +32,8 @@ double call_external_pair(void) {
 
 // CHECK: %{{[0-9]+}} = func.func @make_scalar(%{{[0-9]+}}: !f64) -> !f64 {
 // CHECK: %[[SCALAR:[0-9]+]] | %[[SCALAR_DEP:[0-9]+]] = ptr.load %{{[0-9]+}} | %{{[0-9]+}} : !f64
-// CHECK-NEXT: -> %[[SCALAR]] | %[[SCALAR_DEP]]
+// CHECK-NEXT: | %[[SCALAR_OUT:[0-9]+]] = state.join | %{{[0-9]+}}, %{{[0-9]+}}, %[[SCALAR_DEP]], %{{[0-9]+}}
+// CHECK-NEXT: -> %[[SCALAR]] | %[[SCALAR_OUT]]
 // CHECK: %{{[0-9]+}} = func.func @make_pair(%{{[0-9]+}}: !f64, %{{[0-9]+}}: !f64) -> !tuple<!f64, !f64> {
 // CHECK: %[[PAIR:[0-9]+]] = make_tuple %{{[0-9]+}}, %{{[0-9]+}} : !tuple<!f64, !f64>
 // CHECK: -> %[[PAIR]] |

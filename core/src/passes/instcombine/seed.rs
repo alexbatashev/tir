@@ -12,7 +12,7 @@ use tir_relational::{ClassId as Id, Engine};
 
 use crate::sem::egraph::{minimal_unsigned_apint, type_width};
 use crate::sem::{Prov, SemNode as Node, SymKind};
-use crate::state::JoinOp;
+use crate::state::{JoinOp, SplitOp};
 use crate::{
     Commutative, ConstantLike, Context, Gamma, MemoryRead, MemoryWrite, OpHandle, OpId, RegionId,
     Theta, TypeId, ValueId,
@@ -169,6 +169,15 @@ impl Seeder<'_> {
         } else if instance.is::<JoinOp>() {
             self.seed_join(&instance);
             return;
+        } else if instance.is::<SplitOp>() {
+            // A split renames one memory per chain crossing it; each name is
+            // the memory the state it takes already stands for, so a read of
+            // any of them has observed what that state's writes left.
+            let state = self.class_of(instance.dep_operands()[0]);
+            for result in instance.dep_results() {
+                self.bind_value(result, state);
+            }
+            return;
         } else if self.seed_memory(&instance) {
             return;
         } else if is_pure_value(&instance) {
@@ -250,6 +259,35 @@ impl Seeder<'_> {
         }
     }
 
+    /// A chain a loop body hands back untouched — the port itself is what it
+    /// names in both its continue and its exit group — is the memory the loop
+    /// was entered on: nothing under the loop changes an object on that chain,
+    /// on any iteration. So a read of it inside the body has observed what the
+    /// state before the loop stands for, and so has one after the loop.
+    fn bind_unchanged_chains(&mut self, instance: &OpHandle, region: &crate::RegionHandle) {
+        let ports: Vec<ValueId> = region
+            .dep_arguments()
+            .iter()
+            .map(crate::Value::id)
+            .collect();
+        let results = region.dep_results();
+        let entered = instance.dep_operands();
+        let carried = results.len() / 2;
+        if carried != ports.len() || entered.len() != ports.len() {
+            return;
+        }
+        for (index, &port) in ports.iter().enumerate() {
+            if !names_same_memory(self.context, results[index], port)
+                || !names_same_memory(self.context, results[carried + index], port)
+            {
+                continue;
+            }
+            let before = self.class_of(entered[index]);
+            self.bind_value(port, before);
+            self.bind_value(instance.dep_results()[index], before);
+        }
+    }
+
     /// A declared θ over an unordered body: each carried port is read inside
     /// the body as a `Port` of its own identity, and the value the loop produces
     /// for it is `Loop(init, next, exit, pred)`. A port every iteration carries
@@ -268,6 +306,7 @@ impl Seeder<'_> {
         for &head in &heads {
             self.anchor(head);
         }
+        self.bind_unchanged_chains(instance, &region);
         self.seed_region(body);
         let predicate = self.class_of(theta.predicate());
         let body_results = region.value_results();
@@ -353,25 +392,9 @@ impl Seeder<'_> {
             return false;
         };
         let location = read.read_location();
-        let observed = state;
         let state = self.class_of(state);
         if let Some(published) = read.state_result() {
             self.bind_value(published, state);
-        }
-        // A write to another object leaves this one as it was, so the read
-        // observes every state before such writes above it too: a write of
-        // its own location and type there answers it, and the read *is* the
-        // value written. Bound one way, as that value: a read term of its own
-        // in the class could be picked as the spelling of the value the write
-        // stores, which the read comes after.
-        let mut above = observed;
-        while let Some(before) = super::state_before_distinct_write(self.context, above, location) {
-            if let Some(written) = self.same_access_written(before, location, ty) {
-                let written = self.class_of(written);
-                self.bind_value(value, written);
-                return true;
-            }
-            above = before;
         }
         let address = self.class_of(location);
         let bytes = self.int(bits / 8);
@@ -386,30 +409,6 @@ impl Seeder<'_> {
         );
         self.bind_value(value, id);
         true
-    }
-
-    /// The value the write publishing `state` stores, when it writes exactly
-    /// `location` as a value of `ty`.
-    fn same_access_written(
-        &mut self,
-        state: ValueId,
-        location: ValueId,
-        ty: TypeId,
-    ) -> Option<ValueId> {
-        let op = self.context.get_value(state).defining_op()?;
-        let write = self.context.get_op(op).as_interface::<dyn MemoryWrite>()?;
-        if write.state_result() != Some(state) {
-            return None;
-        }
-        let written = write.written_value();
-        if self.context.get_value(written).ty() != ty {
-            return None;
-        }
-        let (a, b) = (
-            self.class_of(location),
-            self.class_of(write.write_location()),
-        );
-        (self.eg.find(a) == self.eg.find(b)).then_some(written)
     }
 
     /// A write's term *is* the state the accesses after it read. The term names
@@ -462,6 +461,32 @@ impl Seeder<'_> {
             Prov::None,
         ))
     }
+}
+
+/// Whether `state` names the memory `port` does: the reads between them left
+/// it as they found it, and a merge of one chain's fork of them names the state
+/// they all observed.
+fn names_same_memory(context: &Context, state: ValueId, port: ValueId) -> bool {
+    if state == port {
+        return true;
+    }
+    let Some(op) = context.get_value(state).defining_op() else {
+        return false;
+    };
+    let instance = context.get_op(op);
+    if let Some(read) = instance.clone().as_interface::<dyn MemoryRead>()
+        && !instance.has_interface::<dyn MemoryWrite>()
+        && read.state_result() == Some(state)
+        && let Some(taken) = read.state_operand()
+    {
+        return names_same_memory(context, taken, port);
+    }
+    instance.is::<JoinOp>()
+        && instance.dep_results().as_slice() == [state]
+        && instance
+            .dep_operands()
+            .iter()
+            .all(|&input| names_same_memory(context, input, port))
 }
 
 /// A pure value op the e-graph may reason about: one result, no regions, and a declared semantic expression.

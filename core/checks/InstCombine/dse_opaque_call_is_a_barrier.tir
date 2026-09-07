@@ -19,6 +19,10 @@ module {data_layout = #data_layout} {
 }
 
 // CHECK-LABEL: %{{[0-9]+}} = func.func @f
-// CHECK: | %[[A1:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[SLOT:[0-9]+]] | %[[A:[0-9]+]]
-// CHECK-NEXT: | %[[A2:[0-9]+]] = func.call %{{[0-9]+}}(%[[SLOT]] : !ptr.p<!i32>) | %[[A1]]
-// CHECK-NEXT: | %{{[0-9]+}} = ptr.store %{{[0-9]+}}, %[[SLOT]] | %[[A2]]
+// CHECK: | %[[A1:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[SLOT:[0-9]+]] | %{{[0-9]+}}
+// CHECK-NEXT: | %[[W1:[0-9]+]], %[[O1:[0-9]+]] = state.split | %[[A1]]
+// CHECK-NEXT: | %[[J1:[0-9]+]] = state.join | %[[O1]], %[[W1]]
+// CHECK-NEXT: | %[[A2:[0-9]+]] = func.call %{{[0-9]+}}(%[[SLOT]] : !ptr.p<!i32>) | %[[J1]]
+// CHECK-NEXT: | %[[W2:[0-9]+]], %[[O2:[0-9]+]] = state.split | %[[A2]]
+// CHECK-NEXT: | %[[J2:[0-9]+]] = state.join | %[[O2]], %[[W2]]
+// CHECK-NEXT: | %{{[0-9]+}} = ptr.store %{{[0-9]+}}, %[[SLOT]] | %[[J2]]

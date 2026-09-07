@@ -361,7 +361,7 @@ derived from them, not the other way round (§6.3).
 | `ptr.alloca` | *produces* the initial state of its slot's chain (alongside the pointer) |
 | `ptr.load` | *takes* a dependency and produces one: the memory it observed, which the join closing its fork names |
 | `ptr.store`, `ptr.memset` | take one, produce one |
-| `ptr.memcpy`, `func.call` | take and produce the one state every chain they may touch was merged into |
+| `ptr.memcpy`, `func.call` | take the join of every chain they may touch and produce the state it is split back out of |
 | `func.return` | optional dependency operand: every chain the caller can reach, merged |
 | `state.entry_state` | produces one chain's initial state at region entry, one op per chain: `\| %s = state.entry_state` |
 | `state.join` | takes any number of dependencies, produces the memory they merge into |
@@ -390,40 +390,50 @@ liveness and colouring never see one (`son-backend` B2).
 
 ### 6.2 Chains
 
-`restructure-nodes` draws the chain as it converts the CFG (§5.2), and
-`verify-deps` checks after every later pass that it is still whole rather
-than drawing it again. What it draws is **one conservative chain** over every
-access in the function: every effect observes the memory the last change left
-and leaves a dependency of its own, reads forking off a change without
-ordering one another.
+`restructure-nodes` draws the chains as it converts the CFG (§5.2), and
+`verify-deps` checks after every later pass that they are still whole rather
+than drawing them again. What it draws is **one chain per object**: one for
+every object `AliasFacts` can name at the accesses' addresses — a stack
+allocation, a global, a parameter — plus a *world* chain for the memory whose
+provenance it cannot read back. Each opens at an `state.entry_state` of its
+own and the return hands the caller the join of them all.
 
-One chain is the ordering statement; it is not an aliasing statement. Telling
-two objects apart is `AliasFacts` and the shared escape classifier — the same
-gate promotion reads (§5.3) — and the passes that need the distinction consult
-them directly rather than reading it off the chain:
+Independence is therefore a property of the graph, not something a consumer
+recovers on the side. Which chains an effect names is the whole aliasing
+statement, made once, at conversion:
 
-- A stack slot whose address never leaves the function is an object nothing
-  else can name. Promotion takes its value onto the ports; the simplifier
-  forwards a read across a write to a different object, and drops a write no
-  reader of that object observes.
-- Two parameters may name one memory unless the λ declares one free of
-  aliases: `func.func @f(…) noalias [0]`, what C's `restrict` becomes.
-  `ptr.disjoint %a, %na, %b, %nb : !i1` is the same fact where the proof is a
-  runtime check rather than a qualifier: it is `a+na <= b || b+nb <= a` over
-  unsigned addresses, which says `[a, a+na)` and `[b, b+nb)` share no byte as
-  long as neither range wraps past the end of the address space — the
-  producer's obligation, not the op's. It reads addresses, not memory, so it
-  is pure and takes no state, and the backend prologue lowers it to the
-  compares it stands for.
-- A call, a `memcpy` and a `return` touch every object the outside can reach,
-  which on one chain is simply the chain.
+- A **read** names one chain: its own object's. Every access that may alias
+  that object is on that chain too, so that one edge carries every order the
+  read needs, both ways.
+- A **change** — a write, a `memcpy`, a call — names its own chain first and
+  then every chain whose object it may alias. It takes the `state.join` of
+  them and its result is `state.split` back into one name per chain, so each
+  carries on from a state of its own and the fork check still sees one changer
+  per memory. Reads fork off a change without ordering one another; the next
+  change, or whatever leaves the region, takes the join of what the fork left.
+- An object is **private** where nothing but its own accesses can reach it: a
+  stack allocation, or a parameter the λ declares free of aliases
+  (`func.func @f(…) noalias [0]`, what C's `restrict` becomes), whose address
+  never leaves its own loads and stores. No call and no pointer of unknown
+  provenance is on a private object's chain — two local arrays, or two
+  `restrict` parameters, share no dependency edge at all.
+- Everything else is on the world's chain as well as its own, so a call, a
+  `memcpy` and a `return` reach it: they name the world and every chain the
+  world can reach.
+- `ptr.disjoint %a, %na, %b, %nb : !i1` states the same disjointness where the
+  proof is a runtime check rather than a qualifier: it is
+  `a+na <= b || b+nb <= a` over unsigned addresses, which says `[a, a+na)` and
+  `[b, b+nb)` share no byte as long as neither range wraps past the end of the
+  address space — the producer's obligation, not the op's. It reads addresses,
+  not memory, so it is pure and takes no state, and the backend prologue
+  lowers it to the compares it stands for.
 
-`state.join` and `state.split` exist for the shape where several chains cross
-one operation, and the fork-and-join of reads is what uses `join` today.
-Splitting the chain per object is not implemented: it would be a second
-ordering statement over the same accesses, and every consumer that would read
-it can ask the facts instead. Where that changes, this section is what has to
-change with it.
+The consumers read the edges and nothing else. The simplifier walks the chain
+of the access it is answering: a write to another object is not on it, so
+stepping over one needs no aliasing question asked a second time. The affine
+view pairs two accesses exactly when the chains they name meet. Promotion's
+reaching-write walk follows a private slot's chain, which holds that slot's
+accesses and nothing else.
 
 ### 6.3 Ordering semantics
 
@@ -605,9 +615,9 @@ view construction *is* value numbering; commit is the elimination.
   `CountedLoop` nest with intact bounds, which is the reason counted loops
   are not rotated away. Per depth the bounds as affine forms over the outer
   counters and the values the nest was entered with; per `MemoryRead`/
-  `MemoryWrite` the chain its dependency operand is rooted at, the object its
-  address is derived from and the offset into it; per pair of accesses on
-  one chain the distances the single-equation GCD/bounded test admits, a
+  `MemoryWrite` the chains its dependency operand names, the object its
+  address is derived from and the offset into it; per pair of accesses whose
+  chains meet the distances the single-equation GCD/bounded test admits, a
   range-disjointness predicate where the two objects differ, or nothing
   where it cannot decide. Refusal is per access and per pair. Built on
   demand and thrown away; `tir opt --print-affine` prints it.

@@ -5,14 +5,14 @@ use super::*;
 
 impl Builder<'_> {
     /// Every pair of accesses of one memory with at least one write among them.
-    /// Accesses on different chains are of different memories, so they are not a
-    /// pair at all.
+    /// Two accesses sharing no chain are of different memories — a change names
+    /// every chain it may alias — so they are not a pair at all.
     pub(super) fn pairs(&self) -> Vec<Pair> {
         let mut pairs = Vec::new();
         for left in 0..self.accesses.len() {
             for right in left + 1..self.accesses.len() {
                 let (a, b) = (&self.accesses[left], &self.accesses[right]);
-                if a.chain != b.chain || !(a.write || b.write) {
+                if a.chains.is_disjoint(&b.chains) || !(a.write || b.write) {
                     continue;
                 }
                 pairs.push(Pair {
@@ -33,11 +33,6 @@ impl Builder<'_> {
             return Dependence::Unknown;
         }
         if a.base != b.base {
-            // Two allocations are two objects: nothing derived from one
-            // reaches the other.
-            if self.is_allocation(a.base) && self.is_allocation(b.base) {
-                return Dependence::Independent;
-            }
             return match (self.extremes(a, left), self.extremes(b, right)) {
                 (Some(left), Some(right)) => Dependence::Conditional(Box::new((left, right))),
                 _ => Dependence::Unknown,
@@ -63,17 +58,6 @@ impl Builder<'_> {
             Some(components) => Dependence::Distances(components),
             None => Dependence::Independent,
         }
-    }
-
-    fn is_allocation(&self, base: ValueId) -> bool {
-        self.context
-            .get_value(base)
-            .defining_op()
-            .is_some_and(|op| {
-                self.context
-                    .get_op(op)
-                    .has_interface::<dyn crate::PromotableAllocation>()
-            })
     }
 
     /// The bytes an access can touch, as forms over the nest's symbols: every

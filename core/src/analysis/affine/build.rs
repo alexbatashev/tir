@@ -157,15 +157,31 @@ impl<'a> Builder<'a> {
     }
 
     /// Whether an operation names a memory state without saying what it does to
-    /// the memory: a call, a copy, an export.
+    /// the memory: a call, a copy, an export. A merge and a split only name the
+    /// chains an effect crosses; the effect itself is what was scanned.
     fn touches_memory(&self, op: &OpHandle) -> bool {
-        if op.is::<JoinOp>() {
+        if op.is::<JoinOp>() || op.is::<SplitOp>() {
             return false;
         }
-        if op.is::<SplitOp>() {
-            return true;
-        }
         !op.dep_operands().is_empty()
+    }
+
+    /// The chains an effect names: the one state it observes, or every chain
+    /// merged into the state a change takes, which is exactly the set of
+    /// objects it may alias.
+    fn chains_of(&self, state: ValueId) -> BTreeSet<ValueId> {
+        let merged = self
+            .context
+            .get_value(state)
+            .defining_op()
+            .map(|op| self.context.get_op(op))
+            .filter(|op| op.is::<JoinOp>())
+            .map(|op| op.dep_operands())
+            .unwrap_or_else(|| vec![state].into());
+        merged
+            .into_iter()
+            .filter_map(|input| chain_root(self.context, input))
+            .collect()
     }
 
     fn access(
@@ -179,7 +195,8 @@ impl<'a> Builder<'a> {
     ) -> Access {
         let (base, offset) = self.address(address);
         let chain = state.and_then(|state| chain_root(self.context, state));
-        if chain.is_none() {
+        let chains = state.map(|state| self.chains_of(state)).unwrap_or_default();
+        if chain.is_none() || chains.is_empty() {
             self.opaque = true;
         }
         let extent = self
@@ -195,6 +212,7 @@ impl<'a> Builder<'a> {
             op,
             write,
             chain: chain.unwrap_or(base),
+            chains,
             base,
             offset: match &offset {
                 Some((form, _)) => Offset::Affine(form.clone()),
@@ -619,16 +637,26 @@ fn chain_root_walk(
         else {
             return Some(current);
         };
+        // A merge of one chain's fork of reads names that chain. A merge of
+        // several is what an effect crossing them takes, and the converter
+        // names the effect's own chain first, so that is the one carrying on.
         if op.is::<JoinOp>() {
-            let mut roots = op
+            let roots = op
                 .operands()
                 .iter()
                 .map(|&operand| chain_root_memo(context, operand, memo))
                 .collect::<Option<BTreeSet<_>>>()?;
-            return (roots.len() == 1).then(|| roots.pop_first().expect("one root"));
+            if roots.len() == 1 {
+                return roots.into_iter().next();
+            }
+            current = op.dep_operands()[0];
+            continue;
         }
+        // One name per chain crossing the effect that left the state split,
+        // in the order the merge it took named them.
         if op.is::<SplitOp>() {
-            return None;
+            current = split_source(context, &op, current)?;
+            continue;
         }
         let observed = op
             .clone()
@@ -674,6 +702,24 @@ fn chain_root_walk(
         }
         return Some(current);
     }
+}
+
+/// The state one chain stood at before the effect whose result `split` names
+/// again: the effect took the merge of the chains it crosses, in the order the
+/// split hands them back, so chain `state` came in on the merge's operand at
+/// the same index.
+fn split_source(context: &Context, split: &OpHandle, state: ValueId) -> Option<ValueId> {
+    let index = split.dep_results().iter().position(|&r| r == state)?;
+    let changed = *split.dep_operands().first()?;
+    let changer = context.get_op(context.get_value(changed).defining_op()?);
+    let [taken] = changer.dep_operands()[..] else {
+        return None;
+    };
+    let merge = context.get_op(context.get_value(taken).defining_op()?);
+    merge
+        .is::<JoinOp>()
+        .then(|| merge.dep_operands().get(index).copied())
+        .flatten()
 }
 
 /// The value a region entry argument stands for outside the region.

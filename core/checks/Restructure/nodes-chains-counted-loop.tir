@@ -1,0 +1,39 @@
+// RUN: tir opt --pass restructure-nodes,verify-deps --verify %s | filecheck %s
+// RUN: tir interp %s -f f --args=4 | filecheck --check-prefix=VALUE %s
+// RUN: tir opt --pass restructure-nodes %s | tir interp -f f --args=4 | filecheck --check-prefix=VALUE %s
+// RUN: tir opt --pass restructure-nodes --shuffle-seed 3 %s | tir interp -f f --args=4 | filecheck --check-prefix=VALUE %s
+// RUN: tir opt --pass restructure-nodes --shuffle-seed 11 %s | tir interp -f f --args=4 | filecheck --check-prefix=VALUE %s
+
+// A counted loop writing one slot and reading another carries a dependency
+// port per chain, and the two accesses inside the body share no edge: the
+// store observes the port its own chain enters on and the load the other's.
+
+module {
+  %fn_f = func.func @f(%n: !i32) -> !i32 {
+    %a = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    %b = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    %zero = constant {value = 0} : !i32
+    %one = constant {value = 1} : !i32
+    ptr.store %zero, %b
+    %i_end, %fin = scf.for %i = %zero to %n step %one (%iv = %zero) {
+      ptr.store %iv, %a
+      %v = ptr.load %b : !i32
+      %next = addi %iv, %one : !i32
+      scf.yield %next
+    }
+    %r = ptr.load %a : !i32
+    func.return %r
+  }
+  module_end
+}
+
+// CHECK: %{{[0-9]+}} = func.func @f(%[[N:[0-9]+]]: !i32) -> !i32 {
+// CHECK: | %[[EA:[0-9]+]] = state.entry_state
+// CHECK-NEXT: | %[[EB:[0-9]+]] = state.entry_state
+// CHECK-NEXT: | %[[SB:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[B:[0-9]+]] | %[[EB]]
+// CHECK: scf.for %{{[0-9]+}} = %{{[0-9]+}} to %[[N]] step %{{[0-9]+}} (%{{[0-9]+}} = %{{[0-9]+}} | %[[PA:[0-9]+]] = %[[EA]], %[[PB:[0-9]+]] = %[[SB]]) {
+// CHECK-NEXT: | %[[SA:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[A:[0-9]+]] | %[[PA]]
+// CHECK-NEXT: %{{[0-9]+}} | %[[RB:[0-9]+]] = ptr.load %[[B]] | %[[PB]] : !i32
+// CHECK: -> %{{[0-9]+}} | %[[SA]], %[[RB]]
+
+// VALUE: i32 3

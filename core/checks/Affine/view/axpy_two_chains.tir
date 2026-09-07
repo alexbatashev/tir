@@ -1,9 +1,9 @@
 // RUN: tir opt --pass func.func(restructure-nodes) --print-affine %s -o /dev/null | filecheck %s
 
 // Two allocations are two memories, which is what a `restrict` pair claims about
-// two parameters. The accesses share one chain, but a pair whose bases are
-// two allocations is independent by the objects alone, with nothing left for
-// the dependence test to decide.
+// two parameters. Each opens a chain of its own, so an access of one and an
+// access of the other are not a pair at all and the dependence test is never
+// asked about them. What is left is `y`'s read against `y`'s own write.
 
 #data_layout = {types = {i32 = {abi = 32, size = 32}, i64 = {abi = 64, size = 64}, p = {abi = 64, size = 64}}}
 
@@ -33,9 +33,8 @@ module {data_layout = #data_layout} {
   module_end
 }
 
-// CHECK: access 0 read %{{[0-9]+}} chain %[[S:[0-9]+]] base %[[X:[0-9]+]] offset 4*d0 extent 4
-// CHECK-NEXT: access 1 read %{{[0-9]+}} chain %[[S]] base %[[Y:[0-9]+]] offset 4*d0 extent 4
-// CHECK-NEXT: access 2 write %{{[0-9]+}} chain %[[S]] base %[[Y]] offset 4*d0 extent 4
-// CHECK-NEXT: dep 0 2 independent
+// CHECK: access 0 read %{{[0-9]+}} chain %[[SX:[0-9]+]] base %[[X:[0-9]+]] offset 4*d0 extent 4
+// CHECK-NEXT: access 1 read %{{[0-9]+}} chain %[[SY:[0-9]+]] base %[[Y:[0-9]+]] offset 4*d0 extent 4
+// CHECK-NEXT: access 2 write %{{[0-9]+}} chain %[[SY]] base %[[Y]] offset 4*d0 extent 4
 // CHECK-NEXT: dep 1 2 independent
 // CHECK-NEXT: port 0

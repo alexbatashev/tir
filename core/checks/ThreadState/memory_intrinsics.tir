@@ -1,7 +1,7 @@
 // RUN: tir opt --pass restructure-nodes --verify %s | filecheck %s
 
-// The intrinsics name whole ranges of unknown memory, so they thread the
-// conservative chain in the order they are written.
+// The intrinsics name whole ranges of unknown memory, so each write joins every
+// chain it may reach and the two stay ordered as they are written.
 
 module {
   %fn_c = func.func @c(%0: !ptr.p, %1: !ptr.p, %2: !i8, %3: !i64) {
@@ -12,7 +12,13 @@ module {
   module_end
 }
 // CHECK-LABEL: %{{[0-9]+}} = func.func @c(%[[DST:[0-9]+]]: !ptr.p, %[[SRC:[0-9]+]]: !ptr.p, %[[BYTE:[0-9]+]]: !i8, %[[LEN:[0-9]+]]: !i64)
-// CHECK-NEXT: | %[[ENTRY:[0-9]+]] = state.entry_state
-// CHECK-NEXT: | %[[S1:[0-9]+]] = ptr.memset %[[DST]], %[[BYTE]], %[[LEN]] | %[[ENTRY]]
-// CHECK-NEXT: | %[[S2:[0-9]+]] = ptr.memcpy %[[SRC]], %[[DST]], %[[LEN]] | %[[S1]]
-// CHECK-NEXT: -> | %[[S2]]
+// CHECK-NEXT: | %[[E0:[0-9]+]] = state.entry_state
+// CHECK-NEXT: | %[[E1:[0-9]+]] = state.entry_state
+// CHECK-NEXT: | %[[J1:[0-9]+]] = state.join | %[[E0]], %[[E1]]
+// CHECK-NEXT: | %[[S1:[0-9]+]] = ptr.memset %[[DST]], %[[BYTE]], %[[LEN]] | %[[J1]]
+// CHECK-NEXT: | %[[P0:[0-9]+]], %[[P1:[0-9]+]] = state.split | %[[S1]]
+// CHECK-NEXT: | %[[J2:[0-9]+]] = state.join | %[[P1]], %[[P0]]
+// CHECK-NEXT: | %[[S2:[0-9]+]] = ptr.memcpy %[[SRC]], %[[DST]], %[[LEN]] | %[[J2]]
+// CHECK-NEXT: | %[[Q0:[0-9]+]], %[[Q1:[0-9]+]] = state.split | %[[S2]]
+// CHECK-NEXT: | %[[EXIT:[0-9]+]] = state.join | %[[Q1]], %[[Q0]]
+// CHECK-NEXT: -> | %[[EXIT]]

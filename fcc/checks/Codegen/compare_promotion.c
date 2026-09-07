@@ -29,7 +29,7 @@
 // the operation.
 // CHECK: %{{[0-9]+}} = func.func @both
 // CHECK: %[[LEFT:.*]] = cmpi {{.*}} {predicate = "eq"}
-// CHECK: %[[RIGHT:.*]] = cmpi {{.*}} {predicate = "eq"}
 // CHECK: %[[LEFT_WIDE:.*]] = extui %[[LEFT:[0-9]+]] : !i32
+// CHECK: %[[RIGHT:.*]] = cmpi {{.*}} {predicate = "eq"}
 // CHECK: %[[RIGHT_WIDE:.*]] = extui %[[RIGHT:[0-9]+]] : !i32
 // CHECK: andi %[[LEFT_WIDE:[0-9]+]], %[[RIGHT_WIDE:[0-9]+]] : !i32

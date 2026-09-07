@@ -1,34 +1,41 @@
 // RUN: tir opt --pass func.func(instcombine-nodes) --verify %s | filecheck %s
 
-// A private slot written before a call and read after it: the call reaches
-// no address the slot's own accesses never let out, so the read is the value
-// stored. The read is bound to that value one way only. Were it a read term
-// of its own in the value's class, the store's operand could be spelled as
-// the read that comes after the store, closing the chain on itself.
+// A private slot written before a call and read after it: no call is on the
+// slot's chain, because the call reaches no address the slot's own accesses
+// ever let out, so the read is the value stored. The read is bound to that
+// value one way only. Were it a read term of its own in the value's class, the
+// store's operand could be spelled as the read that comes after the store,
+// closing the chain on itself.
 
 #data_layout = {types = {i8 = {abi = 8, size = 8}, p = {abi = 64, size = 64}}}
 
 module {data_layout = #data_layout} {
-  %0 = func.declare @f(!i8) -> !unit
-  %1 = func.declare @g() -> !unit
-  %33 = func.func @scale(%4: !ptr.p) {
-    %3 = ptr.alloca {size = 1, align = 1} : !ptr.p
-    | %6 = state.entry_state
-    %12 | %13 = ptr.load %4 | %6 : !ptr.p
-    %14 | %15 = ptr.load %12 | %13 : !i8
-    | %17 = ptr.store %14, %3 | %15
-    | %19 = func.call %1() | %17
-    %20 | %21 = ptr.load %3 | %19 : !i8
-    | %32 = func.call %0(%20 : !i8) | %21
-    -> | %32
+  %fn_f = func.declare @f(!i8) -> !unit
+  %fn_g = func.declare @g() -> !unit
+  %fn_scale = func.func @scale(%p: !ptr.p) {
+    %slot = ptr.alloca {size = 1, align = 1} : !ptr.p
+    | %s_slot = state.entry_state
+    | %s_param = state.entry_state
+    | %s_world = state.entry_state
+    %ptr | %r_param = ptr.load %p | %s_param : !ptr.p
+    %byte | %r_world = ptr.load %ptr | %s_world : !i8
+    | %w_slot = ptr.store %byte, %slot | %s_slot
+    | %in_g = state.join | %r_world, %r_param
+    | %after_g = func.call %fn_g() | %in_g
+    | %g_world, %g_param = state.split | %after_g
+    %back | %r_slot = ptr.load %slot | %w_slot : !i8
+    | %in_f = state.join | %g_world, %g_param
+    | %after_f = func.call %fn_f(%back : !i8) | %in_f
+    | %f_world, %f_param = state.split | %after_f
+    | %out = state.join | %r_slot, %f_world, %f_param
+    -> | %out
   }
   module_end
 }
 
 // CHECK-LABEL: func.func @scale
-// CHECK: %[[V:[0-9]+]] | %[[S:[0-9]+]] = ptr.load %{{[0-9]+}} | %{{[0-9]+}} : !i8
+// CHECK: %[[V:[0-9]+]] | %{{[0-9]+}} = ptr.load %{{[0-9]+}} | %{{[0-9]+}} : !i8
 // CHECK-NOT: ptr.
-// CHECK: | %[[G:[0-9]+]] = func.call %{{[0-9]+}}() | %[[S]]
+// CHECK: | %[[G:[0-9]+]] = func.call %{{[0-9]+}}() | %{{[0-9]+}}
 // CHECK-NOT: ptr.
-// CHECK: | %[[F:[0-9]+]] = func.call %{{[0-9]+}}(%[[V]] : !i8) | %[[G]]
-// CHECK-NEXT: -> | %[[F]]
+// CHECK: | %[[F:[0-9]+]] = func.call %{{[0-9]+}}(%[[V]] : !i8) | %{{[0-9]+}}

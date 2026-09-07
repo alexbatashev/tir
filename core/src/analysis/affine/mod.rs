@@ -72,6 +72,10 @@ pub struct Access {
     pub write: bool,
     /// The memory the access is of, named by the state its chain is rooted at.
     pub chain: ValueId,
+    /// Every chain the access is on, its own included: a change names each
+    /// chain it may alias, so two accesses can be of one memory exactly when
+    /// these sets meet.
+    pub chains: BTreeSet<ValueId>,
     /// The object the address was derived from.
     pub base: ValueId,
     pub offset: Offset,

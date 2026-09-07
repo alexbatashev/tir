@@ -380,6 +380,26 @@ fn splice_nodes(
         .filter_map(|call| callee_node(context, &call, &graph.by_op))
         .collect();
     let entered = call.dep_operands().first().copied();
+    let roots: Vec<OpId> = ops
+        .iter()
+        .copied()
+        .filter(|&op| context.get_op(op).is::<crate::state::EntryStateOp>())
+        .collect();
+    // The callee runs on a chain per object it names; the caller hands the
+    // call one state, so it is split into the memory each of those chains is
+    // entered on. Two chains rooted at one state would be two futures for it.
+    let mut chains = match (roots.len() > 1, entered) {
+        (true, Some(entered)) => {
+            let mut split = crate::state::SplitOpBuilder::new(context).dep_operand(entered);
+            for _ in &roots {
+                split = split.dep_result();
+            }
+            let split = split.build();
+            context.add(destination, split.id());
+            split.states().into_iter()
+        }
+        _ => Vec::new().into_iter(),
+    };
     for &op in &ops {
         let instance = context.get_op(op);
         if instance.is::<AllocaOp>() && destination != body {
@@ -387,7 +407,7 @@ fn splice_nodes(
             context.add(body, op);
         }
         if instance.is::<crate::state::EntryStateOp>() {
-            let Some(entered) = entered else {
+            let Some(entered) = chains.next().or(entered) else {
                 return Err(PassError::RewriteFailed(call.id));
             };
             let root = instance.dep_results()[0];
