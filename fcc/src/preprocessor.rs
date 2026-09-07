@@ -1122,25 +1122,19 @@ impl TokenStream {
 ///
 /// * `name`          — file name shown in diagnostics (e.g. a path or `<stdin>`)
 /// * `source`        — primary translation unit text
-/// * `defines`       — predefined macros (name → single-token replacement)
+/// * `defines`       — predefined macros (name → replacement text, lexed as a
+///   `#define` body would be, so a macro may name a type)
 /// * `include_paths` — directories searched for `#include` files
 pub fn preprocessed(
     name: &str,
     source: &str,
-    defines: HashMap<String, Token>,
+    defines: HashMap<String, String>,
     include_paths: &IncludePaths,
 ) -> TokenStream {
     let file = intern_file(name, source);
     let defines = defines
         .into_iter()
-        .map(|(name, token)| {
-            let replacement = if token == Token::Hash {
-                Vec::new()
-            } else {
-                vec![token]
-            };
-            (name, MacroDefinition::Object(replacement))
-        })
+        .map(|(name, replacement)| (name, MacroDefinition::Object(lex_replacement(&replacement))))
         .collect();
     TokenStream {
         frames: vec![Frame {

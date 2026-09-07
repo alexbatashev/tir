@@ -29,28 +29,18 @@ use harness::{FccVariant, Outcome};
 /// Mid-end pipelines exercised besides the default. All are semantically
 /// neutral orderings of the registered passes; a correct compiler must give
 /// identical behavior under each.
-const EXTRA_PIPELINES: [&str; 6] = [
-    "func.func(promote),fixpoint<3>(func.func(thread-state,instcombine,affine,instcombine))",
-    "func.func(promote),fixpoint<3>(func.func(thread-state,affine,instcombine))",
-    "func.func(promote),fixpoint<3>(func.func(thread-state,instcombine,instcombine))",
+const EXTRA_PIPELINES: [&str; 5] = [
+    "func.func(promote-nodes),fixpoint<3>(func.func(verify-deps,instcombine-nodes,affine,instcombine-nodes))",
+    "func.func(promote-nodes),fixpoint<3>(func.func(verify-deps,affine,instcombine-nodes))",
+    "func.func(promote-nodes),fixpoint<3>(func.func(verify-deps,instcombine-nodes,instcombine-nodes))",
     // Scheduling with nothing folded before it and nothing after: the rebuilt
     // nest has to be right on its own, not because a later pass tidied it.
-    "func.func(promote),fixpoint<3>(func.func(thread-state,affine))",
+    "func.func(promote-nodes),fixpoint<3>(func.func(verify-deps,affine))",
     // Every eligible call site taken, which is the shape the rest of the
-    // mid-end has to stay correct on: bodies spliced into bodies, and callers
-    // handed back unthreaded for the round to thread again.
-    "fixpoint<3>(inline<1000,0>,func.func(promote,thread-state,instcombine,dce,affine,instcombine))",
-    // The inverse on its own, with no inliner to justify it: threading a
-    // function the strip just emptied has to derive the same order every time.
-    "func.func(promote),fixpoint<3>(func.func(thread-state,unthread,thread-state,instcombine))",
+    // mid-end has to stay correct on: bodies spliced into bodies, and the
+    // chains they brought checked again.
+    "fixpoint<3>(inline<1000,0>,func.func(promote-nodes,verify-deps,instcombine-nodes,affine,instcombine-nodes))",
 ];
-
-/// The pipeline that proves the state edges are the whole memory order: every
-/// block is re-linearized by another topological order of the value and state
-/// DAG, once on the threaded IR and once more on what the optimizers left. A
-/// divergence under it is an edge the threader did not draw.
-const SHUFFLE_PIPELINE: &str = "func.func(promote),fixpoint<3>(func.func(thread-state,\
-                                shuffle-state,instcombine,shuffle-state,affine,shuffle-state))";
 
 const CORPUS_DIRS: [&str; 3] = ["fcc/checks", "fcc/tests", "utils/unit-tests/src/fcc/corpus"];
 
@@ -127,8 +117,30 @@ pub fn run(sh: &Shell, root: &Path, options: &Options) -> anyhow::Result<()> {
         for (_, outcome) in harness::run_variants(&fcc, &source, &variants(seed), &program_dir) {
             match outcome {
                 Outcome::Agree => {}
-                Outcome::Errored { variant, message } => {
-                    eprintln!("seed {seed}: {variant} errored: {message}");
+                Outcome::Errored {
+                    variant,
+                    message,
+                    crashed,
+                } => {
+                    // A reference compiler declining the program says nothing
+                    // about fcc, and fcc declining one with a diagnostic is a
+                    // front end limit the torture baseline tracks. fcc dying is
+                    // neither: no input entitles it to, so it is filed like any
+                    // other defect rather than printed and forgotten.
+                    if !crashed || !is_fcc(&variant) {
+                        eprintln!("seed {seed}: {variant} errored: {message}");
+                        continue;
+                    }
+                    let reduced = triage::crash(&fcc, &source_text, &blamed(&variant), &triage_dir);
+                    let failure = triage::crash_failure(
+                        "differential-fuzz",
+                        format!("Crash: fcc dies on {}", reduced.culprit()),
+                        reproduce_command(seed, &reduced),
+                        &reduced,
+                        &variant,
+                        &message,
+                    );
+                    record(&failures_dir, &failure, &mut filed)?;
                 }
                 Outcome::Diverged {
                     variant,
@@ -190,6 +202,12 @@ fn reproduce_command(seed: u64, reduced: &triage::Reduced) -> String {
     )
 }
 
+/// Whether a variant name is one of fcc's own, rather than a reference
+/// compiler's.
+fn is_fcc(variant: &str) -> bool {
+    variant == "fcc-default" || variant.starts_with("fcc:")
+}
+
 /// The fcc variant a divergence names, recovered from the variant's own name.
 fn blamed(variant: &str) -> FccVariant {
     variant
@@ -233,10 +251,9 @@ fn variants(seed: u64) -> Vec<harness::Variant> {
     let mut variants = vec![
         harness::Variant::fcc(FccVariant::default()),
         harness::Variant::fcc(FccVariant::pipeline(extra_pipeline(seed))),
-        harness::Variant::fcc(FccVariant::pipeline(SHUFFLE_PIPELINE)),
-        // The backend half of the same question: order inside a machine block
-        // is a linearization of its dependence graph, so another one is the
-        // same program.
+        // The mid-end holds no order to shuffle: an unordered region is its
+        // dependence graph. The backend's linearization of it is the question,
+        // and another linearization is the same program.
         harness::Variant::fcc(FccVariant::shuffle_machine_order()),
     ];
     variants.extend(reference_variants());

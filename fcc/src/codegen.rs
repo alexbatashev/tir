@@ -3570,7 +3570,10 @@ impl FnCodegen<'_> {
             let mut args = Vec::new();
             let mut argument_alignments = Vec::new();
             for (index, &argument) in arguments.iter().enumerate() {
-                let expression = self.values[&argument];
+                let mut expression = self.values[&argument];
+                if let LoweredExpr::Value(value) = expression {
+                    expression = LoweredExpr::Value(self.as_value_of_node_type(value, argument));
+                }
                 if let Some(parameter) = sig.params.get(index) {
                     args.extend(self.lower_abi_argument(argument, expression, parameter)?);
                     if parameter.grouped {
@@ -3674,6 +3677,10 @@ impl FnCodegen<'_> {
             let rhs = self.values[&rhs_node];
             let l = self.materialize(lhs);
             let r = self.materialize(rhs);
+            // Each side is read as a value of its own type: a relational
+            // operand is one bit wide until something asks it to be an `int`.
+            let l = self.as_value_of_node_type(l, lhs_node);
+            let r = self.as_value_of_node_type(r, rhs_node);
             let source_ty = node_type(self.typed, node);
             let lhs_ty = converted_node_type(self.typed, lhs_node);
             let rhs_ty = converted_node_type(self.typed, rhs_node);
@@ -3866,6 +3873,24 @@ impl FnCodegen<'_> {
         Ok(expression)
     }
 
+    /// A lowered value with the width its own C type asks for. A relational
+    /// operator is one bit wide where the machine decides a branch on it, and
+    /// `int` everywhere it is read as a value, so a reader of the second kind
+    /// asks here rather than trusting the two to agree.
+    fn as_value_of_node_type(&mut self, value: ValueId, node: NodeId) -> ValueId {
+        let target = lower_type(
+            self.context,
+            self.typed,
+            converted_node_type(self.typed, node),
+        );
+        if self.context.get_value(value).ty() == target {
+            return value;
+        }
+        self.builder
+            .append_op(b::extui(self.context, value, target).build())
+            .result()
+    }
+
     fn lower_cast(&mut self, node: NodeId) -> Result<LoweredExpr, Diagnostic> {
         let ast = self.ast;
         let expression = {
@@ -3909,6 +3934,7 @@ impl FnCodegen<'_> {
             };
             let rhs_node = children.next().unwrap();
             let rhs = self.materialize(self.values[&rhs_node]);
+            let rhs = self.as_value_of_node_type(rhs, rhs_node);
             let lhs = self
                 .builder
                 .append_op(p::load(self.context, ptr, elem).build())

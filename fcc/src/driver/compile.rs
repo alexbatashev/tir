@@ -11,20 +11,12 @@ use crate::toolchain::system_include_dirs;
 
 /// Build the predefined-macro map from `-D` arguments. Each value is lexed to a
 /// single token, mirroring how `#define NAME VALUE` is stored.
-pub(super) fn build_defines(defines: &[String]) -> HashMap<String, Token> {
-    use logos::Logos;
+pub(super) fn build_defines(defines: &[String]) -> HashMap<String, String> {
     defines
         .iter()
-        .map(|d| {
-            let (name, value) = match d.split_once('=') {
-                Some((n, v)) => (n.to_string(), v.to_string()),
-                None => (d.to_string(), "1".to_string()),
-            };
-            let tok = Token::lexer(value.trim())
-                .next()
-                .and_then(|r| r.ok())
-                .unwrap_or(Token::Hash);
-            (name, tok)
+        .map(|d| match d.split_once('=') {
+            Some((name, value)) => (name.to_string(), value.to_string()),
+            None => (d.to_string(), "1".to_string()),
         })
         .collect()
 }
@@ -53,7 +45,6 @@ pub(super) fn lower_to_ir(
     options: LangOptions,
     march: Option<&str>,
     mabi: Option<&str>,
-    nodes: bool,
 ) -> tir::builtin::ModuleOp {
     let fail = |error: String| -> ! {
         eprintln!("fcc: error: {error}; pass --march explicitly");
@@ -78,8 +69,7 @@ pub(super) fn lower_to_ir(
     // Restructuring accepts CFG form only, so no `cir` operation may survive
     // into it: struct ops become pointer arithmetic, loop ops become `scf.for`
     // where the counted shape is provable and blocks with branches otherwise.
-    // The unordered form takes the same input and turns a raised `scf.for`
-    // into `scf.for2` on the way.
+    // The conversion turns a raised `scf.for` into `scf.r#for` on the way.
     run_pass(
         context,
         &module,
@@ -94,23 +84,13 @@ pub(super) fn lower_to_ir(
         true,
         crate::passes::RaiseLoopsPass::new(),
     );
-    if nodes {
-        run_pass(
-            context,
-            &module,
-            "restructuring",
-            true,
-            tir::passes::RestructureNodesPass::new(),
-        );
-    } else {
-        run_pass(
-            context,
-            &module,
-            "restructuring",
-            true,
-            tir::passes::RestructurePass::new(),
-        );
-    }
+    run_pass(
+        context,
+        &module,
+        "restructuring",
+        true,
+        tir::passes::RestructureNodesPass::new(),
+    );
     describe_target(context, &module, machine.as_ref())
 }
 
@@ -187,10 +167,6 @@ pub(super) fn emit_machine_code(
         eprintln!("fcc: error: --march is required for the asm and obj stages");
         std::process::exit(1);
     };
-    if opts.nodes {
-        eprintln!("fcc: error: --nodes stops at the IR stage; the backend takes structured blocks");
-        std::process::exit(1);
-    }
     let target = tir::backend::select_target_with_abi(
         march,
         opts.mcpu.as_deref(),
@@ -219,7 +195,6 @@ pub(super) fn emit_machine_code(
         opts.lang_options,
         Some(march),
         opts.mabi.as_deref(),
-        false,
     );
 
     let mut pm = mid_end(opts, true);
@@ -288,11 +263,10 @@ pub(super) fn emit_machine_code(
 /// Preprocess `source`, reporting any `#error`/`#warning` diagnostics. Exits if
 /// any of them is an error.
 fn add_default_defines(
-    defines: &mut HashMap<String, Token>,
+    defines: &mut HashMap<String, String>,
     options: LangOptions,
     march: Option<&str>,
 ) {
-    use logos::Logos;
     let mut predefined = vec![
         ("__GNUC__", "4"),
         ("__GNUC_MINOR__", "2"),
@@ -314,16 +288,13 @@ fn add_default_defines(
         predefined.push(("__unix__", "1"));
     }
     for (name, value) in predefined {
-        defines.entry(name.to_string()).or_insert_with(|| {
-            Token::lexer(value)
-                .next()
-                .and_then(|r| r.ok())
-                .unwrap_or(Token::Hash)
-        });
+        defines
+            .entry(name.to_string())
+            .or_insert_with(|| value.to_string());
     }
     defines
         .entry("__VERSION__".to_string())
-        .or_insert_with(|| Token::StringLiteral(format!("fcc {}", env!("CARGO_PKG_VERSION"))));
+        .or_insert_with(|| format!("\"fcc {}\"", env!("CARGO_PKG_VERSION")));
     let stdc_version = match options.std_version {
         crate::lang_options::StdVersion::C89 => None,
         crate::lang_options::StdVersion::C99 => Some("199901L"),
@@ -334,27 +305,38 @@ fn add_default_defines(
     if let Some(value) = stdc_version {
         defines
             .entry("__STDC_VERSION__".to_string())
-            .or_insert_with(|| {
-                Token::lexer(value)
-                    .next()
-                    .and_then(|result| result.ok())
-                    .unwrap()
-            });
+            .or_insert_with(|| value.to_string());
+    }
+    // The type macros name a type, not a value, so their replacement is more
+    // than one token. Without them a declaration reading `__SIZE_TYPE__` is an
+    // identifier list, and every call through it passes the wrong width.
+    let (size_ty, signed_ty) = match march.unwrap_or(std::env::consts::ARCH) {
+        "riscv32" => ("unsigned int", "int"),
+        _ => ("unsigned long", "long"),
+    };
+    for (name, value) in [
+        ("__SIZE_TYPE__", size_ty),
+        ("__UINTPTR_TYPE__", size_ty),
+        ("__PTRDIFF_TYPE__", signed_ty),
+        ("__INTPTR_TYPE__", signed_ty),
+        ("__WCHAR_TYPE__", "int"),
+    ] {
+        defines
+            .entry(name.to_string())
+            .or_insert_with(|| value.to_string());
     }
     let arch_define = match march.unwrap_or(std::env::consts::ARCH) {
         "aarch64" | "arm64" => "__arm64__",
         "x86_64" => "__x86_64__",
         _ => return,
     };
-    defines
-        .entry(arch_define.to_string())
-        .or_insert(Token::Hash);
+    defines.entry(arch_define.to_string()).or_default();
 }
 
 pub(super) fn preprocess(
     name: &str,
     source: &str,
-    mut defines: HashMap<String, Token>,
+    mut defines: HashMap<String, String>,
     undefines: &[String],
     include_dirs: &[PathBuf],
     options: LangOptions,
@@ -407,13 +389,8 @@ pub(super) fn parse_source(
     })
 }
 
-/// The simplifier for the body kind the pipeline produces.
-fn add_instcombine(pm: &mut tir::PassManager, nodes: bool) {
-    if nodes {
-        pm.add_pass(tir::passes::InstCombineNodesPass::new());
-    } else {
-        pm.add_pass(tir::passes::InstCombinePass::new());
-    }
+fn add_instcombine(pm: &mut tir::PassManager) {
+    pm.add_pass(tir::passes::InstCombineNodesPass::new());
 }
 
 /// The mid-end pipeline the driver options ask for, ending in the data
@@ -429,41 +406,31 @@ pub(super) fn mid_end(opts: &DriverOptions, materialize: bool) -> tir::PassManag
         // callers select a reduced mid-end pipeline. Without this final
         // cleanup, unfolded address arithmetic can reach instruction
         // selection and change the program's observable behavior.
-        add_instcombine(pm.nest::<tir::func::FuncOp>(), opts.nodes);
+        add_instcombine(pm.nest::<tir::func::FuncOp>());
     } else if let Some(rounds) = opts.opt_level.rounds() {
         let fixpoint = pm.fixpoint(rounds.cap);
         fixpoint.add_pass(tir::passes::InlinePass::new(rounds.inline));
         let round = fixpoint.nest::<tir::func::FuncOp>();
         // Inlining is the only thing that makes a slot promotable that was
-        // not, so promote follows it inside the round.
-        if opts.nodes {
-            // The unordered pipeline: the chain the conversion built is kept
-            // and checked, never drawn again, and the simplifier's own sweep
-            // takes what nothing demands.
-            round.add_pass(tir::passes::PromoteNodesPass::new());
-            round.add_pass(tir::passes::VerifyDepsPass::new());
-            round.add_pass(tir::passes::InstCombineNodesPass::new());
-        } else {
-            round.add_pass(tir::passes::PromotePass::new());
-            round.add_pass(tir::passes::ThreadStatePass::new());
-            round.add_pass(tir::passes::InstCombinePass::new());
-            // Inlining is what makes a gate's decision a constant, and the arms it
-            // then cannot reach are what the rest of the round would walk.
-            round.add_pass(tir::passes::DeadCodeEliminationPass::new());
-        }
+        // not, so promote follows it inside the round. The chain the
+        // conversion built is kept and checked, never drawn again, and the
+        // simplifier's own sweep takes what nothing demands.
+        round.add_pass(tir::passes::PromoteNodesPass::new());
+        round.add_pass(tir::passes::VerifyDepsPass::new());
+        round.add_pass(tir::passes::InstCombineNodesPass::new());
         if rounds.affine {
             // Loop scheduling reads the chains too, and what it leaves behind — a
             // rebuilt nest, an unrolled body — is address arithmetic nobody has
             // folded yet, so the simplifier runs once more over it.
             round.add_pass(tir::passes::AffineSchedulePass::new());
-            add_instcombine(round, opts.nodes);
+            add_instcombine(round);
         }
     } else {
         // -O0 runs no round. What is left is the normalising simplifier every
         // pipeline needs: instruction selection reads unfolded address
         // arithmetic as a different program, which is a backend defect this
         // level inherits.
-        add_instcombine(pm.nest::<tir::func::FuncOp>(), opts.nodes);
+        add_instcombine(pm.nest::<tir::func::FuncOp>());
     }
     // Data lowering consumes the δ ops, so the functions that name them must
     // hold symbol addresses of their own by then.
