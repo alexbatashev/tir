@@ -26,6 +26,7 @@ use tir_relational::{ClassId as Id, Extraction};
 
 use super::{Driver, Node, Prov, SymKind, cost, state};
 use crate::analysis::AnalysisManager;
+use crate::analysis::alias_facts::{distinct_objects, object_base};
 use crate::func::FuncOp;
 use crate::sem::egraph::type_width;
 use crate::{
@@ -182,7 +183,7 @@ impl Driver<'_> {
         let Some(extent) = self.extent(published) else {
             return;
         };
-        let base = super::object_base(self.context, write.write_location());
+        let base = object_base(self.context, write.write_location());
         let mut state = published;
         loop {
             if self.published(scope, state) {
@@ -213,8 +214,8 @@ impl Driver<'_> {
             if self.extent(left) == Some(extent) {
                 break;
             }
-            let other = super::object_base(self.context, next.write_location());
-            if !super::distinct_objects(self.context, base, other) {
+            let other = object_base(self.context, next.write_location());
+            if !distinct_objects(self.context, base, other) {
                 return;
             }
             state = left;

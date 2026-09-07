@@ -20,7 +20,9 @@ use crate::analysis::{Analysis, AnalysisManager, DefUse, Escape, EscapeFacts};
 use crate::builtin::GlobalOp;
 use crate::func::FuncOp;
 use crate::ptr::PtrAddOp;
-use crate::{Context, OpId, PromotableAllocation, ValueId};
+use crate::{
+    Context, MemoryRead, MemoryWrite, OpId, PromotableAllocation, RegionId, Value, ValueId,
+};
 
 /// The object a pointer was derived from.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -164,6 +166,106 @@ impl AliasFacts {
             _ => false,
         }
     }
+}
+
+/// The object `address` is derived from through pointer arithmetic: a stack
+/// allocation, a global, or a parameter of the function, and nothing else.
+///
+/// Read off the IR rather than off [`AliasFacts`], so the converter can ask it
+/// while the function is still a graph of blocks and its parameters are the
+/// entry block's arguments.
+pub fn object_base(context: &Context, address: ValueId) -> Option<Base> {
+    let mut current = address;
+    loop {
+        let Some(op) = context.get_value(current).defining_op() else {
+            let region = parameter_region(context, current)?;
+            let function = context.get_region(region).parent_op()?;
+            let function = context.get_op(function);
+            let function = function.as_op::<FuncOp>()?;
+            let noalias = function.noalias_arguments().into_iter().any(|index| {
+                context.get_region(region).ports().get(index).map(Value::id) == Some(current)
+            });
+            return Some(Base::Param {
+                pointer: current,
+                noalias,
+            });
+        };
+        if !context.has_operation(op) {
+            return None;
+        }
+        let instance = context.get_op(op);
+        if instance.is::<PtrAddOp>() {
+            current = instance.operands()[0];
+        } else if instance.has_interface::<dyn PromotableAllocation>() {
+            return Some(Base::Alloca(current));
+        } else if instance.is::<GlobalOp>() {
+            return Some(Base::Global(current));
+        } else {
+            return None;
+        }
+    }
+}
+
+/// The region `value` is a parameter of: its own port, or an argument of the
+/// entry block a region is entered on, which is the same list either way.
+fn parameter_region(context: &Context, value: ValueId) -> Option<RegionId> {
+    if let Some(region) = context.region_of_port(value) {
+        return Some(region);
+    }
+    let block = context.block_of_argument(value)?;
+    let region = context.parent_region(block)?;
+    (context.get_region(region).entry_block() == block).then_some(region)
+}
+
+/// Whether two accesses are of different memory: their objects are known to
+/// be distinct, or one is an allocation whose address never left the
+/// function's own accesses, which no pointer of unknown origin reaches.
+pub fn distinct_objects(context: &Context, a: Option<Base>, b: Option<Base>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a.distinct(b),
+        (Some(Base::Alloca(slot)), None) | (None, Some(Base::Alloca(slot))) => {
+            accessed_only(context, slot)
+        }
+        _ => false,
+    }
+}
+
+/// Whether every use of `address`, through pointer arithmetic, is as the
+/// location of a read or a write: the address itself never leaves the
+/// function's own accesses.
+pub fn accessed_only(context: &Context, address: ValueId) -> bool {
+    context.users_of(address).into_iter().all(|user| {
+        let instance = context.get_op(user);
+        if instance.is::<PtrAddOp>() {
+            return instance.operands()[0] == address
+                && instance
+                    .results()
+                    .iter()
+                    .all(|&derived| accessed_only(context, derived));
+        }
+        let location = instance
+            .clone()
+            .as_interface::<dyn MemoryWrite>()
+            .map(|write| write.write_location())
+            .or_else(|| {
+                instance
+                    .clone()
+                    .as_interface::<dyn MemoryRead>()
+                    .map(|read| read.read_location())
+            });
+        location == Some(address)
+            && instance
+                .operands()
+                .iter()
+                .filter(|&&v| v == address)
+                .count()
+                == 1
+    }) && !crate::region::defining_region(context, address).is_some_and(|region| {
+        context
+            .nested_regions(region)
+            .iter()
+            .any(|&r| context.get_region(r).results().contains(&address))
+    })
 }
 
 /// Whether `[a, a + a_size)` and `[b, b + b_size)` share no byte.
