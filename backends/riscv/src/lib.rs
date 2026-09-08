@@ -945,112 +945,14 @@ pub struct RiscvTarget {
     selected_abi: &'static tir::backend::abi::AbiInfo,
 }
 
-impl tir::backend::TargetMachine for RiscvTarget {
-    fn name(&self) -> &'static str {
-        self.config.canonical_name()
-    }
-
-    fn model_check_target(&self) -> Option<tir::backend::ModelCheckTarget> {
-        Some(tir::backend::ModelCheckTarget {
-            isa: if self.config.xlen == 32 {
-                "RV32I"
-            } else {
-                "RV64I"
-            },
-            features: self.config.features.iter().map(Feature::name).collect(),
-            sources: MODEL_CHECK_SOURCES,
-        })
-    }
-
-    fn register_dialects(&self, context: &tir::Context) {
-        context.register_dialect::<tir::backend::AsmDialect>();
-        context.register_dialect::<RiscvDialect>();
-        context.register_reg_classes(register_info().classes);
-    }
-
-    fn data_layout(&self) -> Option<tir::attributes::AttributeValue> {
-        let pointer = self.config.xlen;
-        Some(tir::data_layout_spec(
-            tir::Endianness::Little,
-            self.abi().stack.align * 8,
-            &[
-                ("i1", 8, 8),
-                ("i8", 8, 8),
-                ("i16", 16, 16),
-                ("i32", 32, 32),
-                ("i64", 64, 64),
-                ("f32", 32, 32),
-                ("f64", 64, 64),
-                ("p", pointer, pointer),
-            ],
-        ))
-    }
-
-    fn target_env(&self) -> Option<tir::attributes::AttributeValue> {
-        // Lowercased TMDL feature names, which `--mattr` accepts alongside the
-        // march extension letters.
-        let features: Vec<String> = self
-            .config
-            .features
-            .iter()
-            .map(|feature| feature.name().to_ascii_lowercase())
-            .collect();
-        Some(tir::target_env_spec(
-            self.config.canonical_name(),
-            &features,
-        ))
-    }
-
-    fn isel_pass(&self, context: &tir::Context) -> tir::backend::isel::InstructionSelectPass {
-        create_isel_pass_for(context, &self.config.features, self.abi())
-            .with_data_layout(self.data_layout())
-    }
-
-    fn regalloc_target(&self) -> Box<dyn tir::backend::regalloc::TargetRegAlloc> {
-        Box::new(RiscvRegAlloc)
-    }
-
-    fn register_info(&self) -> tir::backend::regalloc::RegisterInfo {
-        use tir::backend::regalloc::TargetRegAlloc;
-        RiscvRegAlloc.register_info()
-    }
-
-    fn abis(&self) -> &'static [tir::backend::abi::AbiInfo] {
-        riscv_abis()
-    }
-
-    fn abi(&self) -> &'static tir::backend::abi::AbiInfo {
-        self.selected_abi
-    }
-
-    fn asm_parser(&self, _context: &tir::Context) -> tir::backend::AsmParser {
-        let (parsers, disabled) = get_instruction_parsers(&self.config.features);
-        tir::backend::AsmParser::new(parsers).with_disabled_mnemonics(disabled)
-    }
-
-    fn machine_model(&self, name: &str) -> Option<tir::backend::sched::MachineModel> {
-        crate::machine_model(name, &self.config.features)
-    }
-
-    fn machines(&self) -> Vec<&'static str> {
-        crate::machines(&self.config.features)
-    }
-
-    fn default_machine(&self) -> Option<&str> {
-        self.config.machine.as_deref()
-    }
-
-    fn isa_params(&self) -> Vec<(&'static str, i64)> {
-        crate::isa_params(&self.config.features)
-    }
-
-    fn register_widths(&self) -> Vec<(&'static str, u32)> {
-        crate::register_widths(&self.config.features)
-    }
-
-    fn register_name(&self, class: &str, index: u16, prefer_abi: bool) -> Option<String> {
-        crate::register_name(class, index, prefer_abi)
-    }
+tir::impl_target_machine! {
+    RiscvTarget,
+    dialect: RiscvDialect,
+    isa: |config: &TargetConfig| if config.xlen == 32 { "RV32I" } else { "RV64I" },
+    pointer_bits: |config: &TargetConfig| config.xlen,
+    regalloc: |_| RiscvRegAlloc,
+    abis: riscv_abis,
+    sources: MODEL_CHECK_SOURCES,
 
     fn counter_registers(&self) -> Vec<(&'static str, u16, tir::backend::PerfCounter)> {
         use tir::backend::PerfCounter;

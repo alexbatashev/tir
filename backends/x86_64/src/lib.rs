@@ -666,6 +666,11 @@ mod isa {
         pub fn features(&self) -> &[Feature] {
             &self.features
         }
+
+        /// The target name this configuration selects.
+        pub fn canonical_name(&self) -> &'static str {
+            "x86_64"
+        }
     }
 
     /// Resolve `--mcpu` to the machine model the compiler and the instrument
@@ -711,70 +716,29 @@ mod isa {
         selected_abi: &'static tir::backend::abi::AbiInfo,
     }
 
-    impl tir::backend::TargetMachine for X86Target {
-        fn name(&self) -> &'static str {
-            "x86_64"
-        }
-
-        fn model_check_target(&self) -> Option<tir::backend::ModelCheckTarget> {
-            Some(tir::backend::ModelCheckTarget {
-                isa: "X86_64",
-                features: self.config.features.iter().map(Feature::name).collect(),
-                sources: super::MODEL_CHECK_SOURCES,
-            })
-        }
-
-        fn register_dialects(&self, context: &tir::Context) {
-            context.register_dialect::<tir::backend::AsmDialect>();
-            context.register_dialect::<X86_64Dialect>();
-            context.register_reg_classes(register_info().classes);
-        }
-
-        fn data_layout(&self) -> Option<tir::attributes::AttributeValue> {
-            Some(tir::data_layout_spec(
-                tir::Endianness::Little,
-                self.abi().stack.align * 8,
-                &[
-                    ("i1", 8, 8),
-                    ("i8", 8, 8),
-                    ("i16", 16, 16),
-                    ("i32", 32, 32),
-                    ("i64", 64, 64),
-                    ("f32", 32, 32),
-                    ("f64", 64, 64),
-                    ("p", 64, 64),
-                ],
-            ))
-        }
-
-        fn target_env(&self) -> Option<tir::attributes::AttributeValue> {
-            let features: Vec<String> = self
-                .config
-                .features
-                .iter()
-                .map(|feature| feature.name().to_ascii_lowercase())
-                .collect();
-            Some(tir::target_env_spec(self.name(), &features))
-        }
-
-        fn isel_pass(&self, context: &tir::Context) -> tir::backend::isel::InstructionSelectPass {
-            tir::backend::isel::InstructionSelectPass::new(get_isel_rules(
-                context,
-                self.config.features(),
-            ))
+    fn create_isel_pass_for(
+        context: &tir::Context,
+        features: &[Feature],
+        abi: &'static tir::backend::abi::AbiInfo,
+    ) -> tir::backend::isel::InstructionSelectPass {
+        tir::backend::isel::InstructionSelectPass::new(get_isel_rules(context, features))
             .with_rules(include_str!("isel.pdl"))
             .with_branch_emitters(tir::backend::isel::BranchEmitters {
                 uncond: tir::backend::emit_uncond_branch,
                 cond_nonzero: emit_branch_nonzero,
             })
             .with_op_lowering(lower_func_and_return_to_asm_symbol)
-            .with_call_lowering(self.abi(), Box::new(X86CallEmitter))
-            .with_data_layout(self.data_layout())
-        }
+            .with_call_lowering(abi, Box::new(X86CallEmitter))
+    }
 
-        fn regalloc_target(&self) -> Box<dyn tir::backend::regalloc::TargetRegAlloc> {
-            Box::new(X86RegAlloc::new(self.config.features()))
-        }
+    tir::impl_target_machine! {
+        X86Target,
+        dialect: X86_64Dialect,
+        isa: |_| "X86_64",
+        pointer_bits: |_| 64,
+        regalloc: |features| X86RegAlloc::new(features),
+        abis: x86_64_abis,
+        sources: super::MODEL_CHECK_SOURCES,
 
         fn pre_ra_lowerings(&self) -> Vec<tir::backend::isel::OpLowering> {
             vec![
@@ -788,49 +752,8 @@ mod isa {
             vec![Box::new(finalize_virtual_ops)]
         }
 
-        fn register_info(&self) -> tir::backend::regalloc::RegisterInfo {
-            register_info()
-        }
-
-        fn abis(&self) -> &'static [tir::backend::abi::AbiInfo] {
-            x86_64_abis()
-        }
-
-        fn abi(&self) -> &'static tir::backend::abi::AbiInfo {
-            self.selected_abi
-        }
-
-        fn asm_parser(&self, _context: &tir::Context) -> tir::backend::AsmParser {
-            let (parsers, disabled) = get_instruction_parsers(self.config.features());
-            tir::backend::AsmParser::new(parsers).with_disabled_mnemonics(disabled)
-        }
-
-        fn machine_model(&self, name: &str) -> Option<tir::backend::sched::MachineModel> {
-            machine_model(name, self.config.features())
-        }
-
-        fn default_machine(&self) -> Option<&str> {
-            self.config.machine.as_deref()
-        }
-
-        fn machines(&self) -> Vec<&'static str> {
-            machines(self.config.features())
-        }
-
-        fn isa_params(&self) -> Vec<(&'static str, i64)> {
-            isa_params(self.config.features())
-        }
-
-        fn register_widths(&self) -> Vec<(&'static str, u32)> {
-            register_widths(self.config.features())
-        }
-
         fn register_views(&self) -> Vec<(&'static str, tir::backend::regalloc::RegisterView)> {
             register_views(self.config.features())
-        }
-
-        fn register_name(&self, class: &str, index: u16, prefer_abi: bool) -> Option<String> {
-            register_name(class, index, prefer_abi)
         }
 
         fn object_format(&self) -> Option<tir::backend::binary::ObjectFormatInfo> {

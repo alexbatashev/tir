@@ -21,6 +21,7 @@ mod registers;
 pub mod sched;
 pub mod shuffle_order;
 pub mod target;
+mod target_boilerplate;
 mod verify;
 
 pub use operations::*;
