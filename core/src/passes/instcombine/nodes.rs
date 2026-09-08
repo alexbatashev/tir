@@ -477,17 +477,7 @@ fn changed_chain(context: &Context, state: ValueId) -> bool {
     let Some(index) = instance.dep_results().iter().position(|&r| r == state) else {
         return true;
     };
-    let carries = |region: &RegionId| {
-        let handle = context.get_region(*region);
-        let ports = handle.dep_arguments();
-        let results = handle.dep_results();
-        let groups = results.len().checked_div(ports.len()).unwrap_or(0);
-        ports.get(index).is_some_and(|port| {
-            (groups == 1 || groups == 2)
-                && results.len() == groups * ports.len()
-                && (0..groups).all(|group| results[group * ports.len() + index] == port.id())
-        })
-    };
+    let carries = |&region| crate::binding::forwards_dep(context, region, index);
     if instance.regions().is_empty() || !instance.regions().iter().all(carries) {
         return true;
     }
@@ -576,24 +566,20 @@ fn carries_nothing(context: &Context, op: OpId, index: usize) -> bool {
         return false;
     }
     handle.regions().iter().all(|&region| {
-        let handle = context.get_region(region);
-        let ports = handle.dep_arguments();
-        let results = handle.dep_results();
-        let Some(port) = ports.get(index).map(crate::Value::id) else {
+        let Some(groups) = crate::binding::dep_groups(context, region) else {
             return false;
         };
-        let groups = results.len().checked_div(ports.len()).unwrap_or(0);
+        if !crate::binding::forwards_dep(context, region, index) {
+            return false;
+        }
+        let port = context.get_region(region).dep_arguments()[index].id();
         let named = context
             .nested_regions(region)
             .iter()
             .flat_map(|&nested| context.get_region(nested).results())
             .filter(|&named| named == port)
             .count();
-        (groups == 1 || groups == 2)
-            && results.len() == groups * ports.len()
-            && (0..groups).all(|group| results[group * ports.len() + index] == port)
-            && named == groups
-            && context.users_of(port).is_empty()
+        named == groups && context.users_of(port).is_empty()
     })
 }
 
