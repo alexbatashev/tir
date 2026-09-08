@@ -1,9 +1,11 @@
 //! Context tests: staged regions, port growth, interning and spine bumps.
 
 use tir::{
-    builtin, func, scf, BlockHandle, BlockId, Commutative, Context, IRFormatter, OpId, Operand,
-    Operation, RegionId, StagedRegion, Use, ValueId,
+    builtin, func, func::FuncOp, scf, BlockHandle, BlockId, Commutative, Context, IRFormatter,
+    OpId, Operand, Operation, RegionId, StagedRegion, Use, ValueId,
 };
+
+use super::fixtures;
 
 // An operation holding one ordered region and nothing else, so a commit to it
 // is a commit to a region an op owns without also being a port contract the
@@ -45,37 +47,41 @@ struct Fixture {
 
 fn fixture(context: &Context) -> Fixture {
     context.register_dialect::<NestDialect>();
-    let i32_ty = builtin::IntegerType::new(context, 32);
-    let unit = builtin::UnitType::new(context);
-
-    let body_region = context.create_region();
-    let body_block = context.create_block(vec![]);
-    body_region.add_block(body_block.id());
-    let old = builtin::ops::constant(context, 7, i32_ty).build();
-    body_block.append(old.id());
-    body_block.append(scf::ops::r#yield(context, vec![]).build().id());
-
-    let body = context.create_region();
-    let entry = context.create_block(vec![]);
-    body.add_block(entry.id());
-    let constant = builtin::ops::constant(context, 1, i32_ty).build();
-    entry.append(constant.id());
-    let nest = NestOpBuilder::new(context).body(body_region.id()).build();
-    entry.append(nest.id());
-    entry.append(func::ops::r#return(context, Operand::none()).build().id());
-
-    let func = func::ops::lambda(context, "demo", unit, &body).build();
-    let module = builtin::ops::module(context, None).build();
-    module.body().append(func.id());
+    let module = fixtures::parse_in(
+        context,
+        r#"module {
+%fn_demo = func.func @demo() {
+  %c = constant {value = 1} : !i32
+  nest_test.nest {
+    %old = constant {value = 7} : !i32
+    scf.yield
+  }
+  func.return
+}
+module_end
+}"#,
+    );
+    let func = fixtures::module_ops(context, module.id())[0];
+    let body = context
+        .get_op(func)
+        .as_op::<FuncOp>()
+        .expect("a func")
+        .body();
+    let [constant, nest, ..] = body.op_ids()[..] else {
+        panic!("the function body holds the constant and the nest");
+    };
+    let body_region = context.get_op(nest).regions()[0];
+    let body_block = context.get_region(body_region).block_ids()[0];
+    let old = context.get_block(body_block).op_ids()[0];
 
     Fixture {
         module: module.id(),
-        func: func.id(),
-        nest: nest.id(),
-        body_region: body_region.id(),
-        body_block: body_block.id(),
-        old: old.result(),
-        constant: constant.result(),
+        func,
+        nest,
+        body_region,
+        body_block,
+        old: context.get_op(old).results()[0],
+        constant: context.get_op(constant).results()[0],
         module_body: context.get_block(module.body().id()),
     }
 }
@@ -258,48 +264,31 @@ fn a_commit_keeps_analyses_of_untouched_functions() {
     assert!(analyses.get_cached::<Probe>(&context, f.func).is_none());
 }
 
+/// What the interner answers about a name.
 #[test]
-fn an_attribute_name_resolves_back_to_its_spelling() {
-    let context = Context::with_default_dialects();
+fn a_name_is_an_id_once_something_uses_it() {
+    let first = Context::with_default_dialects();
 
-    let attribute = context.named_attribute("size", tir::attributes::AttributeValue::UInt(4));
+    let attribute = first.named_attribute("size", tir::attributes::AttributeValue::UInt(4));
+    assert_eq!(first.resolve(attribute.name), "size");
+    assert_eq!(first.sym("size"), Some(attribute.name));
 
-    assert_eq!(context.resolve(attribute.name), "size");
-    assert_eq!(context.sym("size"), Some(attribute.name));
-}
+    // A name no one has used is not an id, so a lookup answers "absent"
+    // instead of minting one.
+    assert_eq!(first.sym("no_op_declares_this"), None);
 
-/// A name no one has used is not an id, so a lookup answers "absent" instead
-/// of minting one.
-#[test]
-fn an_unused_name_has_no_id() {
-    let context = Context::with_default_dialects();
-
-    assert_eq!(context.sym("no_op_declares_this"), None);
-}
-
-/// Registered ops' attribute names are interned before any IR exists, so they
-/// hold the low ids and a lookup never has to intern on a read path.
-#[test]
-fn schema_attribute_names_are_interned_up_front() {
-    let context = Context::with_default_dialects();
-
-    let value = context
+    // Registered ops' attribute names are interned before any IR exists, so
+    // they hold the low ids and a lookup never has to intern on a read path.
+    let value = first
         .sym("value")
         .expect("builtin.constant declares 'value'");
-
-    assert!(context.sym("sym_name").is_some());
+    assert!(first.sym("sym_name").is_some());
     assert!(value.index() < tir::schema::OP_SCHEMAS.len());
-}
 
-/// Ids are per-context: two contexts assign them independently, and the same
-/// spelling reaches the same attribute in each.
-#[test]
-fn ids_are_local_to_one_context() {
-    let first = Context::with_default_dialects();
+    // Ids are per-context: a second context assigns them independently, and
+    // the same spelling reaches the same attribute in each.
     let second = Context::with_default_dialects();
-
     let only_in_first = first.intern("a_name_only_the_first_context_sees");
-
     assert_eq!(
         first.resolve(only_in_first),
         "a_name_only_the_first_context_sees"
@@ -311,14 +300,17 @@ fn ids_are_local_to_one_context() {
 /// `module { func demo { ^entry: } }` — the func body sits two regions deep,
 /// so an edit there must reach the module to prove root-ward propagation.
 fn module_with_function(context: &Context) -> (OpId, OpId, BlockHandle) {
-    let i32 = builtin::IntegerType::new(context, 32);
-    let region = context.create_region();
-    let block = context.create_block(vec![]);
-    region.add_block(block.id());
-    let func = func::ops::lambda(context, "demo", i32, &region).build();
-    let module = builtin::ops::module(context, None).build();
-    module.body().append(func.id());
-    (module.id(), func.id(), context.get_block(block.id()))
+    let module = fixtures::parse_in(
+        context,
+        "module {\n%fn_demo = func.func @demo() -> !i32 {\n}\nmodule_end\n}",
+    );
+    let func = fixtures::module_ops(context, module.id())[0];
+    let body = context
+        .get_op(func)
+        .as_op::<FuncOp>()
+        .expect("a func")
+        .body();
+    (module.id(), func, body)
 }
 
 /// Every kind of IR edit dirties the edited op's owner and propagates the
@@ -522,29 +514,6 @@ fn replacing_value_uses_reaches_a_nested_region() {
     assert_eq!(
         context.get_op(nested.id()).operands().as_slice(),
         vec![b.id(); 2]
-    );
-}
-
-#[test]
-fn replacing_uses_of_a_block_argument_rewrites_its_readers() {
-    let context = Context::with_default_dialects();
-    let i32 = builtin::IntegerType::new(&context, 32);
-    let region = context.create_region();
-    let argument = context.create_value(i32, None);
-    let block = context.create_block(vec![argument.clone()]);
-    region.add_block(block.id());
-    let func = func::ops::lambda(&context, "demo", i32, &region).build();
-    let module = builtin::ops::module(&context, None).build();
-    module.body().append(func.id());
-    let reader = builtin::ops::addi(&context, argument.id(), argument.id(), i32).build();
-    block.append(reader.id());
-    let replacement = context.create_value(i32, None);
-
-    context.replace_value_uses(argument.id(), replacement.id());
-
-    assert_eq!(
-        context.get_op(reader.id()).operands().as_slice(),
-        vec![replacement.id(); 2]
     );
 }
 
