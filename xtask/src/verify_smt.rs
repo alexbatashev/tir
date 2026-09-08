@@ -2586,7 +2586,6 @@ mod tests {
           "version": 1,
           "isa": "TestIsa",
           "dialect": "test",
-          "smt_prelude": "(set-logic ALL)",
           "flat_state": [
             {"name": "gpr", "sort": "(Array (_ BitVec 5) (_ BitVec 64))"},
             {"name": "mem", "sort": "(Array (_ BitVec 64) (_ BitVec 8))"},
@@ -2613,7 +2612,6 @@ mod tests {
                 {"word_low": 0, "word_high": 6, "operand": null, "operand_low": 0, "value": "3"}
               ]
             }],
-            "execute": "(write_gpr st rd (_ bv0 64))",
             "flat_execute": {"gpr": "st0_gpr", "mem": "st0_mem", "resv": "st0_resv", "resa": "st0_resa", "pc": "st0_pc"}
           }]
         }"#;
