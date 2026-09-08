@@ -559,7 +559,76 @@ pub fn f64_constant_bits(context: &tir::Context, op: &crate::builtin::ConstantFO
 }
 
 pub fn int_attr(op: &impl tir::Operation, name: &str) -> Option<i64> {
-    op.attr(name).as_ref().and_then(AttributeValue::as_int)
+    as_int_attr(op.attr(name))
+}
+
+/// The integer an attribute holds. Reading through an [`tir::OpHandle`], which
+/// is not a [`tir::Operation`], goes through here.
+pub fn as_int_attr(attribute: Option<AttributeValue>) -> Option<i64> {
+    attribute.as_ref().and_then(AttributeValue::as_int)
+}
+
+/// The string an attribute holds.
+pub fn as_string_attr(attribute: Option<AttributeValue>) -> Option<String> {
+    match attribute? {
+        AttributeValue::Str(value) => Some(value.into_string()),
+        _ => None,
+    }
+}
+
+/// What one operation of an assembly module contributes to the output. The
+/// assembly printer and the object writer emit the same items, in their own
+/// notations, and classify them here.
+pub enum AsmItem {
+    /// Notation, not code: a terminator, a memory-state name, or a declaration
+    /// resolved at link time.
+    Skip,
+    Section(SectionOp),
+    Symbol,
+    Literal,
+    DataReloc,
+    Instruction,
+}
+
+pub fn asm_item(op: &tir::OpHandle) -> AsmItem {
+    if op.is::<crate::builtin::ModuleEndOp>()
+        || op.is::<SectionEndOp>()
+        || op.is::<SymbolEndOp>()
+        || op.is::<BlockEndOp>()
+        || names_memory_state(op)
+        || op.is::<crate::func::DeclareOp>()
+        || op
+            .clone()
+            .as_op::<crate::builtin::GlobalOp>()
+            .is_some_and(|global| global.is_external())
+    {
+        return AsmItem::Skip;
+    }
+    if let Some(section) = op.clone().as_op::<SectionOp>() {
+        return AsmItem::Section(section);
+    }
+    if op.is::<SymbolOp>() {
+        return AsmItem::Symbol;
+    }
+    if op.is::<LiteralOp>() {
+        return AsmItem::Literal;
+    }
+    if op.is::<DataRelocOp>() {
+        return AsmItem::DataReloc;
+    }
+    AsmItem::Instruction
+}
+
+/// The blocks of an `asm.symbol` op's body region, in program order.
+pub fn symbol_body_blocks(context: &tir::Context, op: &tir::OpHandle) -> Vec<tir::BlockId> {
+    let Some(&region_id) = op.regions().first() else {
+        return Vec::new();
+    };
+    context
+        .get_region(region_id)
+        .iter(context.clone())
+        .map(|block| block.id())
+        .collect()
 }
 
 pub mod ops {

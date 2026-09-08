@@ -78,37 +78,74 @@ fn join(lines: &[&str]) -> String {
 /// optimizations, so they are never dropped; what is left is the shortest pass
 /// sequence that still miscompiles.
 pub fn bisect_pipeline(pipeline: &str, still_diverges: &mut dyn FnMut(&str) -> bool) -> String {
-    let Some((prefix, rest)) = pipeline.split_once('(') else {
-        return pipeline.to_string();
-    };
-    let Some(inner) = rest.strip_suffix(')') else {
-        return pipeline.to_string();
-    };
-
-    let mut passes: Vec<&str> = inner.split(',').collect();
-    let mut index = 0;
-    while index < passes.len() {
-        if STRUCTURAL_PASSES.contains(&passes[index]) {
-            index += 1;
+    let mut current = pipeline.to_string();
+    let mut kept = 0;
+    loop {
+        let Some(&(start, end)) = pipeline_items(&current).get(kept) else {
+            return current;
+        };
+        if STRUCTURAL_PASSES.contains(&&current[start..end]) {
+            kept += 1;
             continue;
         }
-        let mut candidate = passes.clone();
-        candidate.remove(index);
-        if still_diverges(&render(prefix, &candidate)) {
-            passes = candidate;
+        let candidate = without_item(&current, start, end);
+        if still_diverges(&candidate) {
+            current = candidate;
         } else {
-            index += 1;
+            kept += 1;
         }
     }
-    render(prefix, &passes)
 }
 
 /// The check every pipeline runs under: it rewrites nothing, so dropping it
 /// makes the reproduction weaker rather than smaller.
 pub const STRUCTURAL_PASSES: [&str; 1] = ["verify-deps"];
 
-fn render(prefix: &str, passes: &[&str]) -> String {
-    format!("{prefix}({})", passes.join(","))
+/// The spans of everything a pipeline is a comma-separated list of, at every
+/// nesting depth: a pass, and the nested pipeline that holds it. Inner items
+/// come first, so a body is reduced before the pipeline wrapping it is dropped
+/// whole.
+fn pipeline_items(pipeline: &str) -> Vec<(usize, usize)> {
+    let mut items = Vec::new();
+    let mut enclosing = Vec::new();
+    let mut start = 0;
+    let push = |items: &mut Vec<(usize, usize)>, start: usize, end: usize| {
+        if start < end {
+            items.push((start, end));
+        }
+    };
+    for (index, byte) in pipeline.bytes().enumerate() {
+        match byte {
+            b'(' => {
+                enclosing.push(start);
+                start = index + 1;
+            }
+            b')' => {
+                push(&mut items, start, index);
+                start = enclosing.pop().unwrap_or(index + 1);
+            }
+            b',' => {
+                push(&mut items, start, index);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    push(&mut items, start, pipeline.len());
+    items
+}
+
+/// `pipeline` without the item spanning `start..end`, and without the comma
+/// that separated it from its neighbor.
+fn without_item(pipeline: &str, start: usize, end: usize) -> String {
+    let (from, to) = if pipeline[..start].ends_with(',') {
+        (start - 1, end)
+    } else if pipeline[end..].starts_with(',') {
+        (start, end + 1)
+    } else {
+        (start, end)
+    };
+    format!("{}{}", &pipeline[..from], &pipeline[to..])
 }
 
 #[cfg(test)]
@@ -165,5 +202,14 @@ mod tests {
         let minimal = bisect_pipeline(pipeline, &mut |candidate| candidate.contains("promote"));
 
         assert_eq!(minimal, "func.func(verify-deps,promote-nodes)");
+    }
+
+    #[test]
+    fn drops_passes_nested_under_another_pipeline() {
+        let pipeline = "func.func(promote-nodes),fixpoint<3>(func.func(instcombine-nodes,affine))";
+
+        let minimal = bisect_pipeline(pipeline, &mut |candidate| candidate.contains("affine"));
+
+        assert_eq!(minimal, "fixpoint<3>(func.func(affine))");
     }
 }

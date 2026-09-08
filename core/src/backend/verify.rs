@@ -250,13 +250,11 @@ fn register_values(context: &Context, symbol: &OpHandle) -> Vec<ValueId> {
             values.push(value);
         }
     };
-    for region in context.get_op(symbol.id).regions().iter().copied() {
-        for block in context.get_region(region).iter(context.clone()) {
-            for op_id in block.op_ids() {
-                let op = context.get_op(op_id);
-                for value in op.value_operands().iter().chain(op.value_results().iter()) {
-                    record(*value, &mut seen, &mut values);
-                }
+    for block_id in crate::backend::symbol_body_blocks(context, &context.get_op(symbol.id)) {
+        for op_id in context.get_block(block_id).op_ids() {
+            let op = context.get_op(op_id);
+            for value in op.value_operands().iter().chain(op.value_results().iter()) {
+                record(*value, &mut seen, &mut values);
             }
         }
     }

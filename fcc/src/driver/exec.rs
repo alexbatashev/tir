@@ -6,8 +6,7 @@ use tempfile::TempDir;
 
 use super::actions::{Action, DriverError, DriverOptions, InputFile, LinkInput, Output, StopPhase};
 use super::compile::{
-    build_defines, emit_machine_code, fcc_context, lower_to_ir, parse_source, preprocess,
-    read_input,
+    emit_machine_code, fcc_context, lower_to_ir, parse_source_opts, preprocess_opts, read_input,
 };
 use crate::lexer::Token;
 use crate::toolchain::link_command;
@@ -188,56 +187,23 @@ fn run_compile_action(
     let (name, source) = read_input(path);
 
     match stop {
-        StopPhase::Preprocess => {
-            for (tok, _) in preprocess(
-                &name,
-                &source,
-                build_defines(&opts.defines),
-                &opts.undefines,
-                &opts.include_dirs,
-                opts.lang_options,
-                opts.march.as_deref(),
-            ) {
-                write!(out, "{tok}").unwrap();
+        StopPhase::Preprocess | StopPhase::Tokens => {
+            let preprocessed = preprocess_opts(opts, &name, &source);
+            if matches!(stop, StopPhase::Preprocess) {
+                for (tok, _) in preprocessed {
+                    write!(out, "{tok}").unwrap();
+                }
+            } else {
+                let tokens: Vec<Token> = preprocessed.into_iter().map(|(tok, _)| tok).collect();
+                writeln!(out, "{tokens:#?}").unwrap();
             }
         }
-        StopPhase::Tokens => {
-            let tokens: Vec<Token> = preprocess(
-                &name,
-                &source,
-                build_defines(&opts.defines),
-                &opts.undefines,
-                &opts.include_dirs,
-                opts.lang_options,
-                opts.march.as_deref(),
-            )
-            .into_iter()
-            .map(|(tok, _)| tok)
-            .collect();
-            writeln!(out, "{tokens:#?}").unwrap();
-        }
         StopPhase::Ast => {
-            let unit = parse_source(
-                &name,
-                &source,
-                &opts.defines,
-                &opts.undefines,
-                &opts.include_dirs,
-                opts.lang_options,
-                opts.march.as_deref(),
-            );
+            let unit = parse_source_opts(opts, &name, &source);
             write!(out, "{}", crate::ast::render(&unit)).unwrap();
         }
         StopPhase::Ir => {
-            let unit = parse_source(
-                &name,
-                &source,
-                &opts.defines,
-                &opts.undefines,
-                &opts.include_dirs,
-                opts.lang_options,
-                opts.march.as_deref(),
-            );
+            let unit = parse_source_opts(opts, &name, &source);
             let context = fcc_context();
             let module = lower_to_ir(
                 &context,

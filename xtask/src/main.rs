@@ -4,11 +4,13 @@ mod fcc_torture;
 pub mod utils;
 mod verify_smt;
 
-use std::{env, path::PathBuf};
+use std::path::PathBuf;
 
 use clap::Parser;
 use tmdl::{Action, Compiler, OutputKind};
 use xshell::{cmd, Shell};
+
+use crate::utils::project_root;
 
 #[derive(Parser)]
 enum Task {
@@ -298,10 +300,4 @@ fn haskell_smoke(sh: &Shell) -> anyhow::Result<()> {
     .run()?;
     cmd!(sh, "{bin}").run()?;
     Ok(())
-}
-
-fn project_root() -> PathBuf {
-    let dir =
-        env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| env!("CARGO_MANIFEST_DIR").to_owned());
-    PathBuf::from(dir).parent().unwrap().to_owned()
 }

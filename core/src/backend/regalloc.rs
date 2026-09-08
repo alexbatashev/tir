@@ -23,7 +23,9 @@ use tir_pbqp::{self as pbqp, INF_COST, PbqpMatrix, PbqpNodeId, PbqpProblem};
 use crate::backend::liveness::{self, Liveness, PhysReg};
 use crate::backend::prealloc;
 use crate::backend::registers::fresh_reg;
-use crate::backend::{SymbolOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp};
+use crate::backend::{
+    SymbolOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp, symbol_body_blocks,
+};
 use crate::ptr::AllocaOp;
 
 /// Architectural metadata for one register class.
@@ -698,34 +700,38 @@ impl Pass for RegisterAllocationPass {
         _analyses: &AnalysisManager,
     ) -> Result<(), PassError> {
         let info = self.target.register_info();
-        let blocks = symbol_body_blocks(context, op);
+        let blocks = symbol_body_blocks(context, op.op());
         if blocks.is_empty() {
             return Ok(());
         }
 
         let precolor = self.lower_fixed_registers(context, rewriter, op, &blocks)?;
-        let coalescable_copies = collect_coalescable_copies(context, &blocks)?;
-        let affinities: Vec<_> = coalescable_copies
+        let scan = BodyScan::of(context, &blocks)?;
+        let affinities: Vec<_> = scan
+            .coalescable_copies
             .iter()
             .map(|copy| (copy.src, copy.dst))
             .collect();
 
-        let (outgoing_size, has_calls) = outgoing_stack_layout(context, &blocks)?;
         let mut frame = FramePlan::new(self.abi);
-        frame.reserve_outgoing(outgoing_size);
-        let stack_allocas = collect_stack_allocas(context, &blocks, &mut frame);
-        self.rematerialize_stack_allocas(context, rewriter, &blocks, &stack_allocas, &mut frame)?;
+        frame.reserve_outgoing(scan.outgoing_size);
+        let stack_allocas = scan.stack_allocas(&mut frame);
+        self.rematerialize_stack_allocas(
+            context,
+            rewriter,
+            &blocks,
+            &scan,
+            &stack_allocas,
+            &mut frame,
+        )?;
         // Rematerializing left the allocations naming nothing, so they go now
         // rather than after allocation: a definition the function still holds is
         // a live range the allocator may pick to spill, and the spill code it
         // would write names a value this erasure is about to retire.
         erase_stack_allocas(context, rewriter, &stack_allocas)?;
-        // Spills insert ops within blocks but never add or remove edges, so the
-        // CFG is the same in every round.
-        let successors = block_successors(context, &blocks);
         let assignment = loop {
             let liveness = liveness::analyze(context, &blocks, |b| {
-                successors.get(&b).cloned().unwrap_or_default()
+                scan.successors.get(&b).cloned().unwrap_or_default()
             });
             let use_counts = reference_counts(context, &blocks);
             // Spill the least-used value first. Reload/store temps are unspillable:
@@ -768,7 +774,7 @@ impl Pass for RegisterAllocationPass {
             }
         };
 
-        for copy in &coalescable_copies {
+        for copy in &scan.coalescable_copies {
             if !context.has_operation(copy.op) {
                 continue;
             }
@@ -795,7 +801,7 @@ impl Pass for RegisterAllocationPass {
         // push/pop targets keep saves outside the stable frame area.
         let saves = callee_saved_slots(&assignment, &mut frame, self.abi.callee_saved);
 
-        let frame_size = frame.prologue_adjustment(has_calls, saves.len());
+        let frame_size = frame.prologue_adjustment(scan.has_calls, saves.len());
         let stack_args = collect_stack_arg_loads(context, &blocks)?;
         self.insert_incoming_stack_arg_loads(
             context,
@@ -845,6 +851,7 @@ impl RegisterAllocationPass {
         context: &Context,
         rewriter: &mut Rewriter,
         blocks: &[BlockId],
+        scan: &BodyScan,
         allocas: &[StackAlloca],
         frame: &mut FramePlan,
     ) -> Result<(), PassError> {
@@ -855,7 +862,8 @@ impl RegisterAllocationPass {
         let frame_register = self.frame_register();
         let mut sites = Vec::new();
         for alloca in allocas {
-            let class = slot_class_of(context, blocks, alloca.value)
+            let class = scan
+                .class_of(context, alloca.value)
                 .or(default_class)
                 .ok_or_else(|| {
                     PassError::InvalidRuleSet(format!(
@@ -1142,29 +1150,6 @@ impl RegisterAllocationPass {
     }
 }
 
-fn outgoing_stack_layout(context: &Context, blocks: &[BlockId]) -> Result<(u32, bool), PassError> {
-    let mut size = 0;
-    let mut has_calls = false;
-    for &block in blocks {
-        for op_id in context.get_block(block).op_ids() {
-            let op = context.get_op(op_id);
-            let outgoing = if let Some(call) = op.clone().as_op::<VirtualCallOp>() {
-                call.outgoing_stack_size()
-            } else if let Some(call) = op.as_op::<VirtualIndirectCallOp>() {
-                call.outgoing_stack_size()
-            } else {
-                continue;
-            };
-            has_calls = true;
-            let outgoing = u32::try_from(outgoing).map_err(|_| {
-                PassError::InvalidRuleSet("outgoing call frame exceeds 32-bit size".to_string())
-            })?;
-            size = size.max(outgoing);
-        }
-    }
-    Ok((size, has_calls))
-}
-
 /// Tracks stack-slot assignment across spill rounds and owns the target-neutral
 /// ABI layout formulas for the stable frame area.
 struct FramePlan {
@@ -1277,32 +1262,6 @@ struct StackAlloca {
     offset: i64,
 }
 
-fn collect_stack_allocas(
-    context: &Context,
-    blocks: &[BlockId],
-    frame: &mut FramePlan,
-) -> Vec<StackAlloca> {
-    let mut allocas = Vec::new();
-    for &block in blocks {
-        for op_id in context.get_block(block).op_ids() {
-            let op = context.get_op(op_id);
-            let Some(allocation) = op.clone().as_op::<AllocaOp>() else {
-                continue;
-            };
-            let Some(result) = op.results().first().copied() else {
-                continue;
-            };
-            allocas.push(StackAlloca {
-                op_id,
-                value: result,
-                offset: frame
-                    .alloc_stack_allocation(allocation.size() as u32, allocation.align() as u32),
-            });
-        }
-    }
-    allocas
-}
-
 /// Erase the allocations, keeping the chains they rooted. A slot's memory is its
 /// own — the allocation is what said so — so with the op gone the chain starts at
 /// a `state.entry_state` of its own instead, and the accesses on it stay ordered
@@ -1328,42 +1287,6 @@ fn erase_stack_allocas(
         rewriter.erase_op(&op_ref)?;
     }
     Ok(())
-}
-
-/// The control-flow successors of each block, for liveness's inter-block
-/// dataflow. A machine block may hold several branch-shaped ops — a mid-block
-/// conditional jump for the taken edge plus a trailing virtual branch for the
-/// fallthrough — so a block's successors are the union of `Terminator::successors`
-/// over every op it contains, not just its last op's.
-fn block_successors(context: &Context, blocks: &[BlockId]) -> HashMap<BlockId, Vec<BlockId>> {
-    let mut map = HashMap::new();
-    for &block_id in blocks {
-        let mut succs = Vec::new();
-        for op_id in context.get_block(block_id).op_ids() {
-            let op = context.get_op(op_id);
-            if let Some(term) = op.as_interface::<dyn tir::Terminator>() {
-                for succ in term.successors() {
-                    if !succs.contains(&succ) {
-                        succs.push(succ);
-                    }
-                }
-            }
-        }
-        map.insert(block_id, succs);
-    }
-    map
-}
-
-/// The blocks of an `asm.symbol` op's body region, in program order.
-pub(crate) fn symbol_body_blocks(context: &Context, op: &OperationRef) -> Vec<BlockId> {
-    let Some(&region_id) = op.op().regions().first() else {
-        return Vec::new();
-    };
-    context
-        .get_region(region_id)
-        .iter(context.clone())
-        .map(|b| b.id())
-        .collect()
 }
 
 pub(crate) fn op_ref_in(context: &Context, op_id: OpId) -> OperationRef {
@@ -1513,34 +1436,130 @@ struct CoalescableCopy {
     dst: u32,
 }
 
-/// The copies marked with [`prealloc::COALESCABLE_COPY_ATTR`]:
-/// their endpoint registers seed the coalescing affinity, and after allocation
-/// a copy whose endpoints landed in one register is erased. Endpoints are
-/// recorded before the spill loop so a copy whose registers were renamed by
-/// spill splitting is never erased (its inserted reload/store still needs it).
-fn collect_coalescable_copies(
-    context: &Context,
-    blocks: &[BlockId],
-) -> Result<Vec<CoalescableCopy>, PassError> {
-    let mut copies = Vec::new();
-    for &block_id in blocks {
-        for op_id in context.get_block(block_id).op_ids() {
-            if !has_attr(context, op_id, prealloc::COALESCABLE_COPY_ATTR) {
-                continue;
+/// An `alloca` the scan found, before the frame gives it an offset.
+struct ScannedAlloca {
+    op_id: OpId,
+    value: ValueId,
+    size: u32,
+    align: u32,
+}
+
+/// One walk of the function body, taken before allocation rewrites anything.
+/// Everything allocation needs to know about the body as selection left it:
+///
+/// - the copies marked with [`prealloc::COALESCABLE_COPY_ATTR`], whose endpoint
+///   registers seed the coalescing affinity and which are erased after
+///   allocation if both ends landed in one register. Endpoints are recorded
+///   before the spill loop so a copy whose registers were renamed by spill
+///   splitting is never erased (its inserted reload/store still needs it);
+/// - the outgoing call frame the body's calls need, and whether it calls at all;
+/// - the stack allocations, which the frame plan then places;
+/// - the class each value is first named through, for a value whose own type
+///   does not name one (an `alloca` address);
+/// - the control-flow successors of each block, for liveness's inter-block
+///   dataflow. A machine block may hold several branch-shaped ops — a mid-block
+///   conditional jump for the taken edge plus a trailing virtual branch for the
+///   fallthrough — so a block's successors are the union of
+///   `Terminator::successors` over every op it contains, not just its last op's.
+///   Spills insert ops within blocks but never add or remove edges, so this
+///   holds for every round.
+#[derive(Default)]
+struct BodyScan {
+    coalescable_copies: Vec<CoalescableCopy>,
+    outgoing_size: u32,
+    has_calls: bool,
+    allocas: Vec<ScannedAlloca>,
+    slot_classes: HashMap<ValueId, Option<RegClassId>>,
+    successors: HashMap<BlockId, Vec<BlockId>>,
+}
+
+impl BodyScan {
+    fn of(context: &Context, blocks: &[BlockId]) -> Result<Self, PassError> {
+        let mut scan = BodyScan::default();
+        for &block_id in blocks {
+            let mut successors: Vec<BlockId> = Vec::new();
+            for op_id in context.get_block(block_id).op_ids() {
+                let op = context.get_op(op_id);
+                if op.attr(prealloc::COALESCABLE_COPY_ATTR).is_some() {
+                    let (src, dst) = copy_endpoints(context, op_id).ok_or_else(|| {
+                        PassError::InvalidRuleSet(format!(
+                            "coalescable copy {op_id:?} does not move one virtual register to another"
+                        ))
+                    })?;
+                    scan.coalescable_copies.push(CoalescableCopy {
+                        op: op_id,
+                        src,
+                        dst,
+                    });
+                }
+
+                let outgoing = op
+                    .clone()
+                    .as_op::<VirtualCallOp>()
+                    .map(|call| call.outgoing_stack_size())
+                    .or_else(|| {
+                        op.clone()
+                            .as_op::<VirtualIndirectCallOp>()
+                            .map(|call| call.outgoing_stack_size())
+                    });
+                if let Some(outgoing) = outgoing {
+                    scan.has_calls = true;
+                    let outgoing = u32::try_from(outgoing).map_err(|_| {
+                        PassError::InvalidRuleSet(
+                            "outgoing call frame exceeds 32-bit size".to_string(),
+                        )
+                    })?;
+                    scan.outgoing_size = scan.outgoing_size.max(outgoing);
+                }
+
+                if let Some(allocation) = op.clone().as_op::<AllocaOp>()
+                    && let Some(value) = op.results().first().copied()
+                {
+                    scan.allocas.push(ScannedAlloca {
+                        op_id,
+                        value,
+                        size: allocation.size() as u32,
+                        align: allocation.align() as u32,
+                    });
+                }
+
+                for slot in crate::backend::reg_slots(&op) {
+                    if let crate::backend::RegSlot::Value(value) = slot.slot {
+                        scan.slot_classes.entry(value).or_insert(slot.port.class);
+                    }
+                }
+
+                if let Some(term) = op.as_interface::<dyn tir::Terminator>() {
+                    for succ in term.successors() {
+                        if !successors.contains(&succ) {
+                            successors.push(succ);
+                        }
+                    }
+                }
             }
-            let (src, dst) = copy_endpoints(context, op_id).ok_or_else(|| {
-                PassError::InvalidRuleSet(format!(
-                    "coalescable copy {op_id:?} does not move one virtual register to another"
-                ))
-            })?;
-            copies.push(CoalescableCopy {
-                op: op_id,
-                src,
-                dst,
-            });
+            scan.successors.insert(block_id, successors);
         }
+        Ok(scan)
     }
-    Ok(copies)
+
+    /// The stack allocations, placed in the frame in the order they were found.
+    fn stack_allocas(&self, frame: &mut FramePlan) -> Vec<StackAlloca> {
+        self.allocas
+            .iter()
+            .map(|alloca| StackAlloca {
+                op_id: alloca.op_id,
+                value: alloca.value,
+                offset: frame.alloc_stack_allocation(alloca.size, alloca.align),
+            })
+            .collect()
+    }
+
+    /// The register class `value` is read through: its own, or the class of the
+    /// first register slot naming it.
+    fn class_of(&self, context: &Context, value: ValueId) -> Option<RegClassId> {
+        crate::backend::value_class(context, value)
+            .or_else(|| self.slot_classes.get(&value).copied().flatten())
+    }
 }
 
 /// The `(source, destination)` virtual registers of a copy op: its first read
@@ -1550,10 +1569,6 @@ fn copy_endpoints(context: &Context, op_id: OpId) -> Option<(u32, u32)> {
     let src = regs.uses.first()?.number();
     let dst = regs.defs.first()?.number();
     Some((src, dst))
-}
-
-fn has_attr(context: &Context, op_id: OpId, name: &str) -> bool {
-    context.get_op(op_id).attr(name).is_some()
 }
 
 fn strip_attr(context: &Context, op_id: OpId, name: &str) {
@@ -1608,25 +1623,6 @@ fn collect_stack_arg_loads(
         }
     }
     Ok(args)
-}
-
-/// The register class `value` is read through, for a value whose own type does
-/// not name one (an `alloca` address): the class of the first register slot
-/// naming it.
-fn slot_class_of(context: &Context, blocks: &[BlockId], value: ValueId) -> Option<RegClassId> {
-    if let Some(class) = crate::backend::value_class(context, value) {
-        return Some(class);
-    }
-    for &block_id in blocks {
-        for op_id in context.get_block(block_id).op_ids() {
-            for slot in crate::backend::reg_slots(&context.get_op(op_id)) {
-                if slot.slot == crate::backend::RegSlot::Value(value) {
-                    return slot.port.class;
-                }
-            }
-        }
-    }
-    None
 }
 
 /// Count how many times each virtual register is referenced (def or use) across the
