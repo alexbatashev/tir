@@ -135,15 +135,16 @@ fn merge_indistinguishable(
     }
     let names = |chain: usize| &names[chain * words..(chain + 1) * words];
     let mut kept: Vec<usize> = Vec::new();
-    let mut merged = vec![0; keys.len()];
+    let mut merged = Vec::with_capacity(keys.len());
     for chain in 0..keys.len() {
-        match kept.iter().position(|&other| names(other) == names(chain)) {
-            Some(position) => merged[chain] = position,
-            None => {
-                merged[chain] = kept.len();
-                kept.push(chain);
-            }
-        }
+        merged.push(
+            kept.iter()
+                .position(|&other| names(other) == names(chain))
+                .unwrap_or_else(|| {
+                    kept.push(chain);
+                    kept.len() - 1
+                }),
+        );
     }
     if kept.len() == keys.len() {
         return (keys, touched);
