@@ -72,27 +72,37 @@ fn variadic_call_rejects_a_mismatched_fixed_prefix() {
 }
 
 #[test]
-fn for_loop_round_trips() {
+fn loop_syntax_round_trips() {
     let printed = roundtrip(
         r#"module {
-  %fn_count = func.func @count() -> !i32 {
-    %0 = ptr.alloca {size = 4, align = 4} : !ptr.p
+  %fn_loops = func.func @loops(%0: !i1) -> !i32 {
+    %1 = ptr.alloca {size = 4, align = 4} : !ptr.p
     cir.for cond {
-      %1 = ptr.load %0 : !i32
-      %2 = constant {value = 3} : !i32
-      %3 = cmpi %1, %2 {predicate = "slt"} : !i1
-      cir.condition %3
+      %2 = ptr.load %1 : !i32
+      %3 = constant {value = 3} : !i32
+      %4 = cmpi %2, %3 {predicate = "slt"} : !i1
+      cir.condition %4
     } step {
-      %4 = ptr.load %0 : !i32
-      %5 = constant {value = 1} : !i32
-      %6 = addi %4, %5 : !i32
-      ptr.store %6, %0
+      %5 = ptr.load %1 : !i32
+      %6 = constant {value = 1} : !i32
+      %7 = addi %5, %6 : !i32
+      ptr.store %7, %1
       cir.yield
     } body {
       cir.yield
     }
-    %7 = ptr.load %0 : !i32
-    func.return %7
+    cir.while cond {
+      cir.condition %0
+    } body {
+      cir.break
+    }
+    cir.do body {
+      cir.continue
+    } cond {
+      cir.condition %0
+    }
+    %8 = ptr.load %1 : !i32
+    func.return %8
   }
   module_end
 }"#,
@@ -100,42 +110,7 @@ fn for_loop_round_trips() {
     assert!(printed.contains("cir.for cond {"), "{printed}");
     assert!(printed.contains(" step {"), "{printed}");
     assert!(printed.contains(" body {"), "{printed}");
-}
-
-#[test]
-fn while_loop_round_trips() {
-    let printed = roundtrip(
-        r#"module {
-  %fn_spin = func.func @spin(%0: !i1) {
-    cir.while cond {
-      cir.condition %0
-    } body {
-      cir.break
-    }
-    func.return
-  }
-  module_end
-}"#,
-    );
     assert!(printed.contains("cir.while cond {"), "{printed}");
-    assert!(printed.contains(" body {"), "{printed}");
-}
-
-#[test]
-fn do_loop_round_trips() {
-    let printed = roundtrip(
-        r#"module {
-  %fn_spin = func.func @spin(%0: !i1) {
-    cir.do body {
-      cir.continue
-    } cond {
-      cir.condition %0
-    }
-    func.return
-  }
-  module_end
-}"#,
-    );
     assert!(printed.contains("cir.do body {"), "{printed}");
     assert!(printed.contains(" cond {"), "{printed}");
 }
