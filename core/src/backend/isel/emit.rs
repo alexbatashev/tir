@@ -7,6 +7,7 @@ use super::{
     FunctionSelection, RuleMatch,
     builder::AuxSlot,
     cover::{BoundaryDemand, PbqpIselMatch},
+    node::chase_low_extract,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -115,7 +116,7 @@ pub(crate) fn resolve_match(
         }
         // A low-extract capture reads its chased source's register, which may
         // be defined by a tile scheduled in this region.
-        let chased = fs.chase_low_extract(class);
+        let chased = chase_low_extract(&fs.egraph, class);
         if let Some(value) = destinations.get(&chased).copied().or_else(|| {
             fs.resolve_binding(context, class, region, consumer, false)
                 .value

@@ -1,12 +1,9 @@
 //! What instruction selection reads off an e-class beyond the vocabulary's own
 //! readings ([`tir::sem::egraph`]): the framework's value model (a low-bit view
-//! of a register), the register a class is carried in, and the purity a fused
-//! match needs.
-
-use std::collections::HashMap;
+//! of a register) and the purity a fused match needs.
 
 use tir::{
-    Context, ValueId,
+    Context,
     sem::{
         SemType, SymKind,
         egraph::{SemEGraph, class_int_binding, class_semantic_type},
@@ -33,30 +30,19 @@ pub(crate) fn low_extract_source(egraph: &SemEGraph, class: Id) -> Option<Id> {
     })
 }
 
+/// The class whose tile defines the register a low-extract view re-reads:
+/// `class` itself unless it is a chain of low-bit truncations.
+pub(crate) fn chase_low_extract(egraph: &SemEGraph, class: Id) -> Id {
+    let mut class = egraph.find(class);
+    while let Some(source) = low_extract_source(egraph, class) {
+        class = source;
+    }
+    class
+}
+
 /// Whether the class is a low-bit truncation (see [`low_extract_source`]).
 pub(crate) fn is_low_extract_view(egraph: &SemEGraph, class: Id) -> bool {
     low_extract_source(egraph, class).is_some()
-}
-
-/// The register value carrying a class: an input value, then the first IR value
-/// the class computes (from `class_values`, the map recording which values a
-/// class stands for). The representative feeds cost-model approximation only.
-pub(crate) fn class_value_binding(
-    egraph: &SemEGraph,
-    class_values: &HashMap<Id, Vec<ValueId>>,
-    class: Id,
-) -> Option<ValueId> {
-    egraph
-        .nodes(class)
-        .find_map(|n| match n.payload.as_ref() {
-            Some(tir::sem::SemPayload::Expr(tir::sem::SymPayload::Value(v))) => Some(*v),
-            _ => None,
-        })
-        .or_else(|| {
-            class_values
-                .get(&egraph.find(class))
-                .and_then(|values| values.first().copied())
-        })
 }
 
 /// Whether duplicating the class's computation is sound: every member is a pure

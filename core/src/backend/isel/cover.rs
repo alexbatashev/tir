@@ -3,18 +3,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use tir::{
-    ValueId,
-    sem::{
-        SymKind,
-        egraph::{SemEGraph, class_int_binding},
-    },
+use tir::sem::{
+    SymKind,
+    egraph::{SemEGraph, class_int_binding},
 };
 use tir_pbqp::{self as pbqp, INF_COST, PbqpMatrix, PbqpProblem};
 use tir_relational::ClassId as Id;
 
-use super::RuleMatch;
-use super::node::{class_is_pure, class_value_binding, is_low_extract_view};
+use super::node::{class_is_pure, is_low_extract_view};
 
 #[derive(Clone, Debug)]
 pub(crate) struct CaptureBindings {
@@ -33,27 +29,6 @@ impl CaptureBindings {
     /// reading to disagree with.
     pub(crate) fn bind(&mut self, symbol: u32, class: Id) {
         self.entries.push((symbol, class));
-    }
-
-    pub(crate) fn to_rule_match(
-        &self,
-        egraph: &SemEGraph,
-        class_values: &HashMap<Id, Vec<ValueId>>,
-    ) -> RuleMatch {
-        // A class can carry both a proven constant and a register value (an
-        // assumption proves a condition equal to its truth value); record both so
-        // immediate-folding and register-reading emitters each find theirs.
-        let mut int_bindings = Vec::new();
-        let mut value_bindings = Vec::new();
-        for (sym, class) in &self.entries {
-            if let Some(v) = class_int_binding(egraph, *class) {
-                int_bindings.push((*sym, v));
-            }
-            if let Some(v) = class_value_binding(egraph, class_values, *class) {
-                value_bindings.push((*sym, v));
-            }
-        }
-        RuleMatch::new(int_bindings, value_bindings)
     }
 }
 
