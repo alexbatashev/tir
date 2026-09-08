@@ -20,7 +20,6 @@ pub struct SmtMetadata {
     pub version: u32,
     pub isa: String,
     pub dialect: String,
-    pub smt_prelude: String,
     pub flat_state: Vec<FlatStateFieldMetadata>,
     pub register_classes: Vec<RegisterClassMetadata>,
     pub instructions: Vec<InstructionMetadata>,
@@ -39,7 +38,6 @@ pub struct InstructionMetadata {
     pub memory_accesses: Vec<MemoryAccessMetadata>,
     pub trap_kinds: Vec<String>,
     pub shapes: Vec<EncodingShapeMetadata>,
-    pub execute: Option<String>,
     pub flat_execute: Option<BTreeMap<String, String>>,
 }
 
@@ -341,15 +339,13 @@ pub fn generate_smtlib<'a>(
     build_state(&ctx, &mut state_output)?;
     let state_smt = String::from_utf8(state_bytes.lock().expect("capture mutex poisoned").clone())
         .expect("SMT output is UTF-8");
-    let smt_prelude = format!("{HEADER}\n{state_smt}");
-    write!(output, "{smt_prelude}")?;
+    write!(output, "{HEADER}\n{state_smt}")?;
     let instructions = build_instructions(dialect, &ctx, item_cache, files, &mut output)?;
     build_decoder(dialect, &ctx, item_cache, files, &mut output)?;
     Ok(SmtMetadata {
         version: 1,
         isa: isa.to_string(),
         dialect: dialect.to_string(),
-        smt_prelude,
         flat_state: flat_state_fields(&ctx),
         register_classes: register_class_metadata(&ctx),
         instructions,
@@ -733,7 +729,6 @@ fn build_instructions<'a>(
                 .as_ref()
                 .map_or_else(Vec::new, |behavior| behavior.trap_kinds.clone()),
             shapes: build_shape_metadata(ctx, item_cache, i, &operands)?,
-            execute: behavior.as_ref().map(|behavior| behavior.body.clone()),
             flat_execute: behavior
                 .as_ref()
                 .and_then(|behavior| behavior.flat_execute.clone()),
