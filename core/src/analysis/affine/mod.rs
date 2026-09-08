@@ -15,14 +15,15 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use crate::analysis::chain;
 use crate::builtin::{
     AddIOp, AndIOp, ExtSIOp, IntegerType, MulIOp, OrIOp, ShlIOp, SubIOp, TruncIOp, XOrIOp,
 };
 use crate::ptr::PtrAddOp;
-use crate::state::{JoinOp, SplitOp};
+use crate::state::JoinOp;
 use crate::{
-    BlockId, ConstantLike, Context, CountedLoop, DataLayout, Gamma, MemoryRead, MemoryWrite,
-    OpHandle, OpId, Theta, TypeId, ValueId,
+    BlockId, ConstantLike, Context, CountedLoop, DataLayout, Gamma, OpHandle, OpId, Theta, TypeId,
+    ValueId,
 };
 
 pub(crate) mod build;

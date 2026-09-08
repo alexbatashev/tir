@@ -260,8 +260,10 @@ impl Seeder<'_> {
             .collect();
         let results = region.dep_results();
         let entered = instance.dep_operands();
-        let carried = results.len() / 2;
-        if carried != ports.len() || entered.len() != ports.len() {
+        let carried = ports.len();
+        if crate::binding::dep_groups(self.context, region.id()) != Some(2)
+            || entered.len() != carried
+        {
             return;
         }
         for (index, &port) in ports.iter().enumerate() {

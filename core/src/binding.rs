@@ -117,6 +117,34 @@ fn names_same(context: &Context, found: ValueId, declared: ValueId) -> bool {
     }
 }
 
+/// How many groups of dependency results `region` produces: two for a loop
+/// body — what the next iteration takes, then what the loop leaves — and one
+/// for a gate's arm. `None` where the lists do not line up with the ports at
+/// all, which is what the growth and the simplifier read them for.
+pub fn dep_groups(context: &Context, region: RegionId) -> Option<usize> {
+    let handle = context.get_region(region);
+    let ports = handle.dep_arguments().len();
+    let results = handle.dep_results().len();
+    let groups = results.checked_div(ports)?;
+    (matches!(groups, 1 | 2) && results == groups * ports).then_some(groups)
+}
+
+/// Whether `region` hands the dependency port at `index` straight back in every
+/// group: the chain flows past the operation carrying the region rather than
+/// through it, since nothing under it changed the memory.
+pub fn forwards_dep(context: &Context, region: RegionId, index: usize) -> bool {
+    let Some(groups) = dep_groups(context, region) else {
+        return false;
+    };
+    let handle = context.get_region(region);
+    let ports = handle.dep_arguments();
+    let results = handle.dep_results();
+    let Some(port) = ports.get(index).map(crate::Value::id) else {
+        return false;
+    };
+    (0..groups).all(|group| results[group * ports.len() + index] == port)
+}
+
 /// Checks a theta's declared alignment: five ranges of one length, one type per
 /// offset, a boolean predicate, and dependencies carried in the same shape.
 pub fn verify_theta(

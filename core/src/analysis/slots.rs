@@ -8,9 +8,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::analysis::{Escape, EscapeFacts};
+use crate::analysis::{Escape, EscapeFacts, access_of};
 use crate::ptr::PtrAddOp;
-use crate::{Context, MemoryRead, MemoryWrite, OpId, PromotableAllocation, TypeId, ValueId};
+use crate::{Context, OpId, PromotableAllocation, TypeId, ValueId};
 
 /// What is known about one allocated stack slot across the operations it was
 /// collected from.
@@ -56,24 +56,18 @@ pub fn collect_slots(
 
     for &op_id in op_ids {
         let instance = context.get_op(op_id);
-        if instance
-            .clone()
-            .as_interface::<dyn PromotableAllocation>()
-            .is_some()
-        {
+        if instance.has_interface::<dyn PromotableAllocation>() {
             continue;
         }
-
-        if let Some(read) = instance.clone().as_interface::<dyn MemoryRead>()
-            && let Some(slot) = slots.get_mut(&slot_base(context, read.read_location()))
-        {
-            slot.loads.push(op_id);
-        }
-
-        if let Some(write) = instance.clone().as_interface::<dyn MemoryWrite>()
-            && let Some(slot) = slots.get_mut(&slot_base(context, write.write_location()))
-        {
-            slot.stores.push(op_id);
+        let Some(access) = access_of(&instance) else {
+            continue;
+        };
+        let Some(slot) = slots.get_mut(&slot_base(context, access.location)) else {
+            continue;
+        };
+        match access.write {
+            true => slot.stores.push(op_id),
+            false => slot.loads.push(op_id),
         }
     }
 
@@ -100,35 +94,10 @@ fn slot_base(context: &Context, pointer: ValueId) -> ValueId {
 /// both opaque and typed, say — has no type to give that value and stays in
 /// memory. A slot nothing accesses has no type either, and nothing to carry.
 pub fn agreed_value_type(context: &Context, state: &SlotState) -> Option<TypeId> {
-    let mut types = state
-        .loads
-        .iter()
-        .map(|&load| load_result(context, load))
-        .chain(
-            state
-                .stores
-                .iter()
-                .map(|&store| store_value(context, store)),
-        )
-        .map(|value| context.get_value(value).ty());
+    let mut types = state.loads.iter().chain(&state.stores).map(|&op| {
+        let named = access_of(&context.get_op(op)).expect("a collected access names a value");
+        context.get_value(named.value).ty()
+    });
     let ty = types.next()?;
     types.all(|other| other == ty).then_some(ty)
-}
-
-/// The value a collected store writes.
-fn store_value(context: &Context, store: OpId) -> ValueId {
-    context
-        .get_op(store)
-        .as_interface::<dyn MemoryWrite>()
-        .expect("store op implements MemoryWrite")
-        .written_value()
-}
-
-/// The value a collected load defines.
-fn load_result(context: &Context, load: OpId) -> ValueId {
-    context
-        .get_op(load)
-        .as_interface::<dyn MemoryRead>()
-        .expect("load op implements MemoryRead")
-        .read_value()
 }

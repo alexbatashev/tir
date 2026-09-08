@@ -165,10 +165,8 @@ impl Driver<'_> {
         Ok(())
     }
 
-    /// The one state a join names, where it names one: the state its inputs
-    /// all are — the reads it merged are gone — or the one chain among them
-    /// something changed, since a chain nothing changed is the memory the
-    /// region was entered with and merging it says nothing.
+    /// The one state a join names, where it names one: the state its inputs all
+    /// are, or the one chain among them something changed.
     ///
     /// Dropping an input is only the join's to do where the join is that
     /// input's one reader: another reader would be left sharing the state with
@@ -195,31 +193,29 @@ impl Driver<'_> {
 
     /// A write nothing observes before the next write of its own extent is
     /// overwritten unread: its readers take the state it was handed, and the
-    /// sweep takes it. Its chain holds every access that may name the object,
-    /// so the walk follows that chain alone: the names a split and a join give
-    /// it on the way are the same memory, and a read nothing demands is one
-    /// the sweep takes too.
+    /// sweep takes it. The walk follows that write's chain alone, since the
+    /// names a split and a join give it on the way are the same memory.
     fn forward_dead_write(&self, op: OpId, scope: &[RegionId]) {
         let instance = self.context.get_op(op);
         let Some(write) = instance.clone().as_interface::<dyn MemoryWrite>() else {
             return;
         };
-        let (Some(taken), Some(published)) = (write.state_operand(), write.state_result()) else {
+        let (Some(taken), Some(leaves)) = (write.state_operand(), write.state_result()) else {
             return;
         };
-        let Some(extent) = self.extent(published) else {
+        let Some(extent) = self.extent(leaves) else {
             return;
         };
-        let mut state = published;
+        let mut state = leaves;
         loop {
-            if self.published(scope, state) {
+            if published(self.context, scope, state) {
                 return;
             }
             let readers: Vec<OpId> = self
                 .context
                 .users_of(state)
                 .into_iter()
-                .filter(|&reader| !self.is_dead_read(scope, reader))
+                .filter(|&reader| !is_dead_read(self.context, scope, reader))
                 .collect();
             let [reader] = readers[..] else {
                 return;
@@ -248,10 +244,10 @@ impl Driver<'_> {
             }
             break;
         }
-        // The loop's first guard found no region result naming `published`,
-        // so no result list here names it either.
-        debug_assert!(!self.published(scope, published));
-        self.context.replace_value_uses(published, taken);
+        // The loop's first guard found no region result naming the state the
+        // write leaves, so no result list here names it either.
+        debug_assert!(!published(self.context, scope, leaves));
+        self.context.replace_value_uses(leaves, taken);
     }
 
     /// The extent the write publishing `state` covers: the object its address
@@ -271,14 +267,6 @@ impl Driver<'_> {
             .nodes(self.eg.find(node.children[state::BYTES]))
             .find_map(|node| node.int())?;
         Some((self.eg.find(object), offset, bytes.to_u64()))
-    }
-
-    fn is_dead_read(&self, scope: &[RegionId], op: OpId) -> bool {
-        is_dead_read(self.context, scope, op)
-    }
-
-    fn published(&self, scope: &[RegionId], value: ValueId) -> bool {
-        published(self.context, scope, value)
     }
 
     /// A read whose value was rewritten leaves memory as it found it: the state
@@ -479,17 +467,7 @@ fn changed_chain(context: &Context, state: ValueId) -> bool {
     let Some(index) = instance.dep_results().iter().position(|&r| r == state) else {
         return true;
     };
-    let carries = |region: &RegionId| {
-        let handle = context.get_region(*region);
-        let ports = handle.dep_arguments();
-        let results = handle.dep_results();
-        let groups = results.len().checked_div(ports.len()).unwrap_or(0);
-        ports.get(index).is_some_and(|port| {
-            (groups == 1 || groups == 2)
-                && results.len() == groups * ports.len()
-                && (0..groups).all(|group| results[group * ports.len() + index] == port.id())
-        })
-    };
+    let carries = |&region| crate::binding::forwards_dep(context, region, index);
     if instance.regions().is_empty() || !instance.regions().iter().all(carries) {
         return true;
     }
@@ -522,12 +500,9 @@ fn visible(context: &Context, value: ValueId, region: RegionId) -> bool {
 }
 
 /// A loop or a gate carrying a chain its body never names carries nothing: the
-/// port hands back the memory the operation was entered on, so the chain flows
-/// past the operation instead of through it and the port goes with it.
-///
-/// The converter carries a chain only where a body changes it. What leaves one
-/// behind is promotion: a slot whose value moves onto the value ports leaves
-/// its chain empty, and the ports it crossed are still there.
+/// port hands back the memory the operation was entered on, so it goes with the
+/// chain. What leaves such a port behind is promotion, whose slot values move
+/// onto the value ports and leave the chain empty.
 fn drop_untouched_chains(context: &Context, region: RegionId) {
     for op in context.get_region(region).op_ids() {
         for sub in context.get_op(op).regions() {
@@ -579,24 +554,20 @@ fn carries_nothing(context: &Context, op: OpId, index: usize) -> bool {
         return false;
     }
     handle.regions().iter().all(|&region| {
-        let handle = context.get_region(region);
-        let ports = handle.dep_arguments();
-        let results = handle.dep_results();
-        let Some(port) = ports.get(index).map(crate::Value::id) else {
+        let Some(groups) = crate::binding::dep_groups(context, region) else {
             return false;
         };
-        let groups = results.len().checked_div(ports.len()).unwrap_or(0);
+        if !crate::binding::forwards_dep(context, region, index) {
+            return false;
+        }
+        let port = context.get_region(region).dep_arguments()[index].id();
         let named = context
             .nested_regions(region)
             .iter()
             .flat_map(|&nested| context.get_region(nested).results())
             .filter(|&named| named == port)
             .count();
-        (groups == 1 || groups == 2)
-            && results.len() == groups * ports.len()
-            && (0..groups).all(|group| results[group * ports.len() + index] == port)
-            && named == groups
-            && context.users_of(port).is_empty()
+        named == groups && context.users_of(port).is_empty()
     })
 }
 

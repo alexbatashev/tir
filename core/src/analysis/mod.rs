@@ -1,5 +1,7 @@
 pub mod affine;
+pub mod chain;
 pub mod defuse;
+pub mod effects;
 pub mod escape_facts;
 pub mod exits;
 mod manager;
@@ -10,6 +12,7 @@ pub mod solver;
 
 pub use affine::AffineView;
 pub use defuse::{DefUse, OpRegs, PhysReg, execution_regs, op_regs};
+pub use effects::{Access, Effect, access_of, effect_of};
 pub use escape_facts::{Escape, EscapeFacts};
 pub use manager::*;
 pub use objects::Base;

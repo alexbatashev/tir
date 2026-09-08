@@ -117,23 +117,13 @@ impl<'a> Builder<'a> {
     fn scan(&mut self, ops: &[OpId], guarded: bool) {
         for &op_id in ops {
             let op = self.context.get_op(op_id);
-            if let Some(read) = op.clone().as_interface::<dyn MemoryRead>() {
+            if let Some(named) = crate::analysis::access_of(&op) {
                 let access = self.access(
                     op_id,
-                    false,
-                    read.read_location(),
-                    read.state_operand(),
-                    self.context.get_value(read.read_value()).ty(),
-                    guarded,
-                );
-                self.accesses.push(access);
-            } else if let Some(write) = op.clone().as_interface::<dyn MemoryWrite>() {
-                let access = self.access(
-                    op_id,
-                    true,
-                    write.write_location(),
-                    write.state_operand(),
-                    self.context.get_value(write.written_value()).ty(),
+                    named.write,
+                    named.location,
+                    named.state,
+                    self.context.get_value(named.value).ty(),
                     guarded,
                 );
                 self.accesses.push(access);
@@ -150,20 +140,10 @@ impl<'a> Builder<'a> {
                         }
                     }
                 }
-            } else if !op.regions().is_empty() || self.touches_memory(&op) {
+            } else if !op.regions().is_empty() || crate::analysis::effect_of(&op).is_some() {
                 self.opaque = true;
             }
         }
-    }
-
-    /// Whether an operation names a memory state without saying what it does to
-    /// the memory: a call, a copy, an export. A merge and a split only name the
-    /// chains an effect crosses; the effect itself is what was scanned.
-    fn touches_memory(&self, op: &OpHandle) -> bool {
-        if op.is::<JoinOp>() || op.is::<SplitOp>() {
-            return false;
-        }
-        !op.dep_operands().is_empty()
     }
 
     /// The chains an effect names: the one state it observes, or every chain
@@ -626,157 +606,49 @@ fn chain_root_walk(
         if !seen.insert(current) {
             return None;
         }
-        if context.is_block_argument(current) || context.region_of_port(current).is_some() {
-            current = incoming(context, current)?;
-            continue;
-        }
-        let Some(op) = context
-            .get_value(current)
-            .defining_op()
-            .map(|op| context.get_op(op))
-        else {
-            return Some(current);
-        };
-        // A merge of one chain's fork of reads names that chain. A merge of
-        // several is what an effect crossing them takes, and the converter
-        // names the effect's own chain first, so that is the one carrying on.
-        if op.is::<JoinOp>() {
-            let roots = op
-                .operands()
-                .iter()
-                .map(|&operand| chain_root_memo(context, operand, memo))
-                .collect::<Option<BTreeSet<_>>>()?;
-            if roots.len() == 1 {
-                return roots.into_iter().next();
+        match chain::back(context, current) {
+            chain::Step::Root => return Some(current),
+            chain::Step::From(next) => current = next,
+            // A merge of one chain's fork of reads names that chain. A merge of
+            // several is what an effect crossing them takes, and the converter
+            // names the effect's own chain first, so that is the one carrying on.
+            chain::Step::Merge(inputs) => {
+                let roots = inputs
+                    .iter()
+                    .map(|&input| chain_root_memo(context, input, memo))
+                    .collect::<Option<BTreeSet<_>>>()?;
+                if roots.len() == 1 {
+                    return roots.into_iter().next();
+                }
+                current = *inputs.first()?;
             }
-            current = op.dep_operands()[0];
-            continue;
-        }
-        // One name per chain crossing the effect that left the state split,
-        // in the order the merge it took named them. The chains a function
-        // opens are one entry state split, and each of those is a root.
-        if op.is::<SplitOp>() {
-            let source = split_source(context, &op, current)?;
-            if source == current {
-                return Some(current);
+            // A dependency a loop carries is entered on the operand at the same
+            // index, and so is a gate's arm; a gate's result is what its arms
+            // left, which is one chain only where they agree.
+            chain::Step::Port {
+                op,
+                index,
+                entering,
+            } => {
+                let op = context.get_op(op);
+                if entering || op.has_interface::<dyn Theta>() {
+                    current = *op.dep_operands().get(index)?;
+                    continue;
+                }
+                let gamma = op.as_interface::<dyn Gamma>()?;
+                let mut roots = gamma
+                    .arms()
+                    .iter()
+                    .map(|&arm| {
+                        chain_root_memo(
+                            context,
+                            *context.get_region(arm).dep_results().get(index)?,
+                            memo,
+                        )
+                    })
+                    .collect::<Option<BTreeSet<_>>>()?;
+                return (roots.len() == 1).then(|| roots.pop_first().expect("one root"));
             }
-            current = source;
-            continue;
         }
-        let observed = op
-            .clone()
-            .as_interface::<dyn MemoryRead>()
-            .and_then(|read| read.state_operand())
-            .or_else(|| {
-                op.clone()
-                    .as_interface::<dyn MemoryWrite>()
-                    .and_then(|write| write.state_operand())
-            });
-        if let Some(observed) = observed {
-            current = observed;
-            continue;
-        }
-        if op.has_interface::<dyn Theta>() {
-            // A dependency result of a theta is entered on the dependency
-            // operand at the same index; a value result on the init.
-            let deps = op.dep_results();
-            if let Some(port) = deps.iter().position(|&r| r == current) {
-                current = op.dep_operands()[port];
-                continue;
-            }
-            let carried = carried(context, &op)?;
-            let port = carried.finals.iter().position(|&r| r == current)?;
-            current = carried.inits[port];
-            continue;
-        }
-        if let Some(gamma) = op.clone().as_interface::<dyn Gamma>() {
-            let deps = op.dep_results();
-            let port = deps.iter().position(|&r| r == current)?;
-            let mut roots = gamma
-                .arms()
-                .iter()
-                .map(|&arm| {
-                    chain_root_memo(
-                        context,
-                        *context.get_region(arm).dep_results().get(port)?,
-                        memo,
-                    )
-                })
-                .collect::<Option<BTreeSet<_>>>()?;
-            return (roots.len() == 1).then(|| roots.pop_first().expect("one root"));
-        }
-        return Some(current);
     }
-}
-
-/// The state one chain stood at before the effect whose result `split` names
-/// again: the effect took the merge of the chains it crosses, in the order the
-/// split hands them back, so chain `state` came in on the merge's operand at
-/// the same index.
-fn split_source(context: &Context, split: &OpHandle, state: ValueId) -> Option<ValueId> {
-    let index = split.dep_results().iter().position(|&r| r == state)?;
-    let changed = *split.dep_operands().first()?;
-    let changer = context.get_op(context.get_value(changed).defining_op()?);
-    // The chains a function opens are one entry state split: each is a chain
-    // of its own, rooted where the split names it, which the caller reads off
-    // the state coming back unchanged.
-    let [taken] = changer.dep_operands()[..] else {
-        return changer.dep_operands().is_empty().then_some(state);
-    };
-    let merge = context.get_op(context.get_value(taken).defining_op()?);
-    merge
-        .is::<JoinOp>()
-        .then(|| merge.dep_operands().get(index).copied())
-        .flatten()
-}
-
-/// The value a region entry argument stands for outside the region.
-fn incoming(context: &Context, argument: ValueId) -> Option<ValueId> {
-    if let Some(region) = context.region_of_port(argument) {
-        let handle = context.get_region(region);
-        let owner = context.get_op(handle.parent_op()?);
-        let deps: Vec<ValueId> = handle
-            .dep_arguments()
-            .iter()
-            .map(crate::Value::id)
-            .collect();
-        if let Some(index) = deps.iter().position(|&port| port == argument) {
-            return owner.dep_operands().get(index).copied();
-        }
-        let values: Vec<ValueId> = handle
-            .value_arguments()
-            .iter()
-            .map(crate::Value::id)
-            .collect();
-        let index = values.iter().position(|&port| port == argument)?;
-        if let Some(theta) = owner.clone().as_interface::<dyn Theta>() {
-            let binding = theta.carried();
-            return owner
-                .value_operands()
-                .get(binding.operands.start + index - binding.ports.start)
-                .copied();
-        }
-        let gamma = owner.clone().as_interface::<dyn Gamma>()?;
-        let binding = gamma.forwarded();
-        return owner
-            .value_operands()
-            .get(binding.operands.start + index - binding.ports.start)
-            .copied();
-    }
-    let block = context.block_of_argument(argument)?;
-    let region = context.parent_region(block)?;
-    let op_id = context.get_region(region).parent_op()?;
-    let op = context.get_op(op_id);
-    // A gate threads what it was given into each arm, so the arms' arguments are
-    // the tail of its operands.
-    let arguments = context.get_block(block).arguments().len();
-    let index = context
-        .get_block(block)
-        .arguments()
-        .iter()
-        .position(|a| a.id() == argument)?;
-    op.operands()
-        .len()
-        .checked_sub(arguments)
-        .and_then(|offset| op.operands().get(offset + index).copied())
 }

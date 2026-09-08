@@ -4,20 +4,14 @@
 use std::collections::BTreeSet;
 
 use super::branches::Stmt;
-use super::cfg::{Cfg, Term, VarId};
-use super::liveness::Liveness;
-use crate::{Context, TypeId};
+use super::cfg::{LoopId, Term, VarId};
+use super::emit_nodes::Emitter;
+use crate::TypeId;
 
-pub struct Ports<'a> {
-    pub context: &'a Context,
-    pub cfg: &'a Cfg,
-    pub live: &'a Liveness,
-}
-
-impl Ports<'_> {
+impl Emitter<'_> {
     /// The variables a structured operation has to carry: those its regions
     /// assign and something after it reads.
-    pub fn ports(&self, arms: &[&[Stmt]], needed: BTreeSet<VarId>) -> Vec<VarId> {
+    pub(super) fn ports(&self, arms: &[&[Stmt]], needed: BTreeSet<VarId>) -> Vec<VarId> {
         let mut assigned = BTreeSet::new();
         for arm in arms {
             assigned.extend(self.assigned(arm));
@@ -27,7 +21,7 @@ impl Ports<'_> {
     }
 
     /// The variables a loop carries: what its body needs and what leaves it.
-    pub fn loop_ports(&self, id: super::cfg::LoopId, body: &[Stmt]) -> Vec<VarId> {
+    pub(super) fn loop_ports(&self, id: LoopId, body: &[Stmt]) -> Vec<VarId> {
         let tail = self.cfg.loops[id].tail;
         let mut needed = self.live.at(self.cfg.loops[id].body_entry).clone();
         if let Term::LoopTail { exit, .. } = &self.cfg.nodes[tail].term {
@@ -38,7 +32,7 @@ impl Ports<'_> {
 
     /// `ports` with the dependencies moved after the values: the order every
     /// port list keeps its two partitions in.
-    pub fn deps_last(&self, ports: &[VarId]) -> Vec<VarId> {
+    pub(super) fn deps_last(&self, ports: &[VarId]) -> Vec<VarId> {
         let is_dep = |var: &VarId| self.cfg.var_types[*var] == TypeId::DEPENDENCY;
         let mut ordered: Vec<VarId> = ports.iter().copied().filter(|var| !is_dep(var)).collect();
         ordered.extend(ports.iter().copied().filter(is_dep));
@@ -46,7 +40,7 @@ impl Ports<'_> {
     }
 
     /// How many trailing ports of a [`Self::deps_last`] list are dependencies.
-    pub fn dep_count(&self, ports: &[VarId]) -> usize {
+    pub(super) fn dep_count(&self, ports: &[VarId]) -> usize {
         ports
             .iter()
             .filter(|var| self.cfg.var_types[**var] == TypeId::DEPENDENCY)
@@ -54,7 +48,7 @@ impl Ports<'_> {
     }
 
     /// The types of the value ports: the dependencies trailing `ports` name none.
-    pub fn value_types(&self, ports: &[VarId]) -> Vec<TypeId> {
+    pub(super) fn value_types(&self, ports: &[VarId]) -> Vec<TypeId> {
         ports[..ports.len() - self.dep_count(ports)]
             .iter()
             .map(|&var| self.cfg.var_types[var])
@@ -62,7 +56,7 @@ impl Ports<'_> {
     }
 
     /// The variables a statement tree leaves with a new value.
-    pub fn assigned(&self, statements: &[Stmt]) -> BTreeSet<VarId> {
+    pub(super) fn assigned(&self, statements: &[Stmt]) -> BTreeSet<VarId> {
         let mut assigned = BTreeSet::new();
         for statement in statements {
             match statement {
@@ -75,7 +69,6 @@ impl Ports<'_> {
                     }
                 }
                 Stmt::Assign(assigns) => assigned.extend(assigns.iter().map(|(var, _)| *var)),
-                Stmt::Exit { .. } => {}
                 Stmt::If {
                     then_arm,
                     else_arm,

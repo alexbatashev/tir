@@ -1,32 +1,18 @@
-//! Demand annotation over unordered regions: a local slot's value on the
-//! ports of the loops and gates its accesses cross.
+//! Demand annotation over unordered regions: a local slot's value on the ports
+//! of the loops and gates its accesses cross. `docs/design/ir.md` §5.3 states
+//! what is promoted and what stays a slot.
 //!
-//! The converter left every access on the memory chain, so the chain says
-//! which write a read sees: walk the dependency a read observes back to the
-//! nearest write of the slot. Where that walk leaves a loop body through its
-//! dependency port, the value crosses an iteration boundary and the loop
-//! carries it as a port of its own; where it leaves a gate through the gate's
-//! dependency result, each arm produces the value it leaves the slot holding
-//! and the gate joins them. Region membership decides nothing: two accesses in
-//! one region are ordered by the chain alone, and insertion order is never read.
-//!
-//! The walk runs twice: once probing, which grows no port and rewrites
-//! nothing, and again for real once the probe has shown that every state the
-//! growth reads holds one value for the slot. What the probe refuses stays a
-//! slot, since a port there would carry no value: two chains a merge brings
-//! together holding different values for it — the seam an inlined body leaves,
-//! where the callee's accesses of the caller's slot sit on a chain of the
-//! callee's own — and a loop whose body writes the slot that nothing wrote it
-//! before.
-//!
-//! What else stays a slot: an escaping address, a partial access, disagreeing
-//! types, and an access off the chain, which nothing can order.
+//! The walk runs twice: once probing, which grows no port and rewrites nothing,
+//! and again for real once the probe has shown that every state the growth
+//! reads holds one value for the slot. Region membership decides nothing: two
+//! accesses in one region are ordered by the chain alone, and insertion order
+//! is never read.
 
 use std::collections::{HashMap, HashSet};
 
-use crate::analysis::regions;
 use crate::analysis::slots::{SlotState, agreed_value_type, collect_slots};
 use crate::analysis::{AnalysisManager, EscapeFacts};
+use crate::analysis::{chain, regions};
 use crate::func::FuncOp;
 use crate::{
     Context, Gamma, MemoryRead, MemoryWrite, OpHandle, OpId, OperationRef, Pass, PassError,
@@ -69,18 +55,13 @@ impl Pass for PromoteNodesPass {
             let Some(ty) = promotable(context, slot, &state, body) else {
                 continue;
             };
-            let mut promoter = Promoter {
-                context,
-                slot,
-                ty,
-                reach: HashMap::new(),
-                grown: HashSet::new(),
-                kept: false,
-                substituted: HashMap::new(),
-                probing: false,
-                refused: false,
-            };
-            promoter.promote(&state, rewriter)?;
+            // A read the chain cannot answer, and a port the growth would
+            // have no value to enter, keep the slot memory: the write either
+            // would go with the promotion or was never there.
+            if Promoter::new(context, slot, ty, true).refuses(&state) {
+                continue;
+            }
+            Promoter::new(context, slot, ty, false).promote(&state, rewriter)?;
         }
         Ok(())
     }
@@ -134,14 +115,8 @@ fn address_only_accessed(context: &Context, address: ValueId, state: &SlotState)
 /// dependency: the chain is what orders it against the writes it may see.
 fn names_whole_slot(context: &Context, op: OpId, slot: ValueId) -> bool {
     let instance = context.get_op(op);
-    let location = if let Some(read) = instance.clone().as_interface::<dyn MemoryRead>() {
-        read.read_location()
-    } else if let Some(write) = instance.clone().as_interface::<dyn MemoryWrite>() {
-        write.write_location()
-    } else {
-        return false;
-    };
-    location == slot && !instance.dep_operands().is_empty()
+    crate::analysis::access_of(&instance).is_some_and(|access| access.location == slot)
+        && !instance.dep_operands().is_empty()
 }
 
 /// Whether every op between `op` and `body` is a loop or a gate with a declared
@@ -212,14 +187,37 @@ struct Promoter<'a> {
     refused: bool,
 }
 
-impl Promoter<'_> {
-    fn promote(&mut self, state: &SlotState, rewriter: &mut Rewriter) -> Result<(), PassError> {
-        // A read the chain cannot answer, and a port the growth would have no
-        // value to enter, keep the slot memory: the write either would go with
-        // the promotion or was never there.
-        if self.refuses(state) {
-            return Ok(());
+impl<'a> Promoter<'a> {
+    fn new(context: &'a Context, slot: ValueId, ty: TypeId, probing: bool) -> Self {
+        Self {
+            context,
+            slot,
+            ty,
+            reach: HashMap::new(),
+            grown: HashSet::new(),
+            kept: false,
+            substituted: HashMap::new(),
+            probing,
+            refused: false,
         }
+    }
+
+    /// Whether the chain answers every state the growth would read. The walk is
+    /// the growth's own, with the ports it would grow recorded rather than
+    /// grown, so what it proves is what the growth then does.
+    fn refuses(&mut self, state: &SlotState) -> bool {
+        for &load in &state.loads {
+            let Some(&observed) = self.context.get_op(load).dep_operands().first() else {
+                return true;
+            };
+            if self.reach(observed) == Reach::Unknown {
+                return true;
+            }
+        }
+        self.refused
+    }
+
+    fn promote(&mut self, state: &SlotState, rewriter: &mut Rewriter) -> Result<(), PassError> {
         let context = self.context;
         let reached: Vec<Reach> = state
             .loads
@@ -299,7 +297,7 @@ impl Promoter<'_> {
         }
         let context = self.context;
         let found = match context.get_value(dep).defining_op() {
-            None => self.reach_port(dep),
+            None => self.crossing(dep),
             Some(def) => {
                 let instance = context.get_op(def);
                 if let Some(written) = self.writes(&instance) {
@@ -314,9 +312,12 @@ impl Promoter<'_> {
                             found.merge(self.reach(state))
                         })
                 } else if instance.regions().is_empty() {
+                    // An effect the walk cannot read still names the memory
+                    // before it: the seam an inlined body leaves sits on the
+                    // chain, and stepping over it would hide the write it holds.
                     self.reach(instance.dep_operands()[0])
                 } else {
-                    self.reach_result(&instance, dep)
+                    self.crossing(dep)
                 }
             }
         };
@@ -324,44 +325,28 @@ impl Promoter<'_> {
         found
     }
 
-    /// The slot's value on entry to the region whose dependency port `dep` is.
-    fn reach_port(&mut self, dep: ValueId) -> Reach {
-        let context = self.context;
-        let Some(region) = context.region_of_port(dep) else {
+    /// The slot's value where the chain crosses a loop or a gate: the port a
+    /// region is entered on, or the state the operation left. A gate's arms are
+    /// entered on the state the gate took; only a loop's port carries a value of
+    /// its own, since an iteration may write the slot the next one reads.
+    fn crossing(&mut self, dep: ValueId) -> Reach {
+        let chain::Step::Port {
+            op,
+            index,
+            entering,
+        } = chain::back(self.context, dep)
+        else {
             return Reach::Undefined;
         };
-        let handle = context.get_region(region);
-        let ports: Vec<ValueId> = handle
-            .dep_arguments()
-            .iter()
-            .map(crate::Value::id)
-            .collect();
-        let index = dep_index(&ports, dep);
-        let Some(owner) = handle.parent_op() else {
-            return Reach::Undefined;
-        };
-        let owner = context.get_op(owner);
-        if owner.has_interface::<dyn Gamma>() || !self.writes_under(&owner) {
-            return self.reach(owner.dep_operands()[index]);
-        }
-        if !owner.has_interface::<dyn Theta>() {
-            return Reach::Undefined;
-        }
-        self.grow_theta(&owner, index);
-        self.reach[&dep]
-    }
-
-    /// The slot's value after `op`, a loop or a gate, along its dependency
-    /// result `dep`.
-    fn reach_result(&mut self, op: &OpHandle, dep: ValueId) -> Reach {
-        let index = dep_index(&op.dep_results(), dep);
-        if !self.writes_under(op) {
+        let op = self.context.get_op(op);
+        let repeats = op.has_interface::<dyn Theta>();
+        if !self.writes_under(&op) || (entering && !repeats) {
             return self.reach(op.dep_operands()[index]);
         }
-        if op.has_interface::<dyn Theta>() {
-            self.grow_theta(op, index);
+        if repeats {
+            self.grow_theta(&op, index);
         } else {
-            self.grow_gamma(op, index);
+            self.grow_gamma(&op, index);
         }
         self.reach[&dep]
     }
@@ -396,11 +381,9 @@ impl Promoter<'_> {
             let grown = Reach::Written(op.id, index);
             self.reach.insert(port_dep, grown);
             self.reach.insert(op.dep_results()[index], grown);
-            self.demand(init);
-            let carried = self.reach(continue_dep);
-            let left = self.reach(exit_dep);
-            self.demand(carried);
-            self.demand(left);
+            for state in [entered, continue_dep, exit_dep] {
+                self.demand(state);
+            }
             return;
         }
         let init = self.value_of(init);
@@ -447,9 +430,7 @@ impl Promoter<'_> {
             self.reach
                 .insert(op.dep_results()[index], Reach::Written(op.id, index));
             for arm in op.regions() {
-                let left = context.get_region(arm).dep_results()[index];
-                let found = self.reach(left);
-                self.demand(found);
+                self.demand(context.get_region(arm).dep_results()[index]);
             }
             return;
         }
@@ -475,38 +456,12 @@ impl Promoter<'_> {
         }
     }
 
-    /// Record that the growth reads a state which has to hold one value for the
-    /// slot; where it does not, the slot stays memory.
-    fn demand(&mut self, found: Reach) {
-        if !matches!(found, Reach::Value(_) | Reach::Written(..)) {
+    /// Read a state the growth would enter a port on, which has to hold one
+    /// value for the slot; where it does not, the slot stays memory.
+    fn demand(&mut self, state: ValueId) {
+        if !matches!(self.reach(state), Reach::Value(_) | Reach::Written(..)) {
             self.refused = true;
         }
-    }
-
-    /// Whether the chain answers every state the growth would read. The walk is
-    /// the growth's own, with the ports it would grow recorded rather than
-    /// grown, so what it proves is what the growth then does.
-    fn refuses(&self, state: &SlotState) -> bool {
-        let mut probe = Promoter {
-            context: self.context,
-            slot: self.slot,
-            ty: self.ty,
-            reach: HashMap::new(),
-            grown: HashSet::new(),
-            kept: false,
-            substituted: HashMap::new(),
-            probing: true,
-            refused: false,
-        };
-        for &load in &state.loads {
-            let Some(&observed) = self.context.get_op(load).dep_operands().first() else {
-                return true;
-            };
-            if probe.reach(observed) == Reach::Unknown {
-                return true;
-            }
-        }
-        probe.refused
     }
 
     /// The value a write to the slot leaves it holding.
@@ -521,10 +476,4 @@ impl Promoter<'_> {
             .into_iter()
             .any(|inner| self.writes(&self.context.get_op(inner)).is_some())
     }
-}
-
-fn dep_index(deps: &[ValueId], dep: ValueId) -> usize {
-    deps.iter()
-        .position(|held| *held == dep)
-        .expect("a dependency of the region or op it was read off")
 }

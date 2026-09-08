@@ -1,30 +1,18 @@
-//! Memory order constructed over ordered blocks, before the order is gone.
+//! Memory order constructed over ordered blocks, before the order is gone:
+//! `docs/design/ir.md` §6.2 states which chains an effect names and §6.3 how
+//! reads fork off a change.
 //!
-//! One chain per object the pointer analysis can name, plus a chain for the
-//! memory of unknown provenance. An effect observes its own object's chain and,
-//! where it changes memory, every chain it may alias: those are joined into the
-//! state it takes and split back out of the state it leaves. Reads fork off a
-//! change without ordering one another; the next change, or whatever leaves the
-//! block, takes `state.join` of what the fork left, so a read never trails the
-//! write that overtakes it. A change's result is split only where something
-//! names one of its chains on its own: a run of changes crossing the same
-//! chains would split and join the same set at every step, which orders
-//! nothing the first join did not.
-//!
-//! Two accesses whose objects [`Base::distinct`] tells apart share no chain and
-//! therefore no edge: independence is a property of the graph, not something a
-//! consumer recovers on the side.
+//! What the construction adds to that: a change's result is split only where
+//! something names one of its chains on its own, since a run of changes
+//! crossing the same chains would split and join the same set at every step,
+//! which orders nothing the first join did not.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::analysis::objects::{Base, accessed_only, object_base};
-use crate::func::CallOp;
-use crate::ptr::MemcpyOp;
+use crate::analysis::{Effect, access_of, effect_of};
 use crate::state::{JoinOpBuilder, SplitOpBuilder};
-use crate::{
-    BlockId, Context, MemoryRead, MemoryWrite, OpHandle, OpId, Operation, PassError, RegionId,
-    ValueId,
-};
+use crate::{BlockId, Context, OpHandle, OpId, Operation, PassError, RegionId, ValueId};
 
 use super::cfg::unsupported;
 
@@ -68,9 +56,9 @@ pub fn plan(context: &Context, region: RegionId) -> Plan {
     let effects: Vec<(OpId, Option<Base>)> = ops
         .iter()
         .map(|&op| (op, context.get_op(op)))
-        .filter(|(_, handle)| touches_memory(handle))
+        .filter(|(_, handle)| effect_of(handle).is_some())
         .map(|(op, handle)| {
-            let base = accessed_object(&handle).and_then(|address| object_base(context, address));
+            let base = access_of(&handle).and_then(|access| object_base(context, access.location));
             (op, base)
         })
         .collect();
@@ -160,26 +148,6 @@ fn merge_indistinguishable(
     (keys, touched)
 }
 
-/// The address an operation accesses, where it names one: a call and a copy of
-/// unknown pointers name none, and reach whatever the outside can.
-fn accessed_object(op: &OpHandle) -> Option<ValueId> {
-    op.clone()
-        .as_interface::<dyn MemoryWrite>()
-        .map(|write| write.write_location())
-        .or_else(|| {
-            op.clone()
-                .as_interface::<dyn MemoryRead>()
-                .map(|read| read.read_location())
-        })
-}
-
-fn touches_memory(op: &OpHandle) -> bool {
-    op.has_interface::<dyn MemoryRead>()
-        || op.has_interface::<dyn MemoryWrite>()
-        || op.is::<MemcpyOp>()
-        || op.is::<CallOp>()
-}
-
 /// Whether nothing but the object's own accesses can reach it: a fresh
 /// allocation or a parameter the λ declares free of aliases, whose address
 /// never leaves those accesses. No pointer of unknown origin and no callee
@@ -231,7 +199,7 @@ pub fn wants_chain(context: &Context, region: RegionId) -> bool {
     !threaded
         && ops
             .iter()
-            .any(|op| !matches!(effect(context, op), Ok(Effect::None)))
+            .any(|op| !matches!(effect(context, op), Ok(None)))
 }
 
 /// Thread `block`'s operations, its terminator excluded, off the state each
@@ -266,54 +234,55 @@ pub fn thread_block(
     };
     for &op in body {
         let handle = context.get_op(op);
+        // A counted loop the frontend raised carries one dependency port per
+        // chain its body touches, so it takes one dependency operand per chain
+        // rather than the one state a change merges them into.
+        if super::is_ordered_counted_loop(context, &handle) {
+            let touched = plan.touched[&op].clone();
+            if touched.is_empty() {
+                continue;
+            }
+            let mut observed = Vec::with_capacity(touched.len());
+            for &chain in &touched {
+                observed.push(chains.close_fork(chain, op)?);
+            }
+            let body = handle.regions()[0];
+            let [body_block] = context.get_region(body).block_ids()[..] else {
+                return Err(unsupported("a counted loop whose body is a graph"));
+            };
+            let ports: BTreeMap<usize, ValueId> = touched
+                .iter()
+                .map(|&chain| (chain, context.append_dep_block_argument(body_block).id()))
+                .collect();
+            let leaving = thread_block(context, body_block, &ports, plan)?;
+            let latch = *context.get_block(body_block).op_ids().last().unwrap();
+            for &chain in &touched {
+                context.append_dep_operand(latch, leaving[&chain]);
+            }
+            for state in observed {
+                context.append_dep_operand(op, state);
+            }
+            for &chain in &touched {
+                let published = context.append_dep_result(op);
+                chains.state(chain)?.written = published;
+            }
+            continue;
+        }
         match effect(context, &handle)? {
-            Effect::None => {}
-            Effect::Read => {
+            None => {}
+            Some(Effect::Read) => {
                 let own = plan.touched[&op][0];
                 let state = chains.state(own)?;
                 context.append_dep_operand(op, state.written);
                 let left = context.append_dep_result(op);
                 chains.state(own)?.reads.push(left);
             }
-            Effect::Change => {
+            Some(Effect::Change) => {
                 let touched = plan.touched[&op].clone();
                 let observed = chains.settle(&touched, op)?;
                 context.append_dep_operand(op, observed);
                 let published = context.append_dep_result(op);
                 chains.split(&touched, op, published)?;
-            }
-            // A counted loop carries one dependency port per chain its body
-            // touches, so it takes one dependency operand per chain rather
-            // than the one state a change merges them into.
-            Effect::CountedLoop => {
-                let touched = plan.touched[&op].clone();
-                if touched.is_empty() {
-                    continue;
-                }
-                let mut observed = Vec::with_capacity(touched.len());
-                for &chain in &touched {
-                    observed.push(chains.close_fork(chain, op)?);
-                }
-                let body = handle.regions()[0];
-                let [body_block] = context.get_region(body).block_ids()[..] else {
-                    return Err(unsupported("a counted loop whose body is a graph"));
-                };
-                let ports: BTreeMap<usize, ValueId> = touched
-                    .iter()
-                    .map(|&chain| (chain, context.append_dep_block_argument(body_block).id()))
-                    .collect();
-                let leaving = thread_block(context, body_block, &ports, plan)?;
-                let latch = *context.get_block(body_block).op_ids().last().unwrap();
-                for &chain in &touched {
-                    context.append_dep_operand(latch, leaving[&chain]);
-                }
-                for state in observed {
-                    context.append_dep_operand(op, state);
-                }
-                for &chain in &touched {
-                    let published = context.append_dep_result(op);
-                    chains.state(chain)?.written = published;
-                }
             }
         }
     }
@@ -330,30 +299,15 @@ fn same_chains(held: &[usize], wanted: &[usize]) -> bool {
     held.len() == wanted.len() && wanted.iter().all(|chain| held.contains(chain))
 }
 
-enum Effect {
-    None,
-    Read,
-    Change,
-    /// An `scf.for` the frontend raised: its body is one block, threaded off
-    /// the dependency ports the loop carries.
-    CountedLoop,
-}
-
-fn effect(context: &Context, op: &OpHandle) -> Result<Effect, PassError> {
-    if op.has_interface::<dyn MemoryWrite>() || op.is::<MemcpyOp>() || op.is::<CallOp>() {
-        return Ok(Effect::Change);
+/// What `op` does to memory, refusing an effect nested where the conversion
+/// has no port to carry it through.
+fn effect(context: &Context, op: &OpHandle) -> Result<Option<Effect>, PassError> {
+    if let Some(effect) = effect_of(op) {
+        return Ok(Some(effect));
     }
-    if op.has_interface::<dyn MemoryRead>() {
-        return Ok(Effect::Read);
-    }
-    if super::is_ordered_counted_loop(context, op) {
-        return Ok(Effect::CountedLoop);
-    }
-    let nested = op
-        .regions()
-        .iter()
-        .flat_map(|&region| crate::analysis::regions::region_ops(context, region))
-        .any(|inner| !matches!(effect(context, &context.get_op(inner)), Ok(Effect::None)));
+    let nested = crate::analysis::regions::subtree_ops(context, op)
+        .into_iter()
+        .any(|inner| effect_of(&context.get_op(inner)).is_some());
     if nested {
         return Err(unsupported(&format!(
             "memory effects inside {}.{}",
@@ -361,7 +315,7 @@ fn effect(context: &Context, op: &OpHandle) -> Result<Effect, PassError> {
             op.name()
         )));
     }
-    Ok(Effect::None)
+    Ok(None)
 }
 
 struct ChainState {
