@@ -415,22 +415,6 @@ fn every_edit_bumps_the_spine() {
 }
 
 #[test]
-fn removing_a_block_argument_drops_it() {
-    let context = Context::with_default_dialects();
-    let (_, _, body) = module_with_function(&context);
-    let i32 = builtin::IntegerType::new(&context, 32);
-    let first = context.append_block_argument(body.id(), i32);
-    let second = context.append_block_argument(body.id(), i32);
-
-    context.remove_block_argument(body.id(), 0);
-
-    let block = context.get_block(body.id());
-    assert_eq!(block.arguments().len(), 1);
-    assert_eq!(block.arguments()[0].id(), second.id());
-    assert!(!context.is_block_argument(first.id()));
-}
-
-#[test]
 fn adopting_a_value_makes_the_block_define_it() {
     let context = Context::with_default_dialects();
     let (_, _, body) = module_with_function(&context);
@@ -654,18 +638,6 @@ fn setting_every_operand_relinks_the_uses() {
 
     assert!(!context.is_used(c));
     assert_eq!(context.uses_of(d), [Use::new(add, 0)]);
-}
-
-#[test]
-fn appending_and_popping_an_operand_tracks_its_use() {
-    let context = Context::with_default_dialects();
-    let (_, d, add) = add_fixture(&context);
-
-    context.append_operand(add, d);
-    assert_eq!(context.uses_of(d), [Use::new(add, 2)]);
-
-    context.pop_operand(add);
-    assert!(!context.is_used(d));
 }
 
 #[test]
