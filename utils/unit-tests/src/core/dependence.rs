@@ -9,12 +9,11 @@ use tir::attributes::{AttributeRole, AttributeValue, ImplicitReg, RegisterAttr};
 use tir::backend::dependence::Dependences;
 use tir::backend::regalloc::{RegClassId, RegClassInfo, RegisterView};
 use tir::backend::{
-    verify_machine_ir, ControlFlow, InstrInfo, MachineInstruction, RegAssignment, RegClassType,
-    RegPort, SymbolOp, SymbolOpBuilder,
+    verify_machine_ir, RegAssignment, RegClassType, RegPort, SymbolOp, SymbolOpBuilder,
 };
 use tir::{BlockHandle, Context, OpId, Operation, ValueId};
 
-use super::fixtures::r;
+use super::fixtures::{machine_op, r};
 
 /// The one-register flag file the test opcodes touch implicitly, standing for
 /// x86 `EFLAGS`.
@@ -33,35 +32,6 @@ static F_CLASS: RegClassInfo = RegClassInfo {
 
 const fn f() -> RegClassId {
     RegClassId::new(&F_CLASS)
-}
-
-tir::helpers::operation! {
-    DefOp {
-        name: "def",
-        dialect: "dep",
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
-}
-
-tir::helpers::operation! {
-    SetFlagsOp {
-        name: "set_flags",
-        dialect: "dep",
-        operands: O { rs: "?tir::backend::RegClassType", },
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
-}
-
-tir::helpers::operation! {
-    ReadFlagsOp {
-        name: "read_flags",
-        dialect: "dep",
-        operands: O { rs: "?tir::backend::RegClassType", },
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
 }
 
 static RD_ONLY: [RegPort; 1] = [RegPort {
@@ -98,31 +68,9 @@ static READS_FLAGS: [ImplicitReg; 1] = [ImplicitReg {
     role: AttributeRole::Use,
 }];
 
-macro_rules! machine_op {
-    ($op:ident, $name:literal, $ports:expr, $implicit:expr) => {
-        impl MachineInstruction for $op {
-            fn info(&self) -> &'static InstrInfo {
-                static INFO: InstrInfo = InstrInfo {
-                    name: $name,
-                    mnemonic: $name,
-                    control_flow: ControlFlow::None,
-                    regs: $ports,
-                    implicit_regs: $implicit,
-                    ..InstrInfo::BASE
-                };
-                &INFO
-            }
-
-            fn instance(&self) -> &tir::OpHandle {
-                &self.0
-            }
-        }
-    };
-}
-
-machine_op!(DefOp, "def", &RD_ONLY, &[]);
-machine_op!(SetFlagsOp, "set_flags", &RD_RS, &WRITES_FLAGS);
-machine_op!(ReadFlagsOp, "read_flags", &RD_RS, &READS_FLAGS);
+machine_op!(DefOp, "dep", "def", &RD_ONLY, &[]);
+machine_op!(SetFlagsOp, "dep", "set_flags", rs, &RD_RS, &WRITES_FLAGS);
+machine_op!(ReadFlagsOp, "dep", "read_flags", rs, &RD_RS, &READS_FLAGS);
 
 fn context() -> Context {
     let context = Context::with_default_dialects();

@@ -7,12 +7,12 @@
 use tir::attributes::AttributeValue;
 use tir::backend::regalloc::{RegClassId, RegClassInfo, RegisterView};
 use tir::backend::{
-    phys_attr, verify_machine_ir, ControlFlow, InstrInfo, MachineInstruction, RegAssignment,
-    RegClassType, RegPort, SymbolOpBuilder, ASSIGNMENT_ATTR, PINS_ATTR,
+    phys_attr, verify_machine_ir, RegAssignment, RegClassType, RegPort, SymbolOpBuilder,
+    ASSIGNMENT_ATTR, PINS_ATTR,
 };
 use tir::{Context, Operation, ValueId};
 
-use super::fixtures::r;
+use super::fixtures::{machine_op, r};
 
 /// A second class over the `R` file at a different bit offset: no register
 /// satisfies both views (an x86 high-byte class against an offset-0 one).
@@ -35,16 +35,6 @@ const fn r_high() -> RegClassId {
 
 // `add rd, rs`: one destination slot and one source slot, both of class `R`,
 // plus the implicit flag register the behavior writes.
-tir::helpers::operation! {
-    AddTestOp {
-        name: "add",
-        dialect: "test",
-        operands: O { rs: "?tir::backend::RegClassType", },
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
-}
-
 static ADD_PORTS: [RegPort; 2] = [
     RegPort {
         name: "rd",
@@ -66,23 +56,7 @@ static ADD_IMPLICIT: [tir::attributes::ImplicitReg; 1] = [tir::attributes::Impli
     role: tir::attributes::AttributeRole::Def,
 }];
 
-impl MachineInstruction for AddTestOp {
-    fn info(&self) -> &'static InstrInfo {
-        static INFO: InstrInfo = InstrInfo {
-            name: "add",
-            mnemonic: "add",
-            control_flow: ControlFlow::None,
-            regs: &ADD_PORTS,
-            implicit_regs: &ADD_IMPLICIT,
-            ..InstrInfo::BASE
-        };
-        &INFO
-    }
-
-    fn instance(&self) -> &tir::OpHandle {
-        &self.0
-    }
-}
+machine_op!(AddTestOp, "test", "add", rs, &ADD_PORTS, &ADD_IMPLICIT);
 
 fn value_of(context: &Context, class: RegClassId) -> ValueId {
     context

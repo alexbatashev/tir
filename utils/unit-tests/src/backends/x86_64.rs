@@ -2,41 +2,6 @@
 
 use tir_x86_64::{Feature, TargetConfig};
 
-/// The one per-opcode record the backend describes `name` with.
-fn info(name: &str) -> &'static tir::backend::InstrInfo {
-    tir_x86_64::instruction_infos()
-        .iter()
-        .copied()
-        .find(|info| info.name == name)
-        .unwrap_or_else(|| panic!("x86-64 declares no instruction '{name}'"))
-}
-
-#[test]
-fn instruction_info_carries_every_per_opcode_fact() {
-    // One record per opcode, keyed by op name — `add32` and `add` share a
-    // mnemonic but not a record, so neither can reach the other's facts.
-    let add32 = info("add32");
-    assert_eq!(add32.mnemonic, "add");
-    assert!(add32.asm.is_some());
-    assert!(add32.encode.is_some());
-    assert_eq!(add32.sched.len(), 1);
-    assert_ne!(
-        add32.sched[0],
-        tir::backend::sched::InstrSchedClass::DEFAULT
-    );
-    assert_eq!(add32.effects, tir::backend::MemoryEffects::NONE);
-    // Its two shapes are the REX-free and REX encodings of the same operation.
-    assert_eq!(add32.width_bytes, (2, 3));
-}
-
-#[test]
-fn guarded_relaxations_hold_for_all_rules() {
-    let context = tir::Context::with_default_dialects();
-    let config = TargetConfig::parse("x86_64", None, None).unwrap();
-    let rules = tir_x86_64::get_isel_rules(&context, config.features());
-    tir::backend::isel::prove_guarded_relaxations(&rules).unwrap();
-}
-
 #[test]
 fn x86_64_target_enables_required_features() {
     let config = TargetConfig::parse("x86_64", None, None).unwrap();

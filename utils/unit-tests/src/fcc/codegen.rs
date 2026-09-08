@@ -5,14 +5,6 @@
 
 use super::support::{compile_ir, fcc_context, print_ir};
 
-/// The emitted IR parses back, and printing what parsed is a fixpoint. Value
-/// numbers are not compared against the emitted text: codegen and the parser
-/// allocate a function's λ value at different points in its body.
-fn assert_roundtrips(ir: &str) {
-    let printed = reprint(ir);
-    assert_eq!(printed, reprint(&printed));
-}
-
 fn reprint(ir: &str) -> String {
     let context = fcc_context();
     let module = tir::parse::ir::parse_ir::<tir::builtin::ModuleOp>(&context, ir)
@@ -20,31 +12,21 @@ fn reprint(ir: &str) -> String {
     print_ir(&module)
 }
 
+/// The emitted IR parses back, and printing what parsed is a fixpoint. Value
+/// numbers are not compared against the emitted text: codegen and the parser
+/// allocate a function's λ value at different points in its body.
 #[test]
 fn ir_roundtrips_through_parser() {
-    assert_roundtrips(&compile_ir("int sum(int a, int b) { return a + b; }"));
-}
-
-#[test]
-fn cir_variadic_ir_roundtrips_through_parser() {
-    assert_roundtrips(&compile_ir(
+    for source in [
+        "int sum(int a, int b) { return a + b; }",
         r#"int printf(const char *restrict format, ...);
 int main(void) { printf("hello"); return 0; }"#,
-    ));
-}
-
-#[test]
-fn struct_ir_roundtrips_through_parser() {
-    assert_roundtrips(&compile_ir(
         "struct Pair { char tag; int value; }; int main(void) { struct Pair source; struct Pair destination; source.value = 1; destination = source; return destination.value; }",
-    ));
-}
-
-#[test]
-fn loop_ir_roundtrips_through_parser() {
-    assert_roundtrips(&compile_ir(
         "int f(void) { int i = 0; while (i < 3) { i = i + 1; } return i; }",
-    ));
+    ] {
+        let printed = reprint(&compile_ir(source));
+        assert_eq!(printed, reprint(&printed), "{source}");
+    }
 }
 
 #[test]

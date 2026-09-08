@@ -63,3 +63,52 @@ pub fn atomic_pattern(kind: SymKind) -> SemGraph {
     binary(&mut g, kind, lhs, rhs);
     g
 }
+
+/// A machine test opcode: the operation plus the `MachineInstruction` facts
+/// (`$ports`, `$implicit`) its info reports. The longer form also declares one
+/// operand slot named `$operand`.
+macro_rules! machine_op {
+    ($op:ident, $dialect:tt, $name:tt, $operand:ident, $ports:expr, $implicit:expr) => {
+        tir::helpers::operation! {
+            $op {
+                name: $name,
+                dialect: $dialect,
+                operands: O { $operand: "?tir::backend::RegClassType", },
+                results: R { regs: "*tir::backend::RegClassType" },
+                interfaces: [tir::backend::MachineInstruction],
+            }
+        }
+        machine_op!(@info $op, $name, $ports, $implicit);
+    };
+    ($op:ident, $dialect:tt, $name:tt, $ports:expr, $implicit:expr) => {
+        tir::helpers::operation! {
+            $op {
+                name: $name,
+                dialect: $dialect,
+                results: R { regs: "*tir::backend::RegClassType" },
+                interfaces: [tir::backend::MachineInstruction],
+            }
+        }
+        machine_op!(@info $op, $name, $ports, $implicit);
+    };
+    (@info $op:ident, $name:tt, $ports:expr, $implicit:expr) => {
+        impl tir::backend::MachineInstruction for $op {
+            fn info(&self) -> &'static tir::backend::InstrInfo {
+                static INFO: tir::backend::InstrInfo = tir::backend::InstrInfo {
+                    name: $name,
+                    mnemonic: $name,
+                    control_flow: tir::backend::ControlFlow::None,
+                    regs: $ports,
+                    implicit_regs: $implicit,
+                    ..tir::backend::InstrInfo::BASE
+                };
+                &INFO
+            }
+
+            fn instance(&self) -> &tir::OpHandle {
+                &self.0
+            }
+        }
+    };
+}
+pub(crate) use machine_op;

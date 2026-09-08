@@ -4,17 +4,17 @@ use std::collections::BTreeSet;
 
 use tir::backend::liveness::analyze;
 use tir::backend::regalloc::{RegClassId, RegClassInfo, RegisterView};
-use tir::backend::{ControlFlow, InstrInfo, MachineInstruction, RegClassType, RegPort};
+use tir::backend::{RegClassType, RegPort};
 use tir::builtin::{ops, IntegerType};
 use tir::{BlockHandle, Context, Operation, TypeId, ValueId};
 
-use super::fixtures::r;
+use super::fixtures::{machine_op, r};
 
 // The test ops: each names one register slot. A slot's class is a per-opcode
 // fact, so there is one op per class the tests constrain a value through; the
 // value's own class is its type.
 macro_rules! slot_op {
-    ($op:ident, $ports:ident, $name:literal, $class:expr, $def:literal) => {
+    ($op:ident, $ports:ident, $name:tt, $class:expr, $def:literal) => {
         static $ports: [RegPort; 1] = [RegPort {
             name: "r",
             class: $class,
@@ -22,93 +22,8 @@ macro_rules! slot_op {
             tied_to: None,
         }];
 
-        impl MachineInstruction for $op {
-            fn info(&self) -> &'static InstrInfo {
-                static INFO: InstrInfo = InstrInfo {
-                    name: $name,
-                    mnemonic: $name,
-                    control_flow: ControlFlow::None,
-                    regs: &$ports,
-                    ..InstrInfo::BASE
-                };
-                &INFO
-            }
-
-            fn instance(&self) -> &tir::OpHandle {
-                &self.0
-            }
-        }
+        machine_op!($op, "test", $name, r, &$ports, &[]);
     };
-}
-
-tir::helpers::operation! {
-    PhysDefOp {
-        name: "phys_def",
-        dialect: "test",
-        operands: O { r: "?tir::backend::RegClassType", },
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
-}
-
-tir::helpers::operation! {
-    PhysUseOp {
-        name: "phys_use",
-        dialect: "test",
-        operands: O { r: "?tir::backend::RegClassType", },
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
-}
-
-tir::helpers::operation! {
-    UseROp {
-        name: "use_r",
-        dialect: "test",
-        operands: O { r: "?tir::backend::RegClassType", },
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
-}
-
-tir::helpers::operation! {
-    UseRlowOp {
-        name: "use_rlow",
-        dialect: "test",
-        operands: O { r: "?tir::backend::RegClassType", },
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
-}
-
-tir::helpers::operation! {
-    UseRhighOp {
-        name: "use_rhigh",
-        dialect: "test",
-        operands: O { r: "?tir::backend::RegClassType", },
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
-}
-
-tir::helpers::operation! {
-    UseRmidOp {
-        name: "use_rmid",
-        dialect: "test",
-        operands: O { r: "?tir::backend::RegClassType", },
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
-}
-
-tir::helpers::operation! {
-    UseROtherOp {
-        name: "use_rother",
-        dialect: "test",
-        operands: O { r: "?tir::backend::RegClassType", },
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
 }
 
 slot_op!(PhysDefOp, PHYS_DEF_PORTS, "phys_def", None, true);

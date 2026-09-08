@@ -57,7 +57,12 @@ mod relational {
 }
 
 #[cfg(test)]
-mod arm64;
+mod backends {
+    mod arm64;
+    mod riscv;
+    mod support;
+    mod x86_64;
+}
 
 #[cfg(test)]
 mod capi {
@@ -76,15 +81,6 @@ mod jit;
 
 #[cfg(test)]
 mod fuzz;
-
-#[cfg(test)]
-mod llvm;
-
-#[cfg(test)]
-mod riscv;
-
-#[cfg(test)]
-mod x86_64;
 
 #[cfg(test)]
 mod simcore {

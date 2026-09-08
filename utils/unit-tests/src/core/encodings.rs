@@ -6,12 +6,10 @@ use tir::backend::binary::{
     DecodeShape, DecodeSpec, EncodeField, EncodeShape, EncodeSpec, FieldRun, FixupTarget, Guard,
     PatchField,
 };
-use tir::backend::{
-    ControlFlow, InstrInfo, MachineInstruction, RegAssignment, RegClassType, RegPort,
-};
+use tir::backend::{RegAssignment, RegClassType, RegPort};
 use tir::{Context, NewOp, Operation};
 
-use super::fixtures::r;
+use super::fixtures::{machine_op, r};
 
 fn phys(index: u16) -> AttributeValue {
     AttributeValue::Register(RegisterAttr::Physical { class: r(), index })
@@ -19,15 +17,6 @@ fn phys(index: u16) -> AttributeValue {
 
 // The instruction the encoder is exercised on: a register slot `rd` it writes,
 // a register slot `rs` it reads, and an immediate.
-tir::helpers::operation! {
-    TestInstOp {
-        name: "inst",
-        dialect: "test",
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
-}
-
 static PORTS: [RegPort; 2] = [
     RegPort {
         name: "rd",
@@ -43,22 +32,7 @@ static PORTS: [RegPort; 2] = [
     },
 ];
 
-impl MachineInstruction for TestInstOp {
-    fn info(&self) -> &'static InstrInfo {
-        static INFO: InstrInfo = InstrInfo {
-            name: "inst",
-            mnemonic: "inst",
-            control_flow: ControlFlow::None,
-            regs: &PORTS,
-            ..InstrInfo::BASE
-        };
-        &INFO
-    }
-
-    fn instance(&self) -> &tir::OpHandle {
-        &self.0
-    }
-}
+machine_op!(TestInstOp, "test", "inst", &PORTS, &[]);
 
 /// The op with its `rd` slot naming a physical register directly.
 fn op_with(attrs: Vec<(&str, AttributeValue)>) -> (Context, tir::OpHandle) {
