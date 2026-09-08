@@ -422,153 +422,70 @@ fn render_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
     writeln!(out, "{:indent$}{label}", "", indent = depth * 2).unwrap();
 }
 
-/// Label for the kinds that carry an [`AstLeaf`]; the rest are named by their kind.
+/// Label for the nodes that carry an [`AstLeaf`]; the rest are named by their
+/// kind. A leaf names one kind, except the three shared by two kinds, which
+/// take their name from the node.
 fn payload_label(ast: &Ast, id: NodeId) -> Option<String> {
-    declaration_label(ast, id).or_else(|| expression_label(ast, id))
-}
-
-fn declaration_label(ast: &Ast, id: NodeId) -> Option<String> {
-    let label = match ast.get_node(id).kind {
-        AstKind::RecordDecl => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Record { kind, name, .. }) => {
-                let kind = match kind {
-                    RecordKind::Struct => "Struct",
-                    RecordKind::Union => "Union",
-                };
-                match name {
-                    Some(name) => format!("{kind} {name:?}"),
-                    None => kind.to_string(),
-                }
+    let kind = ast.get_node(id).kind;
+    let label = match ast.get_leaf_data(id)? {
+        AstLeaf::Record {
+            kind: record, name, ..
+        } => {
+            let record = match record {
+                RecordKind::Struct => "Struct",
+                RecordKind::Union => "Union",
+            };
+            match name {
+                Some(name) => format!("{record} {name:?}"),
+                None => record.to_string(),
             }
-            _ => unreachable!(),
-        },
-        AstKind::EnumDecl => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Enum { name }) => format!("EnumDecl {name:?}"),
-            _ => unreachable!(),
-        },
-        AstKind::Enumerator => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Enumerator { name }) => format!("Enumerator {name:?}"),
-            _ => unreachable!(),
-        },
-        AstKind::Typedef => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Typedef { name, ty }) => {
-                format!("Typedef {name:?}: {}", render_ctype(ty))
-            }
-            _ => unreachable!(),
-        },
-        AstKind::Global => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Global {
-                name,
-                ty,
-                is_extern,
-            }) => {
-                format!("Global {name:?} extern={is_extern}: {}", render_ctype(ty))
-            }
-            _ => unreachable!(),
-        },
-        AstKind::Field => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Field { name, ty }) if name.is_empty() => {
-                format!("Field _: {}", render_ctype(ty))
-            }
-            Some(AstLeaf::Field { name, ty }) => {
-                format!("Field {name:?}: {}", render_ctype(ty))
-            }
-            _ => unreachable!(),
-        },
-        AstKind::Attribute => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Attribute(value)) => format!("Attribute {value:?}"),
-            _ => unreachable!(),
-        },
-        AstKind::Prototype => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Function { name, ret, .. }) => {
-                format!("Prototype {name:?} -> {}", render_ctype(ret))
-            }
-            _ => unreachable!(),
-        },
-        AstKind::Function => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Function { name, ret, .. }) => {
-                format!("Function {name:?} -> {}", render_ctype(ret))
-            }
-            _ => unreachable!(),
-        },
-        AstKind::Param => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Param { name, ty }) if name.is_empty() => {
-                format!("Param _: {}", render_ctype(ty))
-            }
-            Some(AstLeaf::Param { name, ty }) => format!("Param {name:?}: {}", render_ctype(ty)),
-            _ => unreachable!(),
-        },
-        AstKind::Decl => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Decl { name, ty }) => format!("Decl {name:?}: {}", render_ctype(ty)),
-            _ => unreachable!(),
-        },
-        _ => return None,
+        }
+        AstLeaf::Enum { name } => format!("EnumDecl {name:?}"),
+        AstLeaf::Enumerator { name } => format!("Enumerator {name:?}"),
+        AstLeaf::Typedef { name, ty } => format!("Typedef {name:?}: {}", render_ctype(ty)),
+        AstLeaf::Global {
+            name,
+            ty,
+            is_extern,
+        } => format!("Global {name:?} extern={is_extern}: {}", render_ctype(ty)),
+        AstLeaf::Field { name, ty } => {
+            format!("Field {}: {}", declarator_name(name), render_ctype(ty))
+        }
+        AstLeaf::Attribute(value) => format!("Attribute {value:?}"),
+        AstLeaf::Function { name, ret, .. } => {
+            format!("{kind:?} {name:?} -> {}", render_ctype(ret))
+        }
+        AstLeaf::Param { name, ty } => {
+            format!("Param {}: {}", declarator_name(name), render_ctype(ty))
+        }
+        AstLeaf::Decl { name, ty } => format!("Decl {name:?}: {}", render_ctype(ty)),
+        AstLeaf::DesignatedInitializer(InitializerDesignator::Field(name)) => {
+            format!("FieldDesignator {name:?}")
+        }
+        AstLeaf::DesignatedInitializer(InitializerDesignator::Index) => {
+            "IndexDesignator".to_string()
+        }
+        AstLeaf::Assign(name) => format!("Assign {name:?}"),
+        AstLeaf::Label(name) => format!("{kind:?} {name:?}"),
+        AstLeaf::Type(ty) => format!("{kind:?} {}", render_ctype(ty)),
+        AstLeaf::Call(name) => format!("Call {name:?}"),
+        AstLeaf::Member { name, indirect } => {
+            format!("Member {}{name}", if *indirect { "->" } else { "." })
+        }
+        AstLeaf::Var(name) => format!("Var {name:?}"),
+        AstLeaf::String(value) => format!("String {value:?}"),
+        AstLeaf::Int(value) => format!("Int {}", value.spelling),
+        AstLeaf::Float(value) => format!("Float {}", value.spelling),
+        AstLeaf::Character(value) => format!("Character {value}"),
     };
     Some(label)
 }
 
-fn expression_label(ast: &Ast, id: NodeId) -> Option<String> {
-    let label = match ast.get_node(id).kind {
-        AstKind::DesignatedInitializer => match ast.get_leaf_data(id) {
-            Some(AstLeaf::DesignatedInitializer(InitializerDesignator::Field(name))) => {
-                format!("FieldDesignator {name:?}")
-            }
-            Some(AstLeaf::DesignatedInitializer(InitializerDesignator::Index)) => {
-                "IndexDesignator".to_string()
-            }
-            _ => unreachable!(),
-        },
-        AstKind::Assign => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Assign(name)) => format!("Assign {name:?}"),
-            _ => unreachable!(),
-        },
-        AstKind::Goto => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Label(name)) => format!("Goto {name:?}"),
-            _ => unreachable!(),
-        },
-        AstKind::Label => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Label(name)) => format!("Label {name:?}"),
-            _ => unreachable!(),
-        },
-        AstKind::Cast => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Type(ty)) => format!("Cast {}", render_ctype(ty)),
-            _ => unreachable!(),
-        },
-        AstKind::SizeofType => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Type(ty)) => format!("SizeofType {}", render_ctype(ty)),
-            _ => unreachable!(),
-        },
-        AstKind::Call => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Call(name)) => format!("Call {name:?}"),
-            _ => unreachable!(),
-        },
-        AstKind::Member => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Member { name, indirect }) => {
-                format!("Member {}{name}", if *indirect { "->" } else { "." })
-            }
-            _ => unreachable!(),
-        },
-        AstKind::Var => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Var(name)) => format!("Var {name:?}"),
-            _ => unreachable!(),
-        },
-        AstKind::String => match ast.get_leaf_data(id) {
-            Some(AstLeaf::String(value)) => format!("String {value:?}"),
-            _ => unreachable!(),
-        },
-        AstKind::Int => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Int(value)) => format!("Int {}", value.spelling),
-            _ => unreachable!(),
-        },
-        AstKind::FloatLiteral => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Float(value)) => format!("Float {}", value.spelling),
-            _ => unreachable!(),
-        },
-        AstKind::Character => match ast.get_leaf_data(id) {
-            Some(AstLeaf::Character(value)) => format!("Character {value}"),
-            _ => unreachable!(),
-        },
-        _ => return None,
-    };
-    Some(label)
+/// An unnamed field or parameter renders as `_`.
+fn declarator_name(name: &str) -> String {
+    if name.is_empty() {
+        "_".to_string()
+    } else {
+        format!("{name:?}")
+    }
 }
