@@ -11,16 +11,21 @@ fn cache(size: u64, ways: u32, line: u64, latency: u64) -> CacheParams {
     }
 }
 
-/// A two-level system: 1 KiB/2-way/lat 2 L1D over a 4 KiB/lat 10 "L2", DRAM 100.
-fn small() -> MemorySystem {
+/// A two-level system with `l1d` mirrored into L1I, no L3 and DRAM 100.
+fn system(l1d: CacheParams, l2: CacheParams) -> MemorySystem {
     MemorySystem::new(MemParams {
-        l1i: cache(1024, 2, 64, 2),
-        l1d: cache(1024, 2, 64, 2),
-        l2: Some(cache(4096, 4, 64, 10)),
+        l1i: l1d,
+        l1d,
+        l2: Some(l2),
         l3: None,
         dram_latency: 100,
         dram_streams: 8,
     })
+}
+
+/// 1 KiB/2-way/lat 2 L1D over a 4 KiB/lat 10 "L2".
+fn small() -> MemorySystem {
+    system(cache(1024, 2, 64, 2), cache(4096, 4, 64, 10))
 }
 
 #[test]
@@ -73,14 +78,8 @@ fn mshr_merges_same_line() {
     // whose tag was evicted: a re-access merges onto the outstanding fill
     // rather than issuing a new DRAM request. A direct-mapped tiny L1D makes
     // the eviction deterministic.
-    let mut m = MemorySystem::new(MemParams {
-        l1i: cache(128, 1, 64, 2),
-        l1d: cache(128, 1, 64, 2), // 2 sets, direct-mapped
-        l2: Some(cache(1 << 20, 8, 64, 10)),
-        l3: None,
-        dram_latency: 100,
-        dram_streams: 8,
-    });
+    // 2 sets, direct-mapped.
+    let mut m = system(cache(128, 1, 64, 2), cache(1 << 20, 8, 64, 10));
     let a = m.access_data(0, 0, false, 0); // line 0 -> set 0, fills, tracked
     m.access_data(0, 128, false, 0); // line 2 -> set 0, evicts line 0
     assert_eq!(m.stats().dram_accesses, 2);
@@ -99,17 +98,13 @@ fn mshr_merges_same_line() {
 fn mshr_full_stalls() {
     // One MSHR at L1D: a second in-flight miss to a different line must wait
     // for the first to complete before it can even start.
-    let mut m = MemorySystem::new(MemParams {
-        l1i: cache(1024, 2, 64, 2),
-        l1d: CacheParams {
+    let mut m = system(
+        CacheParams {
             mshrs: 1,
             ..cache(1024, 2, 64, 2)
         },
-        l2: Some(cache(1 << 20, 8, 64, 10)),
-        l3: None,
-        dram_latency: 100,
-        dram_streams: 8,
-    });
+        cache(1 << 20, 8, 64, 10),
+    );
     let first = m.access_data(0, 0x0000, false, 0);
     // Different line, same cycle: the single MSHR is busy until `first`.
     let second = m.access_data(0, 0x4000, false, 0);
@@ -127,14 +122,7 @@ fn bank_conflict_serializes() {
         banks: 2,
         ..cache(1 << 20, 8, 64, 3)
     };
-    let mut m = MemorySystem::new(MemParams {
-        l1i: params,
-        l1d: params,
-        l2: Some(cache(1 << 20, 8, 64, 10)),
-        l3: None,
-        dram_latency: 100,
-        dram_streams: 8,
-    });
+    let mut m = system(params, cache(1 << 20, 8, 64, 10));
     // Warm the lines so accesses are L1 hits (isolating the bank effect).
     m.access_data(0, 0, false, 0);
     m.access_data(0, 64, false, 0);
@@ -248,16 +236,7 @@ fn stride_prefetch_learns_and_helps() {
     // A big cache isolates the prefetcher from conflict eviction. One PC
     // striding by 256 B (four lines) reaches steady state and prefetches
     // ahead; later demands hit those lines.
-    let big = || {
-        MemorySystem::new(MemParams {
-            l1i: cache(1 << 16, 4, 64, 2),
-            l1d: cache(1 << 16, 4, 64, 2),
-            l2: Some(cache(1 << 20, 8, 64, 10)),
-            l3: None,
-            dram_latency: 100,
-            dram_streams: 8,
-        })
-    };
+    let big = || system(cache(1 << 16, 4, 64, 2), cache(1 << 20, 8, 64, 10));
     let mut m = big();
     m.set_prefetcher(Box::new(StrideRpt::new(64)));
     for i in 0..12u64 {
@@ -288,17 +267,13 @@ fn late_prefetch_rides_the_fill() {
         banks: 4,
         ..cache(1024, 2, 64, 2)
     };
-    let mut m = MemorySystem::new(MemParams {
-        l1i: banked,
-        l1d: banked,
-        l2: Some(CacheParams {
+    let mut m = system(
+        banked,
+        CacheParams {
             banks: 4,
             ..cache(4096, 4, 64, 10)
-        }),
-        l3: None,
-        dram_latency: 100,
-        dram_streams: 8,
-    });
+        },
+    );
     m.set_prefetcher(Box::new(NextLine::new(64)));
     // Cold miss on line 0 issues a prefetch of line 1.
     m.access_data(0x400, 0, false, 0);
@@ -353,17 +328,13 @@ fn prefetch_dropped_when_mshrs_full() {
     use tir_sim::prefetch::NextLine;
     // A single L1D MSHR is held by the in-flight demand miss, so the
     // prefetch finds the table full and is dropped rather than stalling.
-    let mut m = MemorySystem::new(MemParams {
-        l1i: cache(1024, 2, 64, 2),
-        l1d: CacheParams {
+    let mut m = system(
+        CacheParams {
             mshrs: 1,
             ..cache(1024, 2, 64, 2)
         },
-        l2: Some(cache(1 << 20, 8, 64, 10)),
-        l3: None,
-        dram_latency: 100,
-        dram_streams: 8,
-    });
+        cache(1 << 20, 8, 64, 10),
+    );
     m.set_prefetcher(Box::new(NextLine::new(64)));
     let demand = m.access_data(0x400, 0, false, 0);
     assert_eq!(

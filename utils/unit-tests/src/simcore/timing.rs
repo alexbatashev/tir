@@ -2,11 +2,12 @@ use tir::backend::sched::MachineModel;
 use tir::backend::AsmDialect;
 use tir::backend::MachineInstruction;
 use tir_riscv::RiscvDialect;
+use tir_sim::predictor::AlwaysNotTaken;
 use tir_sim::predictor::BranchPredictor;
 use tir_sim::timing::*;
-use tir_sim::{Executor, ProgramImage, TraceOptions};
+use tir_sim::{Executor, TraceOptions};
 
-use tir_sim::predictor::AlwaysNotTaken;
+use super::support::{riscv_program, run_sim};
 
 /// Control flow is derived from the behavior's `PC::pc` writes at
 /// TMDL-compile time: a guarded write is a conditional branch, an
@@ -83,15 +84,10 @@ fn control_flow_derived_from_pc_writes() {
     assert_eq!(cf(&bl), ControlFlow::Unconditional);
 }
 
-/// Run `asm` functionally, recording the dynamic trace, then time it.
-fn time_asm(asm: &str, model: &MachineModel, config: &TimingConfig) -> TimingResult {
-    let context = tir::Context::with_default_dialects();
-    context.register_dialect::<AsmDialect>();
-    context.register_dialect::<RiscvDialect>();
-    let dialect = context.find_dialect::<RiscvDialect>().unwrap();
-    let module = dialect.get_asm_parser().parse_asm(&context, asm).unwrap();
-    let program = ProgramImage::from_module(&context, module, 0x8000_0000, Some("first"))
-        .expect("program builder");
+/// Run `asm` functionally from `first` to the `done` sentinel, recording the
+/// dynamic trace.
+fn record_trace(context: &tir::Context, asm: &str) -> Executor {
+    let program = riscv_program(context, asm, "first");
     let until_pc = *program.symbols.get("done").unwrap();
 
     let mut exec = Executor::new(4096);
@@ -104,18 +100,14 @@ fn time_asm(asm: &str, model: &MachineModel, config: &TimingConfig) -> TimingRes
         &mut std::io::sink(),
     )
     .unwrap();
+    exec
+}
 
-    simulate(
-        model,
-        &context,
-        exec.trace(),
-        config,
-        &mut AlwaysNotTaken,
-        None,
-        None,
-        None,
-        None,
-    )
+/// Run `asm` functionally, recording the dynamic trace, then time it.
+fn time_asm(asm: &str, model: &MachineModel, config: &TimingConfig) -> TimingResult {
+    let context = tir::Context::with_default_dialects();
+    let exec = record_trace(&context, asm);
+    run_sim(model, &context, exec.trace(), config, &mut AlwaysNotTaken)
 }
 
 /// Five independent ALU ops: an out-of-order core overlaps them (wide issue),
@@ -161,76 +153,6 @@ fn ooo_overlaps_independent_work() {
     assert!(oo.ipc() > io.ipc());
 }
 
-/// The predictor changes the cycle count: a *taken backward* branch (loop
-/// back-edge) is mispredicted by always-not-taken (paying the refetch penalty)
-/// but predicted correctly by BTFN. We parse a real branch op for its registers
-/// and width, then drive a synthetic `(op, pc)` trace whose addresses describe
-/// the back-edge — independent of the functional executor's branch handling.
-#[test]
-fn predictor_changes_mispredicts_on_backward_branch() {
-    use tir::OpId;
-    use tir_sim::predictor::BackwardTaken;
-
-    let context = tir::Context::with_default_dialects();
-    context.register_dialect::<AsmDialect>();
-    context.register_dialect::<RiscvDialect>();
-    let dialect = context.find_dialect::<RiscvDialect>().unwrap();
-    let asm = "
-        .global blk
-        blk:
-          beq a0, a0, 0
-          add a1, a2, a3
-    ";
-    let module = dialect.get_asm_parser().parse_asm(&context, asm).unwrap();
-    let program = ProgramImage::from_module(&context, module, 0x8000_0000, Some("blk")).unwrap();
-    let ops: Vec<OpId> = program
-        .blocks
-        .iter()
-        .flat_map(|b| b.instructions.iter().copied())
-        .collect();
-    assert_eq!(ops.len(), 2);
-
-    // Branch at 0x100 whose successor executes at 0x080: a taken back-edge.
-    let trace = vec![(ops[0], 0x100u64), (ops[1], 0x080u64)];
-    let model = tir_riscv::out_of_order_core_model();
-    let config = TimingConfig::for_model(&model);
-
-    let ant = simulate(
-        &model,
-        &context,
-        &trace,
-        &config,
-        &mut AlwaysNotTaken,
-        None,
-        None,
-        None,
-        None,
-    );
-    let btfn = simulate(
-        &model,
-        &context,
-        &trace,
-        &config,
-        &mut BackwardTaken,
-        None,
-        None,
-        None,
-        None,
-    );
-
-    assert_eq!(
-        ant.mispredicts, 1,
-        "not-taken mispredicts the taken back-edge"
-    );
-    assert_eq!(btfn.mispredicts, 0, "btfn predicts the back-edge taken");
-    assert!(
-        ant.cycles > btfn.cycles,
-        "misprediction penalty should cost cycles: ant {} vs btfn {}",
-        ant.cycles,
-        btfn.cycles
-    );
-}
-
 /// End-to-end: a real backward-branch loop runs functionally (3 iterations),
 /// and the recorded trace shows the loop predictor's advantage — always-not-taken
 /// mispredicts every taken back-edge, BTFN only the loop exit.
@@ -260,23 +182,7 @@ fn loop_branch_prediction_end_to_end() {
           addi a0, zero, 3
     ";
     let context = tir::Context::with_default_dialects();
-    context.register_dialect::<AsmDialect>();
-    context.register_dialect::<RiscvDialect>();
-    let dialect = context.find_dialect::<RiscvDialect>().unwrap();
-    let module = dialect.get_asm_parser().parse_asm(&context, asm).unwrap();
-    let program = ProgramImage::from_module(&context, module, 0x8000_0000, Some("first")).unwrap();
-    let until_pc = *program.symbols.get("done").unwrap();
-
-    let mut exec = Executor::new(4096);
-    exec.enable_trace_recording();
-    exec.load(program).unwrap();
-    exec.run_with_trace(
-        until_pc,
-        10_000,
-        TraceOptions::default(),
-        &mut std::io::sink(),
-    )
-    .unwrap();
+    let exec = record_trace(&context, asm);
 
     // The loop ran to completion: counter 3 → 0.
     assert_eq!(
@@ -289,28 +195,8 @@ fn loop_branch_prediction_end_to_end() {
 
     let model = tir_riscv::out_of_order_core_model();
     let config = TimingConfig::for_model(&model);
-    let ant = simulate(
-        &model,
-        &context,
-        &trace,
-        &config,
-        &mut AlwaysNotTaken,
-        None,
-        None,
-        None,
-        None,
-    );
-    let btfn = simulate(
-        &model,
-        &context,
-        &trace,
-        &config,
-        &mut BackwardTaken,
-        None,
-        None,
-        None,
-        None,
-    );
+    let ant = run_sim(&model, &context, &trace, &config, &mut AlwaysNotTaken);
+    let btfn = run_sim(&model, &context, &trace, &config, &mut BackwardTaken);
 
     assert_eq!(
         ant.mispredicts, 2,
@@ -357,24 +243,18 @@ fn tage_and_batage_learn_periodic_branch() {
     use tir_sim::predictor::{Batage, Tage, TageParams};
 
     let context = tir::Context::with_default_dialects();
-    context.register_dialect::<AsmDialect>();
-    context.register_dialect::<RiscvDialect>();
-    let dialect = context.find_dialect::<RiscvDialect>().unwrap();
     // A conditional branch op and a non-branch filler op, taken verbatim
     // from the parser so their scheduling class and width are real.
-    let module = dialect
-        .get_asm_parser()
-        .parse_asm(
-            &context,
-            "
+    let program = riscv_program(
+        &context,
+        "
             .global blk
             blk:
               beq a0, a0, 0
               add a1, a2, a3
-            ",
-        )
-        .unwrap();
-    let program = ProgramImage::from_module(&context, module, 0x8000_0000, Some("blk")).unwrap();
+        ",
+        "blk",
+    );
     let ops: Vec<OpId> = program
         .blocks
         .iter()
@@ -396,9 +276,8 @@ fn tage_and_batage_learn_periodic_branch() {
 
     let model = tir_riscv::out_of_order_core_model();
     let config = TimingConfig::for_model(&model);
-    let run = |p: &mut dyn BranchPredictor| {
-        simulate(&model, &context, &trace, &config, p, None, None, None, None).mispredicts
-    };
+    let run =
+        |p: &mut dyn BranchPredictor| run_sim(&model, &context, &trace, &config, p).mispredicts;
 
     let params = TageParams {
         num_tables: 6,

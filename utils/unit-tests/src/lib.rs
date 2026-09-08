@@ -89,6 +89,7 @@ mod simcore {
     mod predictor;
     mod prefetch;
     mod scoreboard;
+    mod support;
     mod timing;
 }
 
