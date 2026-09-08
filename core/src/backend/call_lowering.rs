@@ -10,8 +10,8 @@ use tir::func::{CallOp, ReturnOp};
 use tir::{Context, OpId, Operand, Operation, OperationRef, PassError, Rewriter, ValueId};
 
 use crate::backend::abi::{
-    AbiInfo, ArgumentGroup, ArgumentMember, ArgumentSlot, Overflow, ValueKind, next_return_register,
-    place_arguments, type_kind, value_kind,
+    AbiInfo, ArgumentGroup, ArgumentMember, ArgumentSlot, ValueKind, argument_sequences,
+    next_return_register, place_arguments, type_kind, value_kind,
 };
 use crate::backend::liveness::PhysReg;
 use crate::backend::regalloc::RegClassId;
@@ -722,27 +722,10 @@ impl ArgumentLocation {
     }
 }
 
-fn stack_class(abi: &AbiInfo, mut kind: ValueKind) -> Option<crate::backend::regalloc::RegClassId> {
-    let mut visited = HashSet::new();
-    let mut value_class = None;
-    loop {
-        if !visited.insert(kind) {
-            return None;
-        }
-        let sequence = match abi.args.iter().find(|sequence| sequence.kind == kind) {
-            Some(sequence) => sequence,
-            None if kind != ValueKind::Int => {
-                kind = ValueKind::Int;
-                continue;
-            }
-            None => return None,
-        };
-        value_class.get_or_insert(sequence.regs.first()?.0);
-        match sequence.overflow {
-            Overflow::Chain(next) => kind = next,
-            Overflow::Stack => return value_class,
-        }
-    }
+fn stack_class(abi: &AbiInfo, kind: ValueKind) -> Option<crate::backend::regalloc::RegClassId> {
+    argument_sequences(abi, kind)
+        .find_map(|sequence| sequence.regs.first())
+        .map(|register| register.0)
 }
 
 /// A fresh value of `class`, the type a machine instruction reads it through.

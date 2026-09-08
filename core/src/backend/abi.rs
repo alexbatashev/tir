@@ -305,26 +305,46 @@ pub(crate) fn reserve_indirect_result_argument(
     *next = (*next).max(slot);
 }
 
+/// The argument sequences a value of `kind` may draw from, in overflow order:
+/// the sequence for its own kind — the integer one where the ABI does not
+/// sequence that kind — followed by every sequence that one chains to.
+pub(crate) fn argument_sequences(
+    abi: &AbiInfo,
+    kind: ValueKind,
+) -> impl Iterator<Item = &'static PassSeq> {
+    let mut next = Some(kind);
+    let mut visited = HashSet::new();
+    let args = abi.args;
+    std::iter::from_fn(move || {
+        loop {
+            let kind = next?;
+            if !visited.insert(kind) {
+                return None;
+            }
+            let sequence = match args.iter().find(|sequence| sequence.kind == kind) {
+                Some(sequence) => sequence,
+                None if kind != ValueKind::Int => {
+                    next = Some(ValueKind::Int);
+                    continue;
+                }
+                None => return None,
+            };
+            next = match sequence.overflow {
+                Overflow::Chain(chained) => Some(chained),
+                Overflow::Stack => None,
+            };
+            return Some(sequence);
+        }
+    })
+}
+
 pub(crate) fn exhaust_argument_registers(
     abi: &AbiInfo,
-    mut kind: ValueKind,
+    kind: ValueKind,
     next_slot: &mut HashMap<ValueKind, usize>,
 ) {
-    let mut visited = HashSet::new();
-    while visited.insert(kind) {
-        let sequence = match abi.args.iter().find(|sequence| sequence.kind == kind) {
-            Some(sequence) => sequence,
-            None if kind != ValueKind::Int => {
-                kind = ValueKind::Int;
-                continue;
-            }
-            None => return,
-        };
-        next_slot.insert(kind, sequence.regs.len());
-        match sequence.overflow {
-            Overflow::Chain(next) => kind = next,
-            Overflow::Stack => return,
-        }
+    for sequence in argument_sequences(abi, kind) {
+        next_slot.insert(sequence.kind, sequence.regs.len());
     }
 }
 
@@ -335,26 +355,13 @@ pub(crate) fn exhaust_argument_registers(
 pub(crate) fn next_argument_register(
     abi: &AbiInfo,
     class: Option<crate::backend::regalloc::RegClassId>,
-    mut kind: ValueKind,
+    kind: ValueKind,
     next_slot: &mut HashMap<ValueKind, usize>,
 ) -> Option<crate::backend::liveness::PhysReg> {
-    let mut visited = HashSet::new();
-    loop {
-        if !visited.insert(kind) {
-            return None;
-        }
-        let sequence = match abi.args.iter().find(|sequence| sequence.kind == kind) {
-            Some(sequence) => sequence,
-            None if kind != ValueKind::Int => {
-                kind = ValueKind::Int;
-                continue;
-            }
-            None => return None,
-        };
-        let slot = next_slot.entry(kind).or_insert(0);
-        let same_file = |class: crate::backend::regalloc::RegClassId, register: PhysReg| {
-            register.0.file() == class.file()
-        };
+    let same_file =
+        |class: crate::backend::regalloc::RegClassId, register: PhysReg| register.0.file() == class.file();
+    for sequence in argument_sequences(abi, kind) {
+        let slot = next_slot.entry(sequence.kind).or_insert(0);
         let register = match class {
             Some(class)
                 if class.group_width > 1
@@ -377,11 +384,8 @@ pub(crate) fn next_argument_register(
                 _ => register,
             });
         }
-        match sequence.overflow {
-            Overflow::Chain(next) => kind = next,
-            Overflow::Stack => return None,
-        }
     }
+    None
 }
 
 /// The next return register for a value of `kind`, falling back to the
