@@ -137,8 +137,7 @@ impl CondBranchOp {
     /// The values forwarded to the true successor's block arguments, the
     /// dependencies among them last.
     pub fn true_args(&self) -> Vec<ValueId> {
-        let (start, end) = self.true_range();
-        let mut args = self.value_operands()[start..end].to_vec();
+        let mut args = self.value_operands()[self.args_range(1)].to_vec();
         args.extend(&self.dep_operands()[..self.true_deps()]);
         args
     }
@@ -146,8 +145,7 @@ impl CondBranchOp {
     /// The values forwarded to the false successor's block arguments, the
     /// dependencies among them last.
     pub fn false_args(&self) -> Vec<ValueId> {
-        let (start, end) = self.false_range();
-        let mut args = self.value_operands()[start..end].to_vec();
+        let mut args = self.value_operands()[self.args_range(2)].to_vec();
         args.extend(&self.dep_operands()[self.true_deps()..]);
         args
     }
@@ -159,20 +157,10 @@ impl CondBranchOp {
         context.get_block(self.true_dest()).dep_arguments().len()
     }
 
-    // Value operand layout is [condition, true_args.., false_args..]; the
-    // segment sizes [1, t, f] recovered from the op tell where each successor's
-    // args sit.
-    fn true_range(&self) -> (usize, usize) {
-        let segs = operand_segments(self);
-        let t = segs.get(1).copied().unwrap_or(0);
-        (1, 1 + t)
-    }
-
-    fn false_range(&self) -> (usize, usize) {
-        let segs = operand_segments(self);
-        let t = segs.get(1).copied().unwrap_or(0);
-        let f = segs.get(2).copied().unwrap_or(0);
-        (1 + t, 1 + t + f)
+    // Value operand layout is [condition, true_args.., false_args..], one
+    // declared operand group each.
+    fn args_range(&self, group: usize) -> std::ops::Range<usize> {
+        tir::binding::operand_segments(&self.0, 3)[group].clone()
     }
 
     fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
@@ -213,24 +201,6 @@ fn block_attr(op: &impl Operation, name: &str) -> BlockId {
         Some(AttributeValue::Block(id)) => id,
         _ => panic!("{name} must be a block reference"),
     }
-}
-
-fn operand_segments(op: &impl Operation) -> Vec<usize> {
-    op.attr("operand_segment_sizes")
-        .and_then(|value| match value {
-            AttributeValue::Array(items) => Some(items),
-            _ => None,
-        })
-        .map(|items| {
-            items
-                .iter()
-                .map(|v| match v {
-                    AttributeValue::UInt(n) => *n as usize,
-                    _ => 0,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// Print a successor as `^bbN` followed by an optional MLIR-style argument list
