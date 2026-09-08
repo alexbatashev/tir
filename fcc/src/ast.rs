@@ -50,7 +50,6 @@ pub enum CType {
     Float,
     Double,
     LongDouble,
-    Builtin(String),
     Named(String),
     Record(RecordKind, RecordId, Option<String>),
     Enum(Option<String>),
@@ -359,7 +358,6 @@ fn render_leaf_ctype(ty: &CType) -> String {
         CType::Float => "Float".to_string(),
         CType::Double => "Double".to_string(),
         CType::LongDouble => "LongDouble".to_string(),
-        CType::Builtin(name) => format!("Builtin({name})"),
         CType::Named(name) => format!("Named({name})"),
         CType::Record(kind, _, name) => {
             let kind = match kind {
