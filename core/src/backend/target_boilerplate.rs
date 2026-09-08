@@ -3,7 +3,92 @@
 //! Every backend implements [`TargetMachine`](crate::backend::TargetMachine)
 //! the same way: forward to the functions rustgen emits under fixed names, and
 //! answer a handful of questions only the target can answer. The macro here
-//! writes the forwarding half so a backend states only its deltas.
+//! writes the forwarding half so a backend states only its deltas, and the
+//! functions beside it are the target-selection and lowering steps every
+//! backend spells identically.
+
+/// The spelling ISA strings and feature names are compared in: trimmed,
+/// lowercased, with `_` folded to `-` so `zicsr`, `Zicsr` and `zi_csr` name one
+/// feature.
+pub fn normalize_name(name: &str) -> String {
+    name.trim().to_ascii_lowercase().replace('_', "-")
+}
+
+/// Apply an LLVM-style `--mattr` list (`+feat`/`-feat`, comma-separated) on top
+/// of the march-derived feature set.
+///
+/// `lookup` resolves one spelling to every feature it toggles — a single name
+/// may stand for several (RISC-V `m` implies `Zmmul`) — and `arch` names the
+/// target in the diagnostics.
+pub fn apply_mattr<F: Copy + PartialEq>(
+    features: &mut Vec<F>,
+    mattr: &str,
+    arch: &str,
+    lookup: impl Fn(&str) -> Option<Vec<F>>,
+) -> Result<(), String> {
+    for item in mattr.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (add, name) = if let Some(name) = item.strip_prefix('+') {
+            (true, name)
+        } else if let Some(name) = item.strip_prefix('-') {
+            (false, name)
+        } else {
+            return Err(format!(
+                "invalid --mattr entry '{item}' (expected '+feature' or '-feature')"
+            ));
+        };
+        let toggled =
+            lookup(name).ok_or_else(|| format!("unknown {arch} feature '{name}' in --mattr"))?;
+        for feature in toggled {
+            if add && !features.contains(&feature) {
+                features.push(feature);
+            } else if !add {
+                features.retain(|f| *f != feature);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Define a backend's ABI table: the rustgen-emitted `abis()` with `customize`
+/// applied to each entry, memoized, plus a case-insensitive lookup by name.
+///
+/// The table is a `static` so the entries can be handed out as `'static`, which
+/// a generic function cannot do — its statics are shared across every backend
+/// that instantiates it.
+#[macro_export]
+macro_rules! target_abis {
+    ($table:ident, $by_name:ident, |$abi:ident| $customize:expr) => {
+        fn $table() -> &'static [$crate::backend::abi::AbiInfo] {
+            static ABIS: std::sync::OnceLock<Vec<$crate::backend::abi::AbiInfo>> =
+                std::sync::OnceLock::new();
+            ABIS.get_or_init(|| abis().iter().map(|$abi| $customize).collect())
+        }
+
+        fn $by_name(name: &str) -> Option<&'static $crate::backend::abi::AbiInfo> {
+            $table()
+                .iter()
+                .find(|abi| abi.name.eq_ignore_ascii_case(name))
+        }
+    };
+}
+
+/// The block a branch op targets through its `name` attribute.
+pub fn block_attr(op: &dyn tir::Operation, name: &str) -> Result<tir::BlockId, tir::PassError> {
+    match op.attr(name) {
+        Some(tir::attributes::AttributeValue::Block(block)) => Some(block),
+        _ => None,
+    }
+    .ok_or_else(|| tir::PassError::InvalidRuleSet(format!("branch is missing its '{name}' target")))
+}
+
+/// The string an op carries in its `name` attribute (a call's callee symbol).
+pub fn string_attr(op: &dyn tir::Operation, name: &str) -> Result<String, tir::PassError> {
+    match op.attr(name) {
+        Some(tir::attributes::AttributeValue::Str(s)) => Some(s.to_string()),
+        _ => None,
+    }
+    .ok_or_else(|| tir::PassError::InvalidRuleSet(format!("call is missing its '{name}'")))
+}
 
 /// Implement [`TargetMachine`](crate::backend::TargetMachine) for a target
 /// struct holding a `config` and a `selected_abi` field.

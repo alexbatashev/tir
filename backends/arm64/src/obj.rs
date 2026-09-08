@@ -5,11 +5,14 @@
 use tir::Operation;
 use tir::attributes::AttributeValue;
 use tir::backend::binary::{EM_AARCH64, ElfClass, ObjectFormatInfo, RelocKind};
-use tir::backend::{VirtualBranchOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp};
+use tir::backend::{
+    VirtualBranchOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp, block_attr, phys_attr,
+    string_attr,
+};
 
 use crate::{
     AddressPCRelOpBuilder, BranchImmediateOpBuilder, BranchLinkOpBuilder, BranchLinkRegOpBuilder,
-    ReturnOpBuilder, phys,
+    ReturnOpBuilder,
 };
 
 const R_AARCH64_ADR_PREL_LO21: u32 = 274;
@@ -87,14 +90,6 @@ pub(crate) fn lower_symbol_address(
     Ok(true)
 }
 
-fn block_attr(op: &dyn tir::Operation, name: &str) -> Result<tir::BlockId, tir::PassError> {
-    match op.attr(name) {
-        Some(AttributeValue::Block(block)) => Some(block),
-        _ => None,
-    }
-    .ok_or_else(|| tir::PassError::InvalidRuleSet(format!("branch is missing its '{name}' target")))
-}
-
 /// Post-RA: `vret` becomes `ret x30`; `vbr` becomes `b dest`.
 pub(crate) fn finalize_virtual_ops(
     context: &tir::Context,
@@ -103,7 +98,7 @@ pub(crate) fn finalize_virtual_ops(
 ) -> Result<bool, tir::PassError> {
     if op.as_op::<VirtualReturnOp>().is_some() {
         let ret = ReturnOpBuilder::new(context)
-            .attr("rn", phys(&(crate::RegClass::GPR.id(), 30)))
+            .attr("rn", phys_attr((crate::RegClass::GPR.id(), 30)))
             .build();
         rewriter.replace_op(op, &ret)?;
         return Ok(true);
@@ -149,12 +144,4 @@ pub(crate) fn finalize_virtual_ops(
     }
 
     Ok(false)
-}
-
-fn string_attr(op: &dyn tir::Operation, name: &str) -> Result<String, tir::PassError> {
-    match op.attr(name) {
-        Some(AttributeValue::Str(s)) => Some(s.to_string()),
-        _ => None,
-    }
-    .ok_or_else(|| tir::PassError::InvalidRuleSet(format!("call is missing its '{name}'")))
 }

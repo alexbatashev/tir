@@ -23,8 +23,8 @@ mod isa {
     #![allow(dead_code, unused_variables, unused_mut, clippy::all)]
 
     use tir::Operation;
-    use tir::attributes::{AttributeValue, RegisterAttr};
-    use tir::backend::{RegSlot, fresh_reg};
+    use tir::attributes::AttributeValue;
+    use tir::backend::{RegSlot, fresh_reg, phys_attr};
     use tir::backend::{VirtualBranchOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp};
     use tir::helpers::{dialect, operation};
 
@@ -205,7 +205,7 @@ mod isa {
             class: tir::backend::regalloc::RegClassId,
             offset: i64,
         ) -> Result<Box<dyn Operation>, tir::PassError> {
-            let base = phys(abi.sp.0, abi.sp.1);
+            let base = phys_attr(abi.sp);
             let offset = AttributeValue::Int(offset);
             match class.name() {
                 "GPR" => Ok(Box::new(
@@ -237,7 +237,7 @@ mod isa {
         ) -> Vec<Box<dyn Operation>> {
             vec![Box::new(
                 MovImm32OpBuilder::new(context)
-                    .attr("dst", phys(RegClass::GPR32.id(), 0))
+                    .attr("dst", phys_attr((RegClass::GPR32.id(), 0)))
                     .attr("imm", AttributeValue::Int(i64::from(vector_register_args)))
                     .build(),
             )]
@@ -320,11 +320,6 @@ mod isa {
         Ok(false)
     }
 
-    /// The x86-64 stack pointer (`rsp`, GPR index 4).
-    fn phys(class: tir::backend::regalloc::RegClassId, index: u16) -> AttributeValue {
-        AttributeValue::Register(RegisterAttr::Physical { class, index })
-    }
-
     /// The move family a register class is copied and spilled with. A class is a
     /// view over a register file, so the family follows from that view — the file
     /// it draws from, the width of the view and where the view starts — and never
@@ -392,7 +387,7 @@ mod isa {
                 ($Builder:ident) => {
                     Box::new(
                         $Builder::new(context)
-                            .attr("base", phys(frame.0, frame.1))
+                            .attr("base", phys_attr(*frame))
                             .attr("imm", AttributeValue::Int(offset))
                             .src(value)
                             .build(),
@@ -423,7 +418,7 @@ mod isa {
                     Box::new(
                         $Builder::new(context)
                             .result_values(vec![value])
-                            .attr("base", phys(frame.0, frame.1))
+                            .attr("base", phys_attr(*frame))
                             .attr("imm", AttributeValue::Int(offset))
                             .build(),
                     )
@@ -477,7 +472,7 @@ mod isa {
             for ((class, index), _) in saves {
                 ops.push(Box::new(
                     PushOpBuilder::new(context)
-                        .attr("reg", phys(*class, *index))
+                        .attr("reg", phys_attr((*class, *index)))
                         .build(),
                 ));
             }
@@ -501,7 +496,7 @@ mod isa {
             for ((class, index), _) in saves.iter().rev() {
                 ops.push(Box::new(
                     PopOpBuilder::new(context)
-                        .attr("reg", phys(*class, *index))
+                        .attr("reg", phys_attr((*class, *index)))
                         .build(),
                 ));
             }
@@ -536,7 +531,7 @@ mod isa {
             Ok(vec![Box::new(
                 LeaBaseDispOpBuilder::new(context)
                     .result_values(vec![dst])
-                    .attr("base", phys(frame.0, frame.1))
+                    .attr("base", phys_attr(*frame))
                     .attr("imm", AttributeValue::Int(offset))
                     .build(),
             )])
@@ -550,8 +545,8 @@ mod isa {
     ) -> Box<dyn Operation> {
         Box::new(
             AddImmOpBuilder::new(context)
-                .attr("dst", phys(abi.sp.0, abi.sp.1))
-                .attr("dst_tied", phys(abi.sp.0, abi.sp.1))
+                .attr("dst", phys_attr(abi.sp))
+                .attr("dst_tied", phys_attr(abi.sp))
                 .attr("imm", AttributeValue::Int(amount))
                 .build(),
         )
@@ -649,7 +644,10 @@ mod isa {
             }
             let mut features = vec![Feature::X86, Feature::X86_64, Feature::SSE, Feature::SSE2];
             if let Some(mattr) = mattr {
-                apply_mattr(&mut features, mattr)?;
+                tir::backend::apply_mattr(&mut features, mattr, "x86-64", |name| {
+                    Feature::from_name(&name.to_ascii_lowercase().replace('-', "_"))
+                        .map(|feature| vec![feature])
+                })?;
             }
             validate_features(&features)?;
             if !features.contains(&Feature::X86_64) {
@@ -687,28 +685,6 @@ mod isa {
             "unknown x86-64 cpu '{mcpu}' (expected 'generic' or one of: {})",
             machines(Feature::ALL).join(", ")
         ))
-    }
-
-    fn apply_mattr(features: &mut Vec<Feature>, mattr: &str) -> Result<(), String> {
-        for item in mattr.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-            let (add, name) = if let Some(name) = item.strip_prefix('+') {
-                (true, name)
-            } else if let Some(name) = item.strip_prefix('-') {
-                (false, name)
-            } else {
-                return Err(format!(
-                    "invalid --mattr entry '{item}' (expected '+feature' or '-feature')"
-                ));
-            };
-            let feature = Feature::from_name(&name.to_ascii_lowercase().replace('-', "_"))
-                .ok_or_else(|| format!("unknown x86-64 feature '{name}' in --mattr"))?;
-            if add && !features.contains(&feature) {
-                features.push(feature);
-            } else if !add {
-                features.retain(|f| *f != feature);
-            }
-        }
-        Ok(())
     }
 
     struct X86Target {
@@ -794,29 +770,18 @@ mod isa {
 
     tir::register_target!(select_x86_64, ["x86_64"]);
 
-    fn x86_64_abis() -> &'static [tir::backend::abi::AbiInfo] {
-        static ABIS: std::sync::OnceLock<Vec<tir::backend::abi::AbiInfo>> =
-            std::sync::OnceLock::new();
-        ABIS.get_or_init(|| {
-            abis()
-                .iter()
-                .map(|abi| tir::backend::abi::AbiInfo {
-                    indirect_result: Some((RegClass::GPR.id(), 7)),
-                    argument_group_policy: Some(tir::backend::abi::ArgumentGroupPolicy {
-                        register_limit: Some(2),
-                        rollback: tir::backend::abi::GroupRollback::Preserve,
-                    }),
-                    ..*abi
-                })
-                .collect()
-        })
-    }
+    tir::target_abis!(x86_64_abis, x86_64_abi_by_name, |abi| {
+        tir::backend::abi::AbiInfo {
+            indirect_result: Some((RegClass::GPR.id(), 7)),
+            argument_group_policy: Some(tir::backend::abi::ArgumentGroupPolicy {
+                register_limit: Some(2),
+                rollback: tir::backend::abi::GroupRollback::Preserve,
+            }),
+            ..*abi
+        }
+    });
 
     fn x86_64_default_abi() -> &'static tir::backend::abi::AbiInfo {
         &x86_64_abis()[0]
-    }
-
-    fn x86_64_abi_by_name(name: &str) -> Option<&'static tir::backend::abi::AbiInfo> {
-        x86_64_abis().iter().find(|abi| abi.name == name)
     }
 }

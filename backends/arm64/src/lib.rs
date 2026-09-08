@@ -1,5 +1,5 @@
 use tir::Operation;
-use tir::backend::RegSlot;
+use tir::backend::{RegSlot, normalize_name, phys_attr};
 use tir::helpers::{dialect, operation};
 
 const MODEL_CHECK_SOURCES: &[(&str, &str)] = &[
@@ -39,7 +39,9 @@ impl TargetConfig {
             machine: None,
         };
         if let Some(mattr) = mattr {
-            apply_mattr(&mut config.features, mattr)?;
+            tir::backend::apply_mattr(&mut config.features, mattr, "AArch64", |name| {
+                Feature::from_name(&normalize_name(name)).map(|feature| vec![feature])
+            })?;
         }
         validate_features(&config.features)?;
         if !config.features.contains(&Feature::ARMv8A64) {
@@ -63,7 +65,7 @@ impl TargetConfig {
 }
 
 fn parse_march(march: &str) -> Result<Vec<Feature>, String> {
-    let march = normalize(march);
+    let march = normalize_name(march);
     let (major, minor) = match march.as_str() {
         "arm64" | "aarch64" | "armv8" | "armv8a" | "armv8-a" => (8, 0),
         "armv9" | "armv9a" | "armv9-a" => (9, 0),
@@ -128,7 +130,7 @@ fn armv9_features(revision: usize) -> Vec<Feature> {
 /// onto the generic cores; any other name must be a TMDL machine (by name or
 /// alias) compatible with the enabled features.
 fn parse_mcpu(mcpu: &str, config: &TargetConfig) -> Result<Option<String>, String> {
-    let name = normalize(mcpu);
+    let name = normalize_name(mcpu);
     let generic = match name.as_str() {
         "generic" | "generic-arm64" | "generic-aarch64" => Some(None),
         "generic-in-order" | "generic-inorder" | "in-order" | "inorder" => {
@@ -155,33 +157,6 @@ fn parse_mcpu(mcpu: &str, config: &TargetConfig) -> Result<Option<String>, Strin
         "unknown AArch64 cpu '{name}' (expected 'generic', 'generic-in-order', 'generic-ooo' or one of: {})",
         machines(Feature::ALL).join(", ")
     ))
-}
-
-/// Apply an LLVM-style `--mattr` list (`+feat`/`-feat`, comma-separated).
-fn apply_mattr(features: &mut Vec<Feature>, mattr: &str) -> Result<(), String> {
-    for item in mattr.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        let (add, name) = if let Some(name) = item.strip_prefix('+') {
-            (true, name)
-        } else if let Some(name) = item.strip_prefix('-') {
-            (false, name)
-        } else {
-            return Err(format!(
-                "invalid --mattr entry '{item}' (expected '+feature' or '-feature')"
-            ));
-        };
-        let feature = Feature::from_name(&normalize(name))
-            .ok_or_else(|| format!("unknown AArch64 feature '{name}' in --mattr"))?;
-        if add && !features.contains(&feature) {
-            features.push(feature);
-        } else if !add {
-            features.retain(|f| *f != feature);
-        }
-    }
-    Ok(())
-}
-
-fn normalize(s: &str) -> String {
-    s.trim().to_ascii_lowercase().replace('_', "-")
 }
 
 dialect! {
@@ -252,7 +227,7 @@ const XZR: u16 = 31;
 
 /// Build a register-register move (`orr rd, xzr, rm`).
 fn mv(context: &tir::Context, rd: RegSlot, rm: RegSlot) -> Box<dyn Operation> {
-    let builder = OrOpBuilder::new(context).attr("rn", phys(&(RegClass::GPR.id(), XZR)));
+    let builder = OrOpBuilder::new(context).attr("rn", phys_attr((RegClass::GPR.id(), XZR)));
     let builder = tir::reg_use!(builder, rm, rm);
     Box::new(tir::reg_def!(builder, rd, rd).build())
 }
@@ -308,7 +283,7 @@ impl tir::backend::call_lowering::CallEmitter for Arm64CallEmitter {
             Ok(Box::new(
                 StoreFloatDoubleOpBuilder::new(context)
                     .ft(value)
-                    .attr("rn", phys(&abi.sp))
+                    .attr("rn", phys_attr(abi.sp))
                     .attr("imm", offset)
                     .build(),
             ))
@@ -316,7 +291,7 @@ impl tir::backend::call_lowering::CallEmitter for Arm64CallEmitter {
             Ok(Box::new(
                 StoreDoublewordOpBuilder::new(context)
                     .rt(value)
-                    .attr("rn", phys(&abi.sp))
+                    .attr("rn", phys_attr(abi.sp))
                     .attr("imm", offset)
                     .build(),
             ))
@@ -343,13 +318,6 @@ impl tir::backend::call_lowering::CallEmitter for Arm64CallEmitter {
     }
 }
 
-fn phys(reg: &tir::backend::liveness::PhysReg) -> tir::attributes::AttributeValue {
-    tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Physical {
-        class: reg.0,
-        index: reg.1,
-    })
-}
-
 /// AArch64 register allocation target: the generated register file plus `str`/`ldr`
 /// spill code and a `sub sp, sp, #frame` / `add sp, sp, #frame` prologue/epilogue.
 pub struct Arm64RegAlloc;
@@ -372,7 +340,7 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
             return Box::new(
                 StoreFloatDoubleOpBuilder::new(context)
                     .ft(value)
-                    .attr("rn", phys(frame))
+                    .attr("rn", phys_attr(*frame))
                     .attr("imm", offset)
                     .build(),
             );
@@ -380,7 +348,7 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
         Box::new(
             StoreDoublewordOpBuilder::new(context)
                 .rt(value)
-                .attr("rn", phys(frame))
+                .attr("rn", phys_attr(*frame))
                 .attr("imm", offset)
                 .build(),
         )
@@ -399,7 +367,7 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
             return Box::new(
                 LoadFloatDoubleOpBuilder::new(context)
                     .result_values(vec![value])
-                    .attr("rn", phys(frame))
+                    .attr("rn", phys_attr(*frame))
                     .attr("imm", offset)
                     .build(),
             );
@@ -407,7 +375,7 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
         Box::new(
             LoadDoublewordOpBuilder::new(context)
                 .result_values(vec![value])
-                .attr("rn", phys(frame))
+                .attr("rn", phys_attr(*frame))
                 .attr("imm", offset)
                 .build(),
         )
@@ -444,16 +412,16 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
         let sp = abi.sp;
         let mut ops: Vec<Box<dyn Operation>> = vec![Box::new(
             SubImmediateOpBuilder::new(context)
-                .attr("rd", phys(&sp))
-                .attr("rn", phys(&sp))
+                .attr("rd", phys_attr(sp))
+                .attr("rn", phys_attr(sp))
                 .attr("imm", tir::attributes::AttributeValue::Int(size as i64))
                 .build(),
         )];
         for (reg, offset) in saves {
             ops.push(Box::new(
                 StoreDoublewordOpBuilder::new(context)
-                    .attr("rt", phys(reg))
-                    .attr("rn", phys(&sp))
+                    .attr("rt", phys_attr(*reg))
+                    .attr("rn", phys_attr(sp))
                     .attr("imm", tir::attributes::AttributeValue::Int(*offset))
                     .build(),
             ));
@@ -473,16 +441,16 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
         for (reg, offset) in saves {
             ops.push(Box::new(
                 LoadDoublewordOpBuilder::new(context)
-                    .attr("rt", phys(reg))
-                    .attr("rn", phys(&sp))
+                    .attr("rt", phys_attr(*reg))
+                    .attr("rn", phys_attr(sp))
                     .attr("imm", tir::attributes::AttributeValue::Int(*offset))
                     .build(),
             ));
         }
         ops.push(Box::new(
             AddImmediateOpBuilder::new(context)
-                .attr("rd", phys(&sp))
-                .attr("rn", phys(&sp))
+                .attr("rd", phys_attr(sp))
+                .attr("rn", phys_attr(sp))
                 .attr("imm", tir::attributes::AttributeValue::Int(size as i64))
                 .build(),
         ));
@@ -506,7 +474,7 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
         Ok(vec![Box::new(
             AddImmediateOpBuilder::new(context)
                 .result_values(vec![dst])
-                .attr("rn", phys(frame))
+                .attr("rn", phys_attr(*frame))
                 .attr("imm", tir::attributes::AttributeValue::Int(offset))
                 .build(),
         )])
@@ -561,7 +529,7 @@ fn select_arm64(
 ) -> Result<Option<Box<dyn tir::backend::TargetMachine>>, String> {
     let owned = ["arm", "aarch64"]
         .iter()
-        .any(|prefix| normalize(march).starts_with(prefix));
+        .any(|prefix| normalize_name(march).starts_with(prefix));
     if !owned {
         return Ok(None);
     }
@@ -587,28 +555,18 @@ fn select_arm64(
 
 tir::register_target!(select_arm64, ["arm64"]);
 
-fn arm64_abis() -> &'static [tir::backend::abi::AbiInfo] {
-    static ABIS: std::sync::OnceLock<Vec<tir::backend::abi::AbiInfo>> = std::sync::OnceLock::new();
-    ABIS.get_or_init(|| {
-        abis()
-            .iter()
-            .map(|abi| tir::backend::abi::AbiInfo {
-                indirect_result: Some((RegClass::GPR.id(), 8)),
-                argument_group_alignment: Some(tir::backend::abi::ArgumentGroupAlignment {
-                    kind: tir::backend::abi::ValueKind::Int,
-                    minimum_source_alignment: 16,
-                    register_multiple: 2,
-                }),
-                ..*abi
-            })
-            .collect()
-    })
-}
+tir::target_abis!(arm64_abis, arm64_abi_by_name, |abi| {
+    tir::backend::abi::AbiInfo {
+        indirect_result: Some((RegClass::GPR.id(), 8)),
+        argument_group_alignment: Some(tir::backend::abi::ArgumentGroupAlignment {
+            kind: tir::backend::abi::ValueKind::Int,
+            minimum_source_alignment: 16,
+            register_multiple: 2,
+        }),
+        ..*abi
+    }
+});
 
 fn arm64_default_abi() -> &'static tir::backend::abi::AbiInfo {
     &arm64_abis()[0]
-}
-
-fn arm64_abi_by_name(name: &str) -> Option<&'static tir::backend::abi::AbiInfo> {
-    arm64_abis().iter().find(|abi| abi.name == name)
 }

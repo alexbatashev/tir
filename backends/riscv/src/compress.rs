@@ -12,7 +12,7 @@
 
 use tir::Operation;
 use tir::attributes::AttributeValue;
-use tir::backend::{RegSlot, reg_slot};
+use tir::backend::{RegSlot, phys_attr, reg_slot};
 
 use crate::{
     AddImmOp, AddImmWordOp, AddOp, AddWordOp, AndImmOp, AndOp, CAddImm4SpNOpBuilder,
@@ -28,7 +28,7 @@ use crate::{
     CSubWordOpBuilder, CXorOpBuilder, EnvBreakOp, FLoadDoubleOp, FLoadWordOp, FStoreDoubleOp,
     FStoreWordOp, JumpAndLinkRegOp, LoadDoubleWordOp, LoadUpperImmOp, LoadWordOp, OrOp,
     ShiftLeftLogicalImmOp, ShiftRightArithmeticImmOp, ShiftRightLogicalImmOp, StoreDoubleWordOp,
-    StoreWordOp, SubOp, SubWordOp, XorOp, phys,
+    StoreWordOp, SubOp, SubWordOp, XorOp,
 };
 use tir::backend::VirtualReturnOp;
 
@@ -117,7 +117,7 @@ fn compressed_form(
     // expand it to the full `jalr x0, x1, 0`).
     if op.as_op::<VirtualReturnOp>().is_some() {
         let jr = CJumpRegOpBuilder::new(context)
-            .attr("rs1", phys(&(crate::RegClass::GPR.id(), 1)))
+            .attr("rs1", phys_attr((crate::RegClass::GPR.id(), 1)))
             .build();
         return Some(Box::new(jr));
     }
@@ -159,7 +159,7 @@ fn compress_add_imm(context: &tir::Context, op: &tir::OperationRef) -> Option<Bo
     if rd == 2 && rs1 == 2 && value % 16 == 0 && (-512..512).contains(&value) {
         // `c.addi16sp` names the stack pointer implicitly, in both
         // directions; the slots say which register that is.
-        let sp = phys(&(crate::RegClass::GPR.id(), 2));
+        let sp = phys_attr((crate::RegClass::GPR.id(), 2));
         let addi16sp = CAddImm16SpOpBuilder::new(context)
             .attr("x2", sp.clone())
             .attr("x2_def", sp)
@@ -409,7 +409,7 @@ macro_rules! mem_op {
                 // The sp-relative forms name the stack pointer implicitly;
                 // the slot says which register that is.
                 let new_op = $sp_builder::new(context)
-                    .attr("x2", phys(&(crate::RegClass::GPR.id(), 2)))
+                    .attr("x2", phys_attr((crate::RegClass::GPR.id(), 2)))
                     .attr("imm", AttributeValue::Int(value));
                 let new_op = tir::$dir!(new_op, $data, data_slot);
                 return Some(Box::new(new_op.build()));
