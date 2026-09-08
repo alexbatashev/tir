@@ -134,14 +134,8 @@ fn address_only_accessed(context: &Context, address: ValueId, state: &SlotState)
 /// dependency: the chain is what orders it against the writes it may see.
 fn names_whole_slot(context: &Context, op: OpId, slot: ValueId) -> bool {
     let instance = context.get_op(op);
-    let location = if let Some(read) = instance.clone().as_interface::<dyn MemoryRead>() {
-        read.read_location()
-    } else if let Some(write) = instance.clone().as_interface::<dyn MemoryWrite>() {
-        write.write_location()
-    } else {
-        return false;
-    };
-    location == slot && !instance.dep_operands().is_empty()
+    crate::analysis::access_of(&instance).is_some_and(|access| access.location == slot)
+        && !instance.dep_operands().is_empty()
 }
 
 /// Whether every op between `op` and `body` is a loop or a gate with a declared

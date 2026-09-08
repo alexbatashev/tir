@@ -117,23 +117,13 @@ impl<'a> Builder<'a> {
     fn scan(&mut self, ops: &[OpId], guarded: bool) {
         for &op_id in ops {
             let op = self.context.get_op(op_id);
-            if let Some(read) = op.clone().as_interface::<dyn MemoryRead>() {
+            if let Some(named) = crate::analysis::access_of(&op) {
                 let access = self.access(
                     op_id,
-                    false,
-                    read.read_location(),
-                    read.state_operand(),
-                    self.context.get_value(read.read_value()).ty(),
-                    guarded,
-                );
-                self.accesses.push(access);
-            } else if let Some(write) = op.clone().as_interface::<dyn MemoryWrite>() {
-                let access = self.access(
-                    op_id,
-                    true,
-                    write.write_location(),
-                    write.state_operand(),
-                    self.context.get_value(write.written_value()).ty(),
+                    named.write,
+                    named.location,
+                    named.state,
+                    self.context.get_value(named.value).ty(),
                     guarded,
                 );
                 self.accesses.push(access);
