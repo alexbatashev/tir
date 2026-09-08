@@ -16,7 +16,7 @@ use super::liveness::Liveness;
 use super::ports::Ports;
 use crate::attributes::Predicate;
 use crate::builtin::{AddIOpBuilder, CmpIOpBuilder, ConstantOpBuilder, IntegerType};
-use crate::state::{EntryStateOpBuilder, JoinOpBuilder};
+use crate::state::{EntryStateOpBuilder, JoinOpBuilder, SplitOpBuilder};
 use crate::{
     Context, CountedLoop, OpId, Operation, PassError, RegionId, Theta, TypeId, Value, ValueId, scf,
 };
@@ -44,10 +44,25 @@ pub fn emit(
     for (parameter, port) in parameters.iter().zip(&ports) {
         env.insert(cfg.value_var[&parameter.id()], port.id());
     }
-    for &chain in &cfg.chains {
+    // The memory the function is entered with is one state; the chains it is
+    // threaded on are that state split once, and a function on one chain is
+    // that state itself.
+    if let Some((&first, rest)) = cfg.chains.split_first() {
         let root = EntryStateOpBuilder::new(context).dep_result().build();
         context.add(body, root.id());
-        env.insert(chain, root.result());
+        if rest.is_empty() {
+            env.insert(first, root.result());
+        } else {
+            let mut split = SplitOpBuilder::new(context).dep_operand(root.result());
+            for _ in &cfg.chains {
+                split = split.dep_result();
+            }
+            let split = split.build();
+            context.add(body, split.id());
+            for (&chain, state) in cfg.chains.iter().zip(split.states()) {
+                env.insert(chain, state);
+            }
+        }
     }
 
     let emitter = Emitter {

@@ -31,7 +31,7 @@ use crate::sem::egraph::type_width;
 use crate::{
     ConstantLike, Context, Gamma, MemoryRead, MemoryWrite, NewOp, OpHandle, OpId, OperationRef,
     Pass, PassError, PassTarget, PromotableAllocation, RegionId, RegionKind, Rewriter,
-    Speculatable, TypeId, ValueId,
+    Speculatable, Theta, TypeId, ValueId,
 };
 
 #[derive(Default)]
@@ -78,6 +78,7 @@ impl Pass for InstCombineNodesPass {
         let body = context.get_op(root).regions()[0];
         driver.commit_nodes(body, &extraction, &mut HashMap::new())?;
         forget_write_only_slots(context, body);
+        drop_untouched_chains(context, body);
         let result = sweep(context, body, rewriter);
         tir_relational::report_saturation("instcombine-nodes");
         result
@@ -468,6 +469,11 @@ fn changed_chain(context: &Context, state: ValueId) -> bool {
     if instance.is::<crate::state::EntryStateOp>() {
         return false;
     }
+    // The chains a function opens are one entry state split, so a split of a
+    // memory nothing changed names one nothing changed either.
+    if instance.is::<crate::state::SplitOp>() {
+        return changed_chain(context, instance.dep_operands()[0]);
+    }
     let Some(index) = instance.dep_results().iter().position(|&r| r == state) else {
         return true;
     };
@@ -511,6 +517,84 @@ fn visible(context: &Context, value: ValueId, region: RegionId) -> bool {
         current = carrier.and_then(|op| context.region_of_op(op));
     }
     false
+}
+
+/// A loop or a gate carrying a chain its body never names carries nothing: the
+/// port hands back the memory the operation was entered on, so the chain flows
+/// past the operation instead of through it and the port goes with it.
+///
+/// The converter carries a chain only where a body changes it. What leaves one
+/// behind is promotion: a slot whose value moves onto the value ports leaves
+/// its chain empty, and the ports it crossed are still there.
+fn drop_untouched_chains(context: &Context, region: RegionId) {
+    for op in context.get_region(region).op_ids() {
+        for sub in context.get_op(op).regions() {
+            drop_untouched_chains(context, sub);
+        }
+        let instance = context.get_op(op);
+        // A split names one memory per chain crossing it, so where one chain is
+        // left it names that memory and nothing else: its reader takes the
+        // state the split was handed.
+        if instance.is::<crate::state::SplitOp>() {
+            let read: Vec<ValueId> = instance
+                .dep_results()
+                .into_iter()
+                .filter(|&state| {
+                    !context.users_of(state).is_empty() || named_by_results(context, region, state)
+                })
+                .collect();
+            if let [kept] = read[..] {
+                let taken = instance.dep_operands()[0];
+                context.replace_value_uses(kept, taken);
+                context.rename_region_results(region, kept, taken, &[]);
+            }
+            continue;
+        }
+        if !(instance.has_interface::<dyn Theta>() || instance.has_interface::<dyn Gamma>()) {
+            continue;
+        }
+        // Highest index first, so the ports that stay keep their positions.
+        for index in (0..instance.dep_operands().len()).rev() {
+            if !carries_nothing(context, op, index) {
+                continue;
+            }
+            let handle = context.get_op(op);
+            let entered = handle.dep_operands()[index];
+            let published = handle.dep_results()[index];
+            context.replace_value_uses(published, entered);
+            context.rename_region_results(region, published, entered, &[]);
+            context.drop_dep_port(op, index);
+        }
+    }
+}
+
+/// Whether the chain `op` carries at `index` is one nothing under it names:
+/// every region hands the port straight back, and nothing else reads it.
+fn carries_nothing(context: &Context, op: OpId, index: usize) -> bool {
+    let handle = context.get_op(op);
+    if handle.dep_results().len() != handle.dep_operands().len() {
+        return false;
+    }
+    handle.regions().iter().all(|&region| {
+        let handle = context.get_region(region);
+        let ports = handle.dep_arguments();
+        let results = handle.dep_results();
+        let Some(port) = ports.get(index).map(crate::Value::id) else {
+            return false;
+        };
+        let groups = results.len().checked_div(ports.len()).unwrap_or(0);
+        let named = context
+            .nested_regions(region)
+            .iter()
+            .flat_map(|&nested| context.get_region(nested).results())
+            .filter(|&named| named == port)
+            .count();
+        (groups == 1 || groups == 2)
+            && results.len() == groups * ports.len()
+            && (0..groups).all(|group| results[group * ports.len() + index] == port)
+            && named == groups
+            && context.users_of(port).is_empty()
+    })
 }
 
 /// A slot whose address reaches only writes is a memory nothing observes: each

@@ -33,16 +33,16 @@ module {
 
 // CHECK-LABEL: %{{[0-9]+}} = func.func @nested
 // CHECK-NOT: ptr.
-// CHECK: %[[OUTER:[0-9]+]] | %{{[0-9]+}} = scf.switch %0 args(| %{{[0-9]+}}) (| %[[EA:[0-9]+]]) {
-// CHECK-NEXT: -> %4 | %[[EA]]
+// CHECK: %[[OUTER:[0-9]+]] = scf.switch %0 {
+// CHECK-NEXT: -> %4
 // CHECK-NEXT: }
-// CHECK-NEXT: (| %[[TA:[0-9]+]]) {
-// CHECK-NEXT: %[[INNER:[0-9]+]] | %[[TD:[0-9]+]] = scf.switch %1 args(| %[[TA]]) (| %[[IEA:[0-9]+]]) {
-// CHECK-NEXT: -> %3 | %[[IEA]]
+// CHECK-NEXT: {
+// CHECK-NEXT: %[[INNER:[0-9]+]] = scf.switch %1 {
+// CHECK-NEXT: -> %3
 // CHECK-NEXT: }
-// CHECK-NEXT: (| %[[ITA:[0-9]+]]) {
-// CHECK-NEXT: -> %2 | %[[ITA]]
+// CHECK-NEXT: {
+// CHECK-NEXT: -> %2
 // CHECK-NEXT: }
-// CHECK-NEXT: -> %[[INNER]] | %[[TD]]
+// CHECK-NEXT: -> %[[INNER]]
 // CHECK-NEXT: }
 // CHECK-NEXT: -> %[[OUTER]]

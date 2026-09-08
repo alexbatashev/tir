@@ -1621,6 +1621,54 @@ impl Context {
         value
     }
 
+    /// Drop the dependency operand at `index`, and with it the use it made.
+    pub(crate) fn remove_dep_operand(&self, op: OpId, index: usize) {
+        let mut inner = self.0.write();
+        let Some(instance) = inner.op(op) else {
+            return;
+        };
+        let values = (instance.operand_count - instance.dep_operand_count) as usize;
+        // `remove_operand` rewrites the port groups and their counts; what is
+        // left is the partition this operand was in.
+        inner.remove_operand(op, values + index);
+        inner.op_mut(op).expect("live op").dep_operand_count -= 1;
+        inner.edit_op(op);
+    }
+
+    /// Drop the dependency result at `index`. The value it named is left with
+    /// no definition, so a caller drops one nothing reads.
+    pub(crate) fn remove_dep_result(&self, op: OpId, index: usize) {
+        let mut inner = self.0.write();
+        let Some(instance) = inner.op(op) else {
+            return;
+        };
+        let (results, dep_results) = (
+            instance.result_count as usize,
+            instance.dep_result_count as usize,
+        );
+        let (operands, mut all_results, regions) = inner.ports(op);
+        all_results.remove(results - dep_results + index);
+        inner.set_ports(op, &operands, &all_results, &regions);
+        inner.op_mut(op).expect("live op").dep_result_count -= 1;
+        inner.edit_op(op);
+    }
+
+    /// Drop the dependency port at `index` of an unordered region.
+    pub(crate) fn remove_region_dep_port(&self, region: RegionId, index: usize) {
+        let mut inner = self.0.write();
+        match inner.region_mut(region).map(Region::body_mut) {
+            Some(crate::region::RegionBody::Nodes {
+                ports, dep_ports, ..
+            }) => {
+                let values = ports.len() - *dep_ports as usize;
+                ports.remove(values + index);
+                *dep_ports -= 1;
+            }
+            _ => panic!("only an unordered region drops a port by position"),
+        }
+        inner.edit_region(region);
+    }
+
     /// Drop `op`'s last value operand, keeping the segment sizes that describe
     /// the grouping in step. The inverse of [`Context::append_operand`].
     pub fn pop_operand(&self, op: OpId) {

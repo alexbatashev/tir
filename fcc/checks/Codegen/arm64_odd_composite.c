@@ -29,21 +29,16 @@ struct Three make_three(struct Three *value) {
 // CHECK: %[[ZERO:[0-9]+]] = constant {value = 0} : !i64
 // CHECK: %[[SIZE:[0-9]+]] = constant {value = 3} : !i64
 // CHECK: | %[[CLEAR:[0-9]+]] = ptr.store %[[ZERO]], %[[SLOT:[0-9]+]]
-// CHECK-NEXT: | %[[CLEAR_A:[0-9]+]], %[[CLEAR_B:[0-9]+]] = state.split | %[[CLEAR]]
-// CHECK-NEXT: | %[[COPY_IN:[0-9]+]] = state.join | %[[CLEAR_B]], %[[CLEAR_A]]
-// CHECK-NEXT: | %[[COPY:[0-9]+]] = ptr.memcpy %[[SLOT]], %{{[0-9]+}}, %[[SIZE]] | %[[COPY_IN]]
-// CHECK-NEXT: | %[[COPY_A:[0-9]+]], %[[COPY_B:[0-9]+]] = state.split | %[[COPY]]
-// CHECK-NEXT: %[[WORD:[0-9]+]] | %[[LOAD:[0-9]+]] = ptr.load %[[SLOT]] | %[[COPY_B]] : !i64
-// CHECK-NEXT: | %[[CALL_IN:[0-9]+]] = state.join | %[[COPY_A]], %[[LOAD]]
-// CHECK-NEXT: func.call %{{[0-9]+}}(%[[WORD]] : !i64) -> !i64 | %[[CALL_IN]]
+// CHECK-NEXT: | %[[COPY:[0-9]+]] = ptr.memcpy %[[SLOT]], %{{[0-9]+}}, %[[SIZE]] | %[[CLEAR]]
+// CHECK-NEXT: %[[WORD:[0-9]+]] | %[[LOAD:[0-9]+]] = ptr.load %[[SLOT]] | %[[COPY]] : !i64
+// CHECK-NEXT: %{{[0-9]+}} | %{{[0-9]+}} = func.call %{{[0-9]+}}(%[[WORD]] : !i64) -> !i64 | %[[LOAD]]
 // CHECK-LABEL: %{{[0-9]+}} = func.func @make_three(
 // CHECK-SAME: ) -> !i64 {
 // CHECK: ptr.alloca {size = 8, align = 8}
 // CHECK: ptr.memcpy
 // CHECK: | %[[RET_COPY:[0-9]+]] = ptr.memcpy %[[RET:[0-9]+]]
-// CHECK-NEXT: | %[[RET_A:[0-9]+]], %[[RET_B:[0-9]+]] = state.split | %[[RET_COPY]]
-// CHECK-NEXT: %[[RET_WORD:[0-9]+]] | %[[RET_LOAD:[0-9]+]] = ptr.load %[[RET]] | %[[RET_B]] : !i64
-// CHECK-NEXT: | %[[RET_OUT:[0-9]+]] = state.join | %{{[0-9]+}}, %[[RET_LOAD]], %[[RET_A]]
+// CHECK-NEXT: %[[RET_WORD:[0-9]+]] | %[[RET_LOAD:[0-9]+]] = ptr.load %[[RET]] | %[[RET_COPY]] : !i64
+// CHECK-NEXT: | %[[RET_OUT:[0-9]+]] = state.join | %{{[0-9]+}}, %[[RET_LOAD]]
 // CHECK-NEXT: -> %[[RET_WORD]] | %[[RET_OUT]]
 
 // ASM-LABEL: call_three:

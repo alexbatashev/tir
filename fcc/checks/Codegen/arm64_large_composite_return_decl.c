@@ -21,5 +21,4 @@ long first(long a, long b, long c) {
 // CHECK: %[[FIELD:[0-9]+]] = ptr.ptradd %[[BASE]]
 // CHECK: | %[[CALL:[0-9]+]] = func.call %{{[0-9]+}}(%[[TEMP]]
 // CHECK-SAME: ) result_address
-// CHECK-NEXT: | %{{[0-9]+}}, %[[AFTER:[0-9]+]] = state.split | %[[CALL]]
-// CHECK-NEXT: ptr.load %[[FIELD]] | %[[AFTER]]
+// CHECK-NEXT: %{{[0-9]+}} | %{{[0-9]+}} = ptr.load %[[FIELD]] | %[[CALL]]

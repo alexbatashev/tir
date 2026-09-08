@@ -27,6 +27,6 @@ module {
 
 // CHECK-LABEL: %{{[0-9]+}} = func.func @last
 // CHECK: %[[SEVEN:[0-9]+]] = constant {value = 7} : !i32
-// CHECK: %{{[0-9]+}}, %[[RESULT:[0-9]+]] | %{{[0-9]+}} = scf.for
+// CHECK: %{{[0-9]+}}, %[[RESULT:[0-9]+]] = scf.for
 // CHECK: %[[SUM:[0-9]+]] = addi %[[RESULT]], %[[SEVEN]] : !i32
 // CHECK-NEXT: -> %[[SUM]]

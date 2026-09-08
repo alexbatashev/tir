@@ -30,13 +30,13 @@ module {
 
 // CHECK-LABEL: %{{[0-9]+}} = func.func @pick
 // CHECK-NOT: ptr.
-// CHECK: %[[RESULT:[0-9]+]] | %{{[0-9]+}} = scf.switch %0 args(| %{{[0-9]+}}) (| %[[A:[0-9]+]]) {
-// CHECK-NEXT: -> %1 | %[[A]]
+// CHECK: %[[RESULT:[0-9]+]] = scf.switch %0 {
+// CHECK-NEXT: -> %1
 // CHECK-NEXT: }
-// CHECK-NEXT: (| %[[B:[0-9]+]]) {
-// CHECK-NEXT: -> %2 | %[[B]]
+// CHECK-NEXT: {
+// CHECK-NEXT: -> %2
 // CHECK-NEXT: }
-// CHECK-NEXT: (| %[[C:[0-9]+]]) {
-// CHECK-NEXT: -> %3 | %[[C]]
+// CHECK-NEXT: {
+// CHECK-NEXT: -> %3
 // CHECK-NEXT: }
 // CHECK-NEXT: -> %[[RESULT]]

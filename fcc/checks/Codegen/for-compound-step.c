@@ -13,8 +13,10 @@ int advance(int limit) {
 }
 
 // CHECK: %[[ST:[0-9]+]] = constant {value = 2} : !i32
-// CHECK: | %[[PARAM:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[PSLOT:[0-9]+]] | %{{[0-9]+}}
-// CHECK-NEXT: %[[UB:[0-9]+]] | %{{[0-9]+}} = ptr.load %[[PSLOT]] | %[[PARAM]] : !i32
-// CHECK: | %[[INIT:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[CSLOT:[0-9]+]] | %{{[0-9]+}}
+// CHECK: | %[[E:[0-9]+]] = state.entry_state
+// CHECK-NEXT: | %[[PCHAIN:[0-9]+]], %[[CCHAIN:[0-9]+]], %{{[0-9]+}} = state.split | %[[E]]
+// CHECK-NEXT: | %[[PARAM:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[PSLOT:[0-9]+]] | %[[PCHAIN]]
+// CHECK-NEXT: | %[[INIT:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[CSLOT:[0-9]+]] | %[[CCHAIN]]
 // CHECK-NEXT: %[[LB:[0-9]+]] | %{{[0-9]+}} = ptr.load %[[CSLOT]] | %[[INIT]] : !i32
+// CHECK-NEXT: %[[UB:[0-9]+]] | %{{[0-9]+}} = ptr.load %[[PSLOT]] | %[[PARAM]] : !i32
 // CHECK: scf.for %{{[0-9]+}} = %[[LB]] to %[[UB]] step %[[ST]] (

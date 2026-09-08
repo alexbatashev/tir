@@ -12,6 +12,6 @@
 // CHECK: %{{[0-9]+}} = func.func @copy() -> !i32 {
 // CHECK: ptr.alloca {size = 8, align = 4} : !ptr.p
 // CHECK: %[[TAG:[0-9]+]] | %{{[0-9]+}} = ptr.load %{{[0-9]+}} | %[[SRC:[0-9]+]] : !i8
-// CHECK: %[[VALUE:[0-9]+]] | %{{[0-9]+}} = ptr.load %{{[0-9]+}} | %[[SRC]] : !i32
 // CHECK: | %[[TAG_STORE:[0-9]+]] = ptr.store %[[TAG]], %{{[0-9]+}} | %{{[0-9]+}}
+// CHECK: %[[VALUE:[0-9]+]] | %{{[0-9]+}} = ptr.load %{{[0-9]+}} | %[[SRC]] : !i32
 // CHECK: ptr.store %[[VALUE]], %{{[0-9]+}} | %[[TAG_STORE]]

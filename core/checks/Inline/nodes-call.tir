@@ -9,7 +9,7 @@
 // leaves are what the call left, so the load after the second call still sees
 // both stores. The callee's slot is hoisted twice and the copies stay apart.
 // Nothing is unthreaded and no chain of the callee's survives as an entry state
-// of its own, so the caller keeps the two it opened.
+// of its own, so the caller's is the only one left.
 
 module {
   %fn_bump = func.func private @bump(%cell: !ptr.p<!i32>, %a: !i32) -> !i32 {
@@ -40,10 +40,8 @@ module {
 // CHECK-NOT: @bump
 // CHECK: func.func @main
 // CHECK-NOT: func.call
-// CHECK: | %[[E0:[0-9]+]] = state.entry_state
-// CHECK-NEXT: | %[[E1:[0-9]+]] = state.entry_state
-// CHECK-NEXT: | %[[JOINED:[0-9]+]] = state.join | %[[E0]], %[[E1]]
-// CHECK-NEXT: | %{{[0-9]+}} = ptr.store %{{[0-9]+}}, %{{[0-9]+}} | %[[JOINED]]
+// CHECK: | %[[ENTRY:[0-9]+]] = state.entry_state
+// CHECK-NEXT: | %{{[0-9]+}} = ptr.store %{{[0-9]+}}, %{{[0-9]+}} | %[[ENTRY]]
 // CHECK-NOT: state.entry_state
 
 // VALUE: i32 17

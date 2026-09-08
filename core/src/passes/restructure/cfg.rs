@@ -402,23 +402,33 @@ impl Builder<'_> {
             .map(|_| self.cfg.add_var(TypeId::DEPENDENCY))
             .collect();
         for (block, node) in self.node_of_block.clone() {
-            let entries: BTreeMap<usize, ValueId> = chains
+            // A block is entered on the chains its own effects name; the one
+            // control leaves the region from names every chain, since the exit
+            // hands them all back.
+            let leaves = matches!(self.cfg.nodes[node].term, Term::Sink { args: None, .. });
+            let carried: Vec<usize> = match leaves {
+                true => (0..chains.len()).collect(),
+                false => plan
+                    .carried(&self.context.get_block(block).op_ids())
+                    .into_iter()
+                    .collect(),
+            };
+            let entries: BTreeMap<usize, ValueId> = carried
                 .iter()
-                .enumerate()
-                .map(|(index, &chain)| {
+                .map(|&index| {
                     let entry = self.context.append_dep_block_argument(block).id();
-                    self.arg_var.insert(entry, chain);
+                    self.arg_var.insert(entry, chains[index]);
                     (index, entry)
                 })
                 .collect();
             let leaving = super::deps::thread_block(self.context, block, &entries, &plan)?;
-            for (index, &chain) in chains.iter().enumerate() {
+            for &index in &carried {
                 let left = leaving[&index];
                 if let Term::Sink { op, .. } = &self.cfg.nodes[node].term {
                     self.context.append_dep_operand(*op, left);
                 }
                 if left != entries[&index] {
-                    self.cfg.value_var.insert(left, chain);
+                    self.cfg.value_var.insert(left, chains[index]);
                 }
             }
         }

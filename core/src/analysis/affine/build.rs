@@ -653,9 +653,14 @@ fn chain_root_walk(
             continue;
         }
         // One name per chain crossing the effect that left the state split,
-        // in the order the merge it took named them.
+        // in the order the merge it took named them. The chains a function
+        // opens are one entry state split, and each of those is a root.
         if op.is::<SplitOp>() {
-            current = split_source(context, &op, current)?;
+            let source = split_source(context, &op, current)?;
+            if source == current {
+                return Some(current);
+            }
+            current = source;
             continue;
         }
         let observed = op
@@ -712,8 +717,11 @@ fn split_source(context: &Context, split: &OpHandle, state: ValueId) -> Option<V
     let index = split.dep_results().iter().position(|&r| r == state)?;
     let changed = *split.dep_operands().first()?;
     let changer = context.get_op(context.get_value(changed).defining_op()?);
+    // The chains a function opens are one entry state split: each is a chain
+    // of its own, rooted where the split names it, which the caller reads off
+    // the state coming back unchanged.
     let [taken] = changer.dep_operands()[..] else {
-        return None;
+        return changer.dep_operands().is_empty().then_some(state);
     };
     let merge = context.get_op(context.get_value(taken).defining_op()?);
     merge

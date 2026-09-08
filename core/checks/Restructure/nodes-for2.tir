@@ -41,9 +41,11 @@ module {
 }
 
 // CHECK: %{{[0-9]+}} = func.func @sum(%[[N:[0-9]+]]: !i32) -> !i32 {
-// CHECK: %[[LB:[0-9]+]] | %[[LBS:[0-9]+]] = ptr.load %[[I:[0-9]+]] | %{{[0-9]+}} : !i32
-// CHECK-NEXT: | %{{[0-9]+}} = state.entry_state
-// CHECK-NEXT: | %[[TS:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[T:[0-9]+]] | %{{[0-9]+}}
+// CHECK: | %[[ENTRY:[0-9]+]] = state.entry_state
+// CHECK-NEXT: | %[[EI:[0-9]+]], %[[ET:[0-9]+]] = state.split | %[[ENTRY]]
+// CHECK-NEXT: | %[[TS:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[T:[0-9]+]] | %[[ET]]
+// CHECK-NEXT: | %[[IS:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[I:[0-9]+]] | %[[EI]]
+// CHECK-NEXT: %[[LB:[0-9]+]] | %[[LBS:[0-9]+]] = ptr.load %[[I]] | %[[IS]] : !i32
 // CHECK-NEXT: %{{[0-9]+}}, %[[FIN:[0-9]+]] | %[[MI:[0-9]+]], %[[MT:[0-9]+]] = scf.for %[[C:[0-9]+]] = %[[LB]] to %[[N]] step %[[ONE:[0-9]+]] (%[[IV:[0-9]+]] = %[[LB]] | %[[DI:[0-9]+]] = %[[LBS]], %[[DT:[0-9]+]] = %[[TS]]) {
 // CHECK-NEXT: | %[[S1:[0-9]+]] = ptr.store %[[IV]], %[[I]] | %[[DI]]
 // CHECK-NEXT: %{{[0-9]+}} | %[[R1:[0-9]+]] = ptr.load %[[T]] | %[[DT]] : !i32

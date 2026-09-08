@@ -46,6 +46,16 @@ impl Plan {
     pub fn chains(&self) -> usize {
         self.keys.len()
     }
+
+    /// The chains `ops` name between them: what a block has to be entered on,
+    /// which is rarely every chain the function is threaded on.
+    pub fn carried(&self, ops: &[OpId]) -> BTreeSet<usize> {
+        ops.iter()
+            .filter_map(|op| self.touched.get(op))
+            .flatten()
+            .copied()
+            .collect()
+    }
 }
 
 /// Read the chains `region` needs: one per object its accesses name, plus the
@@ -88,6 +98,7 @@ pub fn plan(context: &Context, region: RegionId) -> Plan {
         let base = accessed_object(&handle).and_then(|address| object_base(context, address));
         touched.insert(op, touched_chains(&keys, &private, base));
     }
+    let (keys, mut touched) = merge_indistinguishable(keys, touched);
     for &op in &ops {
         let handle = context.get_op(op);
         if !super::is_ordered_counted_loop(context, &handle) {
@@ -102,6 +113,55 @@ pub fn plan(context: &Context, region: RegionId) -> Plan {
         touched.insert(op, carried.into_iter().collect());
     }
     Plan { keys, touched }
+}
+
+/// Two chains no effect ever tells apart are one chain. Every effect that
+/// names either names both, so their accesses are already ordered against each
+/// other and merging them states nothing new — it just spares the merge and the
+/// split that crossing them would otherwise cost at every effect. An escaped
+/// allocation and the world are the pair this is usually about.
+fn merge_indistinguishable(
+    keys: Vec<ChainKey>,
+    touched: BTreeMap<OpId, Vec<usize>>,
+) -> (Vec<ChainKey>, BTreeMap<OpId, Vec<usize>>) {
+    // One bit per effect per chain: which effects name a chain is what tells it
+    // apart from another, and a bitset says that in a word rather than a tree.
+    let words = touched.len().div_ceil(64);
+    let mut names = vec![0u64; words * keys.len()];
+    for (effect, chains) in touched.values().enumerate() {
+        for &chain in chains {
+            names[chain * words + effect / 64] |= 1 << (effect % 64);
+        }
+    }
+    let names = |chain: usize| &names[chain * words..(chain + 1) * words];
+    let mut kept: Vec<usize> = Vec::new();
+    let mut merged = vec![0; keys.len()];
+    for chain in 0..keys.len() {
+        match kept.iter().position(|&other| names(other) == names(chain)) {
+            Some(position) => merged[chain] = position,
+            None => {
+                merged[chain] = kept.len();
+                kept.push(chain);
+            }
+        }
+    }
+    if kept.len() == keys.len() {
+        return (keys, touched);
+    }
+    let keys = kept.iter().map(|&chain| keys[chain]).collect();
+    let touched = touched
+        .into_iter()
+        .map(|(op, chains)| {
+            let mut mapped: Vec<usize> = Vec::with_capacity(chains.len());
+            for chain in chains {
+                if !mapped.contains(&merged[chain]) {
+                    mapped.push(merged[chain]);
+                }
+            }
+            (op, mapped)
+        })
+        .collect();
+    (keys, touched)
 }
 
 /// The address an operation accesses, where it names one: a call and a copy of

@@ -249,6 +249,33 @@ impl Context {
         }
     }
 
+    /// Drop the dependency port a loop or a gate carries at `index`, the
+    /// inverse of [`Context::grow_dep_port`]. The chain it carried flows past
+    /// the operation instead of through it, which is what a chain the body
+    /// leaves alone was doing all along.
+    ///
+    /// The caller has already handed the port's readers what the operation was
+    /// entered on and its result's readers that same state; what is left is the
+    /// port list, and it goes.
+    pub fn drop_dep_port(&self, op: OpId, index: usize) {
+        let regions = self.get_op(op).regions().to_vec();
+        for &region in &regions {
+            let handle = self.get_region(region);
+            let ports = handle.dep_arguments().len();
+            let mut results = handle.results();
+            let deps = handle.dep_results().len();
+            let groups = deps.checked_div(ports).unwrap_or(0);
+            let values = results.len() - deps;
+            for group in (0..groups).rev() {
+                results.remove(values + group * ports + index);
+            }
+            self.set_region_results(region, results, deps - groups);
+            self.remove_region_dep_port(region, index);
+        }
+        self.remove_dep_operand(op, index);
+        self.remove_dep_result(op, index);
+    }
+
     /// Move `ops`, held by the unordered `region`, into a new structured op
     /// placed in `region`. A gamma with one arm and a constant predicate takes
     /// any value the ops produce for the outside as a joined result. A loop

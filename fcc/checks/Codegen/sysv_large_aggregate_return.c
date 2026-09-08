@@ -23,8 +23,7 @@ struct Large forward_large(long a, long b, long c) {
 // CHECK-LABEL: %{{[0-9]+}} = func.func @make_large(%[[MAKE_DEST:[0-9]+]]: !ptr.p,
 // CHECK-SAME: ) -> !ptr.p result_address {
 // CHECK: | %[[MAKE_COPY:[0-9]+]] = ptr.memcpy %[[MAKE_DEST]]
-// CHECK-NEXT: | %[[MAKE_A:[0-9]+]], %[[MAKE_B:[0-9]+]] = state.split | %[[MAKE_COPY]]
-// CHECK-NEXT: | %[[MAKE_OUT:[0-9]+]] = state.join | %{{[0-9]+}}, %{{[0-9]+}}, %{{[0-9]+}}, %[[MAKE_B]], %[[MAKE_A]]
+// CHECK-NEXT: | %[[MAKE_OUT:[0-9]+]] = state.join | %{{[0-9]+}}, %{{[0-9]+}}, %{{[0-9]+}}, %[[MAKE_COPY]]
 // CHECK-NEXT: -> %[[MAKE_DEST]] | %[[MAKE_OUT]]
 // CHECK-LABEL: %{{[0-9]+}} = func.func @forward_large(%[[FORWARD_DEST:[0-9]+]]: !ptr.p,
 // CHECK-SAME: ) -> !ptr.p result_address {

@@ -3,8 +3,8 @@
 // A `noalias` parameter whose address never leaves its own accesses is as
 // private as a slot: the caller guarantees nothing else the function reaches
 // names that memory, so a pointer the facts cannot read back names neither
-// parameter. The unresolved load opens the world chain and both qualified
-// parameters keep chains of their own.
+// parameter. The entry state splits three ways: a chain for each qualified
+// parameter and the world chain the unresolved load reads.
 
 module {
   %fn_f = func.func @f(%0: !ptr.p, %1: !ptr.p) noalias [0, 1] {
@@ -16,10 +16,9 @@ module {
   module_end
 }
 // CHECK-LABEL: %{{[0-9]+}} = func.func @f(%[[P0:[0-9]+]]: !ptr.p, %[[P1:[0-9]+]]: !ptr.p)
-// CHECK-NEXT: | %[[E0:[0-9]+]] = state.entry_state
+// CHECK-NEXT: | %[[ENTRY:[0-9]+]] = state.entry_state
+// CHECK-NEXT: | %[[E0:[0-9]+]], %[[E1:[0-9]+]], %[[WORLD:[0-9]+]] = state.split | %[[ENTRY]]
 // CHECK-NEXT: %[[PTR:[0-9]+]] | %[[A:[0-9]+]] = ptr.load %[[P0]] | %[[E0]] : !ptr.p
-// CHECK-NEXT: | %[[E1:[0-9]+]] = state.entry_state
-// CHECK-NEXT: | %[[WORLD:[0-9]+]] = state.entry_state
 // CHECK-NEXT: %[[VAL:[0-9]+]] | %[[B:[0-9]+]] = ptr.load %[[PTR]] | %[[WORLD]] : !i32
 // CHECK-NEXT: | %[[S:[0-9]+]] = ptr.store %[[VAL]], %[[P1]] | %[[E1]]
 // CHECK-NEXT: | %[[EXIT:[0-9]+]] = state.join | %[[A]], %[[S]], %[[B]]

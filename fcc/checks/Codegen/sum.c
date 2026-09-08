@@ -2,17 +2,17 @@
 
 // A two-parameter function lowers to two stack slots, with each parameter
 // stored then loaded before the addition. Neither slot's address leaves its
-// own loads and stores, so each gets a chain of its own opening at its own
-// entry state and nothing orders one slot against the other.
+// own loads and stores, so the entry state splits into a chain per slot and
+// nothing orders one slot against the other.
 
 // CHECK: module {
 // CHECK: %{{[0-9]+}} = func.func @sum(%{{[0-9]+}}: !i32, %{{[0-9]+}}: !i32) -> !i32 {
 // CHECK-COUNT-2: ptr.alloca
-// CHECK: | %[[E0:[0-9]+]] = state.entry_state
-// CHECK: | %[[S0:[0-9]+]] = ptr.store %{{[0-9]+}}, %{{[0-9]+}} | %[[E0]]
+// CHECK: | %[[E:[0-9]+]] = state.entry_state
+// CHECK: | %[[C0:[0-9]+]], %[[C1:[0-9]+]], %{{[0-9]+}} = state.split | %[[E]]
+// CHECK: | %[[S0:[0-9]+]] = ptr.store %{{[0-9]+}}, %{{[0-9]+}} | %[[C0]]
+// CHECK: | %[[S1:[0-9]+]] = ptr.store %{{[0-9]+}}, %{{[0-9]+}} | %[[C1]]
 // CHECK: %[[A:[0-9]+]] | %{{[0-9]+}} = ptr.load %{{[0-9]+}} | %[[S0]] : !i32
-// CHECK: | %[[E1:[0-9]+]] = state.entry_state
-// CHECK: | %[[S1:[0-9]+]] = ptr.store %{{[0-9]+}}, %{{[0-9]+}} | %[[E1]]
 // CHECK: %[[B:[0-9]+]] | %{{[0-9]+}} = ptr.load %{{[0-9]+}} | %[[S1]] : !i32
 // CHECK: addi %[[A]], %[[B]] : !i32
 // CHECK: -> %{{[0-9]+}} | %{{[0-9]+}}

@@ -31,8 +31,8 @@ module {
 
 // CHECK-LABEL: %{{[0-9]+}} = func.func @spin
 // CHECK-NOT: ptr.
-// CHECK: %[[RESULT:[0-9]+]] | %{{[0-9]+}} = scf.loop (%[[PORT:[0-9]+]] = %1 | %{{[0-9]+}} = %{{[0-9]+}}) {
-// CHECK: -> %{{[0-9]+}}, %[[PORT]] | %{{[0-9]+}}
+// CHECK: %[[RESULT:[0-9]+]] = scf.loop (%[[PORT:[0-9]+]] = %1) {
+// CHECK: -> %{{[0-9]+}}, %[[PORT]]
 // CHECK: %[[NEXT:[0-9]+]] = addi %[[PORT]], %[[PORT]] : !i32
-// CHECK: -> %{{[0-9]+}}, %[[NEXT]] | %{{[0-9]+}}
+// CHECK: -> %{{[0-9]+}}, %[[NEXT]]
 // CHECK: -> %[[RESULT]] | %{{[0-9]+}}

@@ -1,8 +1,8 @@
 // RUN: tir opt --pass restructure-nodes --verify %s | filecheck %s
 
-// Without the qualifier two parameters may name the same memory, so each opens
-// its own chain and the store joins the chain of the pointer it may alias,
-// which orders it after the load that observes it.
+// Without the qualifier two parameters may name the same memory, so they are one
+// object on one chain, and the store lands after the load that observes it with
+// no join to say so.
 
 module {
   %fn_axpy = func.func @axpy(%0: !ptr.p, %1: !ptr.p) {
@@ -13,11 +13,7 @@ module {
   module_end
 }
 // CHECK-LABEL: %{{[0-9]+}} = func.func @axpy(%[[DST:[0-9]+]]: !ptr.p, %[[SRC:[0-9]+]]: !ptr.p)
-// CHECK-NEXT: | %[[ENTRY_DST:[0-9]+]] = state.entry_state
-// CHECK-NEXT: | %[[ENTRY_SRC:[0-9]+]] = state.entry_state
-// CHECK-NEXT: %[[VAL:[0-9]+]] | %[[READ:[0-9]+]] = ptr.load %[[SRC]] | %[[ENTRY_SRC]] : !i32
-// CHECK-NEXT: | %[[JOIN:[0-9]+]] = state.join | %[[ENTRY_DST]], %[[READ]]
-// CHECK-NEXT: | %[[WRITE:[0-9]+]] = ptr.store %[[VAL]], %[[DST]] | %[[JOIN]]
-// CHECK-NEXT: | %[[A:[0-9]+]], %[[B:[0-9]+]] = state.split | %[[WRITE]]
-// CHECK-NEXT: | %[[EXIT:[0-9]+]] = state.join | %[[A]], %[[B]]
-// CHECK-NEXT: -> | %[[EXIT]]
+// CHECK-NEXT: | %[[ENTRY:[0-9]+]] = state.entry_state
+// CHECK-NEXT: %[[VAL:[0-9]+]] | %[[READ:[0-9]+]] = ptr.load %[[SRC]] | %[[ENTRY]] : !i32
+// CHECK-NEXT: | %[[WRITE:[0-9]+]] = ptr.store %[[VAL]], %[[DST]] | %[[READ]]
+// CHECK-NEXT: -> | %[[WRITE]]
