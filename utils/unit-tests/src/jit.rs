@@ -3,7 +3,24 @@
 
 use std::ffi::c_void;
 
-use tir_jit::Jit;
+use tir_jit::{Jit, Module};
+
+extern "C" fn host_triple(x: i64) -> i64 {
+    x * 3
+}
+
+/// Compile `ir` for the host, with `host_triple` available as an external
+/// symbol. The module is leaked so its mapped code outlives the test.
+fn compile(ir: &str) -> &'static Module {
+    let mut jit = Jit::host().expect("host target");
+    jit.define_symbol("host_triple", host_triple as *const c_void);
+    Box::leak(Box::new(jit.compile(ir).expect("compile")))
+}
+
+/// Typed `extern "C"` pointer to a compiled function.
+fn get<F: Copy>(module: &Module, name: &str) -> F {
+    unsafe { module.get(name) }.unwrap_or_else(|| panic!("no symbol `{name}`"))
+}
 
 /// Returns 1 when a < b, else 0: a local branch resolved as pc-relative block
 /// fixups, with no relocations.
@@ -36,51 +53,23 @@ const EXTERNAL_CALL: &str = r#"
 "#;
 
 #[test]
-fn add_two_integers() {
-    let ir = r#"
+fn integer_arithmetic() {
+    // One module, four entry points: register-register add and multiply, a
+    // chain of dependent operations, and the immediate-multiply form
+    // (`imul r, r/m, imm`) fed by constants.
+    let module = compile(
+        r#"
         module {
           func.func @add(%0: !i64, %1: !i64) -> !i64 {
             %2 = addi %0, %1 : !i64
             func.return %2
           }
-          module_end
-        }
-    "#;
-
-    let jit = Jit::host().expect("host target");
-    let module = jit.compile(ir).expect("compile");
-    let add: extern "C" fn(i64, i64) -> i64 = unsafe { module.get("add") }.expect("add symbol");
-    assert_eq!(add(2, 40), 42);
-    assert_eq!(add(-5, 5), 0);
-}
-
-#[test]
-fn arithmetic_chain() {
-    let ir = r#"
-        module {
           func.func @chain(%0: !i64, %1: !i64) -> !i64 {
             %2 = addi %0, %1 : !i64
             %3 = subi %0, %2 : !i64
             %4 = muli %3, %1 : !i64
             func.return %4
           }
-          module_end
-        }
-    "#;
-
-    let jit = Jit::host().expect("host target");
-    let module = jit.compile(ir).expect("compile");
-    let f: extern "C" fn(i64, i64) -> i64 = unsafe { module.get("chain") }.expect("chain symbol");
-    // chain(a,b) = (a - (a+b)) * b = (-b) * b
-    assert_eq!(f(3, 4), -16);
-    assert_eq!(f(10, 7), -49);
-}
-
-#[test]
-fn multiply_by_constant() {
-    // Exercises the immediate-multiply form (`imul r, r/m, imm`).
-    let ir = r#"
-        module {
           func.func @scale(%0: !i64) -> !i64 {
             %1 = constant {value = 7} : !i64
             %2 = muli %0, %1 : !i64
@@ -88,33 +77,30 @@ fn multiply_by_constant() {
             %4 = muli %2, %3 : !i64
             func.return %4
           }
-          module_end
-        }
-    "#;
-
-    let jit = Jit::host().expect("host target");
-    let module = jit.compile(ir).expect("compile");
-    let scale: extern "C" fn(i64) -> i64 = unsafe { module.get("scale") }.expect("scale symbol");
-    // scale(x) = (x * 7) * -3 = -21x
-    assert_eq!(scale(2), -42);
-    assert_eq!(scale(-5), 105);
-}
-
-#[test]
-fn multiply_registers() {
-    let ir = r#"
-        module {
           func.func @mul(%0: !i64, %1: !i64) -> !i64 {
             %2 = muli %0, %1 : !i64
             func.return %2
           }
           module_end
         }
-    "#;
+    "#,
+    );
 
-    let jit = Jit::host().expect("host target");
-    let module = jit.compile(ir).expect("compile");
-    let mul: extern "C" fn(i64, i64) -> i64 = unsafe { module.get("mul") }.expect("mul symbol");
+    let add: extern "C" fn(i64, i64) -> i64 = get(module, "add");
+    assert_eq!(add(2, 40), 42);
+    assert_eq!(add(-5, 5), 0);
+
+    // chain(a, b) = (a - (a + b)) * b = (-b) * b
+    let chain: extern "C" fn(i64, i64) -> i64 = get(module, "chain");
+    assert_eq!(chain(3, 4), -16);
+    assert_eq!(chain(10, 7), -49);
+
+    // scale(x) = (x * 7) * -3 = -21x
+    let scale: extern "C" fn(i64) -> i64 = get(module, "scale");
+    assert_eq!(scale(2), -42);
+    assert_eq!(scale(-5), 105);
+
+    let mul: extern "C" fn(i64, i64) -> i64 = get(module, "mul");
     assert_eq!(mul(6, 7), 42);
     assert_eq!(mul(-4, 8), -32);
 }
@@ -124,9 +110,7 @@ fn conditional_branch() {
     // Local branches resolve as pc-relative block fixups (no relocations):
     // returns 1 when a < b, else 0.
 
-    let jit = Jit::host().expect("host target");
-    let module = jit.compile(BRANCH).expect("compile");
-    let lt: extern "C" fn(i64, i64) -> i64 = unsafe { module.get("lt") }.expect("lt symbol");
+    let lt: extern "C" fn(i64, i64) -> i64 = get(compile(BRANCH), "lt");
     assert_eq!(lt(3, 9), 1);
     assert_eq!(lt(20, 4), 0);
     assert_eq!(lt(-8, -1), 1);
@@ -156,10 +140,7 @@ fn value_live_across_branch() {
         }
     "#;
 
-    let jit = Jit::host().expect("host target");
-    let module = jit.compile(ir).expect("compile");
-    let cross: extern "C" fn(i64, i64) -> i64 =
-        unsafe { module.get("cross") }.expect("cross symbol");
+    let cross: extern "C" fn(i64, i64) -> i64 = get(compile(ir), "cross");
     // a < b  => (a + b) + 2a = 3a + b ; else => 2b
     assert_eq!(cross(3, 10), 19);
     assert_eq!(cross(20, 4), 8);
@@ -182,9 +163,7 @@ fn returns_first_argument_directly() {
         }
     "#;
 
-    let jit = Jit::host().expect("host target");
-    let module = jit.compile(ir).expect("compile");
-    let f: extern "C" fn(i64, i64) -> i64 = unsafe { module.get("first") }.expect("first symbol");
+    let f: extern "C" fn(i64, i64) -> i64 = get(compile(ir), "first");
     assert_eq!(f(42, 7), 42);
     assert_eq!(f(-3, 100), -3);
 }
@@ -211,10 +190,7 @@ fn block_argument_diamond() {
         }
     "#;
 
-    let jit = Jit::host().expect("host target");
-    let module = jit.compile(ir).expect("compile");
-    let sel: extern "C" fn(i64, i64, i64, i64) -> i64 =
-        unsafe { module.get("sel") }.expect("sel symbol");
+    let sel: extern "C" fn(i64, i64, i64, i64) -> i64 = get(compile(ir), "sel");
     // sel(c, d, a, b) = if c < d { a } else { b }
     assert_eq!(sel(1, 2, 42, 7), 42);
     assert_eq!(sel(5, 2, 42, 7), 7);
@@ -242,9 +218,7 @@ fn loop_carried_block_argument() {
         }
     "#;
 
-    let jit = Jit::host().expect("host target");
-    let module = jit.compile(ir).expect("compile");
-    let count: extern "C" fn(i64) -> i64 = unsafe { module.get("count") }.expect("count symbol");
+    let count: extern "C" fn(i64) -> i64 = get(compile(ir), "count");
     assert_eq!(count(0), 0);
     assert_eq!(count(5), 5);
     assert_eq!(count(23), 23);
@@ -279,9 +253,7 @@ fn loop_accumulator_in_a_slot() {
         }
     "#;
 
-    let jit = Jit::host().expect("host target");
-    let module = jit.compile(ir).expect("compile");
-    let sum: extern "C" fn(i64) -> i64 = unsafe { module.get("sum") }.expect("sum symbol");
+    let sum: extern "C" fn(i64) -> i64 = get(compile(ir), "sum");
     // sum(n) = 0 + 1 + ... + (n - 1)
     assert_eq!(sum(0), 0);
     assert_eq!(sum(5), 10);
@@ -308,26 +280,16 @@ fn conditional_edge_arguments() {
         }
     "#;
 
-    let jit = Jit::host().expect("host target");
-    let module = jit.compile(ir).expect("compile");
-    let sel: extern "C" fn(i64, i64, i64, i64) -> i64 =
-        unsafe { module.get("sel") }.expect("sel symbol");
+    let sel: extern "C" fn(i64, i64, i64, i64) -> i64 = get(compile(ir), "sel");
     // sel(c, d, a, b) = if c < d { a } else { b }
     assert_eq!(sel(1, 2, 42, 7), 42);
     assert_eq!(sel(5, 2, 42, 7), 7);
     assert_eq!(sel(-9, 0, 100, 200), 100);
 }
 
-extern "C" fn host_triple(x: i64) -> i64 {
-    x * 3
-}
-
 #[test]
 fn external_host_call() {
-    let mut jit = Jit::host().expect("host target");
-    jit.define_symbol("host_triple", host_triple as *const c_void);
-    let module = jit.compile(EXTERNAL_CALL).expect("compile");
-    let f: extern "C" fn(i64) -> i64 = unsafe { module.get("via_host") }.expect("via_host symbol");
+    let f: extern "C" fn(i64) -> i64 = get(compile(EXTERNAL_CALL), "via_host");
     // via_host(x) = host_triple(x) = 3x
     assert_eq!(f(5), 15);
     assert_eq!(f(-3), -9);
@@ -353,10 +315,7 @@ fn value_live_across_host_call() {
         }
     "#;
 
-    let mut jit = Jit::host().expect("host target");
-    jit.define_symbol("host_triple", host_triple as *const c_void);
-    let module = jit.compile(ir).expect("compile");
-    let f: extern "C" fn(i64) -> i64 = unsafe { module.get("f") }.expect("f symbol");
+    let f: extern "C" fn(i64) -> i64 = get(compile(ir), "f");
     // f(x) = 2x + host_triple(2x) = 2x + 6x = 8x
     assert_eq!(f(5), 40);
     assert_eq!(f(-3), -24);
