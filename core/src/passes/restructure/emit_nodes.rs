@@ -13,7 +13,6 @@ use std::collections::BTreeMap;
 use super::branches::Stmt;
 use super::cfg::{Cfg, LoopId, NodeId, Rhs, Src, Term, VarId, unsupported};
 use super::liveness::Liveness;
-use super::ports::Ports;
 use crate::attributes::Predicate;
 use crate::builtin::{AddIOpBuilder, CmpIOpBuilder, ConstantOpBuilder, IntegerType};
 use crate::state::{EntryStateOpBuilder, JoinOpBuilder, SplitOpBuilder};
@@ -65,12 +64,7 @@ pub fn emit(
         }
     }
 
-    let emitter = Emitter {
-        context,
-        cfg,
-        live,
-        ports: Ports { context, cfg, live },
-    };
+    let emitter = Emitter { context, cfg, live };
     emitter.statements(tree, body, &mut env)?;
     let Term::Sink { op, args } = &cfg.nodes[cfg.sink].term else {
         return Err(unsupported("a region whose exit moved"));
@@ -80,11 +74,10 @@ pub fn emit(
     Ok(())
 }
 
-struct Emitter<'a> {
-    context: &'a Context,
-    cfg: &'a Cfg,
-    live: &'a Liveness,
-    ports: Ports<'a>,
+pub(super) struct Emitter<'a> {
+    pub(super) context: &'a Context,
+    pub(super) cfg: &'a Cfg,
+    pub(super) live: &'a Liveness,
 }
 
 impl Emitter<'_> {
@@ -185,11 +178,8 @@ impl Emitter<'_> {
     ) -> Result<(), PassError> {
         let (mut results, mut deps) = match args {
             Some(args) => {
-                let args = self.ports.deps_last(args);
-                (
-                    self.port_values(&args, region, env)?,
-                    self.ports.dep_count(&args),
-                )
+                let args = self.deps_last(args);
+                (self.port_values(&args, region, env)?, self.dep_count(&args))
             }
             None => {
                 self.bind_undefined_reads(op, region, env)?;
@@ -250,8 +240,8 @@ impl Emitter<'_> {
         region: RegionId,
         env: &mut Env,
     ) -> Result<(), PassError> {
-        let ports = self.ports.ports(arms, self.live.at(continuation).clone());
-        let deps = self.ports.dep_count(&ports);
+        let ports = self.ports(arms, self.live.at(continuation).clone());
+        let deps = self.dep_count(&ports);
         let chains = &ports[ports.len() - deps..];
         let dep_inits = self.port_values(chains, region, env)?;
         let regions = arms
@@ -277,7 +267,7 @@ impl Emitter<'_> {
             .predicate(predicate)
             .inputs(vec![])
             .arms(regions)
-            .result_types(self.ports.value_types(&ports));
+            .result_types(self.value_types(&ports));
         for dep in dep_inits {
             gate = gate.dep_operand(dep).dep_result();
         }
@@ -312,7 +302,7 @@ impl Emitter<'_> {
         self.statements(arm, region, &mut inner)?;
         let produced = self.port_values(ports, region, &inner)?;
         self.context
-            .set_region_results(region, produced, self.ports.dep_count(ports));
+            .set_region_results(region, produced, self.dep_count(ports));
         Ok(region)
     }
 
@@ -331,8 +321,8 @@ impl Emitter<'_> {
         let Term::LoopTail { pred, .. } = self.cfg.nodes[tail].term.clone() else {
             return Err(unsupported("a loop whose tail moved"));
         };
-        let ports = self.ports.loop_ports(id, body);
-        let deps = self.ports.dep_count(&ports);
+        let ports = self.loop_ports(id, body);
+        let deps = self.dep_count(&ports);
         let port_values: Vec<Value> = ports
             .iter()
             .map(|&var| self.context.create_value(self.cfg.var_types[var], None))
@@ -362,7 +352,7 @@ impl Emitter<'_> {
         let mut loop_op = scf::LoopOpBuilder::new(self.context)
             .inits(values.to_vec())
             .body(body_region)
-            .result_types(self.ports.value_types(&ports));
+            .result_types(self.value_types(&ports));
         for &dep in dep_inits {
             loop_op = loop_op.dep_operand(dep).dep_result();
         }
