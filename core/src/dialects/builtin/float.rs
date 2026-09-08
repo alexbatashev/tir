@@ -10,7 +10,9 @@
 use crate::operation;
 
 use crate as tir;
-use crate::{Commutative, Context, OpId, SameOperandAndResultType, attributes::AttributeValue};
+use crate::{
+    Commutative, Context, OpId, SameOperandAndResultType, Speculatable, attributes::AttributeValue,
+};
 
 /// The attribute consulted by [`fp_math_flags`], valid on blocks and on
 /// region-owning operations. Its value is a string accepted by
@@ -279,39 +281,29 @@ impl CmpFOp {
     }
 }
 
-operation! {
-    FPToSIOp {
-        name: "fptosi",
-        dialect: "builtin",
-        operands: O {
-            input: "crate::builtin::FloatType",
-        },
-        results: R {
-            result: "crate::builtin::IntegerType",
-        },
-        sem: "(set result (fptosi input))",
-        interfaces: [crate::Speculatable],
-    }
+macro_rules! float_cast {
+    ($op:ident, $name:tt, $sem:tt) => {
+        operation! {
+            $op {
+                name: $name,
+                dialect: "builtin",
+                operands: O {
+                    input: "crate::builtin::FloatType",
+                },
+                results: R {
+                    result: "crate::builtin::IntegerType",
+                },
+                sem: $sem,
+                interfaces: [Speculatable],
+            }
+        }
+
+        impl Speculatable for $op {}
+    };
 }
 
-impl crate::Speculatable for FPToSIOp {}
-
-operation! {
-    FPToUIOp {
-        name: "fptoui",
-        dialect: "builtin",
-        operands: O {
-            input: "crate::builtin::FloatType",
-        },
-        results: R {
-            result: "crate::builtin::IntegerType",
-        },
-        sem: "(set result (fptoui input))",
-        interfaces: [crate::Speculatable],
-    }
-}
-
-impl crate::Speculatable for FPToUIOp {}
+float_cast!(FPToSIOp, "fptosi", "(set result (fptosi input))");
+float_cast!(FPToUIOp, "fptoui", "(set result (fptoui input))");
 
 impl ConstantFOpBuilder {
     /// The constant, held as `f64`; every supported format embeds in it exactly.
@@ -320,82 +312,49 @@ impl ConstantFOpBuilder {
     }
 }
 
-operation! {
-    AddFOp {
-        name: "addf",
-        dialect: "builtin",
-        operands: O {
-            lhs: "crate::builtin::FloatType",
-            rhs: "crate::builtin::FloatType",
-        },
-        results: R {
-            result: "crate::builtin::FloatType",
-        },
-        interfaces: [Commutative, SameOperandAndResultType, crate::Speculatable],
-        sem: "(set result (fadd lhs rhs))",
-    }
+macro_rules! float_binop {
+    ($op:ident, $name:tt, [$($iface:ident),*], $sem:tt) => {
+        operation! {
+            $op {
+                name: $name,
+                dialect: "builtin",
+                operands: O {
+                    lhs: "crate::builtin::FloatType",
+                    rhs: "crate::builtin::FloatType",
+                },
+                results: R {
+                    result: "crate::builtin::FloatType",
+                },
+                interfaces: [$($iface),*],
+                sem: $sem,
+            }
+        }
+
+        $(impl $iface for $op {})*
+    };
 }
 
-impl crate::Speculatable for AddFOp {}
-
-impl Commutative for AddFOp {}
-impl SameOperandAndResultType for AddFOp {}
-
-operation! {
-    SubFOp {
-        name: "subf",
-        dialect: "builtin",
-        operands: O {
-            lhs: "crate::builtin::FloatType",
-            rhs: "crate::builtin::FloatType",
-        },
-        results: R {
-            result: "crate::builtin::FloatType",
-        },
-        interfaces: [SameOperandAndResultType, crate::Speculatable],
-        sem: "(set result (fsub lhs rhs))",
-    }
-}
-
-impl crate::Speculatable for SubFOp {}
-
-impl SameOperandAndResultType for SubFOp {}
-
-operation! {
-    MulFOp {
-        name: "mulf",
-        dialect: "builtin",
-        operands: O {
-            lhs: "crate::builtin::FloatType",
-            rhs: "crate::builtin::FloatType",
-        },
-        results: R {
-            result: "crate::builtin::FloatType",
-        },
-        interfaces: [Commutative, SameOperandAndResultType, crate::Speculatable],
-        sem: "(set result (fmul lhs rhs))",
-    }
-}
-
-impl crate::Speculatable for MulFOp {}
-
-impl Commutative for MulFOp {}
-impl SameOperandAndResultType for MulFOp {}
-
-operation! {
-    DivFOp {
-        name: "divf",
-        dialect: "builtin",
-        operands: O {
-            lhs: "crate::builtin::FloatType",
-            rhs: "crate::builtin::FloatType",
-        },
-        results: R {
-            result: "crate::builtin::FloatType",
-        },
-        interfaces: [SameOperandAndResultType],
-        sem: "(set result (fdiv lhs rhs))",
-    }
-}
-
-impl SameOperandAndResultType for DivFOp {}
+float_binop!(
+    AddFOp,
+    "addf",
+    [Commutative, SameOperandAndResultType, Speculatable],
+    "(set result (fadd lhs rhs))"
+);
+float_binop!(
+    SubFOp,
+    "subf",
+    [SameOperandAndResultType, Speculatable],
+    "(set result (fsub lhs rhs))"
+);
+float_binop!(
+    MulFOp,
+    "mulf",
+    [Commutative, SameOperandAndResultType, Speculatable],
+    "(set result (fmul lhs rhs))"
+);
+float_binop!(
+    DivFOp,
+    "divf",
+    [SameOperandAndResultType],
+    "(set result (fdiv lhs rhs))"
+);

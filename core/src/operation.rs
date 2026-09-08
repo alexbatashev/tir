@@ -94,8 +94,7 @@ where
     erase_op_interface(ImplementsOpInterface::<I>::into_interface(op))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct OpId(u32);
+id_newtype!(OpId);
 
 /// Core trait for all operations in TIR’s intermediate representation.
 ///
@@ -1047,29 +1046,6 @@ impl OpId {
 
     pub fn invalid() -> Self {
         Self::default()
-    }
-
-    pub(crate) fn new(id: u32) -> Self {
-        Self(id)
-    }
-
-    pub(crate) fn index(self) -> usize {
-        self.0 as usize
-    }
-
-    /// The hive handle backing this id.
-    pub(crate) fn raw(self) -> u32 {
-        self.0
-    }
-
-    /// Raw integer id, for stable identification across an FFI boundary.
-    pub fn number(self) -> u32 {
-        self.0
-    }
-
-    /// Reconstruct an id from its raw integer, the inverse of [`OpId::number`].
-    pub fn from_number(id: u32) -> Self {
-        Self(id)
     }
 }
 

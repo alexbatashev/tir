@@ -3,7 +3,7 @@ use crate::operation;
 use crate as tir;
 use crate::{
     Any, Commutative, ConstantLike, Context, Error, IntegerArithmetic, OpCost, Operation,
-    SameOperandAndResultType,
+    SameOperandAndResultType, Speculatable,
 };
 
 operation! {
@@ -44,287 +44,147 @@ impl crate::ConstantLike for ConstantOp {
     }
 }
 
-operation! {
-    AddIOp {
-        name: "addi",
-        dialect: "builtin",
-        operands: O {
-            lhs: "crate::builtin::IntegerType",
-            rhs: "crate::builtin::IntegerType",
-        },
-        results: R {
-            result: "crate::builtin::IntegerType",
-        },
-        interfaces: [Commutative, SameOperandAndResultType, IntegerArithmetic, crate::Speculatable],
-        sem: "(set result (add lhs rhs))",
-    }
+macro_rules! int_binop {
+    ($op:ident, $name:tt, [$($iface:ident),*], $sem:tt) => {
+        int_binop!($op, $name, [$($iface),*], [], $sem);
+    };
+    ($op:ident, $name:tt, [$($iface:ident),*], [$($extra:ident),*], $sem:tt) => {
+        operation! {
+            $op {
+                name: $name,
+                dialect: "builtin",
+                operands: O {
+                    lhs: "crate::builtin::IntegerType",
+                    rhs: "crate::builtin::IntegerType",
+                },
+                results: R {
+                    result: "crate::builtin::IntegerType",
+                },
+                interfaces: [$($iface,)* $($extra),*],
+                sem: $sem,
+            }
+        }
+
+        $(impl $iface for $op {})*
+    };
 }
 
-impl crate::Speculatable for AddIOp {}
-
-impl Commutative for AddIOp {}
-impl SameOperandAndResultType for AddIOp {}
-impl IntegerArithmetic for AddIOp {}
-
-operation! {
-    SubIOp {
-        name: "subi",
-        dialect: "builtin",
-        operands: O {
-            lhs: "crate::builtin::IntegerType",
-            rhs: "crate::builtin::IntegerType",
-        },
-        results: R {
-            result: "crate::builtin::IntegerType",
-        },
-        interfaces: [SameOperandAndResultType, IntegerArithmetic, crate::Speculatable],
-        sem: "(set result (sub lhs rhs))",
-    }
-}
-
-impl crate::Speculatable for SubIOp {}
-
-impl SameOperandAndResultType for SubIOp {}
-impl IntegerArithmetic for SubIOp {}
-
-operation! {
-    MulIOp {
-        name: "muli",
-        dialect: "builtin",
-        operands: O {
-            lhs: "crate::builtin::IntegerType",
-            rhs: "crate::builtin::IntegerType",
-        },
-        results: R {
-            result: "crate::builtin::IntegerType",
-        },
-        interfaces: [Commutative, SameOperandAndResultType, OpCost, IntegerArithmetic, crate::Speculatable],
-        sem: "(set result (mul lhs rhs))",
-    }
-}
-
-impl crate::Speculatable for MulIOp {}
-
-impl Commutative for MulIOp {}
-impl SameOperandAndResultType for MulIOp {}
-impl IntegerArithmetic for MulIOp {}
+int_binop!(
+    AddIOp,
+    "addi",
+    [
+        Commutative,
+        SameOperandAndResultType,
+        IntegerArithmetic,
+        Speculatable
+    ],
+    "(set result (add lhs rhs))"
+);
+int_binop!(
+    SubIOp,
+    "subi",
+    [SameOperandAndResultType, IntegerArithmetic, Speculatable],
+    "(set result (sub lhs rhs))"
+);
+int_binop!(
+    MulIOp,
+    "muli",
+    [
+        Commutative,
+        SameOperandAndResultType,
+        IntegerArithmetic,
+        Speculatable
+    ],
+    [OpCost],
+    "(set result (mul lhs rhs))"
+);
+int_binop!(
+    DivSIOp,
+    "divsi",
+    [SameOperandAndResultType, IntegerArithmetic],
+    "(set result (div lhs rhs))"
+);
+int_binop!(
+    DivUIOp,
+    "divui",
+    [SameOperandAndResultType, IntegerArithmetic],
+    "(set result (udiv lhs rhs))"
+);
+// Remainder is defined by the Euclidean identity rather than a primitive
+// srem/urem, so the semantic form matches the canonical sub-mul-div target
+// that TMDL rem/remu behaviors reduce to and selects through the e-graph
+// without an unprovable rewrite. This total form equals bvsrem/bvurem
+// everywhere, including rhs=0 (a - x*0 = a) and MIN/-1 (0). IR-level
+// partiality (C's UB at rhs=0) is unchanged.
+int_binop!(
+    RemSIOp,
+    "remsi",
+    [SameOperandAndResultType, IntegerArithmetic],
+    "(set result (sub lhs (mul (div lhs rhs) rhs)))"
+);
+int_binop!(
+    RemUIOp,
+    "remui",
+    [SameOperandAndResultType, IntegerArithmetic],
+    "(set result (sub lhs (mul (udiv lhs rhs) rhs)))"
+);
+int_binop!(
+    AndIOp,
+    "andi",
+    [
+        Commutative,
+        SameOperandAndResultType,
+        IntegerArithmetic,
+        Speculatable
+    ],
+    "(set result (and lhs rhs))"
+);
+int_binop!(
+    OrIOp,
+    "ori",
+    [
+        Commutative,
+        SameOperandAndResultType,
+        IntegerArithmetic,
+        Speculatable
+    ],
+    "(set result (or lhs rhs))"
+);
+int_binop!(
+    XOrIOp,
+    "xori",
+    [
+        Commutative,
+        SameOperandAndResultType,
+        IntegerArithmetic,
+        Speculatable
+    ],
+    "(set result (xor lhs rhs))"
+);
+int_binop!(
+    ShlIOp,
+    "shli",
+    [SameOperandAndResultType, IntegerArithmetic, Speculatable],
+    "(set result (shl lhs rhs))"
+);
+int_binop!(
+    ShrUIOp,
+    "shrui",
+    [SameOperandAndResultType, IntegerArithmetic, Speculatable],
+    "(set result (lshr lhs rhs))"
+);
+int_binop!(
+    ShrSIOp,
+    "shrsi",
+    [SameOperandAndResultType, IntegerArithmetic, Speculatable],
+    "(set result (ashr lhs rhs))"
+);
 
 impl crate::OpCost for MulIOp {
     fn cost(&self) -> u32 {
         4
     }
 }
-
-operation! {
-    DivSIOp {
-        name: "divsi",
-        dialect: "builtin",
-        operands: O {
-            lhs: "crate::builtin::IntegerType",
-            rhs: "crate::builtin::IntegerType",
-        },
-        results: R {
-            result: "crate::builtin::IntegerType",
-        },
-        interfaces: [SameOperandAndResultType, IntegerArithmetic],
-        sem: "(set result (div lhs rhs))",
-    }
-}
-
-impl SameOperandAndResultType for DivSIOp {}
-impl IntegerArithmetic for DivSIOp {}
-
-operation! {
-    DivUIOp {
-        name: "divui",
-        dialect: "builtin",
-        operands: O {
-            lhs: "crate::builtin::IntegerType",
-            rhs: "crate::builtin::IntegerType",
-        },
-        results: R {
-            result: "crate::builtin::IntegerType",
-        },
-        interfaces: [SameOperandAndResultType, IntegerArithmetic],
-        sem: "(set result (udiv lhs rhs))",
-    }
-}
-
-impl SameOperandAndResultType for DivUIOp {}
-impl IntegerArithmetic for DivUIOp {}
-
-operation! {
-    // Remainder is defined by the Euclidean identity rather than a primitive
-    // srem/urem, so the semantic form matches the canonical sub-mul-div target
-    // that TMDL rem/remu behaviors reduce to and selects through the e-graph
-    // without an unprovable rewrite. This total form equals bvsrem/bvurem
-    // everywhere, including rhs=0 (a - x*0 = a) and MIN/-1 (0). IR-level
-    // partiality (C's UB at rhs=0) is unchanged.
-    RemSIOp {
-        name: "remsi",
-        dialect: "builtin",
-        operands: O {
-            lhs: "crate::builtin::IntegerType",
-            rhs: "crate::builtin::IntegerType",
-        },
-        results: R {
-            result: "crate::builtin::IntegerType",
-        },
-        interfaces: [SameOperandAndResultType, IntegerArithmetic],
-        sem: "(set result (sub lhs (mul (div lhs rhs) rhs)))",
-    }
-}
-
-impl SameOperandAndResultType for RemSIOp {}
-impl IntegerArithmetic for RemSIOp {}
-
-operation! {
-    RemUIOp {
-        name: "remui",
-        dialect: "builtin",
-        operands: O {
-            lhs: "crate::builtin::IntegerType",
-            rhs: "crate::builtin::IntegerType",
-        },
-        results: R {
-            result: "crate::builtin::IntegerType",
-        },
-        interfaces: [SameOperandAndResultType, IntegerArithmetic],
-        sem: "(set result (sub lhs (mul (udiv lhs rhs) rhs)))",
-    }
-}
-
-impl SameOperandAndResultType for RemUIOp {}
-impl IntegerArithmetic for RemUIOp {}
-
-operation! {
-    AndIOp {
-        name: "andi",
-        dialect: "builtin",
-        operands: O {
-            lhs: "crate::builtin::IntegerType",
-            rhs: "crate::builtin::IntegerType",
-        },
-        results: R {
-            result: "crate::builtin::IntegerType",
-        },
-        interfaces: [Commutative, SameOperandAndResultType, IntegerArithmetic, crate::Speculatable],
-        sem: "(set result (and lhs rhs))",
-    }
-}
-
-impl crate::Speculatable for AndIOp {}
-
-impl Commutative for AndIOp {}
-impl SameOperandAndResultType for AndIOp {}
-impl IntegerArithmetic for AndIOp {}
-
-operation! {
-    OrIOp {
-        name: "ori",
-        dialect: "builtin",
-        operands: O {
-            lhs: "crate::builtin::IntegerType",
-            rhs: "crate::builtin::IntegerType",
-        },
-        results: R {
-            result: "crate::builtin::IntegerType",
-        },
-        interfaces: [Commutative, SameOperandAndResultType, IntegerArithmetic, crate::Speculatable],
-        sem: "(set result (or lhs rhs))",
-    }
-}
-
-impl crate::Speculatable for OrIOp {}
-
-impl Commutative for OrIOp {}
-impl SameOperandAndResultType for OrIOp {}
-impl IntegerArithmetic for OrIOp {}
-
-operation! {
-    XOrIOp {
-        name: "xori",
-        dialect: "builtin",
-        operands: O {
-            lhs: "crate::builtin::IntegerType",
-            rhs: "crate::builtin::IntegerType",
-        },
-        results: R {
-            result: "crate::builtin::IntegerType",
-        },
-        interfaces: [Commutative, SameOperandAndResultType, IntegerArithmetic, crate::Speculatable],
-        sem: "(set result (xor lhs rhs))",
-    }
-}
-
-impl crate::Speculatable for XOrIOp {}
-
-impl Commutative for XOrIOp {}
-impl SameOperandAndResultType for XOrIOp {}
-impl IntegerArithmetic for XOrIOp {}
-
-operation! {
-    ShlIOp {
-        name: "shli",
-        dialect: "builtin",
-        operands: O {
-            lhs: "crate::builtin::IntegerType",
-            rhs: "crate::builtin::IntegerType",
-        },
-        results: R {
-            result: "crate::builtin::IntegerType",
-        },
-        interfaces: [SameOperandAndResultType, IntegerArithmetic, crate::Speculatable],
-        sem: "(set result (shl lhs rhs))",
-    }
-}
-
-impl crate::Speculatable for ShlIOp {}
-
-impl SameOperandAndResultType for ShlIOp {}
-impl IntegerArithmetic for ShlIOp {}
-
-operation! {
-    ShrUIOp {
-        name: "shrui",
-        dialect: "builtin",
-        operands: O {
-            lhs: "crate::builtin::IntegerType",
-            rhs: "crate::builtin::IntegerType",
-        },
-        results: R {
-            result: "crate::builtin::IntegerType",
-        },
-        interfaces: [SameOperandAndResultType, IntegerArithmetic, crate::Speculatable],
-        sem: "(set result (lshr lhs rhs))",
-    }
-}
-
-impl crate::Speculatable for ShrUIOp {}
-
-impl SameOperandAndResultType for ShrUIOp {}
-impl IntegerArithmetic for ShrUIOp {}
-
-operation! {
-    ShrSIOp {
-        name: "shrsi",
-        dialect: "builtin",
-        operands: O {
-            lhs: "crate::builtin::IntegerType",
-            rhs: "crate::builtin::IntegerType",
-        },
-        results: R {
-            result: "crate::builtin::IntegerType",
-        },
-        interfaces: [SameOperandAndResultType, IntegerArithmetic, crate::Speculatable],
-        sem: "(set result (ashr lhs rhs))",
-    }
-}
-
-impl crate::Speculatable for ShrSIOp {}
-
-impl SameOperandAndResultType for ShrSIOp {}
-impl IntegerArithmetic for ShrSIOp {}
 
 operation! {
     CmpIOp {
@@ -348,9 +208,6 @@ operation! {
 impl crate::Speculatable for CmpIOp {}
 
 impl CmpIOp {
-    /// The comparison in canonical form: `sgt`/`sle`/`ugt`/`ule` become the
-    /// swapped-operand `Lt`/`Ge`/`ULt`/`UGe`, matching how TMDL lowers target
-    /// behaviors, so only six comparison kinds ever appear in patterns.
     fn cmp_expr(
         &self,
         g: &mut impl tir::graph::MutDag<
@@ -358,42 +215,55 @@ impl CmpIOp {
             Leaf = tir::sem::SymPayload<tir::ValueId>,
         >,
     ) -> Option<tir::graph::NodeId> {
-        use tir::attributes::Predicate;
-        use tir::sem::SymKind;
-
         let tir::attributes::AttributeValue::Predicate(predicate) = self.0.attr("predicate")?
         else {
             return None;
         };
-        let swap = matches!(
-            predicate,
-            Predicate::Sgt | Predicate::Sle | Predicate::Ugt | Predicate::Ule
-        );
-        let kind = match if swap { predicate.swapped() } else { predicate } {
-            Predicate::Eq => SymKind::Eq,
-            Predicate::Ne => SymKind::Ne,
-            Predicate::Slt => SymKind::Lt,
-            Predicate::Sge => SymKind::Ge,
-            Predicate::Ult => SymKind::ULt,
-            Predicate::Uge => SymKind::UGe,
-            _ => return None,
-        };
-
-        let mut operand = |index: u32| {
-            let leaf = g.add_node(SymKind::Symbol);
-            g.set_leaf_data(leaf, tir::sem::SymPayload::SymbolId(index));
-            leaf
-        };
-        let (lhs, rhs) = if swap {
-            (operand(1), operand(0))
-        } else {
-            (operand(0), operand(1))
-        };
-        let node = g.add_node(kind);
-        g.add_edge(node, lhs);
-        g.add_edge(node, rhs);
-        Some(node)
+        compare_expr(g, predicate, false)
     }
+}
+
+/// The comparison in canonical form: `sgt`/`sle`/`ugt`/`ule` become the
+/// swapped-operand `Lt`/`Ge`/`ULt`/`UGe`, matching how TMDL lowers target
+/// behaviors, so only six comparison kinds ever appear in patterns.
+/// `unsigned_only` offers no semantics for a signed comparison, which an
+/// address ordering has no meaning for.
+pub(crate) fn compare_expr(
+    g: &mut impl tir::graph::MutDag<Node = tir::sem::SymKind, Leaf = tir::sem::SymPayload<tir::ValueId>>,
+    predicate: tir::attributes::Predicate,
+    unsigned_only: bool,
+) -> Option<tir::graph::NodeId> {
+    use tir::attributes::Predicate;
+    use tir::sem::SymKind;
+
+    let swap = matches!(
+        predicate,
+        Predicate::Sgt | Predicate::Sle | Predicate::Ugt | Predicate::Ule
+    );
+    let kind = match if swap { predicate.swapped() } else { predicate } {
+        Predicate::Eq => SymKind::Eq,
+        Predicate::Ne => SymKind::Ne,
+        Predicate::Slt if !unsigned_only => SymKind::Lt,
+        Predicate::Sge if !unsigned_only => SymKind::Ge,
+        Predicate::Ult => SymKind::ULt,
+        Predicate::Uge => SymKind::UGe,
+        _ => return None,
+    };
+
+    let mut operand = |index: u32| {
+        let leaf = g.add_node(SymKind::Symbol);
+        g.set_leaf_data(leaf, tir::sem::SymPayload::SymbolId(index));
+        leaf
+    };
+    let (lhs, rhs) = if swap {
+        (operand(1), operand(0))
+    } else {
+        (operand(0), operand(1))
+    };
+    let node = g.add_node(kind);
+    g.add_edge(node, lhs);
+    g.add_edge(node, rhs);
+    Some(node)
 }
 
 operation! {

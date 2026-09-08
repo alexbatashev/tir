@@ -125,53 +125,41 @@ impl Type for VectorType {
     }
 }
 
-operation! {
-    AddOp {
-        name: "add",
-        dialect: "vector",
-        operands: O {
-            lhs: "crate::vector::VectorType",
-            rhs: "crate::vector::VectorType",
-            vl: "?crate::builtin::IndexType",
-        },
-        results: R {
-            result: "crate::vector::VectorType",
-        },
-        sem: "(set result (concat (map (zip (split lhs $get_vlen $get_sew) (split rhs $get_vlen $get_sew)) (lambda (a b) (add a b)))))",
-    }
+macro_rules! vector_binop {
+    ($op:ident, $name:tt, $sem:tt) => {
+        operation! {
+            $op {
+                name: $name,
+                dialect: "vector",
+                operands: O {
+                    lhs: "crate::vector::VectorType",
+                    rhs: "crate::vector::VectorType",
+                    vl: "?crate::builtin::IndexType",
+                },
+                results: R {
+                    result: "crate::vector::VectorType",
+                },
+                sem: $sem,
+            }
+        }
+    };
 }
 
-operation! {
-    SubOp {
-        name: "sub",
-        dialect: "vector",
-        operands: O {
-            lhs: "crate::vector::VectorType",
-            rhs: "crate::vector::VectorType",
-            vl: "?crate::builtin::IndexType",
-        },
-        results: R {
-            result: "crate::vector::VectorType",
-        },
-        sem: "(set result (concat (map (zip (split lhs $get_vlen $get_sew) (split rhs $get_vlen $get_sew)) (lambda (a b) (sub a b)))))",
-    }
-}
-
-operation! {
-    MulOp {
-        name: "mul",
-        dialect: "vector",
-        operands: O {
-            lhs: "crate::vector::VectorType",
-            rhs: "crate::vector::VectorType",
-            vl: "?crate::builtin::IndexType",
-        },
-        results: R {
-            result: "crate::vector::VectorType",
-        },
-        sem: "(set result (concat (map (zip (split lhs $get_vlen $get_sew) (split rhs $get_vlen $get_sew)) (lambda (a b) (mul a b)))))",
-    }
-}
+vector_binop!(
+    AddOp,
+    "add",
+    "(set result (concat (map (zip (split lhs $get_vlen $get_sew) (split rhs $get_vlen $get_sew)) (lambda (a b) (add a b)))))"
+);
+vector_binop!(
+    SubOp,
+    "sub",
+    "(set result (concat (map (zip (split lhs $get_vlen $get_sew) (split rhs $get_vlen $get_sew)) (lambda (a b) (sub a b)))))"
+);
+vector_binop!(
+    MulOp,
+    "mul",
+    "(set result (concat (map (zip (split lhs $get_vlen $get_sew) (split rhs $get_vlen $get_sew)) (lambda (a b) (mul a b)))))"
+);
 
 // `vector_len(avl)` yields the number of lanes the target grants for a request
 // of `avl` — `min(avl, VLMAX)` on RVV, where it selects as `vsetvli rd, avl`.

@@ -46,26 +46,13 @@ impl Type for TupleType {
         parser: &mut crate::parse::text::Parser<'src>,
         context: &Context,
     ) -> Result<TypeId, (Span, Error)> {
-        if !parser.parse_token("<") {
-            return Err((parser.span(), Error::ExpectedToken("<")));
-        }
-
-        let mut elements = vec![];
-        if !parser.parse_token(">") {
-            loop {
-                elements.push(
-                    parser
-                        .parse_type(context)?
-                        .ok_or_else(|| (parser.span(), Error::ExpectedType))?,
-                );
-                if parser.parse_token(">") {
-                    break;
-                }
-                if !parser.parse_token(",") {
-                    return Err((parser.span(), Error::ExpectedToken(",")));
-                }
-            }
-        }
+        let elements = parser
+            .parse_delimited("<", ">", |parser| {
+                parser
+                    .parse_type(context)?
+                    .ok_or_else(|| (parser.span(), Error::ExpectedType))
+            })?
+            .ok_or_else(|| (parser.span(), Error::ExpectedToken("<")))?;
 
         Ok(Self::new(context, elements))
     }

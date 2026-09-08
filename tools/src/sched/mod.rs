@@ -19,7 +19,7 @@ use tir::backend::{MachineInstruction, SectionOp, SymbolOp};
 use tir::builtin::ModuleOp;
 use tir_sim::scoreboard::{self, Prf, ScoreboardInstr, TimingConfig, phys_regs};
 
-use crate::common::{InputKind, parse_module};
+use crate::common::{InputKind, TargetArgs, parse_module};
 use crate::sched::event::View;
 
 mod event;
@@ -42,18 +42,11 @@ const GENERIC_MODEL: tir::backend::sched::MachineModel = tir::backend::sched::Ma
 
 #[derive(Args)]
 pub struct ToolArgs {
-    /// Target CPU
-    #[arg(long)]
-    mcpu: Option<String>,
+    #[command(flatten)]
+    target: TargetArgs,
     /// Target architecture
-    #[arg(long)]
+    #[arg(long, display_order = 1)]
     march: String,
-    /// Target feature toggles (e.g. `+m,-zmmul`), applied on top of `--march`.
-    #[arg(long)]
-    mattr: Option<String>,
-    /// Target calling convention.
-    #[arg(long)]
-    mabi: Option<String>,
     /// Performance model / machine to analyze against (e.g. `ooo`, `in-order`).
     /// Omitted: the machine implied by `--mcpu` when it names one, otherwise a
     /// generic single-issue core that costs every instruction one cycle.
@@ -70,12 +63,7 @@ pub struct ToolArgs {
 }
 
 pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
-    let target = tir::backend::select_target_with_abi(
-        &args.march,
-        args.mcpu.as_deref(),
-        args.mattr.as_deref(),
-        args.mabi.as_deref(),
-    )?;
+    let target = args.target.select(&args.march)?;
 
     let context = Context::with_default_dialects();
     target.register_dialects(&context);

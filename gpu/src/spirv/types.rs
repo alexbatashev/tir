@@ -22,44 +22,38 @@ pub enum StorageClass {
     PhysicalStorageBuffer,
 }
 
+/// Every storage class and the name SPIR-V spells it with.
+const STORAGE_CLASSES: &[(StorageClass, &str)] = &[
+    (StorageClass::UniformConstant, "UniformConstant"),
+    (StorageClass::Input, "Input"),
+    (StorageClass::Uniform, "Uniform"),
+    (StorageClass::Output, "Output"),
+    (StorageClass::Workgroup, "Workgroup"),
+    (StorageClass::CrossWorkgroup, "CrossWorkgroup"),
+    (StorageClass::Private, "Private"),
+    (StorageClass::Function, "Function"),
+    (StorageClass::Generic, "Generic"),
+    (StorageClass::PushConstant, "PushConstant"),
+    (StorageClass::AtomicCounter, "AtomicCounter"),
+    (StorageClass::Image, "Image"),
+    (StorageClass::StorageBuffer, "StorageBuffer"),
+    (StorageClass::PhysicalStorageBuffer, "PhysicalStorageBuffer"),
+];
+
 impl StorageClass {
     pub fn parse(name: &str) -> Option<Self> {
-        Some(match name {
-            "UniformConstant" => Self::UniformConstant,
-            "Input" => Self::Input,
-            "Uniform" => Self::Uniform,
-            "Output" => Self::Output,
-            "Workgroup" => Self::Workgroup,
-            "CrossWorkgroup" => Self::CrossWorkgroup,
-            "Private" => Self::Private,
-            "Function" => Self::Function,
-            "Generic" => Self::Generic,
-            "PushConstant" => Self::PushConstant,
-            "AtomicCounter" => Self::AtomicCounter,
-            "Image" => Self::Image,
-            "StorageBuffer" => Self::StorageBuffer,
-            "PhysicalStorageBuffer" => Self::PhysicalStorageBuffer,
-            _ => return None,
-        })
+        STORAGE_CLASSES
+            .iter()
+            .find(|(_, candidate)| *candidate == name)
+            .map(|&(class, _)| class)
     }
 
     pub fn name(self) -> &'static str {
-        match self {
-            Self::UniformConstant => "UniformConstant",
-            Self::Input => "Input",
-            Self::Uniform => "Uniform",
-            Self::Output => "Output",
-            Self::Workgroup => "Workgroup",
-            Self::CrossWorkgroup => "CrossWorkgroup",
-            Self::Private => "Private",
-            Self::Function => "Function",
-            Self::Generic => "Generic",
-            Self::PushConstant => "PushConstant",
-            Self::AtomicCounter => "AtomicCounter",
-            Self::Image => "Image",
-            Self::StorageBuffer => "StorageBuffer",
-            Self::PhysicalStorageBuffer => "PhysicalStorageBuffer",
-        }
+        STORAGE_CLASSES
+            .iter()
+            .find(|&&(class, _)| class == self)
+            .map(|&(_, name)| name)
+            .expect("every storage class is in the table")
     }
 }
 
