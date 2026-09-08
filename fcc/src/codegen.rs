@@ -3098,11 +3098,7 @@ impl FnCodegen<'_> {
                 TypeKind::Integer(_) | TypeKind::Enum(_)
             )
         {
-            let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
-            let expression = LoweredExpr::Value(
-                self.emit(b::constant(self.context, value, ty).build())
-                    .result(),
-            );
+            let expression = self.const_of_node(node, value);
             let expression = self.apply_conversions(node, expression);
             self.values.insert(node, expression);
             return Ok(expression);
@@ -3131,11 +3127,7 @@ impl FnCodegen<'_> {
                     let AstLeaf::Int(n) = ast.get_leaf_data(node).unwrap() else {
                         unreachable!("int node carries an int payload");
                     };
-                    let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
-                    LoweredExpr::Value(
-                        self.emit(b::constant(self.context, n.value.to_i64(), ty).build())
-                            .result(),
-                    )
+                    self.const_of_node(node, n.value.to_i64())
                 }
                 AstKind::FloatLiteral => {
                     let AstLeaf::Float(n) = ast.get_leaf_data(node).unwrap() else {
@@ -3160,19 +3152,11 @@ impl FnCodegen<'_> {
                             "multi-character constant".to_string(),
                         ));
                     };
-                    let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
-                    LoweredExpr::Value(
-                        self.emit(b::constant(self.context, value, ty).build())
-                            .result(),
-                    )
+                    self.const_of_node(node, value)
                 }
                 AstKind::SizeofType | AstKind::SizeofExpr => {
                     let value = ast.get_annotation(node).unwrap().constant.unwrap();
-                    let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
-                    LoweredExpr::Value(
-                        self.emit(b::constant(self.context, value, ty).build())
-                            .result(),
-                    )
+                    self.const_of_node(node, value)
                 }
                 AstKind::String => {
                     let AstLeaf::String(value) = ast.get_leaf_data(node).unwrap() else {
@@ -3267,17 +3251,22 @@ impl FnCodegen<'_> {
         }
     }
 
+    /// The integer constant `value`, typed as the C type `node` carries.
+    fn const_of_node(&mut self, node: NodeId, value: i64) -> LoweredExpr {
+        let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
+        LoweredExpr::Value(
+            self.emit(b::constant(self.context, value, ty).build())
+                .result(),
+        )
+    }
+
     fn lower_var(&mut self, node: NodeId) -> Result<LoweredExpr, Diagnostic> {
         let ast = self.ast;
         let AstLeaf::Var(name) = ast.get_leaf_data(node).unwrap() else {
             unreachable!("var node carries a var payload");
         };
         if let Some(value) = ast.get_annotation(node).and_then(|info| info.constant) {
-            let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
-            return Ok(LoweredExpr::Value(
-                self.emit(b::constant(self.context, value, ty).build())
-                    .result(),
-            ));
+            return Ok(self.const_of_node(node, value));
         }
         if ast
             .get_annotation(node)
