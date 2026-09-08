@@ -3,7 +3,7 @@
 
 use std::path::Path;
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// How long one compiled program may run before it is killed.
 pub(super) const RUN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -298,61 +298,27 @@ pub(super) fn timed_output(
     command: &mut Command,
     timeout: Duration,
 ) -> Result<Option<std::process::Output>, String> {
-    let mut child = command
+    command
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait().map_err(|e| e.to_string())? {
-            Some(_) => {
-                return Ok(Some(
-                    child
-                        .wait_with_output()
-                        .map_err(|e| format!("collect output: {e}"))?,
-                ));
-            }
-            None if Instant::now() >= deadline => {
-                let _ = child.kill();
-                return Ok(None);
-            }
-            None => std::thread::sleep(Duration::from_millis(5)),
-        }
-    }
+        .stderr(std::process::Stdio::piped());
+    crate::utils::run_with_deadline(command, timeout)
 }
 
 fn run_program(executable: &Path) -> Result<Behavior, String> {
-    use std::io::Read;
-
-    let mut child = Command::new(executable)
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("spawn {}: {e}", executable.display()))?;
-    let deadline = Instant::now() + RUN_TIMEOUT;
-    loop {
-        match child.try_wait().map_err(|e| e.to_string())? {
-            Some(status) => {
-                let mut stdout = Vec::new();
-                if let Some(mut pipe) = child.stdout.take() {
-                    pipe.read_to_end(&mut stdout)
-                        .map_err(|e| format!("read stdout: {e}"))?;
-                }
-                return Ok(Behavior {
-                    stdout,
-                    exit_code: status.code(),
-                });
-            }
-            None if Instant::now() >= deadline => {
-                let _ = child.kill();
-                return Err(format!(
-                    "{} timed out after {RUN_TIMEOUT:?}",
-                    executable.display()
-                ));
-            }
-            None => std::thread::sleep(Duration::from_millis(5)),
-        }
-    }
+    let mut command = Command::new(executable);
+    command.stdout(std::process::Stdio::piped());
+    let output = crate::utils::run_with_deadline(&mut command, RUN_TIMEOUT)
+        .map_err(|e| format!("spawn {}: {e}", executable.display()))?
+        .ok_or_else(|| {
+            format!(
+                "{} timed out after {RUN_TIMEOUT:?}",
+                executable.display()
+            )
+        })?;
+    Ok(Behavior {
+        stdout: output.stdout,
+        exit_code: output.status.code(),
+    })
 }
 
 /// The first line where two outputs differ, for failure reports.
