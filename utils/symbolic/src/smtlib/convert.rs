@@ -21,8 +21,6 @@ pub struct SymbolInfo {
 /// Why a term or graph could not be converted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConvertError {
-    /// `forall`/`exists` cannot be reduced to a constant by substitution.
-    Quantifier,
     UnknownSymbol(String),
     /// A construct outside the Core + BitVec subset.
     Unsupported(String),
@@ -38,9 +36,6 @@ pub enum ConvertError {
 impl Display for ConvertError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            ConvertError::Quantifier => {
-                f.write_str("quantifiers are not evaluatable and cannot be lowered")
-            }
             ConvertError::UnknownSymbol(s) => write!(f, "unknown symbol `{s}`"),
             ConvertError::Unsupported(s) => write!(f, "unsupported construct: {s}"),
             ConvertError::BadArity { op, expected, got } => {

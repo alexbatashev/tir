@@ -120,55 +120,30 @@ pub struct VarBinding {
     pub term: Term,
 }
 
-/// A `(symbol sort)` binding inside a quantifier or function definition.
+/// A `(symbol sort)` binding inside a function definition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SortedVar {
     pub var: Symbol,
     pub sort: Sort,
 }
 
-/// A `match` pattern: a variable/nullary constructor, or `(constructor var+)`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Pattern {
-    Var(Symbol),
-    Constructor(Symbol, Vec<Symbol>),
-}
-
-/// A `(pattern term)` arm of a `match`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MatchCase {
-    pub pattern: Pattern,
-    pub body: Term,
-}
-
-/// A `<term>`. Quantifiers and `match` exist for grammar fidelity only; conversion rejects them.
+/// A `<term>` of the Core + FixedSizeBitVectors fragment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Term {
     Constant(SpecConstant),
     Ident(QualIdentifier),
     App(QualIdentifier, Vec<Term>),
     Let(Vec<VarBinding>, Box<Term>),
-    Forall(Vec<SortedVar>, Box<Term>),
-    Exists(Vec<SortedVar>, Box<Term>),
-    Match(Box<Term>, Vec<MatchCase>),
     Annotated(Box<Term>, Vec<Attribute>),
 }
 
-/// A `function_def`: `symbol (sorted_var*) sort term`, shared by `define-fun`/`define-fun-rec`.
+/// A `function_def`: `symbol (sorted_var*) sort term`, as used by `define-fun`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FunctionDef {
     pub name: Symbol,
     pub params: Vec<SortedVar>,
     pub return_sort: Sort,
     pub body: Term,
-}
-
-/// A `function_dec`: the signature half `(symbol (sorted_var*) sort)` used by `define-funs-rec`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FunctionDec {
-    pub name: Symbol,
-    pub params: Vec<SortedVar>,
-    pub return_sort: Sort,
 }
 
 /// A `prop_literal`: `symbol` or `(not symbol)`, used by `check-sat-assuming`.
@@ -178,31 +153,20 @@ pub struct PropLiteral {
     pub negated: bool,
 }
 
-/// A top-level `<command>`. Datatype, array and string declarations are out of scope.
+/// A top-level `<command>`. Sort, datatype, array and string declarations are out of scope.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     SetLogic(Symbol),
     SetOption(Attribute),
     SetInfo(Attribute),
-    DeclareSort(Symbol, u128),
-    DefineSort(Symbol, Vec<Symbol>, Sort),
     DeclareConst(Symbol, Sort),
     DeclareFun(Symbol, Vec<Sort>, Sort),
     DefineFun(FunctionDef),
-    DefineFunRec(FunctionDef),
-    DefineFunsRec(Vec<FunctionDec>, Vec<Term>),
     Assert(Term),
     CheckSat,
     CheckSatAssuming(Vec<PropLiteral>),
-    GetAssertions,
     GetModel,
     GetValue(Vec<Term>),
-    GetProof,
-    GetUnsatCore,
-    GetUnsatAssumptions,
-    GetAssignment,
-    GetInfo(Keyword),
-    GetOption(Keyword),
     Push(u128),
     Pop(u128),
     Reset,
