@@ -231,14 +231,8 @@ impl FuncOp {
             .ok_or_else(|| (parser.span(), tir::Error::ExpectedSymbolName))?
             .to_string();
 
-        if !parser.parse_token("(") {
-            return Err((parser.span(), tir::Error::ExpectedToken("(")));
-        }
-
-        let mut block_args = vec![];
-
-        if !parser.parse_token(")") {
-            loop {
+        let block_args = parser
+            .parse_delimited("(", ")", |parser| {
                 let val_name = parser
                     .parse_value_ref()
                     .ok_or_else(|| (parser.span(), tir::Error::ExpectedValueRef))?
@@ -254,16 +248,9 @@ impl FuncOp {
 
                 let value = context.create_value(ty, None);
                 parser.define_value(&val_name, value.id());
-                block_args.push(value);
-
-                if parser.parse_token(")") {
-                    break;
-                }
-                if !parser.parse_token(",") {
-                    return Err((parser.span(), tir::Error::ExpectedToken(",")));
-                }
-            }
-        }
+                Ok(value)
+            })?
+            .ok_or_else(|| (parser.span(), tir::Error::ExpectedToken("(")))?;
 
         let ret_type = if parser.parse_token("->") {
             parser

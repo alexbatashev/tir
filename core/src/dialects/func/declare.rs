@@ -122,26 +122,13 @@ impl DeclareOp {
             .parse_symbol_name()
             .ok_or_else(|| (parser.span(), Error::ExpectedSymbolName))?
             .to_string();
-        if !parser.parse_token("(") {
-            return Err((parser.span(), Error::ExpectedToken("(")));
-        }
-
-        let mut arg_types = Vec::new();
-        if !parser.parse_token(")") {
-            loop {
-                let ty = parser
+        let arg_types = parser
+            .parse_delimited("(", ")", |parser| {
+                parser
                     .parse_type(context)?
-                    .ok_or_else(|| (parser.span(), Error::ExpectedType))?;
-                arg_types.push(ty);
-
-                if parser.parse_token(")") {
-                    break;
-                }
-                if !parser.parse_token(",") {
-                    return Err((parser.span(), Error::ExpectedToken(",")));
-                }
-            }
-        }
+                    .ok_or_else(|| (parser.span(), Error::ExpectedType))
+            })?
+            .ok_or_else(|| (parser.span(), Error::ExpectedToken("(")))?;
 
         if !parser.parse_token("->") {
             return Err((parser.span(), Error::ExpectedToken("->")));
