@@ -16,6 +16,23 @@ pub fn project_root() -> PathBuf {
     PathBuf::from(dir).parent().unwrap().to_owned()
 }
 
+/// Every `.c` file under `directory`, recursively. A path that is not a
+/// directory contributes nothing.
+pub fn collect_c_files(directory: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    if !directory.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_c_files(&path, files)?;
+        } else if path.extension().is_some_and(|extension| extension == "c") {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
 pub fn git_checkout(sh: &Shell, url: &str, tag: &str, dest: &str) -> anyhow::Result<()> {
     let root = project_root();
     let target_dir = root.join("target");
