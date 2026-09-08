@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 
 use tir_adt::{Hive, Interner, Sym};
 
-use crate::run::{AttrRunId, AttrRuns, Entry, EntryId, NO_ENTRY, RunId, Runs};
+use crate::run::{AttrRunId, AttrRuns, EntryId, NO_ENTRY, RunId, Runs};
 
 use crate::{
     Block, Dialect, Error, OpId, OpInstance, Operation, OperationParser, Region, TypeId,
@@ -178,8 +178,8 @@ struct ContextInstance {
     /// Def-site index for the ports of an unordered region, the counterpart of
     /// `value_block` for the arguments a region owns itself.
     value_region: Vec<Option<RegionId>>,
-    /// Ports: every op's operands, results and region ids, in one cell per op
-    /// drawn from a size-classed pool.
+    /// Ports: every op's operands, results and region ids, in one span per op
+    /// drawn from a size-classed arena.
     runs: Runs,
     /// Attributes, pooled the same way.
     attr_runs: AttrRuns,
@@ -331,18 +331,16 @@ impl ContextInstance {
             return;
         };
         let mut run = instance.run;
-        if self.runs.capacity(run) < needed {
+        if run.capacity() < needed {
             let live = self.op(op).expect("live op").port_count();
-            run = self.runs.grow(run, live, needed);
+            run = self.runs.grow(op, run, live, needed);
         }
         let entries = self.runs.entries_mut(run);
         for (entry, id) in entries
             .iter_mut()
             .zip(operands.iter().chain(results).chain(regions))
         {
-            entry.id = *id;
-            entry.next = NO_ENTRY;
-            entry.prev = NO_ENTRY;
+            entry.reset(*id);
         }
         let instance = self.op_mut(op).expect("live op");
         instance.run = run;
@@ -438,11 +436,11 @@ impl ContextInstance {
     fn reserve_ports(&mut self, op: OpId, needed: usize) {
         let instance = self.op(op).expect("live op");
         let (run, live) = (instance.run, instance.port_count());
-        if self.runs.capacity(run) >= needed {
+        if run.capacity() >= needed {
             return;
         }
         self.unlink_operands(op);
-        let grown = self.runs.grow(run, live, needed);
+        let grown = self.runs.grow(op, run, live, needed);
         self.op_mut(op).expect("live op").run = grown;
         self.link_operands(op);
     }
@@ -551,7 +549,7 @@ impl ContextInstance {
         let run = self.op(op).expect("live op").run;
         let entries = self.runs.entries_mut(run);
         entries[at..=count].rotate_right(1);
-        entries[at] = Entry::new(id);
+        entries[at].reset(id);
     }
 
     /// Record every operand slot of `op` under the value it holds.
@@ -586,8 +584,14 @@ impl ContextInstance {
 
     /// The address of `op`'s `index`-th port.
     fn entry_of(&self, op: OpId, index: usize) -> EntryId {
-        let run = self.op(op).expect("live op").run;
-        self.runs.entry_id(run, index)
+        self.op(op).expect("live op").run.entry(index)
+    }
+
+    /// The op and port index an entry address names.
+    fn locate(&self, entry: EntryId) -> (OpId, usize) {
+        let op = self.runs.entry(entry).owner;
+        let start = self.op(op).expect("live op").run.start();
+        (op, entry.raw() as usize - start)
     }
 
     /// Splice `op`'s `index`-th operand slot onto the front of the use list of
@@ -658,7 +662,7 @@ impl ContextInstance {
         let mut uses: Vec<Use> = self
             .use_entries(value)
             .map(|entry| {
-                let (op, index) = self.runs.locate(entry);
+                let (op, index) = self.locate(entry);
                 Use::new(op, index)
             })
             .collect();
@@ -868,11 +872,9 @@ impl Context {
             regions_slab: inner.regions.capacity(),
             regions_live: inner.regions.len(),
             runs_live: runs.0,
-            runs_chunks: runs.1,
-            runs_bytes: runs.2,
+            runs_bytes: runs.1,
             attrs_live: attrs.0,
-            attrs_chunks: attrs.1,
-            attrs_bytes: attrs.2,
+            attrs_bytes: attrs.1,
             ops_chunks: inner.ops.chunk_count(),
             values_chunks: inner.values.chunk_count(),
             blocks_chunks: inner.blocks.chunk_count(),
@@ -885,8 +887,8 @@ impl Context {
                 + inner.values.bytes()
                 + inner.blocks.bytes()
                 + inner.regions.bytes()
-                + runs.2
-                + attrs.2,
+                + runs.1
+                + attrs.1,
         }
     }
 
@@ -1243,7 +1245,7 @@ impl Context {
         let inner = self.0.read();
         let mut users: Vec<OpId> = inner
             .use_entries(value)
-            .map(|entry| inner.runs.locate(entry).0)
+            .map(|entry| inner.locate(entry).0)
             .collect();
         users.reverse();
         users
@@ -1950,9 +1952,10 @@ impl Context {
     /// Drop the storage of entities that have left the IR, and the reverse-index
     /// entries that pointed into it.
     ///
-    /// The hive slot is dropped and its generation bumped; the id itself is
-    /// never handed to another entity, so a handle minted before the erase
-    /// panics rather than reading a successor. See [`OpHandle`].
+    /// The hive slot is emptied but never handed out again: an id is an
+    /// entity's name, and names outlive their bearers here. Ports and
+    /// attributes carry no such meaning, so their storage *is* reused; see
+    /// [`Context::recycle`].
     fn free(&self, owned: Owned) {
         let mut inner = self.0.write();
         for op in owned.ops {

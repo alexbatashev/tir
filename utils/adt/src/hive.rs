@@ -1,24 +1,13 @@
-use std::{collections::VecDeque, mem::ManuallyDrop, mem::MaybeUninit};
-
-/// Sentinel handle: no slot.
-const NONE: u32 = u32::MAX;
+use std::mem::MaybeUninit;
 
 /// Target byte size of one chunk's slot array.
 const CHUNK_BYTES: usize = 64 * 1024;
 
-union Slot<T> {
-    value: ManuallyDrop<T>,
-    next_free: u32,
-}
-
 struct Chunk<T> {
-    live: u32,
-    /// Head of this chunk's LIFO free list, an offset within the chunk.
-    free_head: u32,
     /// Slots ever handed out from the top of this chunk.
     bump: u32,
     occupied: Box<[u64]>,
-    slots: Box<[MaybeUninit<Slot<T>>]>,
+    slots: Box<[MaybeUninit<T>]>,
 }
 
 impl<T> Chunk<T> {
@@ -26,8 +15,6 @@ impl<T> Chunk<T> {
         let mut slots = Vec::with_capacity(len);
         slots.resize_with(len, MaybeUninit::uninit);
         Self {
-            live: 0,
-            free_head: NONE,
             bump: 0,
             occupied: vec![0u64; len.div_ceil(64)].into_boxed_slice(),
             slots: slots.into_boxed_slice(),
@@ -52,32 +39,22 @@ impl<T> Chunk<T> {
 
 /// A chunked pool with stable `u32` handles.
 ///
-/// Values never move, so a handle stays valid until it is removed. Slots and
-/// whole chunks are reclaimed on removal, which means handles are *reused*:
-/// a handle of a removed value can name a later insertion.
+/// Values never move, so a handle stays valid until it is removed. A removed
+/// value's slot is *not* handed out again: a handle names one value for the
+/// life of the pool, so a caller may hold one across any number of removals
+/// and a batch of handles is always ascending in the order they were minted.
+/// Removing therefore reclaims what the value owns, not the slot itself.
 pub struct Hive<T> {
-    /// Chunk index is stable; a freed chunk leaves a `None` hole to be refilled.
-    chunks: Vec<Option<Chunk<T>>>,
-    /// Chunks with a non-empty free list, lowest index first.
-    partial: VecDeque<u32>,
-    /// Chunk currently handing out slots from the top, or [`NONE`].
-    open: u32,
-    /// Slots whose value has been removed but which are not yet on their
-    /// chunk's free list. Reuse is published by [`Hive::recycle`] so a caller
-    /// holding a handle across a removal cannot have it answer for a stranger
-    /// until it says it is done with the old ones.
-    pending: Vec<u32>,
+    /// Slots come off the top of the last chunk; earlier chunks are full.
+    chunks: Vec<Chunk<T>>,
     len: u32,
 }
 
 impl<T> Hive<T> {
     /// `log2` of the slots per chunk, picked so a chunk is about 64 KiB.
     const K: u32 = {
-        assert!(
-            size_of::<T>() >= 4,
-            "a hive slot must hold a free-list link"
-        );
-        let slots = CHUNK_BYTES / size_of::<Slot<T>>();
+        assert!(size_of::<T>() > 0, "a hive slot must have a size");
+        let slots = CHUNK_BYTES / size_of::<T>();
         let mut k = 0;
         while 1usize << (k + 1) <= slots {
             k += 1;
@@ -89,9 +66,6 @@ impl<T> Hive<T> {
     pub fn new() -> Self {
         Self {
             chunks: Vec::new(),
-            partial: VecDeque::new(),
-            open: NONE,
-            pending: Vec::new(),
             len: 0,
         }
     }
@@ -111,147 +85,62 @@ impl<T> Hive<T> {
 
     /// [`Hive::insert`] for a value that needs to know its own handle.
     pub fn insert_with(&mut self, value: impl FnOnce(u32) -> T) -> u32 {
-        let (index, offset) = self.free_slot();
-        let value = value(Self::join(index, offset));
-        let chunk = self.chunks[index]
-            .as_mut()
-            .expect("free slot in live chunk");
-        chunk.slots[offset as usize] = MaybeUninit::new(Slot {
-            value: ManuallyDrop::new(value),
-        });
-        chunk.set_occupied(offset, true);
-        chunk.live += 1;
-        self.len += 1;
-        Self::join(index, offset)
-    }
-
-    fn free_slot(&mut self) -> (usize, u32) {
-        if let Some(&index) = self.partial.front() {
-            let index = index as usize;
-            let chunk = self.chunks[index].as_mut().expect("partial chunk is live");
-            let offset = chunk.free_head;
-            chunk.free_head = unsafe { chunk.slots[offset as usize].assume_init_ref().next_free };
-            if chunk.free_head == NONE {
-                self.partial.pop_front();
-            }
-            return (index, offset);
-        }
-        if self.open != NONE {
-            let index = self.open as usize;
-            let chunk = self.chunks[index].as_mut().expect("open chunk is live");
-            let offset = chunk.bump;
-            chunk.bump += 1;
-            if chunk.bump as usize == Self::N {
-                self.open = NONE;
-            }
-            return (index, offset);
-        }
-        let index = self
+        if self
             .chunks
-            .iter()
-            .position(Option::is_none)
-            .unwrap_or_else(|| {
-                self.chunks.push(None);
-                self.chunks.len() - 1
-            });
-        let mut chunk = Chunk::new(Self::N);
-        chunk.bump = 1;
-        self.chunks[index] = Some(chunk);
-        self.open = index as u32;
-        (index, 0)
+            .last()
+            .is_none_or(|chunk| chunk.bump as usize == Self::N)
+        {
+            self.chunks.push(Chunk::new(Self::N));
+        }
+        let index = self.chunks.len() - 1;
+        let chunk = &mut self.chunks[index];
+        let offset = chunk.bump;
+        chunk.bump += 1;
+        let handle = Self::join(index, offset);
+        chunk.slots[offset as usize] = MaybeUninit::new(value(handle));
+        chunk.set_occupied(offset, true);
+        self.len += 1;
+        handle
     }
 
-    /// Takes the value back out, releasing its slot for reuse.
+    /// Takes the value back out. The slot stays spent, so `handle` names
+    /// nothing from here on.
     ///
     /// # Panics
     /// If `handle` does not name a live value.
     pub fn remove(&mut self, handle: u32) -> T {
         let (index, offset) = Self::split(handle);
-        let chunk = self.chunks[index]
-            .as_mut()
-            .expect("handle names a live chunk");
+        let chunk = &mut self.chunks[index];
         assert!(chunk.is_occupied(offset), "handle names a live value");
-        let value = unsafe {
-            ManuallyDrop::take(&mut chunk.slots[offset as usize].assume_init_mut().value)
-        };
         chunk.set_occupied(offset, false);
-        chunk.live -= 1;
         self.len -= 1;
-        self.pending.push(handle);
-        value
-    }
-
-    /// Hand every slot removed since the last call back for reuse, and free the
-    /// chunks that emptied.
-    ///
-    /// The free lists are rebuilt ascending and served lowest chunk first, so a
-    /// run of inserts takes handles in increasing order rather than in the
-    /// order slots happened to die. That makes a batch of handles a function of
-    /// the free set rather than of erase history; it does *not* make a recycled
-    /// handle compare above a surviving one, so a caller that reads "allocated
-    /// later" off "numbered higher" must not recycle at all.
-    pub fn recycle(&mut self) {
-        let mut touched: Vec<usize> = std::mem::take(&mut self.pending)
-            .into_iter()
-            .map(|handle| Self::split(handle).0)
-            .collect();
-        touched.sort_unstable();
-        touched.dedup();
-        for index in touched {
-            let Some(chunk) = self.chunks[index].as_mut() else {
-                continue;
-            };
-            if chunk.live == 0 && self.open != index as u32 {
-                self.chunks[index] = None;
-                continue;
-            }
-            chunk.free_head = NONE;
-            for offset in (0..chunk.bump).rev() {
-                if chunk.is_occupied(offset) {
-                    continue;
-                }
-                let head = chunk.free_head;
-                chunk.slots[offset as usize] = MaybeUninit::new(Slot { next_free: head });
-                chunk.free_head = offset;
-            }
-        }
-        self.partial = self
-            .chunks
-            .iter()
-            .enumerate()
-            .filter(|(_, chunk)| chunk.as_ref().is_some_and(|c| c.free_head != NONE))
-            .map(|(index, _)| index as u32)
-            .collect();
+        unsafe { chunk.slots[offset as usize].assume_init_read() }
     }
 
     pub fn get(&self, handle: u32) -> Option<&T> {
         let (index, offset) = Self::split(handle);
-        let chunk = self.chunks.get(index)?.as_ref()?;
+        let chunk = self.chunks.get(index)?;
         chunk
             .is_occupied(offset)
-            .then(|| unsafe { &*chunk.slots[offset as usize].assume_init_ref().value })
+            .then(|| unsafe { chunk.slots[offset as usize].assume_init_ref() })
     }
 
     pub fn get_mut(&mut self, handle: u32) -> Option<&mut T> {
         let (index, offset) = Self::split(handle);
-        let chunk = self.chunks.get_mut(index)?.as_mut()?;
+        let chunk = self.chunks.get_mut(index)?;
         if !chunk.is_occupied(offset) {
             return None;
         }
-        Some(unsafe { &mut *chunk.slots[offset as usize].assume_init_mut().value })
+        Some(unsafe { chunk.slots[offset as usize].assume_init_mut() })
     }
 
     /// Live handles in ascending order.
     pub fn handles(&self) -> impl Iterator<Item = u32> + '_ {
-        self.chunks
-            .iter()
-            .enumerate()
-            .filter_map(|(index, chunk)| chunk.as_ref().map(|chunk| (index, chunk)))
-            .flat_map(|(index, chunk)| {
-                (0..chunk.bump)
-                    .filter(move |&offset| chunk.is_occupied(offset))
-                    .map(move |offset| Self::join(index, offset))
-            })
+        self.chunks.iter().enumerate().flat_map(|(index, chunk)| {
+            (0..chunk.bump)
+                .filter(move |&offset| chunk.is_occupied(offset))
+                .map(move |offset| Self::join(index, offset))
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -262,19 +151,19 @@ impl<T> Hive<T> {
         self.len == 0
     }
 
-    /// Chunks currently allocated, live or partially free.
+    /// Chunks currently allocated, live or partly spent.
     pub fn chunk_count(&self) -> usize {
-        self.chunks.iter().filter(|chunk| chunk.is_some()).count()
+        self.chunks.len()
     }
 
-    /// Slots the allocated chunks hold, live or free.
+    /// Slots the allocated chunks hold, live or spent.
     pub fn capacity(&self) -> usize {
         self.chunk_count() * Self::N
     }
 
     /// Bytes the chunks hold, whether or not their slots are live.
     pub fn bytes(&self) -> usize {
-        self.chunk_count() * (Self::N * size_of::<Slot<T>>() + Self::N / 8)
+        self.chunk_count() * (Self::N * size_of::<T>() + Self::N / 8)
     }
 }
 
@@ -289,14 +178,10 @@ impl<T> Drop for Hive<T> {
         if !std::mem::needs_drop::<T>() {
             return;
         }
-        for chunk in self.chunks.iter_mut().flatten() {
+        for chunk in self.chunks.iter_mut() {
             for offset in 0..chunk.bump {
                 if chunk.is_occupied(offset) {
-                    unsafe {
-                        ManuallyDrop::drop(
-                            &mut chunk.slots[offset as usize].assume_init_mut().value,
-                        )
-                    };
+                    unsafe { chunk.slots[offset as usize].assume_init_drop() };
                 }
             }
         }
@@ -323,31 +208,18 @@ mod tests {
     }
 
     #[test]
-    fn removed_slots_are_reused_only_after_recycling() {
+    fn removed_slots_are_never_handed_out_again() {
         let mut hive = Hive::new();
         let handles: Vec<_> = (0..4).map(|i| hive.insert(i as u64)).collect();
         hive.remove(handles[1]);
         hive.remove(handles[3]);
-        assert!(!handles.contains(&hive.insert(99)));
-        hive.recycle();
-        assert_eq!(hive.insert(100), handles[1]);
-        assert_eq!(hive.insert(101), handles[3]);
+        let later: Vec<_> = (0..4).map(|i| hive.insert(100 + i)).collect();
+        assert!(later.iter().all(|handle| !handles.contains(handle)));
+        assert!(later.windows(2).all(|w| w[0] < w[1]));
     }
 
     #[test]
-    fn recycled_handles_are_handed_out_ascending() {
-        let mut hive = Hive::new();
-        let handles: Vec<_> = (0..8u64).map(|i| hive.insert(i)).collect();
-        for handle in [handles[5], handles[1], handles[6], handles[2]] {
-            hive.remove(handle);
-        }
-        hive.recycle();
-        let reused: Vec<_> = (0..4).map(|i| hive.insert(100 + i)).collect();
-        assert_eq!(reused, vec![handles[1], handles[2], handles[5], handles[6]]);
-    }
-
-    #[test]
-    fn chunk_is_freed_when_every_slot_dies() {
+    fn an_emptied_chunk_is_kept() {
         let mut hive: Hive<u64> = Hive::new();
         let handles: Vec<_> = (0..Hive::<u64>::N * 3)
             .map(|i| hive.insert(i as u64))
@@ -357,8 +229,7 @@ mod tests {
             hive.remove(*handle);
         }
         assert_eq!(hive.chunk_count(), 3);
-        hive.recycle();
-        assert_eq!(hive.chunk_count(), 2);
+        assert_eq!(hive.len(), Hive::<u64>::N * 2);
     }
 
     #[test]
@@ -397,7 +268,6 @@ mod tests {
                 } else {
                     let handle = live.swap_remove(value as usize % live.len());
                     prop_assert_eq!(hive.remove(handle), model.remove(&handle).unwrap());
-                    hive.recycle();
                 }
                 prop_assert_eq!(hive.len(), model.len());
             }

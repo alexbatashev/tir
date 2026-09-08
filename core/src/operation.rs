@@ -848,7 +848,7 @@ pub type RegionIds = smallvec::SmallVec<[RegionId; 2]>;
 /// the cell holding its attributes.
 ///
 /// Everything an op holds beyond these thirty-two bytes lives in the context's
-/// hives, so storing an operation allocates nothing; reading a port is one
+/// pools, so storing an operation allocates nothing; reading a port is one
 /// index into its run.
 #[derive(Debug, Clone)]
 pub struct OpInstance {

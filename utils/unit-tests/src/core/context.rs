@@ -710,22 +710,26 @@ fn growing_an_op_promotes_its_run_and_keeps_its_uses() {
 }
 
 /// Erasing an operation gives its ports' storage back: once the context is
-/// told the runs are free, the chunks that emptied are released. Entity ids
-/// are deliberately not recycled, so the op hive keeps its chunks.
+/// told the runs are free, the same operations built again are served out of
+/// the freed spans and the arena does not grow. Entity ids are deliberately
+/// not recycled, so the op hive keeps its chunks.
 #[test]
-fn erasing_operations_releases_their_run_chunks() {
+fn erasing_operations_returns_their_run_storage() {
     let context = Context::with_default_dialects();
     let (_, _, body) = module_with_function(&context);
     let i32_ty = builtin::IntegerType::new(&context, 32);
     let seed = builtin::ops::constant(&context, 1, i32_ty).build();
     body.append(seed.id());
-    let ops: Vec<OpId> = (0..10_000)
-        .map(|_| {
-            let op = builtin::ops::addi(&context, seed.result(), seed.result(), i32_ty).build();
-            body.append(op.id());
-            op.id()
-        })
-        .collect();
+    let build = || {
+        (0..10_000)
+            .map(|_| {
+                let op = builtin::ops::addi(&context, seed.result(), seed.result(), i32_ty).build();
+                body.append(op.id());
+                op.id()
+            })
+            .collect::<Vec<OpId>>()
+    };
+    let ops = build();
     let peak = context.slab_census();
 
     let mut rewriter = tir::Rewriter::new(context.clone());
@@ -738,10 +742,18 @@ fn erasing_operations_releases_their_run_chunks() {
     let after = context.slab_census();
 
     assert!(
-        after.runs_chunks < peak.runs_chunks,
-        "run chunks {} -> {}",
-        peak.runs_chunks,
-        after.runs_chunks
+        after.runs_live < peak.runs_live,
+        "live runs {} -> {}",
+        peak.runs_live,
+        after.runs_live
     );
     assert_eq!(after.ops_chunks, peak.ops_chunks, "op ids are not recycled");
+
+    build();
+    let reused = context.slab_census();
+    assert_eq!(reused.runs_live, peak.runs_live, "the same runs are live");
+    assert_eq!(
+        reused.runs_bytes, peak.runs_bytes,
+        "erased run storage is handed to the operations built after it"
+    );
 }

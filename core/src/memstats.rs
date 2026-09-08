@@ -58,12 +58,10 @@ pub struct SlabCensus {
     pub values_chunks: usize,
     pub blocks_chunks: usize,
     pub regions_chunks: usize,
-    /// Port and attribute runs, summed over their size classes.
+    /// Live port and attribute runs, and the bytes their arenas hold.
     pub runs_live: usize,
-    pub runs_chunks: usize,
     pub runs_bytes: usize,
     pub attrs_live: usize,
-    pub attrs_chunks: usize,
     pub attrs_bytes: usize,
     /// Per-arena heap: `Arc` header plus entity struct plus the capacity of the
     /// `Vec`s it owns. Attribute payloads (`Str`, `Array`, `Dict`) are not
@@ -104,7 +102,7 @@ impl PassScope {
             "tir-mem: context after={} ops_slab={} ops_live={} values_slab={} values_live={} \
              blocks_slab={} blocks_live={} regions_slab={} regions_live={} ops_chunks={} \
              values_chunks={} blocks_chunks={} regions_chunks={} runs_live={} \
-             runs_chunks={} runs_bytes={} attrs_live={} attrs_chunks={} attrs_bytes={} ops_bytes={} \
+             runs_bytes={} attrs_live={} attrs_bytes={} ops_bytes={} \
              values_bytes={} blocks_bytes={} regions_bytes={} slab_bytes={} bytes_per_live_op={}",
             self.name,
             census.ops_slab,
@@ -120,10 +118,8 @@ impl PassScope {
             census.blocks_chunks,
             census.regions_chunks,
             census.runs_live,
-            census.runs_chunks,
             census.runs_bytes,
             census.attrs_live,
-            census.attrs_chunks,
             census.attrs_bytes,
             census.ops_bytes,
             census.values_bytes,
