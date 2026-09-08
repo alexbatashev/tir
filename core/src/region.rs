@@ -214,8 +214,8 @@ impl RegionHandle {
     }
 
     /// The values an unordered region produces, dependencies trailing; empty
-    /// for an ordered one, which binds its results through its
-    /// [`crate::RegionExit`] operations instead.
+    /// for an ordered one, which binds its results through its terminator
+    /// instead.
     pub fn results(&self) -> Vec<ValueId> {
         self.context().region_results(self.id)
     }

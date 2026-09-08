@@ -226,7 +226,6 @@ or implementing an interface; it never means teaching core code about an op.
 | `Callable` | a λ: body (absent for a declaration), the value a call takes as its callee, parameter and result types |
 | `Apply` | an application of a callable to a run of the op's value operands |
 | `Global` | a δ: a data object with an address, and an initializer image where it defines one |
-| `RegionExit` | an operation of an *ordered* region binding that region's results. An unordered region names them outright and has none |
 | `NonLocalExit` | a `break`/`continue` leaving an enclosing structured op from inside its subtree, naming the target by kind or label; `ExitScope` marks what it may leave |
 | `Speculatable` | the op cannot trap, so it may run on a path the source did not take |
 | `MemoryRead` / `MemoryWrite` | location, value, **and state accessors**: the state operand read, and the state result produced (§6) |

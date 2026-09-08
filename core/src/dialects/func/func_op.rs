@@ -4,7 +4,7 @@ use crate::operation;
 use crate::symbol_table::{symbol_name_of, visibility_of};
 
 use crate as tir;
-use crate::{Callable, Context, Error, Operation, RegionExit, Symbol, Terminator, Visibility};
+use crate::{Callable, Context, Error, Operation, Symbol, Terminator, Visibility};
 
 operation! {
     FuncOp {
@@ -397,7 +397,7 @@ operation! {
         operands: O {
             value: "?Any",
         },
-        interfaces: [Terminator, RegionExit],
+        interfaces: [Terminator],
         state: "in",
     }
 }
@@ -412,12 +412,3 @@ impl ReturnOp {
 }
 
 impl Terminator for ReturnOp {}
-
-impl RegionExit for ReturnOp {
-    /// Everything the return carries, memory state included: what the region
-    /// hands back is the whole tuple, so an unordered body naming the same
-    /// values in its `->` line binds exactly the same thing.
-    fn exit_values(&self) -> Vec<tir::ValueId> {
-        self.operands().to_vec()
-    }
-}
