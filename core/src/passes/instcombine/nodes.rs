@@ -204,22 +204,22 @@ impl Driver<'_> {
         let Some(write) = instance.clone().as_interface::<dyn MemoryWrite>() else {
             return;
         };
-        let (Some(taken), Some(published)) = (write.state_operand(), write.state_result()) else {
+        let (Some(taken), Some(leaves)) = (write.state_operand(), write.state_result()) else {
             return;
         };
-        let Some(extent) = self.extent(published) else {
+        let Some(extent) = self.extent(leaves) else {
             return;
         };
-        let mut state = published;
+        let mut state = leaves;
         loop {
-            if self.published(scope, state) {
+            if published(self.context, scope, state) {
                 return;
             }
             let readers: Vec<OpId> = self
                 .context
                 .users_of(state)
                 .into_iter()
-                .filter(|&reader| !self.is_dead_read(scope, reader))
+                .filter(|&reader| !is_dead_read(self.context, scope, reader))
                 .collect();
             let [reader] = readers[..] else {
                 return;
@@ -248,10 +248,10 @@ impl Driver<'_> {
             }
             break;
         }
-        // The loop's first guard found no region result naming `published`,
-        // so no result list here names it either.
-        debug_assert!(!self.published(scope, published));
-        self.context.replace_value_uses(published, taken);
+        // The loop's first guard found no region result naming the state the
+        // write leaves, so no result list here names it either.
+        debug_assert!(!published(self.context, scope, leaves));
+        self.context.replace_value_uses(leaves, taken);
     }
 
     /// The extent the write publishing `state` covers: the object its address
@@ -271,14 +271,6 @@ impl Driver<'_> {
             .nodes(self.eg.find(node.children[state::BYTES]))
             .find_map(|node| node.int())?;
         Some((self.eg.find(object), offset, bytes.to_u64()))
-    }
-
-    fn is_dead_read(&self, scope: &[RegionId], op: OpId) -> bool {
-        is_dead_read(self.context, scope, op)
-    }
-
-    fn published(&self, scope: &[RegionId], value: ValueId) -> bool {
-        published(self.context, scope, value)
     }
 
     /// A read whose value was rewritten leaves memory as it found it: the state
