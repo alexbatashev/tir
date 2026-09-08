@@ -14,10 +14,10 @@ use crate::backend::abi::{
 };
 use crate::backend::liveness::PhysReg;
 use crate::backend::regalloc::{
-    RegClassId, RegisterAllocationPass, RegisterInfo, TargetRegAlloc, op_ref_in, symbol_body_blocks,
+    RegClassId, RegisterAllocationPass, RegisterInfo, TargetRegAlloc, op_ref_in,
 };
 use crate::backend::registers::{RegAssignment, RegSlot, fresh_reg, value_class};
-use crate::backend::{SymbolOp, VirtualBranchOp, VirtualReturnOp, reg_slots};
+use crate::backend::{SymbolOp, VirtualBranchOp, VirtualReturnOp, reg_slots, symbol_body_blocks};
 
 /// A fresh value of `class`: the type a machine instruction reads it through.
 /// Require the slot of `op` holding `value` to be `register`. A copy whose
@@ -94,7 +94,7 @@ impl Pass for TiedOperandLoweringPass {
         rewriter: &mut Rewriter,
         _analyses: &AnalysisManager,
     ) -> Result<(), PassError> {
-        for block_id in symbol_body_blocks(context, op) {
+        for block_id in symbol_body_blocks(context, op.op()) {
             for op_id in context.get_block(block_id).op_ids() {
                 let op = context.get_op(op_id);
                 let slots = reg_slots(&op);
@@ -193,7 +193,7 @@ impl Pass for BlockArgLoweringPass {
         rewriter: &mut Rewriter,
         _analyses: &AnalysisManager,
     ) -> Result<(), PassError> {
-        let blocks = symbol_body_blocks(context, op);
+        let blocks = symbol_body_blocks(context, op.op());
         let info = self.target.register_info();
         for &block_id in &blocks {
             for op_id in context.get_block(block_id).op_ids() {
@@ -338,7 +338,7 @@ impl Pass for AbiPrecolorPass {
         _analyses: &AnalysisManager,
     ) -> Result<(), PassError> {
         let info = self.target.register_info();
-        let blocks = symbol_body_blocks(context, op);
+        let blocks = symbol_body_blocks(context, op.op());
         if blocks.is_empty() {
             return Ok(());
         }

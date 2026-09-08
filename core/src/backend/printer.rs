@@ -2,14 +2,12 @@ use std::error::Error;
 use std::fmt::{self, Display};
 
 use tir::attributes::AttributeValue;
-use tir::builtin::GlobalOp;
-use tir::builtin::{ModuleEndOp, ModuleOp};
-use tir::func::DeclareOp;
+use tir::builtin::ModuleOp;
 use tir::{Context, OpHandle, Operation};
 
 use crate::backend::{
-    BlockEndOp, DataRelocOp, LiteralOp, MachineInstruction, SectionEndOp, SectionOp, SymbolEndOp,
-    SymbolOp,
+    AsmItem, DataRelocOp, LiteralOp, MachineInstruction, as_int_attr, as_string_attr,
+    symbol_body_blocks,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,23 +116,13 @@ impl AsmPrinter {
         out: &mut String,
         assignment: &crate::backend::RegAssignment,
     ) -> Result<(), AsmPrintError> {
-        if op.is::<ModuleEndOp>()
-            || op.is::<SectionEndOp>()
-            || op.is::<SymbolEndOp>()
-            || op.is::<BlockEndOp>()
-            // Memory order is notation, not code: the ops that name a chain's
-            // root and its merges assemble to nothing, like a label.
-            || crate::backend::names_memory_state(op)
-            // External declarations produce no assembly; references resolve
-            // at link time.
-            || op.is::<DeclareOp>()
-            || op.clone().as_op::<GlobalOp>().is_some_and(|global| global.is_external())
-        {
+        let item = crate::backend::asm_item(op);
+        if matches!(item, AsmItem::Skip) {
             return Ok(());
         }
 
-        if let Some(section) = op.clone().as_op::<SectionOp>() {
-            let name = string_attr(op, "name").unwrap_or_else(|| ".text".to_string());
+        if let AsmItem::Section(section) = item {
+            let name = as_string_attr(op.attr("name")).unwrap_or_else(|| ".text".to_string());
             if name == ".text" {
                 out.push_str(".text\n");
             } else {
@@ -146,18 +134,18 @@ impl AsmPrinter {
             return Ok(());
         }
 
-        if op.clone().as_op::<SymbolOp>().is_some() {
+        if matches!(item, AsmItem::Symbol) {
             // Register allocation left the values in place and recorded where it
             // put them; this is where that map is read.
             let assignment =
                 &crate::backend::RegAssignment::of_op(op, crate::backend::ASSIGNMENT_ATTR);
-            let name = string_attr(op, "name").ok_or(AsmPrintError::MissingSymbolName)?;
-            if string_attr(op, "binding").as_deref() != Some("local") {
+            let name = as_string_attr(op.attr("name")).ok_or(AsmPrintError::MissingSymbolName)?;
+            if as_string_attr(op.attr("binding")).as_deref() != Some("local") {
                 out.push_str(".global ");
                 out.push_str(&name);
                 out.push('\n');
             }
-            if let Some(align) = int_attr(op, "align")
+            if let Some(align) = as_int_attr(op.attr("align"))
                 && align > 1
             {
                 out.push_str("\t.balign ");
@@ -168,14 +156,14 @@ impl AsmPrinter {
             out.push_str(":\n");
             // The symbol label above names the entry block, so only non-entry
             // blocks emit their own label (branch targets must be defined).
-            let region = context.get_region(op.regions()[0]);
-            for (index, block) in region.iter(context.clone()).enumerate() {
+            for (index, block_id) in symbol_body_blocks(context, op).into_iter().enumerate() {
+                let block = context.get_block(block_id);
                 if index > 0 {
                     match block.attr("name") {
                         Some(AttributeValue::Str(label)) => out.push_str(&label),
                         _ => {
                             out.push_str(".L");
-                            out.push_str(&block.id().number().to_string());
+                            out.push_str(&block_id.number().to_string());
                         }
                     }
                     out.push_str(":\n");
@@ -185,15 +173,15 @@ impl AsmPrinter {
             return Ok(());
         }
 
-        if op.clone().as_op::<LiteralOp>().is_some() {
-            let kind = string_attr(op, "kind").ok_or(AsmPrintError::UnsupportedOp {
+        if matches!(item, AsmItem::Literal) {
+            let kind = as_string_attr(op.attr("kind")).ok_or(AsmPrintError::UnsupportedOp {
                 op: LiteralOp::name(),
             })?;
             out.push_str("\t.");
             out.push_str(&kind);
             match kind.as_str() {
                 "byte" | "half" | "word" | "dword" | "space" => {
-                    let value = int_attr(op, "value").ok_or(AsmPrintError::UnsupportedOp {
+                    let value = as_int_attr(op.attr("value")).ok_or(AsmPrintError::UnsupportedOp {
                         op: LiteralOp::name(),
                     })?;
                     out.push(' ');
@@ -201,7 +189,7 @@ impl AsmPrinter {
                     out.push('\n');
                 }
                 _ => {
-                    let value = string_attr(op, "value").ok_or(AsmPrintError::UnsupportedOp {
+                    let value = as_string_attr(op.attr("value")).ok_or(AsmPrintError::UnsupportedOp {
                         op: LiteralOp::name(),
                     })?;
                     out.push_str(" \"");
@@ -212,17 +200,17 @@ impl AsmPrinter {
             return Ok(());
         }
 
-        if op.clone().as_op::<DataRelocOp>().is_some() {
+        if matches!(item, AsmItem::DataReloc) {
             let unsupported = || AsmPrintError::UnsupportedOp {
                 op: DataRelocOp::name(),
             };
-            let symbol = string_attr(op, "symbol").ok_or_else(unsupported)?;
-            let directive = match int_attr(op, "width") {
+            let symbol = as_string_attr(op.attr("symbol")).ok_or_else(unsupported)?;
+            let directive = match as_int_attr(op.attr("width")) {
                 Some(4) => "word",
                 Some(8) => "quad",
                 _ => return Err(unsupported()),
             };
-            let addend = int_attr(op, "addend").ok_or_else(unsupported)?;
+            let addend = as_int_attr(op.attr("addend")).ok_or_else(unsupported)?;
             out.push_str("\t.");
             out.push_str(directive);
             out.push(' ');
@@ -264,15 +252,4 @@ fn escape_asm_string(value: &str) -> String {
         }
     }
     out
-}
-
-fn int_attr(op: &OpHandle, name: &str) -> Option<i64> {
-    op.attr(name).as_ref().and_then(AttributeValue::as_int)
-}
-
-fn string_attr(op: &OpHandle, name: &str) -> Option<String> {
-    match op.attr(name)? {
-        AttributeValue::Str(value) => Some(value.into_string()),
-        _ => None,
-    }
 }

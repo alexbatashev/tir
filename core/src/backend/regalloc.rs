@@ -23,7 +23,9 @@ use tir_pbqp::{self as pbqp, INF_COST, PbqpMatrix, PbqpNodeId, PbqpProblem};
 use crate::backend::liveness::{self, Liveness, PhysReg};
 use crate::backend::prealloc;
 use crate::backend::registers::fresh_reg;
-use crate::backend::{SymbolOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp};
+use crate::backend::{
+    SymbolOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp, symbol_body_blocks,
+};
 use crate::ptr::AllocaOp;
 
 /// Architectural metadata for one register class.
@@ -698,7 +700,7 @@ impl Pass for RegisterAllocationPass {
         _analyses: &AnalysisManager,
     ) -> Result<(), PassError> {
         let info = self.target.register_info();
-        let blocks = symbol_body_blocks(context, op);
+        let blocks = symbol_body_blocks(context, op.op());
         if blocks.is_empty() {
             return Ok(());
         }
@@ -1352,18 +1354,6 @@ fn block_successors(context: &Context, blocks: &[BlockId]) -> HashMap<BlockId, V
         map.insert(block_id, succs);
     }
     map
-}
-
-/// The blocks of an `asm.symbol` op's body region, in program order.
-pub(crate) fn symbol_body_blocks(context: &Context, op: &OperationRef) -> Vec<BlockId> {
-    let Some(&region_id) = op.op().regions().first() else {
-        return Vec::new();
-    };
-    context
-        .get_region(region_id)
-        .iter(context.clone())
-        .map(|b| b.id())
-        .collect()
 }
 
 pub(crate) fn op_ref_in(context: &Context, op_id: OpId) -> OperationRef {
