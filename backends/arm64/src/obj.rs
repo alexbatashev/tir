@@ -6,8 +6,7 @@ use tir::Operation;
 use tir::attributes::AttributeValue;
 use tir::backend::binary::{EM_AARCH64, ElfClass, ObjectFormatInfo, RelocKind};
 use tir::backend::{
-    VirtualBranchOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp, block_attr, phys_attr,
-    string_attr,
+    VirtualBranchOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp, phys_attr,
 };
 
 use crate::{
@@ -110,9 +109,8 @@ pub(crate) fn finalize_virtual_ops(
                 "block arguments on branch edges are not supported by codegen yet".to_string(),
             ));
         }
-        let dest = block_attr(&br, "dest")?;
         let jump = BranchImmediateOpBuilder::new(context)
-            .attr("imm", AttributeValue::Block(dest))
+            .attr("imm", AttributeValue::Block(br.dest()))
             .build();
         rewriter.replace_op(op, &jump)?;
         return Ok(true);
@@ -122,9 +120,8 @@ pub(crate) fn finalize_virtual_ops(
     // encoder as a fixup and is emitted as an R_AARCH64_CALL26 relocation, since
     // the callee's address is unknown until link time.
     if let Some(call) = op.as_op::<VirtualCallOp>() {
-        let callee = string_attr(&call, "callee")?;
         let bl = BranchLinkOpBuilder::new(context)
-            .attr("imm", AttributeValue::Str(callee.into()))
+            .attr("imm", AttributeValue::Str(call.callee().into()))
             .build();
         tir::backend::forward_state(context, op.op(), &bl);
         rewriter.replace_op(op, &bl)?;

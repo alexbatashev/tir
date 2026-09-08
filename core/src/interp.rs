@@ -813,7 +813,7 @@ impl Interp for TupleGetOp {
                 "tuple_get operand must be a tuple".into(),
             ));
         };
-        let element = elements.get(self.index()).ok_or_else(|| {
+        let element = elements.get(self.index() as usize).ok_or_else(|| {
             InterpError::Message(format!("tuple_get index {} out of bounds", self.index()))
         })?;
         Ok(vec![element.clone()])

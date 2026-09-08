@@ -74,13 +74,6 @@ impl DeclareOp {
         self.result()
     }
 
-    pub fn sym_name(&self) -> String {
-        match self.attr("sym_name") {
-            Some(AttributeValue::Str(name)) => name.to_string(),
-            _ => panic!("declare must carry sym_name"),
-        }
-    }
-
     fn signature(&self) -> Option<(Vec<TypeId>, TypeId)> {
         FnType::signature_of(&self.0.context.upgrade(), self.fn_value())
     }

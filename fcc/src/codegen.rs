@@ -468,10 +468,10 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
             .collect();
         module.body().append_op(
             cir::DefineStructOpBuilder::new(context)
-                .attr("sym_name", AttributeValue::Str(record.name.clone().into()))
+                .sym_name(record.name.clone())
                 .attr("fields", AttributeValue::Array(fields))
-                .attr("size", AttributeValue::UInt(record.size))
-                .attr("align", AttributeValue::UInt(record.align))
+                .size(record.size)
+                .align(record.align)
                 .build(),
         );
     }
@@ -2069,7 +2069,7 @@ impl FnCodegen<'_> {
                         self.emit(
                             b::TupleGetOpBuilder::new(self.context)
                                 .tuple(tuple)
-                                .attr("index", AttributeValue::UInt(index as u64))
+                                .index(index as u64)
                                 .result_type(piece.ty)
                                 .build(),
                         )
@@ -3468,7 +3468,7 @@ impl FnCodegen<'_> {
                         self.emit(
                             b::TupleGetOpBuilder::new(self.context)
                                 .tuple(result)
-                                .attr("index", AttributeValue::UInt(index as u64))
+                                .index(index as u64)
                                 .result_type(piece.ty)
                                 .build(),
                         )
@@ -3937,7 +3937,7 @@ pub fn lower_data(context: &Context, module: &ModuleOp) -> Result<(), tir::PassE
                 .build();
             symbol.body().append_op(
                 LiteralOpBuilder::new(context)
-                    .attr("kind", AttributeValue::Str("space".to_string().into()))
+                    .kind("space")
                     .attr("value", AttributeValue::Int(size as i64))
                     .build(),
             );
@@ -3974,7 +3974,7 @@ fn emit_data_section(
     }
     let byte = |value: u8| {
         LiteralOpBuilder::new(context)
-            .attr("kind", AttributeValue::Str("byte".to_string().into()))
+            .kind("byte")
             .attr("value", AttributeValue::Int(i64::from(value)))
             .build()
     };
@@ -3991,7 +3991,7 @@ fn emit_data_section(
         if let (true, Some(text)) = (relocations.is_empty(), c_string(&bytes)) {
             symbol.body().append_op(
                 LiteralOpBuilder::new(context)
-                    .attr("kind", AttributeValue::Str("asciz".to_string().into()))
+                    .kind("asciz")
                     .attr("value", AttributeValue::Str(text.into()))
                     .build(),
             );
@@ -4009,9 +4009,9 @@ fn emit_data_section(
             }
             symbol.body().append_op(
                 DataRelocOpBuilder::new(context)
-                    .attr("symbol", AttributeValue::Str(target.into()))
-                    .attr("width", AttributeValue::UInt(width))
-                    .attr("addend", AttributeValue::Int(addend))
+                    .symbol(target)
+                    .width(width)
+                    .addend(addend)
                     .build(),
             );
             cursor = (offset + width) as usize;

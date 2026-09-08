@@ -45,17 +45,6 @@ pub fn lambda(
 }
 
 impl FuncOpBuilder {
-    pub fn sym_name(self, name: &str) -> Self {
-        self.attr(
-            "sym_name",
-            tir::attributes::AttributeValue::Str(name.to_string().into()),
-        )
-    }
-
-    pub fn ret_type(self, ty: tir::TypeId) -> Self {
-        self.attr("ret_type", tir::attributes::AttributeValue::Type(ty))
-    }
-
     pub fn result_address(self) -> Self {
         self.attr(
             "result_address",
@@ -129,13 +118,6 @@ impl FuncOp {
 
     pub fn has_result_address(&self) -> bool {
         self.attr("result_address") == Some(tir::attributes::AttributeValue::Bool(true))
-    }
-
-    pub fn ret_type(&self) -> tir::TypeId {
-        match self.attr("ret_type") {
-            Some(tir::attributes::AttributeValue::Type(ty)) => ty,
-            _ => panic!("func must carry ret_type"),
-        }
     }
 
     pub fn argument_alignments(&self) -> Vec<u64> {
@@ -268,7 +250,7 @@ impl FuncOp {
         let body_region = parser.parse_region_with_entry_args(context, block_args)?;
 
         let mut builder = FuncOpBuilder::new(context)
-            .sym_name(&sym_name)
+            .sym_name(sym_name.as_str())
             .ret_type(ret_type)
             .result_type(tir::builtin::FnType::new(context, &parameters, ret_type))
             .body(body_region.id());

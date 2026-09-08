@@ -212,22 +212,11 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         &binds_verify,
     );
 
-    let predicate_setters: Vec<_> = attributes
-        .iter()
-        .filter(|attr| attr.ty == "Predicate")
-        .map(|attr| {
-            let method = op_fn_ident(&attr.name);
-            let name = attr.name.clone();
-            quote! {
-                pub fn #method(self, #method: tir::attributes::Predicate) -> Self {
-                    self.attr(#name, tir::attributes::AttributeValue::Predicate(#method))
-                }
-            }
-        })
-        .collect();
+    let (attr_setters, attr_getters) =
+        make_attr_accessors(&attributes, &format!("{dialect}.{name}"));
     let attribute_pieces = AttributePieces {
         verifier: attribute_verifier,
-        predicate_setters,
+        setters: attr_setters,
     };
     let builder_code = emit_builder(
         &builder_name,
@@ -267,6 +256,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
             #region_accessors
             #result_accessor
             #state_accessors
+            #attr_getters
         }
 
         impl tir::Operation for #struct_name {
@@ -438,10 +428,94 @@ fn emit_opdef_verifier(
 }
 
 /// What an op's attribute declarations contribute to its builder: the
-/// required-attribute check `build` runs, and a typed setter per `Predicate`.
+/// required-attribute check `build` runs, and one typed setter per attribute.
 struct AttributePieces {
     verifier: proc_macro2::TokenStream,
-    predicate_setters: Vec<proc_macro2::TokenStream>,
+    setters: Vec<proc_macro2::TokenStream>,
+}
+
+/// How one attribute kind crosses between the IR and Rust: the type it reads
+/// as, the type it is written from, and the `AttributeValue` variant between
+/// them.
+struct AttrAccessor {
+    getter_ty: proc_macro2::TokenStream,
+    setter_ty: proc_macro2::TokenStream,
+    variant: Ident,
+    read: proc_macro2::TokenStream,
+    write: proc_macro2::TokenStream,
+}
+
+/// `None` for an aggregate or untyped kind — `Array`, `Dict`, `any` — which
+/// has no single Rust type to hand back.
+fn attr_accessor(ty: &str) -> Option<AttrAccessor> {
+    let scalar = |rust: proc_macro2::TokenStream, variant: &str| AttrAccessor {
+        getter_ty: rust.clone(),
+        setter_ty: rust,
+        variant: format_ident!("{}", variant),
+        read: quote! { value },
+        write: quote! { value },
+    };
+    Some(match ty {
+        "Str" => AttrAccessor {
+            getter_ty: quote! { String },
+            setter_ty: quote! { impl Into<Box<str>> },
+            variant: format_ident!("Str"),
+            read: quote! { value.to_string() },
+            write: quote! { value.into() },
+        },
+        "Int" => scalar(quote! { i64 }, "Int"),
+        "UInt" => scalar(quote! { u64 }, "UInt"),
+        "F32" => scalar(quote! { f32 }, "F32"),
+        "F64" => scalar(quote! { f64 }, "F64"),
+        "Bool" => scalar(quote! { bool }, "Bool"),
+        "Type" => scalar(quote! { tir::TypeId }, "Type"),
+        "Block" => scalar(quote! { tir::BlockId }, "Block"),
+        "Value" => scalar(quote! { tir::ValueId }, "Value"),
+        "Predicate" => scalar(quote! { tir::attributes::Predicate }, "Predicate"),
+        _ => return None,
+    })
+}
+
+/// The builder setters and operation getters a declared attribute list earns,
+/// so an op spells `op.dest()` rather than unwrapping `attr("dest")` by hand.
+fn make_attr_accessors(
+    attributes: &[AttrSpec],
+    spelled: &str,
+) -> (TokenStreams, proc_macro2::TokenStream) {
+    let mut setters = vec![];
+    let mut getters = vec![];
+    for attr in attributes {
+        let Some(AttrAccessor {
+            getter_ty,
+            setter_ty,
+            variant,
+            read,
+            write,
+        }) = attr_accessor(&attr.ty)
+        else {
+            continue;
+        };
+        let method = op_fn_ident(&attr.name);
+        let name = attr.name.clone();
+        let missing = format!(
+            "{spelled} must carry a {} attribute '{}'",
+            attr.ty, attr.name
+        );
+        setters.push(quote! {
+            pub fn #method(self, value: #setter_ty) -> Self {
+                self.attr(#name, tir::attributes::AttributeValue::#variant(#write))
+            }
+        });
+        getters.push(quote! {
+            pub fn #method(&self) -> #getter_ty {
+                match tir::Operation::attr(self, #name) {
+                    Some(tir::attributes::AttributeValue::#variant(value)) => #read,
+                    _ => panic!(#missing),
+                }
+            }
+        });
+    }
+    (setters, quote! { #(#getters)* })
 }
 
 fn emit_builder(
@@ -452,8 +526,7 @@ fn emit_builder(
     results: &ResultPieces,
     attributes: &AttributePieces,
 ) -> proc_macro2::TokenStream {
-    let (attribute_verifier, predicate_setters) =
-        (&attributes.verifier, &attributes.predicate_setters);
+    let (attribute_verifier, attr_setters) = (&attributes.verifier, &attributes.setters);
     let (region_fields, region_defaults, region_builders, region_fills) = (
         &regions.fields,
         &regions.defaults,
@@ -497,7 +570,7 @@ fn emit_builder(
 
             #(#region_builders)*
             #(#operand_builders)*
-            #(#predicate_setters)*
+            #(#attr_setters)*
             #result_builder_method
 
             /// Observe one more dependency: the chain this op is ordered after.

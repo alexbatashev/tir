@@ -103,7 +103,7 @@ pub fn lower_function_and_return(
                 let Some(extract) = extract_instance.clone().as_op::<TupleGetOp>() else {
                     continue;
                 };
-                let Some(element) = elements.get_mut(extract.index()) else {
+                let Some(element) = elements.get_mut(extract.index() as usize) else {
                     return Err(PassError::InvalidRuleSet(
                         "tuple_get index is out of bounds".to_string(),
                     ));

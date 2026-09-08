@@ -22,12 +22,6 @@ operation! {
 
 impl crate::Speculatable for ConstantOp {}
 
-impl ConstantOpBuilder {
-    pub fn value(self, v: i64) -> Self {
-        self.attr("value", tir::attributes::AttributeValue::Int(v))
-    }
-}
-
 impl crate::ConstantLike for ConstantOp {
     fn constant_value(&self) -> tir::utils::APInt {
         let context = self.0.context.upgrade();

@@ -305,13 +305,6 @@ macro_rules! float_cast {
 float_cast!(FPToSIOp, "fptosi", "(set result (fptosi input))");
 float_cast!(FPToUIOp, "fptoui", "(set result (fptoui input))");
 
-impl ConstantFOpBuilder {
-    /// The constant, held as `f64`; every supported format embeds in it exactly.
-    pub fn value(self, v: f64) -> Self {
-        self.attr("value", AttributeValue::F64(v))
-    }
-}
-
 macro_rules! float_binop {
     ($op:ident, $name:tt, [$($iface:ident),*], $sem:tt) => {
         operation! {
