@@ -68,10 +68,6 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
             .is_some_and(|segment| segment.ident == "SameOperandAndResultType")
     });
     let has_results = !results.is_empty();
-    // A `?`-prefixed result type makes the single result optional: the op may be built
-    // with or without it. Used by structured control flow, whose value is absent when
-    // the construct is purely side-effecting.
-    let result_optional = results.iter().any(|r| r.ty.starts_with('?'));
     // A `*`-prefixed result makes the op n-ary: it produces one value per type given
     // to the builder. Used by structured control flow, which carries n values.
     let result_variadic = results.iter().any(|r| r.variadic);
@@ -171,7 +167,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         }
     });
 
-    let result_pieces = make_result_pieces(has_results, result_variadic, result_optional);
+    let result_pieces = make_result_pieces(has_results, result_variadic);
     let attr_fn_params: Vec<_> = attributes
         .iter()
         .map(|attr| {
@@ -972,11 +968,7 @@ struct ResultPieces {
     build: proc_macro2::TokenStream,
 }
 
-fn make_result_pieces(
-    has_results: bool,
-    result_variadic: bool,
-    result_optional: bool,
-) -> ResultPieces {
+fn make_result_pieces(has_results: bool, result_variadic: bool) -> ResultPieces {
     let result_accessor = if has_results {
         quote! {
             pub fn result(&self) -> tir::ValueId {
@@ -1034,8 +1026,6 @@ fn make_result_pieces(
         quote! {}
     } else if result_variadic {
         quote! { result_types: Vec<tir::TypeId>, }
-    } else if result_optional {
-        quote! { result_type: Option<tir::TypeId>, }
     } else {
         quote! { result_type: tir::TypeId, }
     };
@@ -1044,12 +1034,6 @@ fn make_result_pieces(
         quote! {}
     } else if result_variadic {
         quote! { builder = builder.result_types(result_types); }
-    } else if result_optional {
-        quote! {
-            if let Some(result_type) = result_type {
-                builder = builder.result_type(result_type);
-            }
-        }
     } else {
         quote! { builder = builder.result_type(result_type); }
     };
@@ -1067,13 +1051,6 @@ fn make_result_pieces(
                     .collect()
             } else {
                 self.result_values
-            };
-        }
-    } else if result_optional {
-        quote! {
-            let result_vec = match self.result_type {
-                Some(ty) => vec![self.context.create_value(ty, None).id()],
-                None => vec![],
             };
         }
     } else {
@@ -1429,22 +1406,6 @@ fn get_value_specs(expr: &Expr) -> Option<Vec<ValueSpec>> {
                         name: field_name(f),
                         variadic: ty.starts_with('*'),
                         ty,
-                    }
-                })
-                .collect(),
-        ),
-        // Backward-compatible form: operands/results: [lhs, rhs]
-        Expr::Array(arr) => Some(
-            arr.elems
-                .iter()
-                .map(|e| {
-                    let Expr::Path(p) = e else {
-                        unreachable!();
-                    };
-                    ValueSpec {
-                        name: p.path.get_ident().unwrap().to_string(),
-                        ty: "Any".to_string(),
-                        variadic: false,
                     }
                 })
                 .collect(),
