@@ -603,10 +603,7 @@ pub fn parse(context: &Context, text: &str) -> Result<ModuleOp, String> {
         let body = symbol.body();
         for item in body_items(&kernel.body) {
             let id = match item {
-                BodyItem::Label(name) => LabelOpBuilder::new(context)
-                    .attr("name", AttributeValue::Str(name.into()))
-                    .build()
-                    .id(),
+                BodyItem::Label(name) => LabelOpBuilder::new(context).name(name).build().id(),
                 BodyItem::Instruction(line) => {
                     let (op_name, attrs) = parse_instruction(context, &index, line.trim())?;
                     build_op(context, op_name, attrs)

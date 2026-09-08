@@ -10,9 +10,8 @@ use tir::func::{CallOp, ReturnOp};
 use tir::{Context, OpId, Operand, Operation, OperationRef, PassError, Rewriter, ValueId};
 
 use crate::backend::abi::{
-    AbiInfo, GroupRollback, Overflow, ValueKind, align_argument_group, exhaust_argument_registers,
-    next_argument_register, next_return_register, reserve_indirect_result_argument, type_kind,
-    value_kind,
+    AbiInfo, ArgumentGroup, ArgumentMember, ArgumentSlot, ValueKind, argument_sequences,
+    next_return_register, place_arguments, type_kind, value_kind,
 };
 use crate::backend::liveness::PhysReg;
 use crate::backend::regalloc::RegClassId;
@@ -214,7 +213,7 @@ impl CallLowering {
         for (index, element_ty) in tuple.elements(context).into_iter().enumerate() {
             let extract = TupleGetOpBuilder::new(context)
                 .tuple(value)
-                .attr("index", AttributeValue::UInt(index as u64))
+                .index(index as u64)
                 .result_type(element_ty)
                 .build();
             context.add(region, extract.id());
@@ -404,7 +403,7 @@ impl CallLowering {
         let call: Box<dyn Operation> = match callee {
             Callee::Direct(name) => {
                 let mut builder = super::VirtualCallOpBuilder::new(context)
-                    .attr("callee", AttributeValue::Str(name.into()))
+                    .callee(name)
                     .outgoing_stack_size(u64::from(outgoing_size))
                     .attr("clobbers", clobbers)
                     .attr("uses", uses);
@@ -534,69 +533,45 @@ impl CallLowering {
         lowered_arguments: ArgumentGroups,
         has_result_address: bool,
     ) -> Result<(Vec<ValueId>, Vec<ArgumentLocation>, u32), PassError> {
-        let mut next_slot = HashMap::new();
-        if has_result_address {
-            reserve_indirect_result_argument(self.abi, &mut next_slot);
-        }
-        let mut argument_values = Vec::new();
-        let mut argument_locations = Vec::new();
-        let mut stack_args = 0u32;
-        for (values, alignment) in lowered_arguments {
-            let mut trial_slots = next_slot.clone();
-            align_argument_group(
-                self.abi,
-                alignment,
-                values
+        let groups = lowered_arguments
+            .iter()
+            .map(|(values, alignment)| ArgumentGroup {
+                members: values
                     .iter()
-                    .map(|&value| value_kind(context, self.abi, value)),
-                &mut trial_slots,
-            );
-            let direct = if self.abi.argument_group_fits_register_limit(values.len()) {
-                values
-                    .iter()
-                    .map(|&value| {
-                        next_argument_register(
-                            self.abi,
-                            None,
-                            value_kind(context, self.abi, value),
-                            &mut trial_slots,
-                        )
+                    .map(|&value| ArgumentMember {
+                        kind: value_kind(context, self.abi, value),
+                        class: None,
                     })
-                    .collect::<Option<Vec<_>>>()
-            } else {
-                None
-            };
-            if let Some(registers) = direct {
-                next_slot = trial_slots;
-                argument_values.extend(values);
-                argument_locations.extend(registers.into_iter().map(ArgumentLocation::Register));
-                continue;
-            }
-
-            for &value in &values {
-                if self.abi.argument_group_rollback() == GroupRollback::Exhaust {
-                    exhaust_argument_registers(
-                        self.abi,
-                        value_kind(context, self.abi, value),
-                        &mut next_slot,
-                    );
+                    .collect(),
+                alignment: *alignment,
+            })
+            .collect::<Vec<_>>();
+        let (slots, stack_args) = place_arguments(self.abi, &groups, has_result_address);
+        let argument_values = lowered_arguments
+            .into_iter()
+            .flat_map(|(values, _)| values)
+            .collect::<Vec<_>>();
+        let argument_locations = argument_values
+            .iter()
+            .zip(slots)
+            .map(|(&value, slot)| match slot {
+                ArgumentSlot::Register(register) => Ok(ArgumentLocation::Register(register)),
+                ArgumentSlot::Stack(index) => {
+                    let class = stack_class(self.abi, value_kind(context, self.abi, value))
+                        .ok_or_else(|| {
+                            PassError::InvalidRuleSet("ABI has no argument sequence".to_string())
+                        })?;
+                    Ok(ArgumentLocation::Stack {
+                        class,
+                        offset: i64::from(index as u32 * self.abi.stack.slot_size),
+                    })
                 }
-                let class = stack_class(self.abi, value_kind(context, self.abi, value))
-                    .ok_or_else(|| {
-                        PassError::InvalidRuleSet("ABI has no argument sequence".to_string())
-                    })?;
-                argument_values.push(value);
-                argument_locations.push(ArgumentLocation::Stack {
-                    class,
-                    offset: i64::from(stack_args * self.abi.stack.slot_size),
-                });
-                stack_args += 1;
-            }
-        }
+            })
+            .collect::<Result<Vec<_>, PassError>>()?;
         let outgoing_size = if stack_args == 0 {
             0
         } else {
-            let bytes = stack_args * self.abi.stack.slot_size;
+            let bytes = stack_args as u32 * self.abi.stack.slot_size;
             bytes.div_ceil(self.abi.stack.align) * self.abi.stack.align
         };
         Ok((argument_values, argument_locations, outgoing_size))
@@ -632,9 +607,12 @@ impl CallLowering {
             let extract = instance.clone().as_op::<TupleGetOp>().ok_or_else(|| {
                 PassError::InvalidRuleSet("tuple call result has a non-extraction use".to_string())
             })?;
-            let register = registers.get(extract.index()).copied().ok_or_else(|| {
-                PassError::InvalidRuleSet("tuple extraction index is out of bounds".to_string())
-            })?;
+            let register = registers
+                .get(extract.index() as usize)
+                .copied()
+                .ok_or_else(|| {
+                    PassError::InvalidRuleSet("tuple extraction index is out of bounds".to_string())
+                })?;
             extracts.push((
                 extract.index(),
                 extract.result(),
@@ -681,7 +659,7 @@ fn insert_tuple_extractions(
     for (index, element_ty) in tuple.elements(context).into_iter().enumerate() {
         let extract = TupleGetOpBuilder::new(context)
             .tuple(tuple_value)
-            .attr("index", AttributeValue::UInt(index as u64))
+            .index(index as u64)
             .result_type(element_ty)
             .build();
         elements.push(extract.result());
@@ -747,27 +725,10 @@ impl ArgumentLocation {
     }
 }
 
-fn stack_class(abi: &AbiInfo, mut kind: ValueKind) -> Option<crate::backend::regalloc::RegClassId> {
-    let mut visited = HashSet::new();
-    let mut value_class = None;
-    loop {
-        if !visited.insert(kind) {
-            return None;
-        }
-        let sequence = match abi.args.iter().find(|sequence| sequence.kind == kind) {
-            Some(sequence) => sequence,
-            None if kind != ValueKind::Int => {
-                kind = ValueKind::Int;
-                continue;
-            }
-            None => return None,
-        };
-        value_class.get_or_insert(sequence.regs.first()?.0);
-        match sequence.overflow {
-            Overflow::Chain(next) => kind = next,
-            Overflow::Stack => return value_class,
-        }
-    }
+fn stack_class(abi: &AbiInfo, kind: ValueKind) -> Option<crate::backend::regalloc::RegClassId> {
+    argument_sequences(abi, kind)
+        .find_map(|sequence| sequence.regs.first())
+        .map(|register| register.0)
 }
 
 /// A fresh value of `class`, the type a machine instruction reads it through.

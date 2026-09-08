@@ -83,23 +83,11 @@ struct Seeder<'a> {
 impl Seeder<'_> {
     fn seed_region(&mut self, region: RegionId) {
         let handle = self.context.get_region(region);
-        if handle.is_nodes() {
-            for port in handle.ports() {
-                self.class_of(port.id());
-            }
-            for op in handle.op_ids() {
-                self.seed_op(op);
-            }
-            return;
+        for port in handle.ports() {
+            self.class_of(port.id());
         }
-        let blocks: Vec<_> = handle.iter(self.context.clone()).collect();
-        for block in blocks {
-            for argument in block.arguments() {
-                self.class_of(argument.id());
-            }
-            for op in block.op_ids() {
-                self.seed_op(op);
-            }
+        for op in handle.op_ids() {
+            self.seed_op(op);
         }
     }
 
@@ -272,8 +260,10 @@ impl Seeder<'_> {
             .collect();
         let results = region.dep_results();
         let entered = instance.dep_operands();
-        let carried = results.len() / 2;
-        if carried != ports.len() || entered.len() != ports.len() {
+        let carried = ports.len();
+        if crate::binding::dep_groups(self.context, region.id()) != Some(2)
+            || entered.len() != carried
+        {
             return;
         }
         for (index, &port) in ports.iter().enumerate() {

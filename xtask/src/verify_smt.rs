@@ -51,7 +51,7 @@
 //!     TMDL behavior writes them; the ALU ops deliberately leave flags
 //!     unmodeled, so their flag writes are ignored.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -59,7 +59,8 @@ use std::time::Instant;
 
 use crate::utils::{download_file, project_root};
 use anyhow::anyhow;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use tmdl::{FlatStateFieldMetadata, MemoryAccessMetadata, RegisterClassMetadata, SmtMetadata};
 use xshell::{cmd, Shell};
 
 /// A Sail bitfield flag register mapped to TMDL flag slots:
@@ -382,6 +383,51 @@ const X86_REG_NAMES: &[(&str, u32)] = &[
     ("r15", 15),
 ];
 
+/// Why `instr` cannot be verified against the model, as the report names it,
+/// or `None` when it can.
+fn unsupported_reason(spec: &IsaSpec, instr: &Instruction) -> Option<String> {
+    let riscv = spec.name.starts_with("riscv");
+    if riscv && instr.name == "vsetvli" {
+        return Some("vsetvli (RVV disabled in Sail configuration)".to_string());
+    }
+    if riscv && instr.width_bits == 16 {
+        return Some(format!(
+            "{} (compressed extension disabled in Sail configuration)",
+            instr.name
+        ));
+    }
+    if riscv && matches!(instr.name.as_str(), "envcall" | "envbreak" | "cenvbreak") {
+        return Some(format!(
+            "{} (terminating Sail trace omits architectural trap state)",
+            instr.name
+        ));
+    }
+    if !instr.supported {
+        return Some(instr.name.clone());
+    }
+    // Atomics (A extension) reference the reservation state, whose mapping onto
+    // Sail's reservation register is follow-up work (see module docs).
+    if instr.uses_reservation {
+        return Some(format!(
+            "{} (atomic; Sail reservation mapping is follow-up)",
+            instr.name
+        ));
+    }
+    if instr.flat_execute.is_none() {
+        return Some(format!("{} (no flat SMT behavior)", instr.name));
+    }
+    // Operands in register classes that have no correspondence to Sail state
+    // (e.g. the TMDL `pc` operand class).
+    instr
+        .operands
+        .iter()
+        .find_map(|(_, kind)| match kind {
+            OperandKind::Reg { class, .. } if !spec.class_is_mapped(class) => Some(class),
+            _ => None,
+        })
+        .map(|class| format!("{} (unmapped register class {})", instr.name, class))
+}
+
 pub fn verify_smt(sh: &Shell, isa: &str, args: impl Iterator<Item = String>) -> anyhow::Result<()> {
     let spec = ISA_SPECS.iter().find(|s| s.name == isa).ok_or_else(|| {
         anyhow!("unsupported ISA {isa}; available: riscv64, riscv32, armv8, x86_64")
@@ -421,58 +467,8 @@ pub fn verify_smt(sh: &Shell, isa: &str, args: impl Iterator<Item = String>) -> 
         if shard.is_some_and(|shard| !shard.contains(&instr.name)) {
             continue;
         }
-        if spec.name.starts_with("riscv") && instr.name == "vsetvli" {
-            report
-                .unsupported
-                .push("vsetvli (RVV disabled in Sail configuration)".to_string());
-            continue;
-        }
-        if spec.name.starts_with("riscv") && instr.width_bits == 16 {
-            report.unsupported.push(format!(
-                "{} (compressed extension disabled in Sail configuration)",
-                instr.name
-            ));
-            continue;
-        }
-        if spec.name.starts_with("riscv")
-            && matches!(instr.name.as_str(), "envcall" | "envbreak" | "cenvbreak")
-        {
-            report.unsupported.push(format!(
-                "{} (terminating Sail trace omits architectural trap state)",
-                instr.name
-            ));
-            continue;
-        }
-        if !instr.supported {
-            report.unsupported.push(instr.name.clone());
-            continue;
-        }
-        // Atomics (A extension) reference the reservation state, whose mapping
-        // onto Sail's reservation register is follow-up work (see module docs);
-        // skip them until that is enabled.
-        if instr.uses_reservation {
-            report.unsupported.push(format!(
-                "{} (atomic; Sail reservation mapping is follow-up)",
-                instr.name
-            ));
-            continue;
-        }
-        if instr.flat_execute.is_none() {
-            report
-                .unsupported
-                .push(format!("{} (no flat SMT behavior)", instr.name));
-            continue;
-        }
-        // Skip instructions with operands in register classes that have no
-        // correspondence to Sail state (e.g. the TMDL `pc` operand class).
-        if let Some(class) = instr.operands.iter().find_map(|(_, k)| match k {
-            OperandKind::Reg { class, .. } if !spec.class_is_mapped(class) => Some(class),
-            _ => None,
-        }) {
-            report.unsupported.push(format!(
-                "{} (unmapped register class {})",
-                instr.name, class
-            ));
+        if let Some(reason) = unsupported_reason(spec, instr) {
+            report.unsupported.push(reason);
             continue;
         }
         selected.push(instr);
@@ -699,7 +695,7 @@ struct Instruction {
     /// The fixed bit maps this instruction encodes to, each with the guard over
     /// the operands that selects it. Every ISA but x86 has exactly one.
     shapes: Vec<Shape>,
-    flat_execute: Option<HashMap<String, String>>,
+    flat_execute: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -710,11 +706,6 @@ struct Shape {
     encoding: Vec<EncodingField>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct MemoryAccessMetadata {
-    flat_address: String,
-}
-
 #[derive(Clone, Debug)]
 struct EncodingField {
     word_low: u32,
@@ -722,76 +713,6 @@ struct EncodingField {
     operand_index: Option<usize>,
     operand_low: u32,
     value: u128,
-}
-
-#[derive(Deserialize)]
-struct MetadataFile {
-    version: u32,
-    isa: String,
-    dialect: String,
-    flat_state: Vec<FlatStateField>,
-    register_classes: Vec<RegisterClassMetadata>,
-    instructions: Vec<RawInstruction>,
-}
-
-#[derive(Deserialize)]
-struct RawInstruction {
-    name: String,
-    writes_pc: bool,
-    width_bits: u32,
-    operands: Vec<RawOperand>,
-    supported: bool,
-    write_classes: Vec<String>,
-    uses_reservation: bool,
-    pc_source_operands: Vec<usize>,
-    memory_accesses: Vec<MemoryAccessMetadata>,
-    trap_kinds: Vec<String>,
-    shapes: Vec<RawShape>,
-    flat_execute: Option<HashMap<String, String>>,
-}
-
-#[derive(Deserialize)]
-struct RawShape {
-    name: String,
-    width_bits: u32,
-    guard: tmdl::shapes::Predicate,
-    fields: Vec<RawEncodingField>,
-}
-
-#[derive(Clone, Deserialize)]
-struct FlatStateField {
-    name: String,
-    sort: String,
-}
-
-#[derive(Clone, Deserialize)]
-struct RegisterClassMetadata {
-    name: String,
-    storage: String,
-    index_width: u32,
-    value_width: u32,
-    storage_width: u32,
-    zero_index: Option<u64>,
-    bit_offset: u32,
-}
-
-#[derive(Deserialize)]
-struct RawOperand {
-    name: String,
-    kind: String,
-    class: Option<String>,
-    width: u32,
-    align: u64,
-    nonzero: bool,
-}
-
-#[derive(Deserialize)]
-struct RawEncodingField {
-    word_low: u32,
-    word_high: u32,
-    operand: Option<String>,
-    operand_low: u32,
-    value: String,
 }
 
 impl Instruction {
@@ -830,12 +751,12 @@ struct Inventory {
 
 #[derive(Clone)]
 struct FlatModel {
-    fields: Vec<FlatStateField>,
+    fields: Vec<FlatStateFieldMetadata>,
     classes: HashMap<String, RegisterClassMetadata>,
 }
 
 fn parse_inventory(json: &str) -> anyhow::Result<Inventory> {
-    let metadata: MetadataFile = serde_json::from_str(json)?;
+    let metadata: SmtMetadata = serde_json::from_str(json)?;
     anyhow::ensure!(metadata.version == 1, "unsupported SMT metadata version");
     let instructions = metadata
         .instructions
@@ -851,17 +772,18 @@ fn parse_inventory(json: &str) -> anyhow::Result<Inventory> {
                 .into_iter()
                 .map(|operand| {
                     let constraint = ImmConstraint {
-                        align: operand.align,
+                        align: u64::from(operand.align),
                         nonzero: operand.nonzero,
                     };
+                    let width = u32::from(operand.width);
                     let kind = match operand.kind.as_str() {
                         "register" => OperandKind::Reg {
                             class: operand
                                 .class
                                 .ok_or_else(|| anyhow!("register operand without class"))?,
-                            idx_width: operand.width,
+                            idx_width: width,
                         },
-                        "bits" => OperandKind::Bits(operand.width, constraint),
+                        "bits" => OperandKind::Bits(width, constraint),
                         "int" => OperandKind::Int(constraint),
                         kind => anyhow::bail!("unknown operand kind {kind}"),
                     };
@@ -888,17 +810,17 @@ fn parse_inventory(json: &str) -> anyhow::Result<Inventory> {
                                 })
                                 .transpose()?;
                             Ok(EncodingField {
-                                word_low: field.word_low,
-                                word_high: field.word_high,
+                                word_low: u32::from(field.word_low),
+                                word_high: u32::from(field.word_high),
                                 operand_index,
-                                operand_low: field.operand_low,
+                                operand_low: u32::from(field.operand_low),
                                 value: field.value.parse()?,
                             })
                         })
                         .collect::<anyhow::Result<Vec<_>>>()?;
                     Ok(Shape {
                         name: shape.name,
-                        width_bits: shape.width_bits,
+                        width_bits: u32::from(shape.width_bits),
                         guard: shape.guard,
                         encoding,
                     })
@@ -907,7 +829,7 @@ fn parse_inventory(json: &str) -> anyhow::Result<Inventory> {
             Ok(Instruction {
                 name: raw.name,
                 writes_pc: raw.writes_pc,
-                width_bits: raw.width_bits,
+                width_bits: u32::from(raw.width_bits),
                 operands,
                 supported: raw.supported,
                 write_classes: raw.write_classes,
@@ -2664,7 +2586,6 @@ mod tests {
           "version": 1,
           "isa": "TestIsa",
           "dialect": "test",
-          "smt_prelude": "(set-logic ALL)",
           "flat_state": [
             {"name": "gpr", "sort": "(Array (_ BitVec 5) (_ BitVec 64))"},
             {"name": "mem", "sort": "(Array (_ BitVec 64) (_ BitVec 8))"},
@@ -2691,7 +2612,6 @@ mod tests {
                 {"word_low": 0, "word_high": 6, "operand": null, "operand_low": 0, "value": "3"}
               ]
             }],
-            "execute": "(write_gpr st rd (_ bv0 64))",
             "flat_execute": {"gpr": "st0_gpr", "mem": "st0_mem", "resv": "st0_resv", "resa": "st0_resa", "pc": "st0_pc"}
           }]
         }"#;
@@ -2780,7 +2700,7 @@ mod tests {
             pc_source_operands: vec![],
             memory_accesses: vec![],
             shapes: vec![],
-            flat_execute: Some(HashMap::new()),
+            flat_execute: Some(BTreeMap::new()),
         };
         let trace = analyze_trace(
             spec,

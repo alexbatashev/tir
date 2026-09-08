@@ -537,6 +537,25 @@ pub fn behavior_memory_effects(expr: &ast::Expr) -> (bool, bool) {
     effects
 }
 
+/// Apply `f` to each statement of `expr`: `expr` itself for a leaf, and the
+/// statements nested in the arms of the control-flow forms. A `Block` splits
+/// into its statements, an `If` into its arms — its condition is a value, not
+/// a statement — and a `Try` into its body, since a handler writes trap state
+/// rather than values.
+pub(crate) fn visit_statements<'a>(expr: &'a ast::Expr, f: &mut dyn FnMut(&'a ast::Expr)) {
+    match expr {
+        ast::Expr::Block(b) => b.stmts.iter().for_each(|stmt| visit_statements(stmt, f)),
+        ast::Expr::If(i) => {
+            visit_statements(&i.then, f);
+            if let Some(els) = &i.else_ {
+                visit_statements(els, f);
+            }
+        }
+        ast::Expr::Try(t) => visit_statements(&t.body, f),
+        leaf => f(leaf),
+    }
+}
+
 /// Apply `f` to `expr` and every sub-expression of it, outermost first.
 pub(crate) fn visit_exprs<'a>(expr: &'a ast::Expr, f: &mut dyn FnMut(&'a ast::Expr)) {
     f(expr);

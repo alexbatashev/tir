@@ -63,8 +63,10 @@ fn guarded_div(guard_rhs: u64, else_swapped: bool) -> SemGraph {
 
 #[test]
 fn guarded_div_rule_with_correct_relaxation_is_accepted() {
-    let rule = Rule::new("div", div_pattern(), LATENCY_COST_SCALE, emit_unreachable)
-        .with_guarded_semantics(guarded_div(0, false));
+    let rule = Rule {
+        guarded_semantics: Some(guarded_div(0, false)),
+        ..Rule::new("div", div_pattern(), LATENCY_COST_SCALE, emit_unreachable)
+    };
     assert!(prove_guarded_relaxations(&[rule]).is_ok());
 }
 
@@ -72,8 +74,10 @@ fn guarded_div_rule_with_correct_relaxation_is_accepted() {
 fn guarded_div_rule_with_wrong_guard_region_is_rejected() {
     // Guarding on `b == 1` instead of `b == 0` leaves the pure `div` unequal to
     // the behavior at `b == 1` (where `div(a,1) == a`, not all-ones).
-    let rule = Rule::new("div", div_pattern(), LATENCY_COST_SCALE, emit_unreachable)
-        .with_guarded_semantics(guarded_div(1, false));
+    let rule = Rule {
+        guarded_semantics: Some(guarded_div(1, false)),
+        ..Rule::new("div", div_pattern(), LATENCY_COST_SCALE, emit_unreachable)
+    };
     match prove_guarded_relaxations(&[rule]) {
         Err(PassError::InvalidRuleSet(msg)) => assert!(msg.contains("div")),
         Err(other) => panic!("expected InvalidRuleSet, got {other:?}"),
@@ -84,8 +88,10 @@ fn guarded_div_rule_with_wrong_guard_region_is_rejected() {
 #[test]
 fn guarded_div_rule_with_mismatched_else_arm_is_rejected() {
     // The else arm computes `div(b, a)` while the selection pattern is `div(a, b)`.
-    let rule = Rule::new("div", div_pattern(), LATENCY_COST_SCALE, emit_unreachable)
-        .with_guarded_semantics(guarded_div(0, true));
+    let rule = Rule {
+        guarded_semantics: Some(guarded_div(0, true)),
+        ..Rule::new("div", div_pattern(), LATENCY_COST_SCALE, emit_unreachable)
+    };
     match prove_guarded_relaxations(&[rule]) {
         Err(PassError::InvalidRuleSet(msg)) => assert!(msg.contains("div")),
         Err(other) => panic!("expected InvalidRuleSet, got {other:?}"),

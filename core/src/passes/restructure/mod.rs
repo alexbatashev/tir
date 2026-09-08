@@ -70,22 +70,15 @@ impl Pass for RestructureNodesPass {
         if context.get_region(region).is_nodes() {
             return Ok(());
         }
-        restructure_region(context, region, deps::wants_chain(context, region))
+        // Memory order is constructed while the blocks are still there to say
+        // what it is, and only where the region carries none yet.
+        let thread = deps::wants_chain(context, region);
+        let mut graph = cfg::Cfg::build(context, region, thread)?;
+        loops::restructure(&mut graph);
+        let tree = branches::restructure(&mut graph)?;
+        let live = liveness::compute(&graph);
+        emit_nodes::emit(context, region, &graph, &tree, &live)
     }
-}
-
-/// Restructure one CFG region into an unordered region of structured
-/// operations, constructing memory order on the way when `thread`.
-fn restructure_region(
-    context: &Context,
-    region: crate::RegionId,
-    thread: bool,
-) -> Result<(), PassError> {
-    let mut graph = cfg::Cfg::build(context, region, thread)?;
-    loops::restructure(&mut graph);
-    let tree = branches::restructure(&mut graph)?;
-    let live = liveness::compute(&graph);
-    emit_nodes::emit(context, region, &graph, &tree, &live)
 }
 
 /// Whether `op` is an `scf.for` a frontend raised whose body is still a block

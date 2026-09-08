@@ -59,11 +59,16 @@ pub fn print_value_list(
     Ok(())
 }
 
-/// Parse an optional `| %c, %d` list of dependency operands.
+/// Parse an optional `| %c, %d` list of dependency operands, which an op spells
+/// on its own line: a `|` opening the next line binds that line's results, and
+/// an op observing nothing must not swallow it.
 pub fn parse_dep_operands(
     parser: &mut crate::parse::text::Parser<'_>,
     context: &Context,
 ) -> Result<Vec<ValueId>, (Span, Error)> {
+    if !parser.on_same_line() {
+        return Ok(Vec::new());
+    }
     Ok(parse_dep_names(parser)?
         .iter()
         .map(|name| parser.resolve_value(context, name))

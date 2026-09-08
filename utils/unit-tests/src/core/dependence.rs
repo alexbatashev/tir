@@ -7,61 +7,18 @@
 use tir::analysis::defuse::CLOBBERS_ATTR;
 use tir::attributes::{AttributeRole, AttributeValue, ImplicitReg, RegisterAttr};
 use tir::backend::dependence::Dependences;
-use tir::backend::regalloc::{RegClassId, RegClassInfo, RegisterView};
-use tir::backend::{
-    verify_machine_ir, ControlFlow, InstrInfo, MachineInstruction, RegAssignment, RegClassType,
-    RegPort, SymbolOp, SymbolOpBuilder,
-};
+use tir::backend::regalloc::{RegClassId, RegClassInfo};
+use tir::backend::{verify_machine_ir, RegAssignment, RegClassType, RegPort, SymbolOp};
 use tir::{BlockHandle, Context, OpId, Operation, ValueId};
 
-use super::fixtures::r;
+use super::fixtures::{asm_symbol, machine_op, r, reg_class, RD_RS_PORTS};
 
 /// The one-register flag file the test opcodes touch implicitly, standing for
 /// x86 `EFLAGS`.
-static F_CLASS: RegClassInfo = RegClassInfo {
-    name: "F",
-    dialect: "test",
-    file: "F",
-    registers: &[0],
-    group_width: 1,
-    view: RegisterView {
-        bit_offset: 0,
-        merge: false,
-    },
-    print_name: tir::backend::regalloc::no_register_name,
-};
+static F_CLASS: RegClassInfo = reg_class("F", "F", &[0], 1, 0, false);
 
 const fn f() -> RegClassId {
     RegClassId::new(&F_CLASS)
-}
-
-tir::helpers::operation! {
-    DefOp {
-        name: "def",
-        dialect: "dep",
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
-}
-
-tir::helpers::operation! {
-    SetFlagsOp {
-        name: "set_flags",
-        dialect: "dep",
-        operands: O { rs: "?tir::backend::RegClassType", },
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
-}
-
-tir::helpers::operation! {
-    ReadFlagsOp {
-        name: "read_flags",
-        dialect: "dep",
-        operands: O { rs: "?tir::backend::RegClassType", },
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
 }
 
 static RD_ONLY: [RegPort; 1] = [RegPort {
@@ -70,21 +27,6 @@ static RD_ONLY: [RegPort; 1] = [RegPort {
     def: true,
     tied_to: None,
 }];
-
-static RD_RS: [RegPort; 2] = [
-    RegPort {
-        name: "rd",
-        class: Some(r()),
-        def: true,
-        tied_to: None,
-    },
-    RegPort {
-        name: "rs",
-        class: Some(r()),
-        def: false,
-        tied_to: None,
-    },
-];
 
 static WRITES_FLAGS: [ImplicitReg; 1] = [ImplicitReg {
     class: f(),
@@ -98,31 +40,23 @@ static READS_FLAGS: [ImplicitReg; 1] = [ImplicitReg {
     role: AttributeRole::Use,
 }];
 
-macro_rules! machine_op {
-    ($op:ident, $name:literal, $ports:expr, $implicit:expr) => {
-        impl MachineInstruction for $op {
-            fn info(&self) -> &'static InstrInfo {
-                static INFO: InstrInfo = InstrInfo {
-                    name: $name,
-                    mnemonic: $name,
-                    control_flow: ControlFlow::None,
-                    regs: $ports,
-                    implicit_regs: $implicit,
-                    ..InstrInfo::BASE
-                };
-                &INFO
-            }
-
-            fn instance(&self) -> &tir::OpHandle {
-                &self.0
-            }
-        }
-    };
-}
-
-machine_op!(DefOp, "def", &RD_ONLY, &[]);
-machine_op!(SetFlagsOp, "set_flags", &RD_RS, &WRITES_FLAGS);
-machine_op!(ReadFlagsOp, "read_flags", &RD_RS, &READS_FLAGS);
+machine_op!(DefOp, "dep", "def", &RD_ONLY, &[]);
+machine_op!(
+    SetFlagsOp,
+    "dep",
+    "set_flags",
+    rs,
+    &RD_RS_PORTS,
+    &WRITES_FLAGS
+);
+machine_op!(
+    ReadFlagsOp,
+    "dep",
+    "read_flags",
+    rs,
+    &RD_RS_PORTS,
+    &READS_FLAGS
+);
 
 fn context() -> Context {
     let context = Context::with_default_dialects();
@@ -163,51 +97,57 @@ fn flag_use(context: &Context, source: ValueId) -> OpId {
         .id()
 }
 
-/// An `asm.symbol` whose body is one block holding `ops`, in that order.
-fn symbol(context: &Context, ops: &[OpId]) -> (SymbolOp, BlockHandle) {
-    let block = context.create_block(vec![]);
-    for &op in ops {
-        block.append(op);
-    }
-    let region = context.create_region();
-    region.add_block(block.id());
-    let symbol = SymbolOpBuilder::new(context)
-        .body(region.id())
-        .attr("name", AttributeValue::Str("f".into()))
-        .build();
-    (symbol, block)
-}
-
 fn graph(context: &Context, block: &BlockHandle, assignment: &RegAssignment) -> Dependences {
     Dependences::of_ops(context, &block.op_ids(), assignment)
 }
 
-/// A register operand read before the operation defining it is a silent
-/// miscompile everywhere downstream; the machine verifier is what turns it
-/// into an error.
-#[test]
-fn a_register_read_before_its_definition_is_rejected() {
-    let context = context();
-    let (define, value) = def_reg(&context);
-    let read = flag_def(&context, value);
-    let (symbol, _) = symbol(&context, &[read, define]);
-
-    let error = verify_machine_ir(&context, symbol.id()).expect_err("use precedes its definition");
-    assert!(
-        error.to_string().contains(&format!("%{}", value.number())),
-        "the error names the value read too early: {error}",
-    );
+/// `def -> %v` and `set_flags %v`, laid out in the order asked for.
+struct DefinitionAndRead {
+    symbol: SymbolOp,
+    block: BlockHandle,
+    define: OpId,
+    read: OpId,
+    value: ValueId,
 }
 
-/// The same operations, the definition first, are what the rule accepts.
-#[test]
-fn a_register_read_after_its_definition_verifies() {
-    let context = context();
-    let (define, value) = def_reg(&context);
-    let read = flag_def(&context, value);
-    let (symbol, _) = symbol(&context, &[define, read]);
+fn definition_and_read(context: &Context, definition_first: bool) -> DefinitionAndRead {
+    let (define, value) = def_reg(context);
+    let read = flag_def(context, value);
+    let order = if definition_first {
+        [define, read]
+    } else {
+        [read, define]
+    };
+    let (symbol, block) = asm_symbol(context, &order);
+    DefinitionAndRead {
+        symbol,
+        block,
+        define,
+        read,
+        value,
+    }
+}
 
-    verify_machine_ir(&context, symbol.id()).expect("definition precedes its use");
+/// A register operand read before the operation defining it is a silent
+/// miscompile everywhere downstream; the machine verifier is what turns it
+/// into an error. The same two operations the other way round are what it
+/// accepts.
+#[test]
+fn a_register_read_must_follow_its_definition() {
+    let context = context();
+
+    let early = definition_and_read(&context, false);
+    let error =
+        verify_machine_ir(&context, early.symbol.id()).expect_err("use precedes its definition");
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("%{}", early.value.number())),
+        "the error names the value read too early: {error}",
+    );
+
+    let ordered = definition_and_read(&context, true);
+    verify_machine_ir(&context, ordered.symbol.id()).expect("definition precedes its use");
 }
 
 /// A flag register no operand names still orders the operations that share it:
@@ -219,7 +159,7 @@ fn implicit_flag_registers_are_edges() {
     let compare = flag_def(&context, value);
     let reader = flag_use(&context, value);
     let clobber = flag_def(&context, value);
-    let (_, block) = symbol(&context, &[define, compare, reader, clobber]);
+    let (_, block) = asm_symbol(&context, &[define, compare, reader, clobber]);
 
     let graph = graph(&context, &block, &RegAssignment::default());
     assert_eq!(
@@ -240,14 +180,12 @@ fn implicit_flag_registers_are_edges() {
 #[test]
 fn linearize_pulls_a_definition_before_its_use() {
     let context = context();
-    let (define, value) = def_reg(&context);
-    let read = flag_def(&context, value);
-    let (_, block) = symbol(&context, &[read, define]);
+    let reversed = definition_and_read(&context, false);
 
-    let graph = graph(&context, &block, &RegAssignment::default());
+    let graph = graph(&context, &reversed.block, &RegAssignment::default());
     assert_eq!(
         graph.linearize().expect("the edges form a DAG"),
-        vec![define, read],
+        vec![reversed.define, reversed.read],
     );
 }
 
@@ -259,7 +197,7 @@ fn every_shuffled_order_respects_the_edges() {
     let compare = flag_def(&context, value);
     let reader = flag_use(&context, value);
     let (spare, _) = def_reg(&context);
-    let (_, block) = symbol(&context, &[define, compare, reader, spare]);
+    let (_, block) = asm_symbol(&context, &[define, compare, reader, spare]);
 
     let ops = block.op_ids();
     let graph = graph(&context, &block, &RegAssignment::default());
@@ -280,7 +218,7 @@ fn an_assignment_makes_values_register_resources() {
     let (first, a) = def_reg(&context);
     let read = flag_def(&context, a);
     let (second, _) = def_reg(&context);
-    let (_, block) = symbol(&context, &[first, read, second]);
+    let (_, block) = asm_symbol(&context, &[first, read, second]);
 
     let b = result_of(&context, second);
     let mut assignment = RegAssignment::default();
@@ -316,7 +254,7 @@ fn clobbers_are_edges() {
             ),
         )],
     );
-    let (_, block) = symbol(&context, &[define, barrier, reader]);
+    let (_, block) = asm_symbol(&context, &[define, barrier, reader]);
 
     let graph = graph(&context, &block, &RegAssignment::default());
     assert_eq!(

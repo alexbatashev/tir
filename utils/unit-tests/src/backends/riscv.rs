@@ -8,20 +8,8 @@ fn target(march: &str) -> Box<dyn TargetMachine> {
     tir::backend::select_target(march, None, None).expect("march should select")
 }
 
-/// The one per-opcode record the backend describes `name` with.
 fn info(name: &str) -> &'static tir::backend::InstrInfo {
-    tir_riscv::instruction_infos()
-        .iter()
-        .copied()
-        .find(|info| info.name == name)
-        .unwrap_or_else(|| panic!("riscv declares no instruction '{name}'"))
-}
-
-#[test]
-fn guarded_relaxations_hold_for_all_rules() {
-    let context = Context::with_default_dialects();
-    let rules = tir_riscv::get_isel_rules(&context, Feature::ALL);
-    tir::backend::isel::prove_guarded_relaxations(&rules).unwrap();
+    super::support::info("riscv", tir_riscv::instruction_infos(), name)
 }
 
 #[test]
@@ -110,17 +98,7 @@ fn target_selection_accepts_and_validates_mabi() {
 }
 
 #[test]
-fn instruction_info_carries_every_per_opcode_fact() {
-    // One record per opcode: `add` prints, encodes and schedules through the
-    // fields of its own `InstrInfo`, with no side table keyed by its name.
-    let add = info("add");
-    assert_eq!(add.mnemonic, "add");
-    assert_eq!(add.width_bytes, (4, 4));
-    assert!(add.asm.is_some());
-    assert!(add.encode.is_some());
-    assert_eq!(add.sched.len(), tir_riscv::machines(Feature::ALL).len());
-    assert_eq!(add.effects, tir::backend::MemoryEffects::NONE);
-
+fn memory_and_patch_facts_are_per_opcode() {
     // A load's behavior reads memory and its branch-offset immediate is
     // patchable once layout is known; `add` has no immediate to patch.
     assert!(info("lw").effects.reads);
@@ -128,7 +106,7 @@ fn instruction_info_carries_every_per_opcode_fact() {
     let patch_fields =
         |info: &tir::backend::InstrInfo| info.encode.expect("encodes").shapes[0].patch.len();
     assert_eq!(patch_fields(info("beq")), 1);
-    assert_eq!(patch_fields(add), 0);
+    assert_eq!(patch_fields(info("add")), 0);
 }
 
 #[test]
@@ -158,10 +136,6 @@ fn phase_based_timing_resolves_from_pipeline() {
     let in_order = tir_riscv::in_order_core_model();
     assert_eq!(in_order.phase_cycle("ID"), Some(1));
     assert_eq!(in_order.phase_cycle("MEM"), Some(3));
-    assert_eq!(
-        in_order.protection_at(2),
-        Some(tir::backend::sched::Protection::Protected)
-    );
 
     // add: read@ID(1) → write@EX(2) ⇒ latency 1, read_cycle 1, write_cycle 2.
     let add = info("add").sched_on(&in_order);

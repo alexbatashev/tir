@@ -3123,7 +3123,6 @@ impl Analyzer<'_> {
                 .filter(|symbol| symbol.typedef)
                 .map(|symbol| symbol.ty)
                 .unwrap_or_else(|| self.types.intern(TypeKind::Error)),
-            CType::Builtin(_) => self.types.intern(TypeKind::Error),
             CType::Pointer(_)
             | CType::Array(..)
             | CType::Const(_)

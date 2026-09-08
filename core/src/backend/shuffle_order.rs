@@ -15,7 +15,7 @@ use tir::{
     AnalysisManager, Context, OperationRef, Pass, PassError, PassTarget, Rewriter, utils::Rng,
 };
 
-use crate::backend::{ASSIGNMENT_ATTR, Dependences, RegAssignment, SymbolOp};
+use crate::backend::{ASSIGNMENT_ATTR, Dependences, RegAssignment, SymbolOp, symbol_body_blocks};
 
 pub struct ShuffleMachineOrderPass {
     rng: Rng,
@@ -54,18 +54,17 @@ impl Pass for ShuffleMachineOrderPass {
         _analyses: &AnalysisManager,
     ) -> Result<(), PassError> {
         let assignment = RegAssignment::of_op(op.op(), ASSIGNMENT_ATTR);
-        for region in op.op().regions().to_vec() {
-            for block in context.get_region(region).iter(context.clone()) {
-                let ops = block.op_ids();
-                if ops.len() < 2 {
-                    continue;
-                }
-                let graph = Dependences::of_ops(context, &ops, &assignment);
-                let order = graph.shuffle(self.rng.next_u64()).ok_or_else(|| {
-                    PassError::InvalidRuleSet(format!("cyclic dependences in {:?}", block.id()))
-                })?;
-                block.set_ops(order);
+        for block_id in symbol_body_blocks(context, op.op()) {
+            let block = context.get_block(block_id);
+            let ops = block.op_ids();
+            if ops.len() < 2 {
+                continue;
             }
+            let graph = Dependences::of_ops(context, &ops, &assignment);
+            let order = graph.shuffle(self.rng.next_u64()).ok_or_else(|| {
+                PassError::InvalidRuleSet(format!("cyclic dependences in {block_id:?}"))
+            })?;
+            block.set_ops(order);
         }
         Ok(())
     }

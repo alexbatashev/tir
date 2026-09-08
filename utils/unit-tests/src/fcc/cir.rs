@@ -4,36 +4,25 @@
 
 use tir::{builtin::ModuleOp, parse::ir::parse_ir, verify_op_tree, Context, Operation};
 
-fn cir_context() -> Context {
-    let context = Context::with_default_dialects();
-    context.register_dialect::<fcc::cir::CirDialect>();
-    context
-}
+use super::support::{fcc_context, print_ir};
 
 fn verify(module: &str) -> Result<(), tir::Error> {
-    let context = cir_context();
+    let context = fcc_context();
     let module = parse_ir::<ModuleOp>(&context, module).expect("parse module");
     verify_op_tree(&context, module.id())
-}
-
-fn print(module: &ModuleOp) -> String {
-    let mut printed = String::new();
-    let mut fmt = tir::IRFormatter::new(&mut printed);
-    module.print(&mut fmt).expect("print module");
-    printed
 }
 
 /// Parse `module`, print it, and parse the printed form again: the two printings
 /// agree exactly when the op's syntax carries everything its structure holds.
 fn roundtrip(module: &str) -> String {
-    let context = cir_context();
+    let context = fcc_context();
     let parsed = parse_ir::<ModuleOp>(&context, module).expect("parse module");
     verify_op_tree(&context, parsed.id()).expect("verify module");
-    let printed = print(&parsed);
+    let printed = print_ir(&parsed);
 
-    let context = cir_context();
+    let context = fcc_context();
     let reparsed = parse_ir::<ModuleOp>(&context, &printed).expect("parse printed module");
-    assert_eq!(printed, print(&reparsed), "printing is not stable");
+    assert_eq!(printed, print_ir(&reparsed), "printing is not stable");
     printed
 }
 
@@ -83,27 +72,37 @@ fn variadic_call_rejects_a_mismatched_fixed_prefix() {
 }
 
 #[test]
-fn for_loop_round_trips() {
+fn loop_syntax_round_trips() {
     let printed = roundtrip(
         r#"module {
-  %fn_count = func.func @count() -> !i32 {
-    %0 = ptr.alloca {size = 4, align = 4} : !ptr.p
+  %fn_loops = func.func @loops(%0: !i1) -> !i32 {
+    %1 = ptr.alloca {size = 4, align = 4} : !ptr.p
     cir.for cond {
-      %1 = ptr.load %0 : !i32
-      %2 = constant {value = 3} : !i32
-      %3 = cmpi %1, %2 {predicate = "slt"} : !i1
-      cir.condition %3
+      %2 = ptr.load %1 : !i32
+      %3 = constant {value = 3} : !i32
+      %4 = cmpi %2, %3 {predicate = "slt"} : !i1
+      cir.condition %4
     } step {
-      %4 = ptr.load %0 : !i32
-      %5 = constant {value = 1} : !i32
-      %6 = addi %4, %5 : !i32
-      ptr.store %6, %0
+      %5 = ptr.load %1 : !i32
+      %6 = constant {value = 1} : !i32
+      %7 = addi %5, %6 : !i32
+      ptr.store %7, %1
       cir.yield
     } body {
       cir.yield
     }
-    %7 = ptr.load %0 : !i32
-    func.return %7
+    cir.while cond {
+      cir.condition %0
+    } body {
+      cir.break
+    }
+    cir.do body {
+      cir.continue
+    } cond {
+      cir.condition %0
+    }
+    %8 = ptr.load %1 : !i32
+    func.return %8
   }
   module_end
 }"#,
@@ -111,42 +110,7 @@ fn for_loop_round_trips() {
     assert!(printed.contains("cir.for cond {"), "{printed}");
     assert!(printed.contains(" step {"), "{printed}");
     assert!(printed.contains(" body {"), "{printed}");
-}
-
-#[test]
-fn while_loop_round_trips() {
-    let printed = roundtrip(
-        r#"module {
-  %fn_spin = func.func @spin(%0: !i1) {
-    cir.while cond {
-      cir.condition %0
-    } body {
-      cir.break
-    }
-    func.return
-  }
-  module_end
-}"#,
-    );
     assert!(printed.contains("cir.while cond {"), "{printed}");
-    assert!(printed.contains(" body {"), "{printed}");
-}
-
-#[test]
-fn do_loop_round_trips() {
-    let printed = roundtrip(
-        r#"module {
-  %fn_spin = func.func @spin(%0: !i1) {
-    cir.do body {
-      cir.continue
-    } cond {
-      cir.condition %0
-    }
-    func.return
-  }
-  module_end
-}"#,
-    );
     assert!(printed.contains("cir.do body {"), "{printed}");
     assert!(printed.contains(" cond {"), "{printed}");
 }
@@ -284,7 +248,7 @@ fn find<T: Operation>(context: &Context, module: &ModuleOp) -> tir::OpId {
 
 #[test]
 fn a_break_leaves_the_innermost_loop_and_a_labeled_continue_its_label() {
-    let context = cir_context();
+    let context = fcc_context();
     let module = parse_ir::<ModuleOp>(&context, LABELED_LOOPS).expect("parse module");
     let resolve = |exit| tir::analysis::exits::resolve_exit_target(&context, exit);
 
@@ -300,7 +264,7 @@ fn a_break_leaves_the_innermost_loop_and_a_labeled_continue_its_label() {
 
 #[test]
 fn an_exit_with_no_loop_to_leave_is_an_error() {
-    let context = cir_context();
+    let context = fcc_context();
     let module = parse_ir::<ModuleOp>(
         &context,
         r#"module {
@@ -370,7 +334,7 @@ const LABELED_BREAK_OUT: &str = r#"module {
 
 #[test]
 fn flattening_resolves_a_labeled_break_to_the_loop_it_names() {
-    let context = cir_context();
+    let context = fcc_context();
     let module = parse_ir::<ModuleOp>(&context, LABELED_BREAK_OUT).expect("parse module");
     let mut pm = tir::PassManager::new();
     pm.nest::<tir::func::FuncOp>()

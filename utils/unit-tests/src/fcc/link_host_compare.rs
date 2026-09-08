@@ -5,7 +5,9 @@
 //! cannot express this (no way to execute a produced file), so they live here.
 //! Skipped when `cc` is unavailable.
 
-use super::link_support::{assert_fcc_matches_host, cc_available, host_tests};
+use super::link_support::{
+    assert_fcc_matches_host, assert_fcc_object_executes_with_host, cc_available, host_tests,
+};
 
 host_tests! {
     assert_fcc_matches_host:
@@ -479,4 +481,42 @@ int main(void) {
     return sum & 0x7f;
 }
 "#,);
+    loops_execute_through_driver => (r#"int loop_break(int n) {
+    for (;;) { if (n) break; return 4; }
+    return 7;
+}
+int main(void) {
+    if (loop_break(0) != 4) return 1;
+    if (loop_break(1) != 7) return 2;
+    return 0;
+}
+"#,);
+    struct_fields_execute_through_driver => ("struct Pair { char tag; int value; }; int read(void) { struct Pair pair; pair.value = 42; return pair.value; } int main(void) { if (read() == 42) return 0; return 1; }\n",);
+    whole_struct_copy_executes_through_driver => (r#"struct Pair { char tag; int value; };
+int copy(void) {
+    struct Pair source;
+    struct Pair destination;
+    source.tag = 3;
+    source.value = 91;
+    destination = source;
+    return destination.tag + destination.value;
+}
+int main(void) { if (copy() == 94) return 0; return 1; }
+"#,);
+    anonymous_struct_executes_through_driver => ("typedef struct { int value; } Pair; int read(void) { Pair pair; pair.value = 29; return pair.value; } int main(void) { if (read() == 29) return 0; return 1; }\n",);
+    nested_struct_member_executes_through_driver => (r#"struct Inner { int value; };
+struct Outer { char tag; struct Inner inner; };
+int read(void) { struct Outer outer; outer.inner.value = 61; return outer.inner.value; }
+int main(void) { if (read() == 61) return 0; return 1; }
+"#,);
+}
+
+// A struct laid out by `fcc` and one laid out by the host `cc` are the same
+// struct, so a member read and a `sizeof` cross the object boundary.
+host_tests! {
+    assert_fcc_object_executes_with_host:
+    pointer_member_access_executes_through_driver => ("struct Pair { char tag; int value; }; int read(struct Pair *pair) { return pair->value; }\n",
+        "struct Pair { char tag; int value; }; int read(struct Pair *); int main(void) { struct Pair pair = { 1, 73 }; return read(&pair) == 73 ? 0 : 1; }\n",);
+    sizeof_struct_executes_through_driver => ("struct Pair { char tag; int value; }; int size(void) { return sizeof(struct Pair); }\n",
+        "int size(void); int main(void) { return size() == 8 ? 0 : 1; }\n",);
 }

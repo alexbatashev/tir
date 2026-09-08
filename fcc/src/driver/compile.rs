@@ -178,15 +178,7 @@ pub(super) fn emit_machine_code(
         std::process::exit(1);
     });
 
-    let unit = parse_source(
-        name,
-        source,
-        &opts.defines,
-        &opts.undefines,
-        &opts.include_dirs,
-        opts.lang_options,
-        opts.march.as_deref(),
-    );
+    let unit = parse_source_opts(opts, name, source);
     let context = fcc_context();
     target.register_dialects(&context);
     let module = lower_to_ir(
@@ -391,6 +383,36 @@ pub(super) fn parse_source(
         }
         std::process::exit(1);
     })
+}
+
+/// [`preprocess`] driven by the options the driver was invoked with.
+pub(super) fn preprocess_opts(
+    opts: &DriverOptions,
+    name: &str,
+    source: &str,
+) -> Vec<(Token, crate::diagnostics::Span)> {
+    preprocess(
+        name,
+        source,
+        build_defines(&opts.defines),
+        &opts.undefines,
+        &opts.include_dirs,
+        opts.lang_options,
+        opts.march.as_deref(),
+    )
+}
+
+/// [`parse_source`] driven by the options the driver was invoked with.
+pub(super) fn parse_source_opts(opts: &DriverOptions, name: &str, source: &str) -> crate::ast::Ast {
+    parse_source(
+        name,
+        source,
+        &opts.defines,
+        &opts.undefines,
+        &opts.include_dirs,
+        opts.lang_options,
+        opts.march.as_deref(),
+    )
 }
 
 fn add_instcombine(pm: &mut tir::PassManager) {

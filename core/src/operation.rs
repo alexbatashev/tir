@@ -94,8 +94,7 @@ where
     erase_op_interface(ImplementsOpInterface::<I>::into_interface(op))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct OpId(u32);
+id_newtype!(OpId);
 
 /// Core trait for all operations in TIR’s intermediate representation.
 ///
@@ -848,7 +847,7 @@ pub type RegionIds = smallvec::SmallVec<[RegionId; 2]>;
 /// the cell holding its attributes.
 ///
 /// Everything an op holds beyond these thirty-two bytes lives in the context's
-/// hives, so storing an operation allocates nothing; reading a port is one
+/// pools, so storing an operation allocates nothing; reading a port is one
 /// index into its run.
 #[derive(Debug, Clone)]
 pub struct OpInstance {
@@ -906,8 +905,12 @@ impl OpHandle {
     /// The owning context, after checking this handle still names its own op.
     fn context(&self) -> crate::Context {
         let context = self.context.upgrade();
-        #[cfg(debug_assertions)]
-        context.assert_op_generation(self.id, self.generation);
+        debug_assert_eq!(
+            context.op_generation(self.id),
+            self.generation,
+            "handle to erased operation {:?}",
+            self.id
+        );
         context
     }
 
@@ -964,7 +967,7 @@ impl OpHandle {
     /// The value of the attribute called `name`, resolving the name through the
     /// owning context's interner.
     pub fn attr(&self, name: &str) -> Option<crate::attributes::AttributeValue> {
-        self.context().op_attr(self.id, name)
+        self.context().with_attr(self.id, name, Clone::clone)
     }
 
     /// [`OpHandle::attr`] for a name already interned, which is the form a
@@ -1043,29 +1046,6 @@ impl OpId {
 
     pub fn invalid() -> Self {
         Self::default()
-    }
-
-    pub(crate) fn new(id: u32) -> Self {
-        Self(id)
-    }
-
-    pub(crate) fn index(self) -> usize {
-        self.0 as usize
-    }
-
-    /// The hive handle backing this id.
-    pub(crate) fn raw(self) -> u32 {
-        self.0
-    }
-
-    /// Raw integer id, for stable identification across an FFI boundary.
-    pub fn number(self) -> u32 {
-        self.0
-    }
-
-    /// Reconstruct an id from its raw integer, the inverse of [`OpId::number`].
-    pub fn from_number(id: u32) -> Self {
-        Self(id)
     }
 }
 

@@ -1350,34 +1350,6 @@ impl Expr {
             },
         ))
     }
-
-    /// Like [`Expr::lower_to_sema`], but resolves index-less register paths (e.g.
-    /// status flags such as `PSTATE::z`) through `register_indices`, a
-    /// `(class, register-name) -> index` table derived from the register-class
-    /// definitions. Used by simulator codegen so flag reads and writes resolve to a
-    /// stable register slot instead of failing to lower.
-    pub fn lower_to_sema_with_registers(
-        &self,
-        g: &mut impl tir_graph::MutDag<
-            Node = tir_symbolic::lang::SymKind,
-            Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
-        >,
-        params: &HashMap<String, i64>,
-        register_indices: &HashMap<(String, String), u32>,
-    ) -> Option<SemaLowering> {
-        let mut ctx = SemaExprLoweringCtx::new_with_registers(g, params, register_indices);
-        let root = self.lower_with_ctx(&mut ctx);
-        if ctx.had_error {
-            return None;
-        }
-        Some(SemaLowering {
-            root,
-            variable_symbols: ctx.variable_symbols,
-            register_symbols: ctx.register_symbols,
-            regnum_symbols: ctx.regnum_symbols,
-            let_symbols: ctx.let_symbols,
-        })
-    }
 }
 
 impl Assign {
@@ -2244,34 +2216,6 @@ impl Item {
             Item::Unit(su) => &su.name,
             Item::Machine(m) => &m.name,
             Item::Fn(f) => &f.name,
-        }
-    }
-
-    pub fn as_register_class(&self) -> Option<&RegisterClass> {
-        match self {
-            Item::RegisterClass(rc) => Some(rc),
-            _ => None,
-        }
-    }
-
-    pub fn as_instruction(&self) -> Option<&Instruction> {
-        match self {
-            Item::Instruction(i) => Some(i),
-            _ => None,
-        }
-    }
-
-    pub fn as_unit(&self) -> Option<&SchedClassDecl> {
-        match self {
-            Item::Unit(s) => Some(s),
-            _ => None,
-        }
-    }
-
-    pub fn as_machine(&self) -> Option<&Machine> {
-        match self {
-            Item::Machine(m) => Some(m),
-            _ => None,
         }
     }
 }

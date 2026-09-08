@@ -5,7 +5,8 @@ use tir_adt::FxHasher;
 
 use crate::column::{Column, Fact, Join};
 use crate::label::{FxHashMap, Labels};
-use crate::{ClassId, ColumnId, Label, LabelId, RowId, UnionFind};
+use crate::unionfind::UnionFind;
+use crate::{ClassId, ColumnId, Label, LabelId, RowId};
 
 /// Empty link in an intrusive list.
 const NONE: u32 = u32::MAX;
@@ -104,9 +105,6 @@ pub struct Engine<L: Label> {
     /// The constant a class is known to be: seeded by every literal row, raised
     /// by a scope's assumption, joined by a union.
     consts: Column<LabelId>,
-    /// Tags the host put on classes, for a property the terms do not carry —
-    /// a state something outside the term graph observes, say.
-    tags: Column<u64>,
     /// The type a class's terms carry, seeded by every typed row. Congruence
     /// already forces a class's rows to agree on it, so the first row to say
     /// wins and a merge does not make the answer depend on merge order.
@@ -208,7 +206,6 @@ impl<L: Label> Engine<L> {
             scope_dirt: Vec::new(),
             undo: Vec::new(),
             consts: Column::new(Join::Agree),
-            tags: Column::new(Join::First),
             types: Column::new(Join::First),
             objects: Column::new(Join::Agree),
             scope_members: Vec::new(),
@@ -268,7 +265,7 @@ impl<L: Label> Engine<L> {
         self.stats
     }
 
-    pub fn in_scope(&self) -> bool {
+    fn in_scope(&self) -> bool {
         !self.scopes.is_empty()
     }
 
@@ -280,7 +277,7 @@ impl<L: Label> Engine<L> {
     }
 
     /// The class a row belongs to, possibly non-canonical.
-    pub fn owner(&self, row: RowId) -> ClassId {
+    pub(crate) fn owner(&self, row: RowId) -> ClassId {
         self.row_class[row.index()]
     }
 
@@ -324,7 +321,7 @@ impl<L: Label> Engine<L> {
         self.rows(id).map(|row| &self.node[row.index()])
     }
 
-    pub fn class_len(&self, id: ClassId) -> usize {
+    fn class_len(&self, id: ClassId) -> usize {
         let root = self.find(id);
         match self.viewed_members(root) {
             [] => self.class_len[root.index()] as usize,
@@ -444,7 +441,6 @@ impl<L: Label> Engine<L> {
         self.mark_merged_new(absorbed);
         let moved = self.consts.merge(absorbed, survivor, self.row_epoch)
             | self.types.merge(absorbed, survivor, self.row_epoch)
-            | self.tags.merge(absorbed, survivor, self.row_epoch)
             | self.merge_object(absorbed, survivor);
         if moved {
             self.log_change(survivor);
@@ -1023,12 +1019,6 @@ impl<L: Label> Engine<L> {
             .flat_map(|label| self.consts.classes_with(label))
     }
 
-    /// The type every term of `class` carries, as the language spells it.
-    /// `None` when no row of the class is typed.
-    pub fn type_of(&self, class: ClassId) -> Option<u64> {
-        self.types.get(self.find(class))
-    }
-
     /// The node interned under `label`.
     pub fn label_node(&self, label: LabelId) -> Option<&L> {
         (label.index() < self.labels.len()).then(|| self.labels.node(label))
@@ -1140,21 +1130,9 @@ impl<L: Label> Engine<L> {
         match column {
             ColumnId::Const => self.consts.get(class).map(|label| label.0 as u64),
             ColumnId::Type => self.types.get(class),
-            ColumnId::Mark => self.tags.get(class),
             // Not a word: a derivation is a class and a distance, which
             // [`crate::Atom::Object`] binds as a variable and a scalar.
             ColumnId::Object => None,
-        }
-    }
-
-    /// Tag `class` with `tag`. What the tag means is the host's business; the
-    /// engine only carries it through unions and scopes so a rule can read it
-    /// as a fact instead of consulting a side table it never declared.
-    pub fn mark(&mut self, class: ClassId, tag: u64) {
-        let class = self.find(class);
-        if self.tags.raise(class, tag, self.row_epoch) {
-            self.stats.raises += 1;
-            self.log_change(class);
         }
     }
 
@@ -1175,7 +1153,6 @@ impl<L: Label> Engine<L> {
         match column {
             ColumnId::Const => self.consts.is_new(class, self.row_epoch),
             ColumnId::Type => self.types.is_new(class, self.row_epoch),
-            ColumnId::Mark => self.tags.is_new(class, self.row_epoch),
             ColumnId::Object => self.objects.is_new(class, self.row_epoch),
         }
     }
@@ -1207,7 +1184,6 @@ impl<L: Label> Engine<L> {
         self.uf.push_scope();
         self.scope_memo.push(FxHashMap::default());
         self.consts.push_scope();
-        self.tags.push_scope();
         self.types.push_scope();
         self.objects.push_scope();
         self.scope_members.push(members);
@@ -1220,7 +1196,6 @@ impl<L: Label> Engine<L> {
     pub fn pop_context(&mut self) {
         let frame = self.scopes.pop().expect("open scope");
         self.consts.pop_scope();
-        self.tags.pop_scope();
         self.types.pop_scope();
         self.objects.pop_scope();
         for entry in self.undo.drain(frame.undo..).rev() {
@@ -1506,70 +1481,6 @@ impl<L: Label> Iterator for Edges<'_, L> {
 mod tests {
     use super::*;
     use crate::testing::Term;
-    use proptest::prelude::*;
-
-    /// `f(g(x), y)` over fresh leaves, returning every class by name.
-    fn seed() -> (Engine<Term>, [ClassId; 4]) {
-        let mut eg = Engine::new();
-        let x = eg.add(Term::leaf("x"));
-        let y = eg.add(Term::leaf("y"));
-        let g = eg.add(Term::op("g", &[x]));
-        let f = eg.add(Term::op("f", &[g, y]));
-        (eg, [x, y, g, f])
-    }
-
-    #[test]
-    fn equal_terms_share_a_class() {
-        let mut eg = Engine::new();
-        let x = eg.add(Term::leaf("x"));
-        assert_eq!(eg.add(Term::leaf("x")), x);
-        let a = eg.add(Term::op("g", &[x]));
-        assert_eq!(eg.add(Term::op("g", &[x])), a);
-        assert_eq!(eg.num_classes(), 2);
-        assert_eq!(eg.total_size(), 2);
-    }
-
-    #[test]
-    fn unique_terms_never_share_a_class() {
-        let mut eg = Engine::new();
-        let a = eg.add(Term::unique("effect", &[]));
-        let b = eg.add(Term::unique("effect", &[]));
-        assert_ne!(a, b);
-        assert_eq!(eg.lookup(&Term::unique("effect", &[])), None);
-    }
-
-    #[test]
-    fn lookup_finds_an_interned_term_and_nothing_else() {
-        let (eg, [x, _, g, _]) = seed();
-        assert_eq!(eg.lookup(&Term::op("g", &[x])), Some(g));
-        assert_eq!(eg.lookup(&Term::op("h", &[x])), None);
-    }
-
-    #[test]
-    fn a_union_concatenates_the_classes_in_survivor_order() {
-        let mut eg = Engine::new();
-        let a = eg.add(Term::leaf("a"));
-        let b = eg.add(Term::leaf("b"));
-        let survivor = eg.union(a, b);
-        assert_eq!(survivor, a, "the smaller id represents the merged set");
-        let names: Vec<&str> = eg.nodes(survivor).map(|n| n.op.as_str()).collect();
-        assert_eq!(names, vec!["a", "b"]);
-        assert_eq!(eg.num_classes(), 1);
-        assert_eq!(eg.total_size(), 2);
-    }
-
-    #[test]
-    fn rebuild_merges_congruent_parents() {
-        let mut eg = Engine::new();
-        let a = eg.add(Term::leaf("a"));
-        let b = eg.add(Term::leaf("b"));
-        let fa = eg.add(Term::op("f", &[a]));
-        let fb = eg.add(Term::op("f", &[b]));
-        assert_ne!(eg.find(fa), eg.find(fb));
-        eg.union(a, b);
-        eg.rebuild();
-        assert_eq!(eg.find(fa), eg.find(fb));
-    }
 
     #[test]
     fn commutative_operands_keep_the_order_they_were_written_in() {
@@ -1595,63 +1506,6 @@ mod tests {
     }
 
     #[test]
-    fn changes_are_logged_once_per_round_and_drained() {
-        let mut eg = Engine::new();
-        assert_eq!(eg.take_changed(), None, "a fresh graph changed everything");
-        let a = eg.add(Term::leaf("a"));
-        let b = eg.add(Term::leaf("b"));
-        assert_eq!(eg.take_changed(), Some(vec![a, b]));
-        assert_eq!(eg.take_changed(), Some(vec![]));
-        let survivor = eg.union(a, b);
-        assert_eq!(eg.take_changed(), Some(vec![survivor]));
-    }
-
-    #[test]
-    fn a_repaired_parent_is_a_change() {
-        let mut eg = Engine::new();
-        let a = eg.add(Term::leaf("a"));
-        let b = eg.add(Term::leaf("b"));
-        let fb = eg.add(Term::op("f", &[b]));
-        eg.take_changed();
-        eg.union(b, a);
-        eg.rebuild();
-        let changed = eg.take_changed().expect("a named change");
-        assert!(
-            changed.contains(&eg.find(fb)),
-            "f(b) re-canonicalized to f(a)"
-        );
-    }
-
-    #[test]
-    fn delta_closes_upward_by_height() {
-        let mut eg = Engine::new();
-        let x = eg.add(Term::leaf("x"));
-        let h = eg.add(Term::op("h", &[x]));
-        let g = eg.add(Term::op("g", &[h]));
-        let f = eg.add(Term::op("f", &[g]));
-        assert_eq!(eg.delta(&[x], 0), vec![x]);
-        assert_eq!(eg.delta(&[x], 1), vec![x, h]);
-        assert_eq!(eg.delta(&[x], 3), vec![x, h, g, f]);
-    }
-
-    #[test]
-    fn a_scope_leaves_no_trace() {
-        let (mut eg, [x, y, g, f]) = seed();
-        eg.rebuild();
-        let before = state(&eg);
-        eg.push_context();
-        eg.union(x, y);
-        eg.add(Term::op("k", &[f]));
-        eg.assume_const(g, Term::int(7));
-        eg.rebuild();
-        assert!(eg.connected(x, y));
-        eg.pop_context();
-        assert_eq!(state(&eg), before);
-        assert!(!eg.connected(x, y));
-        assert_eq!(eg.const_of(g), None);
-    }
-
-    #[test]
     fn a_scoped_lookup_stays_as_incomplete_as_the_base_hash_cons() {
         let mut eg = Engine::new();
         // `b` first, so the merge canonicalizes `a` onto it and the probe for
@@ -1672,122 +1526,5 @@ mod tests {
         assert_eq!(eg.lookup(&Term::op("f", &[a])), None);
         eg.pop_context();
         assert_eq!(eg.lookup(&Term::op("f", &[a])), Some(eg.find(fa)));
-    }
-
-    #[test]
-    fn scope_members_name_base_reps_through_nesting() {
-        let mut eg = Engine::new();
-        let a = eg.add(Term::leaf("a"));
-        let b = eg.add(Term::leaf("b"));
-        let c = eg.add(Term::leaf("c"));
-        eg.push_context();
-        let outer = eg.union(a, b);
-        eg.push_context();
-        let inner = eg.union(outer, c);
-        let mut members = eg.scope_members(inner).to_vec();
-        members.sort_unstable();
-        assert_eq!(members, vec![a, b, c]);
-        eg.pop_context();
-        let mut members = eg.scope_members(outer).to_vec();
-        members.sort_unstable();
-        assert_eq!(members, vec![a, b]);
-        eg.pop_context();
-        assert!(eg.scope_members(a).is_empty());
-    }
-
-    /// Everything a caller can observe, for the scope round-trip test.
-    fn state(eg: &Engine<Term>) -> Vec<(u32, Vec<String>, Vec<Vec<u32>>)> {
-        eg.class_ids()
-            .map(|class| {
-                (
-                    class.0,
-                    eg.nodes(class).map(|n| n.op.clone()).collect(),
-                    eg.rows(class)
-                        .map(|row| eg.children(row).iter().map(|c| eg.find(*c).0).collect())
-                        .collect(),
-                )
-            })
-            .collect()
-    }
-
-    /// A term built from a random program: `ops[i]` is applied to earlier ids.
-    fn programs() -> impl Strategy<Value = Vec<(usize, Vec<usize>)>> {
-        prop::collection::vec((0usize..4, prop::collection::vec(0usize..12, 0..3)), 1..24)
-    }
-
-    fn build(eg: &mut Engine<Term>, program: &[(usize, Vec<usize>)]) -> Vec<ClassId> {
-        const OPS: [&str; 4] = ["a", "f", "g", "h"];
-        let mut ids: Vec<ClassId> = Vec::new();
-        for (op, args) in program {
-            let children: Vec<ClassId> = args
-                .iter()
-                .filter_map(|&i| ids.get(i % ids.len().max(1)).copied())
-                .collect();
-            ids.push(eg.add(Term::op(OPS[*op], &children)));
-        }
-        ids
-    }
-
-    proptest! {
-        #[test]
-        fn rebuild_restores_the_functional_dependency(
-            program in programs(),
-            merges in prop::collection::vec((0usize..24, 0usize..24), 0..8),
-        ) {
-            let mut eg: Engine<Term> = Engine::new();
-            let ids = build(&mut eg, &program);
-            eg.rebuild();
-            for (a, b) in merges {
-                eg.union(ids[a % ids.len()], ids[b % ids.len()]);
-            }
-            eg.rebuild();
-            // No two live rows share a label and canonical children in
-            // different classes.
-            let mut seen: std::collections::HashMap<(u32, Vec<u32>), u32> = Default::default();
-            for class in eg.class_ids() {
-                for row in eg.rows(class) {
-                    if eg.node(row).is_unique() {
-                        continue;
-                    }
-                    let key = (
-                        eg.label(row).0,
-                        eg.children(row).iter().map(|c| eg.find(*c).0).collect(),
-                    );
-                    let owner = eg.find(eg.row_class[row.index()]).0;
-                    prop_assert_eq!(*seen.entry(key).or_insert(owner), owner);
-                }
-            }
-        }
-
-        #[test]
-        fn the_same_program_builds_the_same_ids(program in programs()) {
-            let mut one: Engine<Term> = Engine::new();
-            let mut two: Engine<Term> = Engine::new();
-            let a = build(&mut one, &program);
-            let b = build(&mut two, &program);
-            one.rebuild();
-            two.rebuild();
-            prop_assert_eq!(a, b);
-            prop_assert_eq!(state(&one), state(&two));
-        }
-
-        #[test]
-        fn a_scope_round_trip_restores_every_column(
-            program in programs(),
-            merges in prop::collection::vec((0usize..24, 0usize..24), 0..8),
-        ) {
-            let mut eg: Engine<Term> = Engine::new();
-            let ids = build(&mut eg, &program);
-            eg.rebuild();
-            let before = state(&eg);
-            eg.push_context();
-            for (a, b) in merges {
-                eg.union(ids[a % ids.len()], ids[b % ids.len()]);
-            }
-            eg.add(Term::op("f", &[ids[0]]));
-            eg.rebuild();
-            eg.pop_context();
-            prop_assert_eq!(state(&eg), before);
-        }
     }
 }

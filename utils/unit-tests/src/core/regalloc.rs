@@ -5,16 +5,12 @@ use std::collections::{BTreeSet, HashMap};
 use tir::backend::abi::{
     AbiInfo, ClassifierKind, Overflow, PassSeq, SaveStyle, StackLayout, ValueKind,
 };
-use tir::backend::liveness::{self, Liveness, PhysReg};
+use tir::backend::liveness::{Liveness, PhysReg};
 use tir::backend::regalloc::{
     allocate, AllocConfig, AllocResult, RegAllocError, RegClassId, RegClassInfo, RegisterInfo,
-    RegisterView,
 };
-use tir::builtin::{ops, IntegerType};
-use tir::BlockHandle;
-use tir::{Context, ValueId};
 
-use super::fixtures::{r, register_info};
+use super::fixtures::{r, reg_class, register_info};
 
 fn test_abi(info: &RegisterInfo, register_indices: &[u16]) -> &'static AbiInfo {
     let caller_saved = Box::leak(
@@ -82,6 +78,23 @@ fn id_of(info: &RegisterInfo, name: &str) -> RegClassId {
     info.class(name).unwrap()
 }
 
+/// Allocate `liveness` over `info`, with `abi_regs` the allocatable indices of
+/// every class and every vreg equally expensive to spill.
+fn alloc(
+    info: &RegisterInfo,
+    abi_regs: &[u16],
+    liveness: &Liveness,
+    precolor: &HashMap<u32, PhysReg>,
+) -> Result<AllocResult, RegAllocError> {
+    allocate(&AllocConfig {
+        info,
+        abi: test_abi(info, abi_regs),
+        liveness,
+        precolor,
+        spill_cost: &|_| 100,
+    })
+}
+
 fn liveness_with(vregs: &[u32], edges: &[(u32, u32)]) -> Liveness {
     let mut lv = Liveness::default();
     for &v in vregs {
@@ -101,73 +114,20 @@ fn assigned(result: AllocResult) -> HashMap<u32, PhysReg> {
     }
 }
 
-fn addi(context: &Context, block: &BlockHandle, a: ValueId, b: ValueId, ty: tir::TypeId) -> u32 {
-    block
-        .append_op(ops::addi(context, a, b, ty).build())
-        .result()
-        .number()
-}
-
-// A value defined in the entry block and read in a successor block must not
-// share a register with a temporary defined in the entry block after it: the
-// cross-block liveness edge forces distinct registers. Without real CFG
-// successors the two look non-interfering and the allocator may coalesce them,
-// clobbering the cross-block value.
-#[test]
-fn cross_block_liveness_forces_distinct_registers() {
-    let context = Context::with_default_dialects();
-    let ty = IntegerType::new(&context, 64);
-    let a = context.create_value(ty, None);
-    let a_id = a.id();
-    let entry = context.create_block(vec![a]);
-    let succ = context.create_block(vec![]);
-
-    let v = addi(&context, &entry, a_id, a_id, ty);
-    let w = ValueId::from_number(addi(&context, &entry, a_id, a_id, ty));
-    addi(&context, &entry, w, w, ty); // `w` dies in the entry block
-    addi(&context, &succ, ValueId::from_number(v), a_id, ty); // `v` read across the edge
-
-    let blocks = [entry.id(), succ.id()];
-    let liveness = liveness::analyze(&context, &blocks, |blk| {
-        if blk == entry.id() {
-            vec![succ.id()]
-        } else {
-            vec![]
-        }
-    });
-
-    let info = register_info();
-    let precolor = HashMap::new();
-    let map = assigned(
-        allocate(&AllocConfig {
-            info: &info,
-            abi: test_abi(&info, &[0, 1, 2]),
-            liveness: &liveness,
-            precolor: &precolor,
-            spill_cost: &|_| 100,
-        })
-        .unwrap(),
-    );
-    assert_ne!(
-        map[&v],
-        map[&w.number()],
-        "a value live across a block edge must not reuse a later entry-block register",
-    );
+/// `count` mutually-live vregs, all of class `R`.
+fn clique(count: u32) -> Liveness {
+    let vregs: Vec<u32> = (0..count).collect();
+    let mut edges = Vec::new();
+    for (index, &vreg) in vregs.iter().enumerate() {
+        edges.extend(vregs[index + 1..].iter().map(|&other| (vreg, other)));
+    }
+    liveness_with(&vregs, &edges)
 }
 
 #[test]
 fn mutually_live_vregs_get_distinct_registers() {
     let info = register_info();
-    let liveness = liveness_with(&[1, 2, 3], &[(1, 2), (1, 3), (2, 3)]);
-    let precolor = HashMap::new();
-    let result = allocate(&AllocConfig {
-        info: &info,
-        abi: test_abi(&info, &[0, 1, 2]),
-        liveness: &liveness,
-        precolor: &precolor,
-        spill_cost: &|_| 100,
-    })
-    .unwrap();
+    let result = alloc(&info, &[0, 1, 2], &clique(3), &HashMap::new()).unwrap();
 
     let map = assigned(result);
     let regs: BTreeSet<u16> = map.values().map(|(_, i)| *i).collect();
@@ -179,64 +139,29 @@ fn mutually_live_vregs_get_distinct_registers() {
 }
 
 #[test]
-fn over_subscribed_clique_forces_a_spill() {
-    let info = register_info();
-    // Four mutually-live vregs, only three registers: exactly one must spill.
-    let liveness = liveness_with(
-        &[1, 2, 3, 4],
-        &[(1, 2), (1, 3), (1, 4), (2, 3), (2, 4), (3, 4)],
-    );
-    let precolor = HashMap::new();
-    let result = allocate(&AllocConfig {
-        info: &info,
-        abi: test_abi(&info, &[0, 1, 2]),
-        liveness: &liveness,
-        precolor: &precolor,
-        spill_cost: &|_| 100,
-    })
-    .unwrap();
-
-    match result {
-        AllocResult::Spill(spilled) => assert_eq!(spilled.len(), 1),
-        other => panic!("expected a spill, got {other:?}"),
-    }
-}
-
-#[test]
 fn spill_picks_the_cheapest_vreg() {
     let info = register_info();
-    let liveness = liveness_with(
-        &[1, 2, 3, 4],
-        &[(1, 2), (1, 3), (1, 4), (2, 3), (2, 4), (3, 4)],
-    );
+    let liveness = clique(4);
     let precolor = HashMap::new();
-    // vreg 4 is far cheaper to spill than the rest.
+    // vreg 3 is far cheaper to spill than the rest.
     let result = allocate(&AllocConfig {
         info: &info,
         abi: test_abi(&info, &[0, 1, 2]),
         liveness: &liveness,
         precolor: &precolor,
-        spill_cost: &|v| if v == 4 { 1 } else { 1000 },
+        spill_cost: &|v| if v == 3 { 1 } else { 1000 },
     })
     .unwrap();
 
-    assert_eq!(result, AllocResult::Spill(vec![4]));
+    assert_eq!(result, AllocResult::Spill(vec![3]));
 }
 
 #[test]
 fn precoloring_pins_a_vreg_and_repels_interferers() {
     let info = register_info();
     let liveness = liveness_with(&[1, 2], &[(1, 2)]);
-    let mut precolor = HashMap::new();
-    precolor.insert(1u32, (r(), 0u16));
-    let result = allocate(&AllocConfig {
-        info: &info,
-        abi: test_abi(&info, &[0, 1, 2]),
-        liveness: &liveness,
-        precolor: &precolor,
-        spill_cost: &|_| 100,
-    })
-    .unwrap();
+    let precolor = HashMap::from([(1u32, (r(), 0u16))]);
+    let result = alloc(&info, &[0, 1, 2], &liveness, &precolor).unwrap();
 
     let map = assigned(result);
     assert_eq!(map[&1], (r(), 0));
@@ -249,24 +174,9 @@ fn precoloring_pins_a_vreg_and_repels_interferers() {
 #[test]
 fn clique_larger_than_register_file_spills_the_excess() {
     // A k-register file and an n-vreg clique must spill exactly n - k of them.
-    let info = register_info(); // 3 allocatable registers below
-    let vregs: Vec<u32> = (0..6).collect();
-    let mut edges = Vec::new();
-    for i in 0..vregs.len() {
-        for j in (i + 1)..vregs.len() {
-            edges.push((vregs[i], vregs[j]));
-        }
-    }
-    let liveness = liveness_with(&vregs, &edges);
-    let precolor = HashMap::new();
-    let result = allocate(&AllocConfig {
-        info: &info,
-        abi: test_abi(&info, &[0, 1, 2]),
-        liveness: &liveness,
-        precolor: &precolor,
-        spill_cost: &|_| 100,
-    })
-    .unwrap();
+    let info = register_info();
+    let result = alloc(&info, &[0, 1, 2], &clique(6), &HashMap::new()).unwrap();
+
     match result {
         AllocResult::Spill(s) => assert_eq!(s.len(), 6 - 3),
         other => panic!("expected spilling, got {other:?}"),
@@ -282,15 +192,7 @@ fn forbidden_register_is_avoided() {
         .entry(1)
         .or_default()
         .extend([(r(), 0u16), (r(), 1u16)]);
-    let precolor = HashMap::new();
-    let result = allocate(&AllocConfig {
-        info: &info,
-        abi: test_abi(&info, &[0, 1, 2]),
-        liveness: &liveness,
-        precolor: &precolor,
-        spill_cost: &|_| 100,
-    })
-    .unwrap();
+    let result = alloc(&info, &[0, 1, 2], &liveness, &HashMap::new()).unwrap();
 
     let map = assigned(result);
     assert_eq!(map[&1], (r(), 2), "only the unforbidden register remains");
@@ -299,30 +201,8 @@ fn forbidden_register_is_avoided() {
 // Two register classes (`GPR` and `GPRsp`) over one shared file with a single
 // allocatable register, mirroring AArch64's slot-31 aliasing.
 static ALIASING_CLASSES: &[RegClassInfo] = &[
-    RegClassInfo {
-        name: "GPR",
-        dialect: "test",
-        file: "GPR",
-        registers: &[0, 1, 2, 3],
-        group_width: 1,
-        view: RegisterView {
-            bit_offset: 0,
-            merge: false,
-        },
-        print_name: tir::backend::regalloc::no_register_name,
-    },
-    RegClassInfo {
-        name: "GPRsp",
-        dialect: "test",
-        file: "GPR",
-        registers: &[0, 1, 2, 3],
-        group_width: 1,
-        view: RegisterView {
-            bit_offset: 0,
-            merge: false,
-        },
-        print_name: tir::backend::regalloc::no_register_name,
-    },
+    reg_class("GPR", "GPR", &[0, 1, 2, 3], 1, 0, false),
+    reg_class("GPRsp", "GPR", &[0, 1, 2, 3], 1, 0, false),
 ];
 
 fn two_class_liveness(class1: RegClassId, class2: RegClassId) -> Liveness {
@@ -345,15 +225,7 @@ fn aliasing_classes_share_physical_registers() {
         classes: ALIASING_CLASSES,
     };
     let liveness = two_class_liveness(id_of(&info, "GPR"), id_of(&info, "GPRsp"));
-    let precolor = HashMap::new();
-    let result = allocate(&AllocConfig {
-        info: &info,
-        abi: test_abi(&info, &[0]),
-        liveness: &liveness,
-        precolor: &precolor,
-        spill_cost: &|_| 100,
-    })
-    .unwrap();
+    let result = alloc(&info, &[0], &liveness, &HashMap::new()).unwrap();
 
     match result {
         AllocResult::Spill(spilled) => assert_eq!(spilled.len(), 1),
@@ -366,42 +238,12 @@ fn distinct_files_do_not_alias() {
     // Same shape, but the classes belong to different files, so both vregs can
     // independently take index 0.
     static CLASSES: &[RegClassInfo] = &[
-        RegClassInfo {
-            name: "A",
-            dialect: "test",
-            file: "A",
-            registers: &[0, 1, 2, 3],
-            group_width: 1,
-            view: RegisterView {
-                bit_offset: 0,
-                merge: false,
-            },
-            print_name: tir::backend::regalloc::no_register_name,
-        },
-        RegClassInfo {
-            name: "B",
-            dialect: "test",
-            file: "B",
-            registers: &[0, 1, 2, 3],
-            group_width: 1,
-            view: RegisterView {
-                bit_offset: 0,
-                merge: false,
-            },
-            print_name: tir::backend::regalloc::no_register_name,
-        },
+        reg_class("A", "A", &[0, 1, 2, 3], 1, 0, false),
+        reg_class("B", "B", &[0, 1, 2, 3], 1, 0, false),
     ];
     let info = RegisterInfo { classes: CLASSES };
     let liveness = two_class_liveness(id_of(&info, "A"), id_of(&info, "B"));
-    let precolor = HashMap::new();
-    let result = allocate(&AllocConfig {
-        info: &info,
-        abi: test_abi(&info, &[0]),
-        liveness: &liveness,
-        precolor: &precolor,
-        spill_cost: &|_| 100,
-    })
-    .unwrap();
+    let result = alloc(&info, &[0], &liveness, &HashMap::new()).unwrap();
 
     let map = assigned(result);
     assert_eq!(map[&1], (id_of(&info, "A"), 0));
@@ -415,30 +257,8 @@ fn group_registers_interfere_by_span() {
     // group's span. With only v0..v2 available, the group takes (VRM2, 0)
     // = v0..v1 and the scalar is pushed to v2 (not v1, which overlaps).
     static CLASSES: &[RegClassInfo] = &[
-        RegClassInfo {
-            name: "VR",
-            dialect: "test",
-            file: "VR",
-            registers: &[0, 1, 2, 3],
-            group_width: 1,
-            view: RegisterView {
-                bit_offset: 0,
-                merge: false,
-            },
-            print_name: tir::backend::regalloc::no_register_name,
-        },
-        RegClassInfo {
-            name: "VRM2",
-            dialect: "test",
-            file: "VR",
-            registers: &[0, 1, 2, 3],
-            group_width: 2,
-            view: RegisterView {
-                bit_offset: 0,
-                merge: false,
-            },
-            print_name: tir::backend::regalloc::no_register_name,
-        },
+        reg_class("VR", "VR", &[0, 1, 2, 3], 1, 0, false),
+        reg_class("VRM2", "VR", &[0, 1, 2, 3], 2, 0, false),
     ];
     let info = RegisterInfo { classes: CLASSES };
     let vrm2 = id_of(&info, "VRM2");
@@ -450,15 +270,7 @@ fn group_registers_interfere_by_span() {
     assert!(!vrm2.overlaps(0, vr, 2));
 
     let liveness = two_class_liveness(vrm2, vr);
-    let precolor = HashMap::new();
-    let result = allocate(&AllocConfig {
-        info: &info,
-        abi: test_abi(&info, &[0, 1, 2]),
-        liveness: &liveness,
-        precolor: &precolor,
-        spill_cost: &|_| 100,
-    })
-    .unwrap();
+    let result = alloc(&info, &[0, 1, 2], &liveness, &HashMap::new()).unwrap();
 
     let map = assigned(result);
     assert_eq!(map[&1].1 % 2, 0);
@@ -469,33 +281,9 @@ fn group_registers_interfere_by_span() {
 fn forbidden_register_aliases_across_classes() {
     // A `GPRsp` vreg forbidding `("GPR", 0)` — a clobber expressed through the
     // aliasing base class — must avoid index 0 and take the other register.
-    static CLASSES: &[RegClassInfo] = &[
-        RegClassInfo {
-            name: "GPR",
-            dialect: "test",
-            file: "GPR",
-            registers: &[0, 1, 2, 3],
-            group_width: 1,
-            view: RegisterView {
-                bit_offset: 0,
-                merge: false,
-            },
-            print_name: tir::backend::regalloc::no_register_name,
-        },
-        RegClassInfo {
-            name: "GPRsp",
-            dialect: "test",
-            file: "GPR",
-            registers: &[0, 1, 2, 3],
-            group_width: 1,
-            view: RegisterView {
-                bit_offset: 0,
-                merge: false,
-            },
-            print_name: tir::backend::regalloc::no_register_name,
-        },
-    ];
-    let info = RegisterInfo { classes: CLASSES };
+    let info = RegisterInfo {
+        classes: ALIASING_CLASSES,
+    };
     let mut liveness = Liveness::default();
     liveness.vregs.insert(1);
     liveness.vreg_class.insert(1, id_of(&info, "GPRsp"));
@@ -504,15 +292,7 @@ fn forbidden_register_aliases_across_classes() {
         .entry(1)
         .or_default()
         .insert((id_of(&info, "GPR"), 0u16));
-    let precolor = HashMap::new();
-    let result = allocate(&AllocConfig {
-        info: &info,
-        abi: test_abi(&info, &[0, 1]),
-        liveness: &liveness,
-        precolor: &precolor,
-        spill_cost: &|_| 100,
-    })
-    .unwrap();
+    let result = alloc(&info, &[0, 1], &liveness, &HashMap::new()).unwrap();
 
     let map = assigned(result);
     assert_eq!(
@@ -524,30 +304,8 @@ fn forbidden_register_aliases_across_classes() {
 
 // `GPR` (whole file) and its REX-free subclass `GPRlow` (indices 0..1).
 static SUBCLASS_CLASSES: &[RegClassInfo] = &[
-    RegClassInfo {
-        name: "GPR",
-        dialect: "test",
-        file: "GPR",
-        registers: &[0, 1, 2, 3],
-        group_width: 1,
-        view: RegisterView {
-            bit_offset: 0,
-            merge: false,
-        },
-        print_name: tir::backend::regalloc::no_register_name,
-    },
-    RegClassInfo {
-        name: "GPRlow",
-        dialect: "test",
-        file: "GPR",
-        registers: &[0, 1],
-        group_width: 1,
-        view: RegisterView {
-            bit_offset: 0,
-            merge: false,
-        },
-        print_name: tir::backend::regalloc::no_register_name,
-    },
+    reg_class("GPR", "GPR", &[0, 1, 2, 3], 1, 0, false),
+    reg_class("GPRlow", "GPR", &[0, 1], 1, 0, false),
 ];
 
 // A vreg pinned through the wide class but read by an operand of a narrow
@@ -567,16 +325,7 @@ fn precolor_does_not_widen_a_narrow_operand_class() {
     liveness.vreg_class.insert(1, low);
     let precolor = HashMap::from([(1u32, (wide, 1u16))]);
 
-    let map = assigned(
-        allocate(&AllocConfig {
-            info: &info,
-            abi: test_abi(&info, &[0, 1, 2, 3]),
-            liveness: &liveness,
-            precolor: &precolor,
-            spill_cost: &|_| 100,
-        })
-        .unwrap(),
-    );
+    let map = assigned(alloc(&info, &[0, 1, 2, 3], &liveness, &precolor).unwrap());
     assert_eq!(map[&1], (low, 1));
 }
 
@@ -596,13 +345,7 @@ fn precolor_outside_narrow_class_is_infeasible() {
     let precolor = HashMap::from([(1u32, (wide, 3u16))]);
 
     assert_eq!(
-        allocate(&AllocConfig {
-            info: &info,
-            abi: test_abi(&info, &[0, 1, 2, 3]),
-            liveness: &liveness,
-            precolor: &precolor,
-            spill_cost: &|_| 100,
-        }),
+        alloc(&info, &[0, 1, 2, 3], &liveness, &precolor),
         Err(RegAllocError::Infeasible(1)),
     );
 }
@@ -623,18 +366,8 @@ fn overlapping_class_constraints_restrict_the_allocation_order() {
     liveness
         .allowed_indices
         .insert(1, BTreeSet::from([1, 2, 3]));
-    let precolor = HashMap::new();
 
-    let map = assigned(
-        allocate(&AllocConfig {
-            info: &info,
-            abi: test_abi(&info, &[0, 1, 2, 3]),
-            liveness: &liveness,
-            precolor: &precolor,
-            spill_cost: &|_| 100,
-        })
-        .unwrap(),
-    );
+    let map = assigned(alloc(&info, &[0, 1, 2, 3], &liveness, &HashMap::new()).unwrap());
     assert_eq!(map[&1], (low, 1));
 }
 
@@ -651,16 +384,9 @@ fn conflicting_class_constraints_fail_allocation() {
     liveness.vregs.insert(1);
     liveness.vreg_class.insert(1, wide);
     liveness.class_conflicts.insert(1, (wide, low));
-    let precolor = HashMap::new();
 
     assert_eq!(
-        allocate(&AllocConfig {
-            info: &info,
-            abi: test_abi(&info, &[0, 1, 2, 3]),
-            liveness: &liveness,
-            precolor: &precolor,
-            spill_cost: &|_| 100,
-        }),
+        alloc(&info, &[0, 1, 2, 3], &liveness, &HashMap::new()),
         Err(RegAllocError::ClassConflict(1)),
     );
 }

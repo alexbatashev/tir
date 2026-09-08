@@ -57,7 +57,12 @@ mod relational {
 }
 
 #[cfg(test)]
-mod arm64;
+mod backends {
+    mod arm64;
+    mod riscv;
+    mod support;
+    mod x86_64;
+}
 
 #[cfg(test)]
 mod capi {
@@ -78,21 +83,13 @@ mod jit;
 mod fuzz;
 
 #[cfg(test)]
-mod llvm;
-
-#[cfg(test)]
-mod riscv;
-
-#[cfg(test)]
-mod x86_64;
-
-#[cfg(test)]
 mod simcore {
     mod executor;
     mod memsys;
     mod predictor;
     mod prefetch;
     mod scoreboard;
+    mod support;
     mod timing;
 }
 
@@ -109,7 +106,6 @@ mod tools {
 #[cfg(test)]
 mod core {
     mod affine;
-    mod alias_facts;
     mod analysis;
     mod arith;
     mod backend;
@@ -118,7 +114,6 @@ mod core {
     mod context;
     mod dependence;
     mod dialects;
-    mod dominance;
     mod edits;
     mod encodings;
     mod fixtures;
@@ -130,6 +125,7 @@ mod core {
     mod layout;
     mod liveness;
     mod machine_ir;
+    mod objects;
     mod pass;
     mod regalloc;
     mod region;

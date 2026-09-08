@@ -130,11 +130,6 @@ impl APInt {
         (self.value & sign_bit) != 0
     }
 
-    /// Check if positive (only meaningful for signed integers)
-    pub fn is_positive(&self) -> bool {
-        !self.is_zero() && !self.is_negative()
-    }
-
     /// Get a copy with different signedness
     pub fn with_signed(&self, signed: bool) -> Self {
         APInt {

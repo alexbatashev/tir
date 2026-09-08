@@ -1,7 +1,9 @@
 //! InstCombine as a round of the mid-end pipeline: what it extracts from its
 //! own output must leave that output alone.
 
-use tir::{builtin::ModuleOp, func::FuncOp, parse::ir::parse_ir, Context, Operation, PassManager};
+use tir::{func::FuncOp, Operation, PassManager};
+
+use super::fixtures;
 
 /// A counted loop with an early exit, as the frontend leaves it: the loop
 /// carries a result it never changes on the way round, and the exit block
@@ -31,8 +33,7 @@ module {
 
 #[test]
 fn a_round_of_instcombine_reaches_a_fixpoint() {
-    let context = Context::with_default_dialects();
-    let module = parse_ir::<ModuleOp>(&context, EARLY_EXIT_LOOP).expect("the fixture parses");
+    let (context, module) = fixtures::parse(EARLY_EXIT_LOOP);
 
     let mut raise = PassManager::new();
     raise

@@ -69,25 +69,13 @@ impl Type for FnType {
         if !parser.parse_token("<") {
             return Err((parser.span(), Error::ExpectedToken("<")));
         }
-        if !parser.parse_token("(") {
-            return Err((parser.span(), Error::ExpectedToken("(")));
-        }
-        let mut params = vec![];
-        if !parser.parse_token(")") {
-            loop {
-                params.push(
-                    parser
-                        .parse_type(context)?
-                        .ok_or_else(|| (parser.span(), Error::ExpectedType))?,
-                );
-                if parser.parse_token(")") {
-                    break;
-                }
-                if !parser.parse_token(",") {
-                    return Err((parser.span(), Error::ExpectedToken(",")));
-                }
-            }
-        }
+        let params = parser
+            .parse_delimited("(", ")", |parser| {
+                parser
+                    .parse_type(context)?
+                    .ok_or_else(|| (parser.span(), Error::ExpectedType))
+            })?
+            .ok_or_else(|| (parser.span(), Error::ExpectedToken("(")))?;
         if !parser.parse_token("->") {
             return Err((parser.span(), Error::ExpectedToken("->")));
         }

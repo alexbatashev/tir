@@ -5,46 +5,17 @@
 //! rather than through a `.tir` check.
 
 use tir::attributes::AttributeValue;
-use tir::backend::regalloc::{RegClassId, RegClassInfo, RegisterView};
+use tir::backend::regalloc::RegClassId;
 use tir::backend::{
-    phys_attr, verify_machine_ir, ControlFlow, InstrInfo, MachineInstruction, RegAssignment,
-    RegClassType, RegPort, SymbolOpBuilder, ASSIGNMENT_ATTR, PINS_ATTR,
+    phys_attr, verify_machine_ir, RegAssignment, RegClassType, RegPort, SymbolOpBuilder,
+    ASSIGNMENT_ATTR, PINS_ATTR,
 };
 use tir::{Context, Operation, ValueId};
 
-use super::fixtures::r;
-
-/// A second class over the `R` file at a different bit offset: no register
-/// satisfies both views (an x86 high-byte class against an offset-0 one).
-static R_HIGH_CLASS: RegClassInfo = RegClassInfo {
-    name: "Rhigh",
-    dialect: "test",
-    file: "R",
-    registers: &[0, 1],
-    group_width: 1,
-    view: RegisterView {
-        bit_offset: 8,
-        merge: true,
-    },
-    print_name: tir::backend::regalloc::no_register_name,
-};
-
-const fn r_high() -> RegClassId {
-    RegClassId::new(&R_HIGH_CLASS)
-}
+use super::fixtures::{asm_symbol, machine_op, r, r_high};
 
 // `add rd, rs`: one destination slot and one source slot, both of class `R`,
 // plus the implicit flag register the behavior writes.
-tir::helpers::operation! {
-    AddTestOp {
-        name: "add",
-        dialect: "test",
-        operands: O { rs: "?tir::backend::RegClassType", },
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
-}
-
 static ADD_PORTS: [RegPort; 2] = [
     RegPort {
         name: "rd",
@@ -66,23 +37,7 @@ static ADD_IMPLICIT: [tir::attributes::ImplicitReg; 1] = [tir::attributes::Impli
     role: tir::attributes::AttributeRole::Def,
 }];
 
-impl MachineInstruction for AddTestOp {
-    fn info(&self) -> &'static InstrInfo {
-        static INFO: InstrInfo = InstrInfo {
-            name: "add",
-            mnemonic: "add",
-            control_flow: ControlFlow::None,
-            regs: &ADD_PORTS,
-            implicit_regs: &ADD_IMPLICIT,
-            ..InstrInfo::BASE
-        };
-        &INFO
-    }
-
-    fn instance(&self) -> &tir::OpHandle {
-        &self.0
-    }
-}
+machine_op!(AddTestOp, "test", "add", rs, &ADD_PORTS, &ADD_IMPLICIT);
 
 fn value_of(context: &Context, class: RegClassId) -> ValueId {
     context
@@ -103,14 +58,7 @@ fn function(build: impl FnOnce(&Context, AddTestOpBuilder) -> AddTestOpBuilder) 
     AddTestOp::register_interfaces(&context);
     let add = build(&context, AddTestOpBuilder::new(&context)).build();
     let handle = add.get_handle();
-    let block = context.create_block(vec![]);
-    block.append(add.id());
-    let region = context.create_region();
-    region.add_block(block.id());
-    let symbol = SymbolOpBuilder::new(&context)
-        .body(region.id())
-        .attr("name", AttributeValue::Str("f".into()))
-        .build();
+    let (symbol, _) = asm_symbol(&context, &[add.id()]);
     Function {
         context,
         symbol,

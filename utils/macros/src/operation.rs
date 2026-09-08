@@ -68,10 +68,6 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
             .is_some_and(|segment| segment.ident == "SameOperandAndResultType")
     });
     let has_results = !results.is_empty();
-    // A `?`-prefixed result type makes the single result optional: the op may be built
-    // with or without it. Used by structured control flow, whose value is absent when
-    // the construct is purely side-effecting.
-    let result_optional = results.iter().any(|r| r.ty.starts_with('?'));
     // A `*`-prefixed result makes the op n-ary: it produces one value per type given
     // to the builder. Used by structured control flow, which carries n values.
     let result_variadic = results.iter().any(|r| r.variadic);
@@ -80,7 +76,6 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         "a variadic result must be the only declared result"
     );
     let op_fn_name = op_fn_ident(&name);
-    let operand_names: Vec<String> = operands.iter().map(|o| o.name.clone()).collect();
 
     let BindsCode {
         interfaces: binds_interfaces,
@@ -93,7 +88,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     let printer = match binds_printer {
         Some(printer) => printer,
         None if custom_format => make_custom_printer(),
-        None => make_generic_printer(&dialect, &name, &operand_names, &regions, has_results),
+        None => make_generic_printer(&dialect, &name),
     };
 
     let region_accessors = make_region_accessors(&regions);
@@ -105,7 +100,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         None => make_parser(
             &builder_name,
             &regions,
-            &operand_names,
+            &operands,
             &attributes,
             has_results,
             result_variadic,
@@ -171,7 +166,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         }
     });
 
-    let result_pieces = make_result_pieces(has_results, result_variadic, result_optional);
+    let result_pieces = make_result_pieces(has_results, result_variadic);
     let attr_fn_params: Vec<_> = attributes
         .iter()
         .map(|attr| {
@@ -217,22 +212,11 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         &binds_verify,
     );
 
-    let predicate_setters: Vec<_> = attributes
-        .iter()
-        .filter(|attr| attr.ty == "Predicate")
-        .map(|attr| {
-            let method = op_fn_ident(&attr.name);
-            let name = attr.name.clone();
-            quote! {
-                pub fn #method(self, #method: tir::attributes::Predicate) -> Self {
-                    self.attr(#name, tir::attributes::AttributeValue::Predicate(#method))
-                }
-            }
-        })
-        .collect();
+    let (attr_setters, attr_getters) =
+        make_attr_accessors(&attributes, &format!("{dialect}.{name}"));
     let attribute_pieces = AttributePieces {
         verifier: attribute_verifier,
-        predicate_setters,
+        setters: attr_setters,
     };
     let builder_code = emit_builder(
         &builder_name,
@@ -272,6 +256,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
             #region_accessors
             #result_accessor
             #state_accessors
+            #attr_getters
         }
 
         impl tir::Operation for #struct_name {
@@ -443,10 +428,94 @@ fn emit_opdef_verifier(
 }
 
 /// What an op's attribute declarations contribute to its builder: the
-/// required-attribute check `build` runs, and a typed setter per `Predicate`.
+/// required-attribute check `build` runs, and one typed setter per attribute.
 struct AttributePieces {
     verifier: proc_macro2::TokenStream,
-    predicate_setters: Vec<proc_macro2::TokenStream>,
+    setters: Vec<proc_macro2::TokenStream>,
+}
+
+/// How one attribute kind crosses between the IR and Rust: the type it reads
+/// as, the type it is written from, and the `AttributeValue` variant between
+/// them.
+struct AttrAccessor {
+    getter_ty: proc_macro2::TokenStream,
+    setter_ty: proc_macro2::TokenStream,
+    variant: Ident,
+    read: proc_macro2::TokenStream,
+    write: proc_macro2::TokenStream,
+}
+
+/// `None` for an aggregate or untyped kind — `Array`, `Dict`, `any` — which
+/// has no single Rust type to hand back.
+fn attr_accessor(ty: &str) -> Option<AttrAccessor> {
+    let scalar = |rust: proc_macro2::TokenStream, variant: &str| AttrAccessor {
+        getter_ty: rust.clone(),
+        setter_ty: rust,
+        variant: format_ident!("{}", variant),
+        read: quote! { value },
+        write: quote! { value },
+    };
+    Some(match ty {
+        "Str" => AttrAccessor {
+            getter_ty: quote! { String },
+            setter_ty: quote! { impl Into<Box<str>> },
+            variant: format_ident!("Str"),
+            read: quote! { value.to_string() },
+            write: quote! { value.into() },
+        },
+        "Int" => scalar(quote! { i64 }, "Int"),
+        "UInt" => scalar(quote! { u64 }, "UInt"),
+        "F32" => scalar(quote! { f32 }, "F32"),
+        "F64" => scalar(quote! { f64 }, "F64"),
+        "Bool" => scalar(quote! { bool }, "Bool"),
+        "Type" => scalar(quote! { tir::TypeId }, "Type"),
+        "Block" => scalar(quote! { tir::BlockId }, "Block"),
+        "Value" => scalar(quote! { tir::ValueId }, "Value"),
+        "Predicate" => scalar(quote! { tir::attributes::Predicate }, "Predicate"),
+        _ => return None,
+    })
+}
+
+/// The builder setters and operation getters a declared attribute list earns,
+/// so an op spells `op.dest()` rather than unwrapping `attr("dest")` by hand.
+fn make_attr_accessors(
+    attributes: &[AttrSpec],
+    spelled: &str,
+) -> (TokenStreams, proc_macro2::TokenStream) {
+    let mut setters = vec![];
+    let mut getters = vec![];
+    for attr in attributes {
+        let Some(AttrAccessor {
+            getter_ty,
+            setter_ty,
+            variant,
+            read,
+            write,
+        }) = attr_accessor(&attr.ty)
+        else {
+            continue;
+        };
+        let method = op_fn_ident(&attr.name);
+        let name = attr.name.clone();
+        let missing = format!(
+            "{spelled} must carry a {} attribute '{}'",
+            attr.ty, attr.name
+        );
+        setters.push(quote! {
+            pub fn #method(self, value: #setter_ty) -> Self {
+                self.attr(#name, tir::attributes::AttributeValue::#variant(#write))
+            }
+        });
+        getters.push(quote! {
+            pub fn #method(&self) -> #getter_ty {
+                match tir::Operation::attr(self, #name) {
+                    Some(tir::attributes::AttributeValue::#variant(value)) => #read,
+                    _ => panic!(#missing),
+                }
+            }
+        });
+    }
+    (setters, quote! { #(#getters)* })
 }
 
 fn emit_builder(
@@ -457,8 +526,7 @@ fn emit_builder(
     results: &ResultPieces,
     attributes: &AttributePieces,
 ) -> proc_macro2::TokenStream {
-    let (attribute_verifier, predicate_setters) =
-        (&attributes.verifier, &attributes.predicate_setters);
+    let (attribute_verifier, attr_setters) = (&attributes.verifier, &attributes.setters);
     let (region_fields, region_defaults, region_builders, region_fills) = (
         &regions.fields,
         &regions.defaults,
@@ -502,7 +570,7 @@ fn emit_builder(
 
             #(#region_builders)*
             #(#operand_builders)*
-            #(#predicate_setters)*
+            #(#attr_setters)*
             #result_builder_method
 
             /// Observe one more dependency: the chain this op is ordered after.
@@ -972,11 +1040,7 @@ struct ResultPieces {
     build: proc_macro2::TokenStream,
 }
 
-fn make_result_pieces(
-    has_results: bool,
-    result_variadic: bool,
-    result_optional: bool,
-) -> ResultPieces {
+fn make_result_pieces(has_results: bool, result_variadic: bool) -> ResultPieces {
     let result_accessor = if has_results {
         quote! {
             pub fn result(&self) -> tir::ValueId {
@@ -1034,8 +1098,6 @@ fn make_result_pieces(
         quote! {}
     } else if result_variadic {
         quote! { result_types: Vec<tir::TypeId>, }
-    } else if result_optional {
-        quote! { result_type: Option<tir::TypeId>, }
     } else {
         quote! { result_type: tir::TypeId, }
     };
@@ -1044,12 +1106,6 @@ fn make_result_pieces(
         quote! {}
     } else if result_variadic {
         quote! { builder = builder.result_types(result_types); }
-    } else if result_optional {
-        quote! {
-            if let Some(result_type) = result_type {
-                builder = builder.result_type(result_type);
-            }
-        }
     } else {
         quote! { builder = builder.result_type(result_type); }
     };
@@ -1067,13 +1123,6 @@ fn make_result_pieces(
                     .collect()
             } else {
                 self.result_values
-            };
-        }
-    } else if result_optional {
-        quote! {
-            let result_vec = match self.result_type {
-                Some(ty) => vec![self.context.create_value(ty, None).id()],
-                None => vec![],
             };
         }
     } else {
@@ -1433,22 +1482,6 @@ fn get_value_specs(expr: &Expr) -> Option<Vec<ValueSpec>> {
                 })
                 .collect(),
         ),
-        // Backward-compatible form: operands/results: [lhs, rhs]
-        Expr::Array(arr) => Some(
-            arr.elems
-                .iter()
-                .map(|e| {
-                    let Expr::Path(p) = e else {
-                        unreachable!();
-                    };
-                    ValueSpec {
-                        name: p.path.get_ident().unwrap().to_string(),
-                        ty: "Any".to_string(),
-                        variadic: false,
-                    }
-                })
-                .collect(),
-        ),
         _ => None,
     }
 }
@@ -1552,91 +1585,16 @@ fn make_custom_parser() -> proc_macro2::TokenStream {
     }
 }
 
-fn make_generic_printer(
-    dialect: &str,
-    name: &str,
-    operands: &[String],
-    regions: &[Region],
-    has_results: bool,
-) -> proc_macro2::TokenStream {
+fn make_generic_printer(dialect: &str, name: &str) -> proc_macro2::TokenStream {
     let op_name = if dialect == "builtin" {
         name.to_string()
     } else {
         format!("{}.{}", dialect, name)
     };
 
-    let operand_printer = if !operands.is_empty() {
-        quote! {
-            let printed_operands = self.0.value_operands();
-            if !printed_operands.is_empty() {
-                fmt.write(" ")?;
-                tir::dependency::print_value_list(fmt, &printed_operands)?;
-            }
-        }
-    } else {
-        quote! {}
-    };
-
-    let result_suffix = if has_results {
-        quote! {
-            if let Some(result) = self.0.value_results().first() {
-                let context = self.0.context.upgrade();
-                let result_val = context.get_value(*result);
-                fmt.write(" : ")?;
-                context.print_type(result_val.ty(), fmt)?;
-            }
-        }
-    } else {
-        quote! {}
-    };
-
-    let regions = if regions.len() == 1 && !regions[0].variadic {
-        make_region_printer(&regions[0], 0)
-    } else {
-        quote! {}
-    };
-
     quote! {
         fn print<'a, 'b: 'a>(&'a self, fmt: &'a mut tir::IRFormatter<'b>) -> Result<(), std::fmt::Error> {
-            tir::dependency::print_result_prefix(fmt, &self.0)?;
-            fmt.write(#op_name)?;
-            #operand_printer
-            tir::dependency::print_dep_operands(fmt, &self.0)?;
-            // Print generic attribute dict if any
-            if !self.attributes().is_empty() {
-                fmt.write(" ")?;
-                fmt.write("{")?;
-                let mut first = true;
-                for attr in self.attributes() {
-                    if !first { fmt.write(", ")?; }
-                    first = false;
-                    let context = self.0.context.upgrade();
-                    fmt.write(context.resolve(attr.name))?;
-                    fmt.write(" = ")?;
-                    attr.value.print(fmt, &context)?;
-                }
-                fmt.write("}")?;
-            }
-
-            #result_suffix
-
-            if self.regions().len() == 0 {
-                fmt.write("\n")?;
-            }
-
-            #regions
-
-            Ok(())
-        }
-    }
-}
-
-fn make_region_printer(region: &Region, index: usize) -> proc_macro2::TokenStream {
-    let _ = region;
-    quote! {
-        {
-            let context = self.0.context.upgrade();
-            tir::region_format::print_op_region(fmt, &context, self, #index)?;
+            tir::region_format::print_generic(fmt, &self.0, #op_name)
         }
     }
 }
@@ -1644,11 +1602,19 @@ fn make_region_printer(region: &Region, index: usize) -> proc_macro2::TokenStrea
 fn make_parser(
     builder_name: &Ident,
     regions: &[Region],
-    operands: &[String],
+    operands: &[ValueSpec],
     attributes: &[AttrSpec],
     has_results: bool,
     result_variadic: bool,
 ) -> proc_macro2::TokenStream {
+    assert!(
+        operands
+            .iter()
+            .rev()
+            .skip(1)
+            .all(|operand| !operand.variadic),
+        "the generic syntax reads a variadic operand group only as the last one"
+    );
     let attr_spec_literals: Vec<_> = attributes
         .iter()
         .map(|attr| {
@@ -1674,17 +1640,31 @@ fn make_parser(
     let operand_parsers: Vec<_> = operands
         .iter()
         .enumerate()
-        .map(|(i, op_name)| {
-            let field = format_ident!("{}", op_name);
+        .map(|(i, operand)| {
+            let field = format_ident!("{}", operand.name);
             let comma = if i > 0 {
                 quote! { parser.parse_token(","); }
             } else {
                 quote! {}
             };
-            quote! {
-                #comma
-                if let Some(ref_name) = parser.parse_value_ref() {
-                    builder = builder.#field(parser.resolve_value(context, ref_name));
+            if operand.variadic {
+                quote! {
+                    #comma
+                    let mut group = vec![];
+                    while let Some(ref_name) = parser.parse_value_ref() {
+                        group.push(parser.resolve_value(context, ref_name));
+                        if !parser.parse_token(",") {
+                            break;
+                        }
+                    }
+                    builder = builder.#field(group);
+                }
+            } else {
+                quote! {
+                    #comma
+                    if let Some(ref_name) = parser.parse_value_ref() {
+                        builder = builder.#field(parser.resolve_value(context, ref_name));
+                    }
                 }
             }
         })

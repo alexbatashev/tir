@@ -173,33 +173,6 @@ operation! {
     }
 }
 
-impl AllocaOpBuilder {
-    pub fn size(self, size: u64) -> Self {
-        self.attr("size", AttributeValue::UInt(size))
-    }
-
-    pub fn align(self, align: u64) -> Self {
-        self.attr("align", AttributeValue::UInt(align))
-    }
-}
-
-impl AllocaOp {
-    pub fn size(&self) -> u64 {
-        uint_attribute(self, "size")
-    }
-
-    pub fn align(&self) -> u64 {
-        uint_attribute(self, "align")
-    }
-}
-
-fn uint_attribute(op: &impl Operation, name: &str) -> u64 {
-    match op.attr(name) {
-        Some(AttributeValue::UInt(value)) => value,
-        _ => panic!("{name} must be an unsigned integer attribute"),
-    }
-}
-
 operation! {
     NullOp {
         name: "null",
@@ -263,35 +236,10 @@ impl CmpOp {
             Leaf = tir::sem::SymPayload<tir::ValueId>,
         >,
     ) -> Option<tir::graph::NodeId> {
-        use tir::sem::SymKind;
-
         let context = self.0.context.upgrade();
         crate::DataLayout::for_instance(&context, &self.0)?.pointer_size()?;
 
-        let pred = predicate(self)?;
-        let swap = matches!(pred, Predicate::Ugt | Predicate::Ule);
-        let kind = match if swap { pred.swapped() } else { pred } {
-            Predicate::Eq => SymKind::Eq,
-            Predicate::Ne => SymKind::Ne,
-            Predicate::Ult => SymKind::ULt,
-            Predicate::Uge => SymKind::UGe,
-            _ => return None,
-        };
-
-        let mut operand = |index: u32| {
-            let leaf = g.add_node(SymKind::Symbol);
-            g.set_leaf_data(leaf, tir::sem::SymPayload::SymbolId(index));
-            leaf
-        };
-        let (lhs, rhs) = if swap {
-            (operand(1), operand(0))
-        } else {
-            (operand(0), operand(1))
-        };
-        let node = g.add_node(kind);
-        g.add_edge(node, lhs);
-        g.add_edge(node, rhs);
-        Some(node)
+        crate::builtin::compare_expr(g, predicate(self)?, true)
     }
 }
 

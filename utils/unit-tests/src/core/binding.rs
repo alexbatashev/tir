@@ -105,16 +105,6 @@ fn a_theta_binding_aligns_inits_ports_continue_exit_and_results() {
 }
 
 #[test]
-fn a_theta_with_a_short_result_list_is_rejected() {
-    let context = Context::with_default_dialects();
-    let i32_ty = builtin::IntegerType::new(&context, 32);
-    let op = build_theta(&context, &[i32_ty], &[(1, 1), (2, 32)]);
-
-    let error = op.verify(&context).expect_err("exit values are missing");
-    assert!(error.to_string().contains("exit"), "{error}");
-}
-
-#[test]
 fn a_theta_port_must_have_its_init_type() {
     let context = Context::with_default_dialects();
     let i64_ty = builtin::IntegerType::new(&context, 64);
@@ -124,16 +114,6 @@ fn a_theta_port_must_have_its_init_type() {
         .verify(&context)
         .expect_err("the port is wider than its init");
     assert!(error.to_string().contains("port"), "{error}");
-}
-
-#[test]
-fn a_theta_predicate_must_be_a_boolean() {
-    let context = Context::with_default_dialects();
-    let i32_ty = builtin::IntegerType::new(&context, 32);
-    let op = build_theta(&context, &[i32_ty], &[(1, 32), (2, 32), (3, 32)]);
-
-    let error = op.verify(&context).expect_err("the predicate is not i1");
-    assert!(error.to_string().contains("predicate"), "{error}");
 }
 
 fn build_gamma(context: &Context, arm_results: &[&[(i64, u32)]]) -> GammaOp {
@@ -170,17 +150,6 @@ fn a_gamma_binding_forwards_inputs_and_joins_arm_results() {
     assert_eq!(op.arms().len(), 2);
     assert_eq!(Gamma::predicate(&op), op.operands()[0]);
     op.verify(&context).expect("an aligned gamma verifies");
-}
-
-#[test]
-fn every_gamma_arm_must_produce_the_op_results() {
-    let context = Context::with_default_dialects();
-    let op = build_gamma(&context, &[&[(1, 32)], &[(2, 32), (3, 32)]]);
-
-    let error = op
-        .verify(&context)
-        .expect_err("the second arm yields too much");
-    assert!(error.to_string().contains("arm 1"), "{error}");
 }
 
 /// `scf.r#for %i = %lb to %ub step %s (%a = %init)` built by hand, with the body

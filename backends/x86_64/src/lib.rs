@@ -1,17 +1,6 @@
 //! x86-64 backend prototype, generated from the TMDL descriptions in `defs/`.
 
-const MODEL_CHECK_SOURCES: &[(&str, &str)] = &[
-    ("main.tmdl", include_str!("../defs/main.tmdl")),
-    ("encoding.tmdl", include_str!("../defs/encoding.tmdl")),
-    ("base.tmdl", include_str!("../defs/base.tmdl")),
-    ("arith_ext.tmdl", include_str!("../defs/arith_ext.tmdl")),
-    ("conditional.tmdl", include_str!("../defs/conditional.tmdl")),
-    ("memory_ext.tmdl", include_str!("../defs/memory_ext.tmdl")),
-    ("atomics.tmdl", include_str!("../defs/atomics.tmdl")),
-    ("ordering.tmdl", include_str!("../defs/ordering.tmdl")),
-    ("float.tmdl", include_str!("../defs/float.tmdl")),
-    ("perf.tmdl", include_str!("../defs/perf.tmdl")),
-];
+include!(concat!(env!("OUT_DIR"), "/model_check_sources.rs"));
 
 pub use isa::{
     Feature, get_isel_rules, instruction_infos, register_info, register_views, register_widths,
@@ -23,8 +12,8 @@ mod isa {
     #![allow(dead_code, unused_variables, unused_mut, clippy::all)]
 
     use tir::Operation;
-    use tir::attributes::{AttributeValue, RegisterAttr};
-    use tir::backend::{RegSlot, fresh_reg};
+    use tir::attributes::AttributeValue;
+    use tir::backend::{RegSlot, fresh_reg, phys_attr};
     use tir::backend::{VirtualBranchOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp};
     use tir::helpers::{dialect, operation};
 
@@ -205,7 +194,7 @@ mod isa {
             class: tir::backend::regalloc::RegClassId,
             offset: i64,
         ) -> Result<Box<dyn Operation>, tir::PassError> {
-            let base = phys(abi.sp.0, abi.sp.1);
+            let base = phys_attr(abi.sp);
             let offset = AttributeValue::Int(offset);
             match class.name() {
                 "GPR" => Ok(Box::new(
@@ -237,7 +226,7 @@ mod isa {
         ) -> Vec<Box<dyn Operation>> {
             vec![Box::new(
                 MovImm32OpBuilder::new(context)
-                    .attr("dst", phys(RegClass::GPR32.id(), 0))
+                    .attr("dst", phys_attr((RegClass::GPR32.id(), 0)))
                     .attr("imm", AttributeValue::Int(i64::from(vector_register_args)))
                     .build(),
             )]
@@ -271,15 +260,8 @@ mod isa {
                     "block arguments on branch edges are not supported by codegen yet".to_string(),
                 ));
             }
-            let dest = match br.attr("dest") {
-                Some(AttributeValue::Block(block)) => Some(block),
-                _ => None,
-            }
-            .ok_or_else(|| {
-                tir::PassError::InvalidRuleSet("branch is missing its 'dest' target".to_string())
-            })?;
             let jump = JmpOpBuilder::new(context)
-                .attr("imm", AttributeValue::Block(dest))
+                .attr("imm", AttributeValue::Block(br.dest()))
                 .build();
             rewriter.replace_op(op, &jump)?;
             return Ok(true);
@@ -289,15 +271,8 @@ mod isa {
         // the encoder as a fixup, emitted as an R_X86_64_PLT32 relocation since the
         // callee's address is unknown until link time.
         if let Some(call) = op.as_op::<VirtualCallOp>() {
-            let callee = match call.attr("callee") {
-                Some(AttributeValue::Str(s)) => Some(s.clone()),
-                _ => None,
-            }
-            .ok_or_else(|| {
-                tir::PassError::InvalidRuleSet("vcall is missing its 'callee'".to_string())
-            })?;
             let real = CallOpBuilder::new(context)
-                .attr("imm", AttributeValue::Str(callee))
+                .attr("imm", AttributeValue::Str(call.callee().into()))
                 .build();
             tir::backend::forward_state(context, op.op(), &real);
             rewriter.replace_op(op, &real)?;
@@ -318,11 +293,6 @@ mod isa {
         }
 
         Ok(false)
-    }
-
-    /// The x86-64 stack pointer (`rsp`, GPR index 4).
-    fn phys(class: tir::backend::regalloc::RegClassId, index: u16) -> AttributeValue {
-        AttributeValue::Register(RegisterAttr::Physical { class, index })
     }
 
     /// The move family a register class is copied and spilled with. A class is a
@@ -392,7 +362,7 @@ mod isa {
                 ($Builder:ident) => {
                     Box::new(
                         $Builder::new(context)
-                            .attr("base", phys(frame.0, frame.1))
+                            .attr("base", phys_attr(*frame))
                             .attr("imm", AttributeValue::Int(offset))
                             .src(value)
                             .build(),
@@ -423,7 +393,7 @@ mod isa {
                     Box::new(
                         $Builder::new(context)
                             .result_values(vec![value])
-                            .attr("base", phys(frame.0, frame.1))
+                            .attr("base", phys_attr(*frame))
                             .attr("imm", AttributeValue::Int(offset))
                             .build(),
                     )
@@ -477,7 +447,7 @@ mod isa {
             for ((class, index), _) in saves {
                 ops.push(Box::new(
                     PushOpBuilder::new(context)
-                        .attr("reg", phys(*class, *index))
+                        .attr("reg", phys_attr((*class, *index)))
                         .build(),
                 ));
             }
@@ -501,7 +471,7 @@ mod isa {
             for ((class, index), _) in saves.iter().rev() {
                 ops.push(Box::new(
                     PopOpBuilder::new(context)
-                        .attr("reg", phys(*class, *index))
+                        .attr("reg", phys_attr((*class, *index)))
                         .build(),
                 ));
             }
@@ -536,7 +506,7 @@ mod isa {
             Ok(vec![Box::new(
                 LeaBaseDispOpBuilder::new(context)
                     .result_values(vec![dst])
-                    .attr("base", phys(frame.0, frame.1))
+                    .attr("base", phys_attr(*frame))
                     .attr("imm", AttributeValue::Int(offset))
                     .build(),
             )])
@@ -550,8 +520,8 @@ mod isa {
     ) -> Box<dyn Operation> {
         Box::new(
             AddImmOpBuilder::new(context)
-                .attr("dst", phys(abi.sp.0, abi.sp.1))
-                .attr("dst_tied", phys(abi.sp.0, abi.sp.1))
+                .attr("dst", phys_attr(abi.sp))
+                .attr("dst_tied", phys_attr(abi.sp))
                 .attr("imm", AttributeValue::Int(amount))
                 .build(),
         )
@@ -649,7 +619,10 @@ mod isa {
             }
             let mut features = vec![Feature::X86, Feature::X86_64, Feature::SSE, Feature::SSE2];
             if let Some(mattr) = mattr {
-                apply_mattr(&mut features, mattr)?;
+                tir::backend::apply_mattr(&mut features, mattr, "x86-64", |name| {
+                    Feature::from_name(&name.to_ascii_lowercase().replace('-', "_"))
+                        .map(|feature| vec![feature])
+                })?;
             }
             validate_features(&features)?;
             if !features.contains(&Feature::X86_64) {
@@ -665,6 +638,11 @@ mod isa {
         /// The enabled ISA set.
         pub fn features(&self) -> &[Feature] {
             &self.features
+        }
+
+        /// The target name this configuration selects.
+        pub fn canonical_name(&self) -> &'static str {
+            "x86_64"
         }
     }
 
@@ -684,97 +662,34 @@ mod isa {
         ))
     }
 
-    fn apply_mattr(features: &mut Vec<Feature>, mattr: &str) -> Result<(), String> {
-        for item in mattr.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-            let (add, name) = if let Some(name) = item.strip_prefix('+') {
-                (true, name)
-            } else if let Some(name) = item.strip_prefix('-') {
-                (false, name)
-            } else {
-                return Err(format!(
-                    "invalid --mattr entry '{item}' (expected '+feature' or '-feature')"
-                ));
-            };
-            let feature = Feature::from_name(&name.to_ascii_lowercase().replace('-', "_"))
-                .ok_or_else(|| format!("unknown x86-64 feature '{name}' in --mattr"))?;
-            if add && !features.contains(&feature) {
-                features.push(feature);
-            } else if !add {
-                features.retain(|f| *f != feature);
-            }
-        }
-        Ok(())
-    }
-
     struct X86Target {
         config: TargetConfig,
         selected_abi: &'static tir::backend::abi::AbiInfo,
     }
 
-    impl tir::backend::TargetMachine for X86Target {
-        fn name(&self) -> &'static str {
-            "x86_64"
-        }
-
-        fn model_check_target(&self) -> Option<tir::backend::ModelCheckTarget> {
-            Some(tir::backend::ModelCheckTarget {
-                isa: "X86_64",
-                features: self.config.features.iter().map(Feature::name).collect(),
-                sources: super::MODEL_CHECK_SOURCES,
-            })
-        }
-
-        fn register_dialects(&self, context: &tir::Context) {
-            context.register_dialect::<tir::backend::AsmDialect>();
-            context.register_dialect::<X86_64Dialect>();
-            context.register_reg_classes(register_info().classes);
-        }
-
-        fn data_layout(&self) -> Option<tir::attributes::AttributeValue> {
-            Some(tir::data_layout_spec(
-                tir::Endianness::Little,
-                self.abi().stack.align * 8,
-                &[
-                    ("i1", 8, 8),
-                    ("i8", 8, 8),
-                    ("i16", 16, 16),
-                    ("i32", 32, 32),
-                    ("i64", 64, 64),
-                    ("f32", 32, 32),
-                    ("f64", 64, 64),
-                    ("p", 64, 64),
-                ],
-            ))
-        }
-
-        fn target_env(&self) -> Option<tir::attributes::AttributeValue> {
-            let features: Vec<String> = self
-                .config
-                .features
-                .iter()
-                .map(|feature| feature.name().to_ascii_lowercase())
-                .collect();
-            Some(tir::target_env_spec(self.name(), &features))
-        }
-
-        fn isel_pass(&self, context: &tir::Context) -> tir::backend::isel::InstructionSelectPass {
-            tir::backend::isel::InstructionSelectPass::new(get_isel_rules(
-                context,
-                self.config.features(),
-            ))
+    fn create_isel_pass_for(
+        context: &tir::Context,
+        features: &[Feature],
+        abi: &'static tir::backend::abi::AbiInfo,
+    ) -> tir::backend::isel::InstructionSelectPass {
+        tir::backend::isel::InstructionSelectPass::new(get_isel_rules(context, features))
             .with_rules(include_str!("isel.pdl"))
             .with_branch_emitters(tir::backend::isel::BranchEmitters {
                 uncond: tir::backend::emit_uncond_branch,
                 cond_nonzero: emit_branch_nonzero,
             })
             .with_op_lowering(lower_func_and_return_to_asm_symbol)
-            .with_call_lowering(self.abi(), Box::new(X86CallEmitter))
-            .with_data_layout(self.data_layout())
-        }
+            .with_call_lowering(abi, Box::new(X86CallEmitter))
+    }
 
-        fn regalloc_target(&self) -> Box<dyn tir::backend::regalloc::TargetRegAlloc> {
-            Box::new(X86RegAlloc::new(self.config.features()))
-        }
+    tir::impl_target_machine! {
+        X86Target,
+        dialect: X86_64Dialect,
+        isa: |_| "X86_64",
+        pointer_bits: |_| 64,
+        regalloc: |features| X86RegAlloc::new(features),
+        abis: x86_64_abis,
+        sources: super::MODEL_CHECK_SOURCES,
 
         fn pre_ra_lowerings(&self) -> Vec<tir::backend::isel::OpLowering> {
             vec![
@@ -788,49 +703,8 @@ mod isa {
             vec![Box::new(finalize_virtual_ops)]
         }
 
-        fn register_info(&self) -> tir::backend::regalloc::RegisterInfo {
-            register_info()
-        }
-
-        fn abis(&self) -> &'static [tir::backend::abi::AbiInfo] {
-            x86_64_abis()
-        }
-
-        fn abi(&self) -> &'static tir::backend::abi::AbiInfo {
-            self.selected_abi
-        }
-
-        fn asm_parser(&self, _context: &tir::Context) -> tir::backend::AsmParser {
-            let (parsers, disabled) = get_instruction_parsers(self.config.features());
-            tir::backend::AsmParser::new(parsers).with_disabled_mnemonics(disabled)
-        }
-
-        fn machine_model(&self, name: &str) -> Option<tir::backend::sched::MachineModel> {
-            machine_model(name, self.config.features())
-        }
-
-        fn default_machine(&self) -> Option<&str> {
-            self.config.machine.as_deref()
-        }
-
-        fn machines(&self) -> Vec<&'static str> {
-            machines(self.config.features())
-        }
-
-        fn isa_params(&self) -> Vec<(&'static str, i64)> {
-            isa_params(self.config.features())
-        }
-
-        fn register_widths(&self) -> Vec<(&'static str, u32)> {
-            register_widths(self.config.features())
-        }
-
         fn register_views(&self) -> Vec<(&'static str, tir::backend::regalloc::RegisterView)> {
             register_views(self.config.features())
-        }
-
-        fn register_name(&self, class: &str, index: u16, prefer_abi: bool) -> Option<String> {
-            register_name(class, index, prefer_abi)
         }
 
         fn object_format(&self) -> Option<tir::backend::binary::ObjectFormatInfo> {
@@ -871,29 +745,18 @@ mod isa {
 
     tir::register_target!(select_x86_64, ["x86_64"]);
 
-    fn x86_64_abis() -> &'static [tir::backend::abi::AbiInfo] {
-        static ABIS: std::sync::OnceLock<Vec<tir::backend::abi::AbiInfo>> =
-            std::sync::OnceLock::new();
-        ABIS.get_or_init(|| {
-            abis()
-                .iter()
-                .map(|abi| tir::backend::abi::AbiInfo {
-                    indirect_result: Some((RegClass::GPR.id(), 7)),
-                    argument_group_policy: Some(tir::backend::abi::ArgumentGroupPolicy {
-                        register_limit: Some(2),
-                        rollback: tir::backend::abi::GroupRollback::Preserve,
-                    }),
-                    ..*abi
-                })
-                .collect()
-        })
-    }
+    tir::target_abis!(x86_64_abis, x86_64_abi_by_name, |abi| {
+        tir::backend::abi::AbiInfo {
+            indirect_result: Some((RegClass::GPR.id(), 7)),
+            argument_group_policy: Some(tir::backend::abi::ArgumentGroupPolicy {
+                register_limit: Some(2),
+                rollback: tir::backend::abi::GroupRollback::Preserve,
+            }),
+            ..*abi
+        }
+    });
 
     fn x86_64_default_abi() -> &'static tir::backend::abi::AbiInfo {
         &x86_64_abis()[0]
-    }
-
-    fn x86_64_abi_by_name(name: &str) -> Option<&'static tir::backend::abi::AbiInfo> {
-        x86_64_abis().iter().find(|abi| abi.name == name)
     }
 }

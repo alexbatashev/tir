@@ -5,9 +5,11 @@
 use tir::Operation;
 use tir::attributes::AttributeValue;
 use tir::backend::binary::{EM_RISCV, ElfClass, ObjectFormatInfo, RelocKind};
-use tir::backend::{VirtualBranchOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp};
+use tir::backend::{
+    VirtualBranchOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp, phys_attr,
+};
 
-use crate::{JumpAndLinkOpBuilder, JumpAndLinkRegOpBuilder, gpr_ty, phys};
+use crate::{JumpAndLinkOpBuilder, JumpAndLinkRegOpBuilder, gpr_ty};
 
 const R_RISCV_BRANCH: u32 = 16;
 const R_RISCV_32: u32 = 1;
@@ -173,14 +175,6 @@ pub(crate) fn lower_symbol_address(
     Ok(true)
 }
 
-fn block_attr(op: &dyn tir::Operation, name: &str) -> Result<tir::BlockId, tir::PassError> {
-    match op.attr(name) {
-        Some(AttributeValue::Block(block)) => Some(block),
-        _ => None,
-    }
-    .ok_or_else(|| tir::PassError::InvalidRuleSet(format!("branch is missing its '{name}' target")))
-}
-
 /// Post-RA: `vret` becomes `jalr x0, x1, 0`; `vbr` becomes `jal x0, dest`.
 pub(crate) fn finalize_virtual_ops(
     context: &tir::Context,
@@ -189,8 +183,8 @@ pub(crate) fn finalize_virtual_ops(
 ) -> Result<bool, tir::PassError> {
     if op.as_op::<VirtualReturnOp>().is_some() {
         let ret = JumpAndLinkRegOpBuilder::new(context)
-            .attr("rd", phys(&(crate::RegClass::GPR.id(), 0)))
-            .attr("rs1", phys(&(crate::RegClass::GPR.id(), 1)))
+            .attr("rd", phys_attr((crate::RegClass::GPR.id(), 0)))
+            .attr("rs1", phys_attr((crate::RegClass::GPR.id(), 1)))
             .attr("imm", AttributeValue::Int(0))
             .build();
         rewriter.replace_op(op, &ret)?;
@@ -203,10 +197,9 @@ pub(crate) fn finalize_virtual_ops(
                 "block arguments on branch edges are not supported by codegen yet".to_string(),
             ));
         }
-        let dest = block_attr(&br, "dest")?;
         let jump = JumpAndLinkOpBuilder::new(context)
-            .attr("rd", phys(&(crate::RegClass::GPR.id(), 0)))
-            .attr("imm", AttributeValue::Block(dest))
+            .attr("rd", phys_attr((crate::RegClass::GPR.id(), 0)))
+            .attr("imm", AttributeValue::Block(br.dest()))
             .build();
         rewriter.replace_op(op, &jump)?;
         return Ok(true);
@@ -216,13 +209,12 @@ pub(crate) fn finalize_virtual_ops(
     // the encoder as a fixup and is emitted as an R_RISCV_JAL relocation, since
     // the callee's address is unknown until link time.
     if let Some(call) = op.as_op::<VirtualCallOp>() {
-        let callee = string_attr(&call, "callee")?;
         let jal = JumpAndLinkOpBuilder::new(context)
             .attr(
                 "rd",
-                phys(&crate::default_abi().ra.expect("RISC-V ABI must define ra")),
+                phys_attr(crate::default_abi().ra.expect("RISC-V ABI must define ra")),
             )
-            .attr("imm", AttributeValue::Str(callee.into()))
+            .attr("imm", AttributeValue::Str(call.callee().into()))
             .build();
         tir::backend::forward_state(context, op.op(), &jal);
         rewriter.replace_op(op, &jal)?;
@@ -238,7 +230,7 @@ pub(crate) fn finalize_virtual_ops(
         let jalr = JumpAndLinkRegOpBuilder::new(context)
             .attr(
                 "rd",
-                phys(&crate::default_abi().ra.expect("RISC-V ABI must define ra")),
+                phys_attr(crate::default_abi().ra.expect("RISC-V ABI must define ra")),
             )
             .rs1(target)
             .attr("imm", AttributeValue::Int(0))
@@ -249,12 +241,4 @@ pub(crate) fn finalize_virtual_ops(
     }
 
     Ok(false)
-}
-
-fn string_attr(op: &dyn tir::Operation, name: &str) -> Result<String, tir::PassError> {
-    match op.attr(name) {
-        Some(AttributeValue::Str(s)) => Some(s.to_string()),
-        _ => None,
-    }
-    .ok_or_else(|| tir::PassError::InvalidRuleSet(format!("call is missing its '{name}'")))
 }

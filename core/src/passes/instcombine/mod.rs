@@ -50,8 +50,6 @@ struct Driver<'a> {
     context: &'a Context,
     eg: Engine<Node>,
     value_class: HashMap<ValueId, Id>,
-    /// The block each block argument belongs to: it has no defining op, so the
-    /// scope check has no other way to place it.
     ruleset: Ruleset,
     /// The value whose readers are being rewired. It answers for its own class
     /// and would answer every rewrite with itself, so no spelling may pick it.
@@ -70,18 +68,11 @@ impl Driver<'_> {
         crate::memstats::egraph_census("instcombine", &self.eg);
     }
 
-    /// Prove the loop-carried values a loop never changes, optimistically. Every
-    /// union promoted into the base graph is saturated before this returns, so
-    /// the base is left wherever [`Engine::saturate_rules`] leaves it: at a
-    /// fixpoint, or marked wholly changed by a limit stop, which is that
-    /// driver's contract to state and not this one's.
-    ///
-    /// SCCP's distinctive power as a scope: hypothesise that a port holds the
-    /// constant the loop was entered on, run the body under that hypothesis, and
-    /// keep the ports no edge back into them refutes. What survives is a fact
-    /// about the base graph, so it is unioned there and every read of the port —
-    /// inside the loop and after it — is that constant. What does not survive is
-    /// dropped and the round runs again; `hypotheses` only shrinks, so it ends.
+    /// Prove the loop-carried values a loop never changes, optimistically:
+    /// hypothesise that a port holds the value the loop was entered on, run the
+    /// body under that hypothesis, and union into the base graph the ports no
+    /// edge back into them refutes. What does not survive is dropped and the
+    /// round runs again; `hypotheses` only shrinks, so it ends.
     ///
     /// A nest is done under its own enclosing scope: an inner port entered on
     /// what an outer one carries is only constant while the outer hypothesis is

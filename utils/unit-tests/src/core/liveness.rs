@@ -3,18 +3,18 @@
 use std::collections::BTreeSet;
 
 use tir::backend::liveness::analyze;
-use tir::backend::regalloc::{RegClassId, RegClassInfo, RegisterView};
-use tir::backend::{ControlFlow, InstrInfo, MachineInstruction, RegClassType, RegPort};
+use tir::backend::regalloc::{RegClassId, RegClassInfo};
+use tir::backend::{RegClassType, RegPort};
 use tir::builtin::{ops, IntegerType};
-use tir::{BlockHandle, Context, Operation, TypeId, ValueId};
+use tir::{BlockHandle, BlockId, Context, Operation, TypeId, ValueId};
 
-use super::fixtures::r;
+use super::fixtures::{machine_op, r, r_high, reg_class};
 
 // The test ops: each names one register slot. A slot's class is a per-opcode
 // fact, so there is one op per class the tests constrain a value through; the
 // value's own class is its type.
 macro_rules! slot_op {
-    ($op:ident, $ports:ident, $name:literal, $class:expr, $def:literal) => {
+    ($op:ident, $ports:ident, $name:tt, $class:expr, $def:literal) => {
         static $ports: [RegPort; 1] = [RegPort {
             name: "r",
             class: $class,
@@ -22,93 +22,8 @@ macro_rules! slot_op {
             tied_to: None,
         }];
 
-        impl MachineInstruction for $op {
-            fn info(&self) -> &'static InstrInfo {
-                static INFO: InstrInfo = InstrInfo {
-                    name: $name,
-                    mnemonic: $name,
-                    control_flow: ControlFlow::None,
-                    regs: &$ports,
-                    ..InstrInfo::BASE
-                };
-                &INFO
-            }
-
-            fn instance(&self) -> &tir::OpHandle {
-                &self.0
-            }
-        }
+        machine_op!($op, "test", $name, r, &$ports, &[]);
     };
-}
-
-tir::helpers::operation! {
-    PhysDefOp {
-        name: "phys_def",
-        dialect: "test",
-        operands: O { r: "?tir::backend::RegClassType", },
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
-}
-
-tir::helpers::operation! {
-    PhysUseOp {
-        name: "phys_use",
-        dialect: "test",
-        operands: O { r: "?tir::backend::RegClassType", },
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
-}
-
-tir::helpers::operation! {
-    UseROp {
-        name: "use_r",
-        dialect: "test",
-        operands: O { r: "?tir::backend::RegClassType", },
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
-}
-
-tir::helpers::operation! {
-    UseRlowOp {
-        name: "use_rlow",
-        dialect: "test",
-        operands: O { r: "?tir::backend::RegClassType", },
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
-}
-
-tir::helpers::operation! {
-    UseRhighOp {
-        name: "use_rhigh",
-        dialect: "test",
-        operands: O { r: "?tir::backend::RegClassType", },
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
-}
-
-tir::helpers::operation! {
-    UseRmidOp {
-        name: "use_rmid",
-        dialect: "test",
-        operands: O { r: "?tir::backend::RegClassType", },
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
-}
-
-tir::helpers::operation! {
-    UseROtherOp {
-        name: "use_rother",
-        dialect: "test",
-        operands: O { r: "?tir::backend::RegClassType", },
-        results: R { regs: "*tir::backend::RegClassType" },
-        interfaces: [tir::backend::MachineInstruction],
-    }
 }
 
 slot_op!(PhysDefOp, PHYS_DEF_PORTS, "phys_def", None, true);
@@ -132,74 +47,22 @@ slot_op!(
 );
 
 // A subclass of `R` over the same file and view: fewer encodable registers.
-static R_LOW_CLASS: RegClassInfo = RegClassInfo {
-    name: "Rlow",
-    dialect: "test",
-    file: "R",
-    registers: &[0, 1],
-    group_width: 1,
-    view: RegisterView {
-        bit_offset: 0,
-        merge: false,
-    },
-    print_name: tir::backend::regalloc::no_register_name,
-};
-
-// Same file and index set as `Rlow`, but a different architectural view (an
-// x86 high-byte class): no register satisfies both constraints.
-static R_HIGH_CLASS: RegClassInfo = RegClassInfo {
-    name: "Rhigh",
-    dialect: "test",
-    file: "R",
-    registers: &[0, 1],
-    group_width: 1,
-    view: RegisterView {
-        bit_offset: 8,
-        merge: true,
-    },
-    print_name: tir::backend::regalloc::no_register_name,
-};
+static R_LOW_CLASS: RegClassInfo = reg_class("Rlow", "R", &[0, 1], 1, 0, false);
 
 const fn r_low() -> RegClassId {
     RegClassId::new(&R_LOW_CLASS)
 }
 
-const fn r_high() -> RegClassId {
-    RegClassId::new(&R_HIGH_CLASS)
-}
-
 // Two classes over one view where neither contains the other (x86 `GPR32low`,
 // which includes esp, and `GPRaddrIndex`, which excludes rsp but reaches r8+).
-static R_MID_CLASS: RegClassInfo = RegClassInfo {
-    name: "Rmid",
-    dialect: "test",
-    file: "R",
-    registers: &[1, 2, 3],
-    group_width: 1,
-    view: RegisterView {
-        bit_offset: 0,
-        merge: false,
-    },
-    print_name: tir::backend::regalloc::no_register_name,
-};
+static R_MID_CLASS: RegClassInfo = reg_class("Rmid", "R", &[1, 2, 3], 1, 0, false);
 
 const fn r_mid() -> RegClassId {
     RegClassId::new(&R_MID_CLASS)
 }
 
 // Over one view with `Rlow`, but sharing no register with it.
-static R_OTHER_CLASS: RegClassInfo = RegClassInfo {
-    name: "Rother",
-    dialect: "test",
-    file: "R",
-    registers: &[2, 3],
-    group_width: 1,
-    view: RegisterView {
-        bit_offset: 0,
-        merge: false,
-    },
-    print_name: tir::backend::regalloc::no_register_name,
-};
+static R_OTHER_CLASS: RegClassInfo = reg_class("Rother", "R", &[2, 3], 1, 0, false);
 
 const fn r_other() -> RegClassId {
     RegClassId::new(&R_OTHER_CLASS)
@@ -249,7 +112,7 @@ fn narrower_class_constraint_wins() {
             vreg_use(&context, &block, a, r());
         }
 
-        let liveness = analyze(&context, &[block.id()], |_| Vec::new());
+        let liveness = analyze(&context, &[block.id()], cfg(&[]));
         assert_eq!(
             liveness.vreg_class.get(&a.number()),
             Some(&r_low()),
@@ -274,7 +137,7 @@ fn overlapping_classes_intersect_their_indices() {
     vreg_use(&context, &block, a, r_low()); // {0, 1}
     vreg_use(&context, &block, a, r_mid()); // {1, 2, 3}
 
-    let liveness = analyze(&context, &[block.id()], |_| Vec::new());
+    let liveness = analyze(&context, &[block.id()], cfg(&[]));
     assert!(liveness.class_conflicts.is_empty());
     assert_eq!(
         liveness.allowed_indices.get(&a.number()),
@@ -292,7 +155,7 @@ fn disjoint_classes_over_one_view_are_reported() {
     vreg_use(&context, &block, a, r_low()); // {0, 1}
     vreg_use(&context, &block, a, r_other()); // {2, 3}
 
-    let liveness = analyze(&context, &[block.id()], |_| Vec::new());
+    let liveness = analyze(&context, &[block.id()], cfg(&[]));
     assert!(liveness.class_conflicts.contains_key(&a.number()));
 }
 
@@ -307,11 +170,22 @@ fn incompatible_class_constraints_are_reported() {
 
     vreg_use(&context, &block, a, r_high());
 
-    let liveness = analyze(&context, &[block.id()], |_| Vec::new());
+    let liveness = analyze(&context, &[block.id()], cfg(&[]));
     assert_eq!(
         liveness.class_conflicts.get(&a.number()),
         Some(&(r_low(), r_high())),
     );
+}
+
+/// The successor function of the CFG holding `edges`: a block no edge leaves
+/// ends the traversal.
+fn cfg<'a>(edges: &'a [(BlockId, &'a [BlockId])]) -> impl Fn(BlockId) -> Vec<BlockId> + 'a {
+    move |block| {
+        edges
+            .iter()
+            .find(|(from, _)| *from == block)
+            .map_or_else(Vec::new, |(_, to)| to.to_vec())
+    }
 }
 
 // `addi %a, %b` whose fresh result names a new virtual register (a def), with
@@ -346,13 +220,7 @@ fn cross_block_def_interferes_only_with_wired_successors() {
     addi(&context, &succ, v, a_id, ty);
 
     let blocks = [entry.id(), succ.id()];
-    let with_edge = analyze(&context, &blocks, |blk| {
-        if blk == entry.id() {
-            vec![succ.id()]
-        } else {
-            vec![]
-        }
-    });
+    let with_edge = analyze(&context, &blocks, cfg(&[(entry.id(), &[succ.id()])]));
     assert!(
         with_edge.interferes(v.number(), w.number()),
         "a value live across a later def must interfere with it",
@@ -362,7 +230,7 @@ fn cross_block_def_interferes_only_with_wired_successors() {
         "the cross-block value is live into its using block",
     );
 
-    let no_edge = analyze(&context, &blocks, |_| Vec::new());
+    let no_edge = analyze(&context, &blocks, cfg(&[]));
     assert!(
         !no_edge.interferes(v.number(), w.number()),
         "without the CFG edge the bug hides the interference (regression guard)",
@@ -388,15 +256,15 @@ fn diamond_live_through_interferes_on_both_arms() {
     addi(&context, &merge, v, a_id, ty);
 
     let blocks = [entry.id(), left.id(), right.id(), merge.id()];
-    let liveness = analyze(&context, &blocks, |blk| {
-        if blk == entry.id() {
-            vec![left.id(), right.id()]
-        } else if blk == left.id() || blk == right.id() {
-            vec![merge.id()]
-        } else {
-            vec![]
-        }
-    });
+    let liveness = analyze(
+        &context,
+        &blocks,
+        cfg(&[
+            (entry.id(), &[left.id(), right.id()]),
+            (left.id(), &[merge.id()]),
+            (right.id(), &[merge.id()]),
+        ]),
+    );
 
     assert!(liveness.live_in[&left.id()].contains(&v.number()));
     assert!(liveness.live_in[&right.id()].contains(&v.number()));
@@ -450,7 +318,7 @@ fn physical_read_forbids_live_vreg() {
     phys_op(&context, &block, r(), 0, false); // use P
     addi(&context, &block, v1, a_id, ty); // use v1
 
-    let liveness = analyze(&context, &[block.id()], |_| Vec::new());
+    let liveness = analyze(&context, &[block.id()], cfg(&[]));
 
     assert!(
         liveness.forbidden[&v1.number()].contains(&(r(), 0)),
@@ -474,13 +342,11 @@ fn loop_back_edge_converges() {
 
     // header -> body -> header (back edge).
     let blocks = [header.id(), body.id()];
-    let liveness = analyze(&context, &blocks, |blk| {
-        if blk == header.id() {
-            vec![body.id()]
-        } else {
-            vec![header.id()]
-        }
-    });
+    let liveness = analyze(
+        &context,
+        &blocks,
+        cfg(&[(header.id(), &[body.id()]), (body.id(), &[header.id()])]),
+    );
 
     assert!(
         liveness.live_in[&body.id()].contains(&carried.number()),

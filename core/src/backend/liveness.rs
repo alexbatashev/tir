@@ -89,29 +89,6 @@ fn ordered(a: u32, b: u32) -> (u32, u32) {
     (a.min(b), a.max(b))
 }
 
-/// Whether `value` is a register at all: one that still exists. A dependency
-/// port is an SSA edge like any other, but it lives in no register, and the
-/// register slots never name one.
-fn is_register(context: &Context, value: ValueId) -> bool {
-    context.has_value(value)
-}
-
-/// Every virtual register some instruction in `blocks` names, as a use or a def.
-fn referenced_vregs(context: &Context, blocks: &[BlockId]) -> BTreeSet<u32> {
-    let mut referenced = BTreeSet::new();
-    for &block_id in blocks {
-        for op_id in context.get_block(block_id).op_ids() {
-            let regs = op_regs(&context.get_op(op_id));
-            for value in regs.uses.iter().chain(&regs.defs) {
-                if is_register(context, *value) {
-                    referenced.insert(value.number());
-                }
-            }
-        }
-    }
-    referenced
-}
-
 /// Analyze liveness over `blocks` (in program order), using `successors` for the
 /// inter-block dataflow: `successors(b)` returns the control-flow successor blocks
 /// of `b`. A value defined in one block and used in another is live across the
@@ -123,16 +100,9 @@ pub fn analyze(
     successors: impl Fn(BlockId) -> Vec<BlockId>,
 ) -> Liveness {
     let mut result = Liveness::default();
-    let referenced = referenced_vregs(context, blocks);
     let mut value_classes: HashMap<ValueId, Option<RegClassId>> = HashMap::new();
 
-    let block_infos = collect_block_infos(
-        context,
-        blocks,
-        &referenced,
-        &mut result,
-        &mut value_classes,
-    );
+    let block_infos = collect_block_infos(context, blocks, &mut result, &mut value_classes);
     let (live_in, live_out) = solve_live_sets(&block_infos, blocks.first().copied(), &successors);
     build_interference(&mut result, &block_infos, &live_in, &live_out);
 
@@ -143,33 +113,22 @@ pub fn analyze(
 fn collect_block_infos(
     context: &Context,
     blocks: &[BlockId],
-    referenced: &BTreeSet<u32>,
     result: &mut Liveness,
     value_classes: &mut HashMap<ValueId, Option<RegClassId>>,
 ) -> Vec<BlockInfo> {
     let mut block_infos: Vec<BlockInfo> = Vec::new();
     for &block_id in blocks {
         let block = context.get_block(block_id);
-        // Block parameters were lowered to explicit copies before allocation, so a
-        // parameter is a value only while some instruction still names it. One that
-        // spilling has rewritten away carries nothing, and keeping it would leave
-        // the allocator a candidate whose spilling can never relieve pressure.
         let params: Vec<u32> = block
             .value_arguments()
             .iter()
             .map(|v| v.id().number())
-            .filter(|vreg| referenced.contains(vreg))
             .collect();
 
         let mut ops = Vec::new();
         let mut exposed_uses = BTreeSet::new();
-        let mut defined = BTreeSet::new();
+        let mut defined: BTreeSet<u32> = params.iter().copied().collect();
         let mut block_defs: BTreeSet<u32> = params.iter().copied().collect();
-
-        for &param in &params {
-            result.vregs.insert(param);
-            defined.insert(param);
-        }
 
         for op_id in block.op_ids() {
             ops.push(collect_op_info(
@@ -190,6 +149,21 @@ fn collect_block_infos(
             exposed_uses,
             defs: block_defs,
         });
+    }
+
+    // Block parameters were lowered to explicit copies before allocation, so a
+    // parameter is a value only while some instruction still names it. One that
+    // spilling has rewritten away carries nothing, and keeping it would leave
+    // the allocator a candidate whose spilling can never relieve pressure.
+    let referenced: BTreeSet<u32> = block_infos
+        .iter()
+        .flat_map(|info| info.ops.iter())
+        .flat_map(|op| op.use_vregs.iter().chain(&op.def_vregs))
+        .copied()
+        .collect();
+    for info in &mut block_infos {
+        info.params.retain(|vreg| referenced.contains(vreg));
+        result.vregs.extend(info.params.iter().copied());
     }
     block_infos
 }
@@ -213,7 +187,7 @@ fn collect_op_info(
     let mut clobbers = Vec::new();
     let mut phys_uses = Vec::new();
 
-    for value in regs.uses.iter().filter(|v| is_register(context, **v)) {
+    for value in regs.uses.iter().filter(|v| context.has_value(**v)) {
         let id = value.number();
         record_class(
             result,
@@ -228,7 +202,7 @@ fn collect_op_info(
             exposed_uses.insert(id);
         }
     }
-    for value in regs.defs.iter().filter(|v| is_register(context, **v)) {
+    for value in regs.defs.iter().filter(|v| context.has_value(**v)) {
         let id = value.number();
         record_class(
             result,

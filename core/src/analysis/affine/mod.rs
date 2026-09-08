@@ -15,14 +15,15 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use crate::analysis::chain;
 use crate::builtin::{
     AddIOp, AndIOp, ExtSIOp, IntegerType, MulIOp, OrIOp, ShlIOp, SubIOp, TruncIOp, XOrIOp,
 };
 use crate::ptr::PtrAddOp;
-use crate::state::{JoinOp, SplitOp};
+use crate::state::JoinOp;
 use crate::{
-    BlockId, ConstantLike, Context, CountedLoop, DataLayout, Gamma, MemoryRead, MemoryWrite,
-    OpHandle, OpId, Theta, TypeId, ValueId,
+    BlockId, ConstantLike, Context, CountedLoop, DataLayout, Gamma, OpHandle, OpId, Theta, TypeId,
+    ValueId,
 };
 
 pub(crate) mod build;
@@ -243,7 +244,7 @@ fn counted_level(context: &Context, outer: OpId) -> Option<OpId> {
 }
 
 /// The single block of a loop's ordered body region.
-pub(crate) fn body_block(context: &Context, op: OpId) -> Option<BlockId> {
+fn body_block(context: &Context, op: OpId) -> Option<BlockId> {
     let region = *context.get_op(op).regions().last()?;
     match context.get_region(region).block_ids()[..] {
         [block] => Some(block),

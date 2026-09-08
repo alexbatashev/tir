@@ -24,6 +24,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use xshell::{cmd, Shell};
 
+use crate::utils::collect_c_files;
 use harness::{FccVariant, Outcome};
 
 /// Mid-end pipelines exercised besides the default. All are semantically
@@ -500,21 +501,6 @@ const SELF_TEST_PROGRAM: &str = "#include <stdio.h>\n\
 fn make_executable(path: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).context("chmod stub")?;
-    Ok(())
-}
-
-fn collect_c_files(dir: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            collect_c_files(&path, files)?;
-        } else if path.extension().is_some_and(|e| e == "c") {
-            files.push(path);
-        }
-    }
     Ok(())
 }
 

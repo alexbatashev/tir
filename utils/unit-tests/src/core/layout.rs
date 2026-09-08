@@ -9,6 +9,8 @@ use tir::{
     scoped_dict, Context, DataLayout, Endianness, Operation, TargetEnv,
 };
 
+use super::fixtures;
+
 /// The layout of a module declaring `spec`.
 fn layout(context: &Context, spec: &str) -> DataLayout {
     let src = format!("module {{data_layout = {spec}}} {{\n  module_end\n}}");
@@ -16,130 +18,89 @@ fn layout(context: &Context, spec: &str) -> DataLayout {
     DataLayout::for_op(context, module.id()).expect("layout in scope")
 }
 
+/// Every data-layout accessor reads its entry out of the spec the module
+/// declares, and answers "absent" for what the spec leaves out.
 #[test]
-fn endianness_is_read_from_the_spec() {
-    let context = Context::with_default_dialects();
+fn layout_accessors_read_the_declared_spec() {
+    type Probe = fn(&Context, &DataLayout);
 
-    let little = layout(&context, r#"{endianness = "little"}"#);
-    let big = layout(&context, r#"{endianness = "big"}"#);
+    let cases: &[(&str, Probe)] = &[
+        (r#"{endianness = "little"}"#, |_, layout| {
+            assert_eq!(layout.endianness(), Some(Endianness::Little));
+        }),
+        (r#"{endianness = "big"}"#, |_, layout| {
+            assert_eq!(layout.endianness(), Some(Endianness::Big));
+        }),
+        ("{stack_alignment = 128}", |_, layout| {
+            assert_eq!(layout.stack_alignment(), Some(128));
+        }),
+        ("{types = {p = {size = 32, abi = 32}}}", |_, layout| {
+            assert_eq!(layout.pointer_size(), Some(32));
+        }),
+        // A class layout is read without a type of that class existing.
+        ("{types = {f64 = {size = 64, abi = 32}}}", |_, layout| {
+            assert_eq!(layout.class_layout("f64"), Some((64, 32)));
+            assert_eq!(layout.class_layout("f32"), None);
+        }),
+        // An integer's size defaults to its own width; a declared one wins.
+        ("{types = {i32 = {abi = 32}}}", |context, layout| {
+            let i32_ty = IntegerType::new(context, 32);
+            assert_eq!(layout.size_in_bits(context, i32_ty), Some(32));
+        }),
+        ("{types = {i1 = {size = 8, abi = 8}}}", |context, layout| {
+            let i1 = IntegerType::new(context, 1);
+            assert_eq!(layout.size_in_bits(context, i1), Some(8));
+        }),
+        // ABI alignment is read per type class...
+        (
+            "{types = {i16 = {abi = 16}, f64 = {abi = 64}, p = {size = 64, abi = 64}}}",
+            |context, layout| {
+                let i16_ty = IntegerType::new(context, 16);
+                let f64_ty = FloatType::f64(context);
+                let pointer = PtrType::opaque(context);
+                assert_eq!(layout.abi_alignment(context, i16_ty), Some(16));
+                assert_eq!(layout.abi_alignment(context, f64_ty), Some(64));
+                assert_eq!(layout.abi_alignment(context, pointer), Some(64));
+            },
+        ),
+        // ... and an undeclared class has none.
+        ("{types = {i64 = {abi = 64}}}", |context, layout| {
+            let i128_ty = IntegerType::new(context, 128);
+            assert_eq!(layout.abi_alignment(context, i128_ty), None);
+        }),
+        // Preferred alignment defaults to the ABI one, and is read when given.
+        ("{types = {i16 = {abi = 16}}}", |context, layout| {
+            let i16_ty = IntegerType::new(context, 16);
+            assert_eq!(layout.preferred_alignment(context, i16_ty), Some(16));
+        }),
+        (
+            "{types = {i16 = {abi = 16, preferred = 32}}}",
+            |context, layout| {
+                let i16_ty = IntegerType::new(context, 16);
+                assert_eq!(layout.preferred_alignment(context, i16_ty), Some(32));
+            },
+        ),
+        // Entries outside the predefined set stay readable.
+        ("{address_spaces = {global = 1}}", |_, layout| {
+            assert!(layout.get("address_spaces").is_some());
+            assert!(layout.get("endianness").is_none());
+        }),
+    ];
 
-    assert_eq!(little.endianness(), Some(Endianness::Little));
-    assert_eq!(big.endianness(), Some(Endianness::Big));
-}
-
-#[test]
-fn stack_alignment_is_read_from_the_spec() {
-    let context = Context::with_default_dialects();
-
-    let layout = layout(&context, "{stack_alignment = 128}");
-
-    assert_eq!(layout.stack_alignment(), Some(128));
-}
-
-#[test]
-fn pointer_size_comes_from_the_pointer_entry() {
-    let context = Context::with_default_dialects();
-
-    let layout = layout(&context, "{types = {p = {size = 32, abi = 32}}}");
-
-    assert_eq!(layout.pointer_size(), Some(32));
-}
-
-#[test]
-fn a_class_layout_is_read_without_a_type() {
-    let context = Context::with_default_dialects();
-
-    let layout = layout(&context, "{types = {f64 = {size = 64, abi = 32}}}");
-
-    assert_eq!(layout.class_layout("f64"), Some((64, 32)));
-    assert_eq!(layout.class_layout("f32"), None);
-}
-
-#[test]
-fn an_integer_size_defaults_to_its_own_width() {
-    let context = Context::with_default_dialects();
-    let i32_ty = IntegerType::new(&context, 32);
-
-    let layout = layout(&context, "{types = {i32 = {abi = 32}}}");
-
-    assert_eq!(layout.size_in_bits(&context, i32_ty), Some(32));
-}
-
-#[test]
-fn a_declared_size_overrides_the_type_width() {
-    let context = Context::with_default_dialects();
-    let i1 = IntegerType::new(&context, 1);
-
-    let layout = layout(&context, "{types = {i1 = {size = 8, abi = 8}}}");
-
-    assert_eq!(layout.size_in_bits(&context, i1), Some(8));
-}
-
-#[test]
-fn abi_alignment_is_read_per_type_class() {
-    let context = Context::with_default_dialects();
-    let i16_ty = IntegerType::new(&context, 16);
-    let f64_ty = FloatType::f64(&context);
-    let pointer = PtrType::opaque(&context);
-
-    let layout = layout(
-        &context,
-        "{types = {i16 = {abi = 16}, f64 = {abi = 64}, p = {size = 64, abi = 64}}}",
-    );
-
-    assert_eq!(layout.abi_alignment(&context, i16_ty), Some(16));
-    assert_eq!(layout.abi_alignment(&context, f64_ty), Some(64));
-    assert_eq!(layout.abi_alignment(&context, pointer), Some(64));
-}
-
-#[test]
-fn preferred_alignment_defaults_to_the_abi_alignment() {
-    let context = Context::with_default_dialects();
-    let i16_ty = IntegerType::new(&context, 16);
-
-    let layout = layout(&context, "{types = {i16 = {abi = 16}}}");
-
-    assert_eq!(layout.preferred_alignment(&context, i16_ty), Some(16));
-}
-
-#[test]
-fn preferred_alignment_is_read_when_declared() {
-    let context = Context::with_default_dialects();
-    let i16_ty = IntegerType::new(&context, 16);
-
-    let layout = layout(&context, "{types = {i16 = {abi = 16, preferred = 32}}}");
-
-    assert_eq!(layout.preferred_alignment(&context, i16_ty), Some(32));
-}
-
-#[test]
-fn an_undeclared_type_class_has_no_alignment() {
-    let context = Context::with_default_dialects();
-    let i128_ty = IntegerType::new(&context, 128);
-
-    let layout = layout(&context, "{types = {i64 = {abi = 64}}}");
-
-    assert_eq!(layout.abi_alignment(&context, i128_ty), None);
-}
-
-#[test]
-fn entries_outside_the_predefined_set_stay_readable() {
-    let context = Context::with_default_dialects();
-
-    let layout = layout(&context, "{address_spaces = {global = 1}}");
-
-    assert!(layout.get("address_spaces").is_some());
-    assert!(layout.get("endianness").is_none());
+    for (spec, probe) in cases {
+        let context = Context::with_default_dialects();
+        probe(&context, &layout(&context, spec));
+    }
 }
 
 #[test]
 fn ir_entries_override_the_target_default_key_by_key() {
-    let context = Context::with_default_dialects();
     let default = tir::data_layout_spec(Endianness::Big, 128, &[("i32", 32, 32), ("p", 64, 64)]);
-    let src = r#"module {data_layout = {endianness = "little", types = {p = {size = 32, abi = 32}}}} {
+    let (context, module) = fixtures::parse(
+        r#"module {data_layout = {endianness = "little", types = {p = {size = 32, abi = 32}}}} {
   module_end
-}"#;
-    let module = parse_ir::<ModuleOp>(&context, src).expect("parse module");
+}"#,
+    );
 
     let layout = DataLayout::for_op_with_default(&context, module.id(), Some(&default))
         .expect("target default applies");
@@ -157,9 +118,8 @@ fn ir_entries_override_the_target_default_key_by_key() {
 
 #[test]
 fn the_target_default_applies_where_the_ir_declares_nothing() {
-    let context = Context::with_default_dialects();
     let default = tir::data_layout_spec(Endianness::Little, 64, &[("p", 64, 64)]);
-    let module = parse_ir::<ModuleOp>(&context, "module {\n  module_end\n}").expect("parse");
+    let (context, module) = fixtures::parse("module {\n  module_end\n}");
 
     let layout = DataLayout::for_op_with_default(&context, module.id(), Some(&default))
         .expect("target default applies");
@@ -188,52 +148,36 @@ fn target_env(context: &Context, spec: &str) -> TargetEnv {
     TargetEnv::for_op(context, module.id()).expect("environment in scope")
 }
 
+/// Every target-environment accessor reads its entry out of the spec the
+/// module declares, and answers "absent" for what the spec leaves out.
 #[test]
-fn arch_and_cpu_are_read_from_the_spec() {
-    let context = Context::with_default_dialects();
+fn target_env_accessors_read_the_declared_spec() {
+    type Probe = fn(&TargetEnv);
 
-    let env = target_env(&context, r#"{arch = "riscv64", cpu = "sifive-u74"}"#);
+    let cases: &[(&str, Probe)] = &[
+        (r#"{arch = "riscv64", cpu = "sifive-u74"}"#, |env| {
+            assert_eq!(env.arch(), Some("riscv64"));
+            assert_eq!(env.cpu(), Some("sifive-u74"));
+        }),
+        (r#"{arch = "arm64"}"#, |env| assert_eq!(env.cpu(), None)),
+        (r#"{arch = "riscv64", features = ["m", "c"]}"#, |env| {
+            assert!(env.has_feature("m"));
+            assert!(env.has_feature("c"));
+            assert!(!env.has_feature("v"));
+        }),
+        (r#"{arch = "riscv64"}"#, |env| {
+            assert!(!env.has_feature("m"));
+        }),
+        // Entries outside the predefined set stay readable.
+        ("{shared_memory = 65536}", |env| {
+            assert_eq!(env.get("shared_memory"), Some(&AttributeValue::Int(65536)));
+        }),
+    ];
 
-    assert_eq!(env.arch(), Some("riscv64"));
-    assert_eq!(env.cpu(), Some("sifive-u74"));
-}
-
-#[test]
-fn an_absent_cpu_is_unknown() {
-    let context = Context::with_default_dialects();
-
-    let env = target_env(&context, r#"{arch = "arm64"}"#);
-
-    assert_eq!(env.cpu(), None);
-}
-
-#[test]
-fn enabled_features_are_queryable_by_name() {
-    let context = Context::with_default_dialects();
-
-    let env = target_env(&context, r#"{arch = "riscv64", features = ["m", "c"]}"#);
-
-    assert!(env.has_feature("m"));
-    assert!(env.has_feature("c"));
-    assert!(!env.has_feature("v"));
-}
-
-#[test]
-fn a_spec_without_features_enables_none() {
-    let context = Context::with_default_dialects();
-
-    let env = target_env(&context, r#"{arch = "riscv64"}"#);
-
-    assert!(!env.has_feature("m"));
-}
-
-#[test]
-fn target_entries_outside_the_predefined_set_stay_readable() {
-    let context = Context::with_default_dialects();
-
-    let env = target_env(&context, "{shared_memory = 65536}");
-
-    assert_eq!(env.get("shared_memory"), Some(&AttributeValue::Int(65536)));
+    for (spec, probe) in cases {
+        let context = Context::with_default_dialects();
+        probe(&target_env(&context, spec));
+    }
 }
 
 #[test]

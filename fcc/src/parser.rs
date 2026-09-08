@@ -1994,100 +1994,88 @@ fn finish_record(
 }
 
 fn builtin_type(tokens: &[Token]) -> CType {
-    if !valid_builtin_type(tokens) {
-        return CType::Invalid(tokens_text(tokens));
-    }
-    let unsigned = tokens.iter().any(|tok| matches!(tok, Token::KwUnsigned));
-    let signed = tokens.iter().any(|tok| matches!(tok, Token::KwSigned));
-    let long_count = tokens
-        .iter()
-        .filter(|tok| matches!(tok, Token::KwLong))
-        .count();
-    if tokens.iter().any(|tok| matches!(tok, Token::KwVoid)) {
-        CType::Void
-    } else if tokens
-        .iter()
-        .any(|tok| matches!(tok, Token::KwBool | Token::KwUnderscoreBool))
-    {
-        CType::Bool
-    } else if tokens.iter().any(|tok| matches!(tok, Token::KwFloat)) {
-        CType::Float
-    } else if tokens.iter().any(|tok| matches!(tok, Token::KwDouble)) {
-        if long_count > 0 {
-            CType::LongDouble
-        } else {
-            CType::Double
-        }
-    } else if tokens.iter().any(|tok| matches!(tok, Token::KwChar)) {
-        if unsigned {
-            CType::UnsignedChar
-        } else if signed {
-            CType::SignedChar
-        } else {
-            CType::Char
-        }
-    } else if tokens.iter().any(|tok| matches!(tok, Token::KwShort)) {
-        if unsigned {
-            CType::UnsignedShort
-        } else {
-            CType::Short
-        }
-    } else if long_count >= 2 {
-        if unsigned {
-            CType::UnsignedLongLong
-        } else {
-            CType::LongLong
-        }
-    } else if long_count == 1 {
-        if unsigned {
-            CType::UnsignedLong
-        } else {
-            CType::Long
-        }
-    } else if unsigned {
-        CType::UnsignedInt
-    } else if tokens
-        .iter()
-        .any(|tok| matches!(tok, Token::KwInt | Token::KwSigned))
-    {
-        CType::Int
-    } else {
-        CType::Builtin(tokens_text(tokens))
-    }
+    SpecCounts::of(tokens)
+        .ctype()
+        .unwrap_or_else(|| CType::Invalid(tokens_text(tokens)))
 }
 
-fn valid_builtin_type(tokens: &[Token]) -> bool {
-    let count = |needle: &Token| tokens.iter().filter(|token| *token == needle).count();
-    let void = count(&Token::KwVoid);
-    let boolean = count(&Token::KwUnderscoreBool) + count(&Token::KwBool);
-    let float = count(&Token::KwFloat);
-    let double = count(&Token::KwDouble);
-    let char_ = count(&Token::KwChar);
-    let short = count(&Token::KwShort);
-    let long = count(&Token::KwLong);
-    let signed = count(&Token::KwSigned);
-    let unsigned = count(&Token::KwUnsigned);
-    let int = count(&Token::KwInt);
+/// How often each builtin type specifier keyword occurs in a declaration's specifier list.
+#[derive(Default)]
+struct SpecCounts {
+    void: usize,
+    boolean: usize,
+    float: usize,
+    double: usize,
+    char_: usize,
+    short: usize,
+    long: usize,
+    int: usize,
+    signed: usize,
+    unsigned: usize,
+    other: usize,
+}
 
-    if signed > 1 || unsigned > 1 || signed + unsigned > 1 || int > 1 || short > 1 || long > 2 {
-        return false;
+impl SpecCounts {
+    fn of(tokens: &[Token]) -> Self {
+        let mut counts = SpecCounts::default();
+        for token in tokens {
+            let slot = match token {
+                Token::KwVoid => &mut counts.void,
+                Token::KwBool | Token::KwUnderscoreBool => &mut counts.boolean,
+                Token::KwFloat => &mut counts.float,
+                Token::KwDouble => &mut counts.double,
+                Token::KwChar => &mut counts.char_,
+                Token::KwShort => &mut counts.short,
+                Token::KwLong => &mut counts.long,
+                Token::KwInt => &mut counts.int,
+                Token::KwSigned => &mut counts.signed,
+                Token::KwUnsigned => &mut counts.unsigned,
+                _ => &mut counts.other,
+            };
+            *slot += 1;
+        }
+        counts
     }
-    if void + boolean + float > 0 {
-        return tokens.len() == 1;
+
+    /// The type these specifiers name, or `None` for a combination C does not allow
+    /// (`long short`, `unsigned float`, a repeated keyword, ...).
+    fn ctype(&self) -> Option<CType> {
+        if self.other > 0 || self.int > 1 {
+            return None;
+        }
+        let sign = (self.signed, self.unsigned);
+        Some(
+            match (
+                self.void,
+                self.boolean,
+                self.float,
+                self.double,
+                self.char_,
+                self.short,
+                self.long,
+                self.int,
+                sign,
+            ) {
+                (1, 0, 0, 0, 0, 0, 0, 0, (0, 0)) => CType::Void,
+                (0, 1, 0, 0, 0, 0, 0, 0, (0, 0)) => CType::Bool,
+                (0, 0, 1, 0, 0, 0, 0, 0, (0, 0)) => CType::Float,
+                (0, 0, 0, 1, 0, 0, 0, 0, (0, 0)) => CType::Double,
+                (0, 0, 0, 1, 0, 0, 1, 0, (0, 0)) => CType::LongDouble,
+                (0, 0, 0, 0, 1, 0, 0, 0, (0, 0)) => CType::Char,
+                (0, 0, 0, 0, 1, 0, 0, 0, (1, 0)) => CType::SignedChar,
+                (0, 0, 0, 0, 1, 0, 0, 0, (0, 1)) => CType::UnsignedChar,
+                (0, 0, 0, 0, 0, 1, 0, _, (0, 0) | (1, 0)) => CType::Short,
+                (0, 0, 0, 0, 0, 1, 0, _, (0, 1)) => CType::UnsignedShort,
+                (0, 0, 0, 0, 0, 0, 2, _, (0, 0) | (1, 0)) => CType::LongLong,
+                (0, 0, 0, 0, 0, 0, 2, _, (0, 1)) => CType::UnsignedLongLong,
+                (0, 0, 0, 0, 0, 0, 1, _, (0, 0) | (1, 0)) => CType::Long,
+                (0, 0, 0, 0, 0, 0, 1, _, (0, 1)) => CType::UnsignedLong,
+                (0, 0, 0, 0, 0, 0, 0, _, (0, 1)) => CType::UnsignedInt,
+                (0, 0, 0, 0, 0, 0, 0, 1, (0, 0)) | (0, 0, 0, 0, 0, 0, 0, _, (1, 0)) => CType::Int,
+                _ => return None,
+            },
+        )
     }
-    if double > 0 {
-        return double == 1 && long <= 1 && tokens.len() == 1 + long;
-    }
-    if char_ > 0 {
-        return char_ == 1 && tokens.len() == 1 + signed + unsigned;
-    }
-    if short > 0 {
-        return long == 0 && tokens.len() == short + signed + unsigned + int;
-    }
-    if long > 0 {
-        return tokens.len() == long + signed + unsigned + int;
-    }
-    !tokens.is_empty() && tokens.len() == signed + unsigned + int
 }
 
 fn is_decl_attr_name(name: &str) -> bool {

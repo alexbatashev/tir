@@ -15,7 +15,7 @@ use std::rc::Rc;
 use crate::analysis::solver::{FactDomain, Facts, Lattice, solve};
 use crate::analysis::{Analysis, AnalysisManager, DefUse};
 use crate::ptr::{CmpOp, PtrAddOp, PtrType};
-use crate::{Context, MemoryRead, MemoryWrite, OpHandle, OpId, ValueId};
+use crate::{Context, OpHandle, OpId, ValueId};
 
 /// How far the address a pointer holds travels.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -109,23 +109,16 @@ fn use_of(instance: &OpHandle, operand: ValueId) -> Escape {
     if instance.is::<PtrAddOp>() || instance.is::<CmpOp>() {
         return Escape::Local;
     }
-    if let Some(read) = instance.clone().as_interface::<dyn MemoryRead>() {
-        return if read.read_location() == operand {
-            Escape::Local
-        } else {
-            Escape::Escapes
-        };
+    let Some(access) = super::access_of(instance) else {
+        return Escape::Escapes;
+    };
+    if access.write && access.value == operand {
+        return Escape::Captured;
     }
-    if let Some(write) = instance.clone().as_interface::<dyn MemoryWrite>() {
-        return if write.written_value() == operand {
-            Escape::Captured
-        } else if write.write_location() == operand {
-            Escape::Local
-        } else {
-            Escape::Escapes
-        };
+    match access.location == operand {
+        true => Escape::Local,
+        false => Escape::Escapes,
     }
-    Escape::Escapes
 }
 
 pub(crate) fn is_pointer(context: &Context, value: ValueId) -> bool {

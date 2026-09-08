@@ -13,6 +13,17 @@ use super::*;
 
 const MAGIC: u32 = 0x0723_0203;
 
+/// The `spirv` ops written as an opcode over their value operands, as
+/// `(name, opcode, has_result)`. Everything the SPIR-V grammar generates is in
+/// [`opcode_for_name`]; these are the hand-written ops of the dialect.
+const CORE_OPS: &[(&str, u16, bool)] = &[
+    ("Load", 61, true),
+    ("Store", 62, false),
+    ("AccessChain", 65, true),
+    ("ControlBarrier", 224, false),
+    ("MemoryBarrier", 225, false),
+];
+
 type Result<T> = std::result::Result<T, String>;
 
 pub fn write_binary(context: &Context, root: &BuiltinModuleOp) -> Result<Vec<u8>> {
@@ -79,10 +90,10 @@ impl<'a> Writer<'a> {
             if let Some(global) = op.clone().as_op::<GlobalVariableOp>() {
                 let id = self.id();
                 self.value_ids.insert(global.result(), id);
-                self.symbol_ids.insert(attr_str(&global, "sym_name")?, id);
+                self.symbol_ids.insert(global.sym_name(), id);
             } else if let Some(func) = op.clone().as_op::<FuncOp>() {
                 let id = self.id();
-                self.symbol_ids.insert(attr_str(&func, "sym_name")?, id);
+                self.symbol_ids.insert(func.sym_name(), id);
             }
         }
 
@@ -97,7 +108,7 @@ impl<'a> Writer<'a> {
                 instruction(
                     &mut capabilities,
                     17,
-                    &[capability_number(&attr_str(&capability, "name")?)?],
+                    &[capability_number(&capability.name())?],
                 );
             } else if let Some(entry) = op.clone().as_op::<EntryPointOp>() {
                 self.write_entry(&entry, &mut entries)?;
@@ -109,8 +120,8 @@ impl<'a> Writer<'a> {
                 self.write_function(&func, &mut debug, &mut functions)?;
             }
         }
-        let addressing = addressing_number(&attr_str(&self.module, "addressing_model")?)?;
-        let memory = memory_model_number(&attr_str(&self.module, "memory_model")?)?;
+        let addressing = addressing_number(&self.module.addressing_model())?;
+        let memory = memory_model_number(&self.module.memory_model())?;
         let mut body = Vec::new();
         body.extend(capabilities);
         instruction(&mut body, 14, &[addressing, memory]);
@@ -121,16 +132,16 @@ impl<'a> Writer<'a> {
         body.extend(self.type_words);
         body.extend(globals);
         body.extend(functions);
-        let version = version_word(&attr_str(&self.module, "version")?)?;
+        let version = version_word(&self.module.version())?;
         let mut result = vec![MAGIC, version, 0, self.next_id, 0];
         result.extend(body);
         Ok(result)
     }
 
     fn write_entry(&self, op: &EntryPointOp, out: &mut Vec<u32>) -> Result<()> {
-        let function = attr_str(op, "function")?;
+        let function = op.function();
         let mut operands = vec![
-            execution_model_number(&attr_str(op, "execution_model")?)?,
+            execution_model_number(&op.execution_model())?,
             *self
                 .symbol_ids
                 .get(&function)
@@ -153,13 +164,13 @@ impl<'a> Writer<'a> {
     }
 
     fn write_mode(&self, op: &ExecutionModeOp, out: &mut Vec<u32>) -> Result<()> {
-        let function = attr_str(op, "function")?;
+        let function = op.function();
         let mut operands = vec![
             *self
                 .symbol_ids
                 .get(&function)
                 .ok_or_else(|| format!("unknown function @{function}"))?,
-            execution_mode_number(&attr_str(op, "mode")?)?,
+            execution_mode_number(&op.mode())?,
         ];
         operands.extend(
             attr_array(op, "values")?
@@ -179,11 +190,11 @@ impl<'a> Writer<'a> {
     ) -> Result<()> {
         let result = op.result();
         let id = self.value_ids[&result];
-        let name = attr_str(op, "sym_name")?;
+        let name = op.sym_name();
         write_name(debug, id, &name);
         let ty = self.context.get_value(result).ty();
         let type_id = self.type_id(ty)?;
-        let storage = storage_class_number(&attr_str(op, "storage_class")?)?;
+        let storage = storage_class_number(&op.storage_class())?;
         let decorations = attr_dict(op, "decorations")?;
         for (name, value) in decorations {
             let (decoration, literal) = decoration_number(&name, &value)?;
@@ -206,10 +217,10 @@ impl<'a> Writer<'a> {
             return self.write_blocks(func, &Destructured::default(), debug, out);
         }
         let mut rewriter = tir::Rewriter::new(self.context.clone());
-        let copy = rewriter.clone_op(func.id());
+        let copy = tir::clone_op(self.context, func.id());
         self.module.body().append(copy);
         let copy = FuncOp::from_op_instance(self.context.get_op(copy));
-        let name = attr_str(func, "sym_name")?;
+        let name = func.sym_name();
         let structure = tir::passes::destructure(
             self.context,
             &mut rewriter,
@@ -233,10 +244,10 @@ impl<'a> Writer<'a> {
         debug: &mut Vec<u32>,
         out: &mut Vec<u32>,
     ) -> Result<()> {
-        let name = attr_str(func, "sym_name")?;
+        let name = func.sym_name();
         let function_id = self.symbol_ids[&name];
         write_name(debug, function_id, &name);
-        let return_type = attr_type(func, "ret_type")?;
+        let return_type = func.ret_type();
         let return_id = self.type_id(return_type)?;
         let entry = func.body();
         let params = entry.value_arguments();
@@ -292,8 +303,9 @@ impl<'a> Writer<'a> {
                         vec![self.type_id(argument.ty())?, self.value_ids[&argument.id()]];
                     for pred in &blocks {
                         let terminator = pred
-                            .iter(self.context.clone())
-                            .next_back()
+                            .op_ids()
+                            .last()
+                            .map(|&op| self.context.get_op(op))
                             .ok_or("empty predecessor block")?;
                         if let Some(incoming) = branch_argument(terminator, block.id(), index) {
                             operands.extend([self.value(incoming)?, block_ids[&pred.id()]]);
@@ -331,43 +343,23 @@ impl<'a> Writer<'a> {
         if op.dialect().as_str() == "state" {
             return Ok(());
         }
-        if let Some(load) = op.clone().as_op::<LoadOp>() {
-            self.write_result_op(61, load.result(), &load.value_operands(), out)
-        } else if let Some(store) = op.clone().as_op::<StoreOp>() {
-            instruction(
-                out,
-                62,
-                &[
-                    self.value(store.value_operands()[0])?,
-                    self.value(store.value_operands()[1])?,
-                ],
-            );
-            Ok(())
-        } else if let Some(access) = op.clone().as_op::<AccessChainOp>() {
-            self.write_result_op(65, access.result(), &access.value_operands(), out)
-        } else if let Some(barrier) = op.clone().as_op::<ControlBarrierOp>() {
-            instruction(
-                out,
-                224,
-                &barrier
-                    .operands()
-                    .iter()
-                    .map(|value| self.value(*value))
-                    .collect::<Result<Vec<_>>>()?,
-            );
-            Ok(())
-        } else if let Some(barrier) = op.clone().as_op::<MemoryBarrierOp>() {
-            instruction(
-                out,
-                225,
-                &barrier
-                    .operands()
-                    .iter()
-                    .map(|value| self.value(*value))
-                    .collect::<Result<Vec<_>>>()?,
-            );
-            Ok(())
-        } else if let Some(extract) = op.clone().as_op::<CompositeExtractOp>() {
+        if op.dialect().as_str() == "spirv"
+            && let Some(&(_, opcode, has_result)) = CORE_OPS
+                .iter()
+                .find(|(name, ..)| *name == op.name().as_str())
+        {
+            let values = op.value_operands();
+            if has_result {
+                return self.write_result_op(opcode, op.value_results()[0], &values, out);
+            }
+            let operands = values
+                .iter()
+                .map(|value| self.value(*value))
+                .collect::<Result<Vec<_>>>()?;
+            instruction(out, opcode, &operands);
+            return Ok(());
+        }
+        if let Some(extract) = op.clone().as_op::<CompositeExtractOp>() {
             let mut operands = self.result_prefix(extract.result())?;
             operands.push(self.value(extract.operands()[0])?);
             operands.extend(
@@ -698,8 +690,8 @@ impl<'a> Reader<'a> {
             let storage = storage_class(o[2])?;
             let decorations = self.ir_decorations(id)?;
             let op = GlobalVariableOpBuilder::new(self.context)
-                .attr("sym_name", AttributeValue::Str(name.into()))
-                .attr("storage_class", AttributeValue::Str(storage.name().into()))
+                .sym_name(name)
+                .storage_class(storage.name())
                 .attr("decorations", AttributeValue::Dict(Box::new(decorations)))
                 .result_type(ty)
                 .build();
@@ -727,11 +719,8 @@ impl<'a> Reader<'a> {
                     .collect();
                 body.append_op(
                     EntryPointOpBuilder::new(self.context)
-                        .attr(
-                            "execution_model",
-                            AttributeValue::Str(execution_model_name(inst.operands[0])?.into()),
-                        )
-                        .attr("function", AttributeValue::Str(name.into()))
+                        .execution_model(execution_model_name(inst.operands[0])?)
+                        .function(name)
                         .attr("interfaces", AttributeValue::Array(interfaces.into()))
                         .build(),
                 );
@@ -743,11 +732,8 @@ impl<'a> Reader<'a> {
                     .unwrap_or_else(|| format!("function_{}", inst.operands[0]));
                 body.append_op(
                     ExecutionModeOpBuilder::new(self.context)
-                        .attr("function", AttributeValue::Str(function.into()))
-                        .attr(
-                            "mode",
-                            AttributeValue::Str(execution_mode_name(inst.operands[1])?.into()),
-                        )
+                        .function(function)
+                        .mode(execution_mode_name(inst.operands[1])?)
                         .attr(
                             "values",
                             AttributeValue::Array(
@@ -1152,18 +1138,6 @@ fn write_name(out: &mut Vec<u32>, id: u32, name: &str) {
 fn attr_value(op: &dyn Operation, name: &str) -> Result<AttributeValue> {
     op.attr(name)
         .ok_or_else(|| format!("missing attribute {name}"))
-}
-fn attr_str(op: &dyn Operation, name: &str) -> Result<String> {
-    match attr_value(op, name)? {
-        AttributeValue::Str(v) => Ok(v.to_string()),
-        _ => Err(format!("attribute {name} must be a string")),
-    }
-}
-fn attr_type(op: &dyn Operation, name: &str) -> Result<TypeId> {
-    match attr_value(op, name)? {
-        AttributeValue::Type(v) => Ok(v),
-        _ => Err(format!("attribute {name} must be a type")),
-    }
 }
 fn attr_array(op: &dyn Operation, name: &str) -> Result<Vec<AttributeValue>> {
     match attr_value(op, name)? {

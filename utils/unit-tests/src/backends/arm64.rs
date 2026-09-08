@@ -1,60 +1,15 @@
 //! Unit tests for the `tir-arm64` backend's public API.
 
+use tir::backend::abi::ValueKind;
 use tir::Context;
 use tir_arm64::{Feature, RegClass, TargetConfig};
 
-/// The one per-opcode record the backend describes `name` with.
-fn info(name: &str) -> &'static tir::backend::InstrInfo {
-    tir_arm64::instruction_infos()
-        .iter()
-        .copied()
-        .find(|info| info.name == name)
-        .unwrap_or_else(|| panic!("arm64 declares no instruction '{name}'"))
-}
-
-#[test]
-fn instruction_info_carries_every_per_opcode_fact() {
-    // One record per opcode: `add` prints, encodes and schedules through the
-    // fields of its own `InstrInfo`, with no side table keyed by its name.
-    let add = info("add");
-    assert_eq!(add.mnemonic, "add");
-    assert_eq!(add.width_bytes, (4, 4));
-    assert!(add.asm.is_some());
-    assert!(add.encode.is_some());
-    assert_eq!(add.sched.len(), tir_arm64::machines(Feature::ALL).len());
-    assert_eq!(add.effects, tir::backend::MemoryEffects::NONE);
-}
-
-#[test]
-fn guarded_relaxations_hold_for_all_rules() {
-    let context = Context::with_default_dialects();
-    let rules = tir_arm64::get_isel_rules(&context, Feature::ALL);
-    tir::backend::isel::prove_guarded_relaxations(&rules).unwrap();
-}
+use super::support::{numbers, pass_seq};
 
 #[test]
 fn generated_abi_matches_aapcs64_register_convention() {
     let abi = tir_arm64::default_abi();
-    let int_args = abi
-        .args
-        .iter()
-        .find(|sequence| sequence.kind == tir::backend::abi::ValueKind::Int)
-        .unwrap();
-    let int_rets = abi
-        .rets
-        .iter()
-        .find(|sequence| sequence.kind == tir::backend::abi::ValueKind::Int)
-        .unwrap();
-    let float_args = abi
-        .args
-        .iter()
-        .find(|sequence| sequence.kind == tir::backend::abi::ValueKind::Float)
-        .unwrap();
-    let vector_rets = abi
-        .rets
-        .iter()
-        .find(|sequence| sequence.kind == tir::backend::abi::ValueKind::Vector)
-        .unwrap();
+    let float_args = pass_seq(abi.args, ValueKind::Float);
 
     assert_eq!(abi.name, "aapcs64");
     assert_eq!(abi.sp, (RegClass::GPRsp.id(), 31));
@@ -67,25 +22,14 @@ fn generated_abi_matches_aapcs64_register_convention() {
         tir::backend::abi::SaveStyle::FrameSlots
     );
     assert_eq!(
-        int_args
-            .regs
-            .iter()
-            .map(|register| register.1)
-            .collect::<Vec<_>>(),
+        numbers(pass_seq(abi.args, ValueKind::Int).regs),
         (0..=7).collect::<Vec<_>>()
     );
-    assert_eq!(
-        int_rets
-            .regs
-            .iter()
-            .map(|register| register.1)
-            .collect::<Vec<_>>(),
-        vec![0, 1]
-    );
+    assert_eq!(numbers(pass_seq(abi.rets, ValueKind::Int).regs), vec![0, 1]);
     assert_eq!(float_args.regs[0], (RegClass::FPR64.id(), 0));
     assert_eq!(float_args.regs.last(), Some(&(RegClass::FPR64.id(), 7)));
     assert_eq!(
-        vector_rets.regs,
+        pass_seq(abi.rets, ValueKind::Vector).regs,
         &[
             (RegClass::VPR.id(), 0),
             (RegClass::VPR.id(), 1),

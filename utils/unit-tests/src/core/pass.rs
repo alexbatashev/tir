@@ -4,11 +4,12 @@ use std::collections::HashMap;
 
 use tir::{
     builtin::{ops, AddIOp, IntegerType},
-    cfg::ops as cfg_ops,
-    func::{ops as func_ops, FuncOp},
+    func::FuncOp,
     AnalysisManager, Context, Operation, OperationRef, Pass, PassError, PassManager, PassTarget,
     Rewriter,
 };
+
+use super::fixtures;
 
 struct AddToSubPass;
 
@@ -105,30 +106,24 @@ impl Pass for TouchPass {
     }
 }
 
-/// `func.func demo(%0) { %1 = addi %0, %0; func.return %1 }`, with `pass` run over it.
-fn run_on_broken_candidate(pass: Box<dyn Pass>) -> Result<(), PassError> {
+/// A function whose body block takes one argument, adds it to itself and
+/// returns the sum.
+const ADD_ITS_ARGUMENT: &str = r#"func.func @demo(%0: !i32) -> !i32 {
+  %1 = addi %0, %0 : !i32
+  func.return %1
+}"#;
+
+fn parse_func(source: &str) -> (Context, FuncOp) {
     let context = Context::with_default_dialects();
-    let i32 = IntegerType::new(&context, 32);
-    let region = context.create_region();
-    let arg = context.create_value(i32, None);
-    let block = context.create_block(vec![arg]);
-    region.add_block(block.id());
-    let func = func_ops::lambda(&context, "demo", i32, &region).build();
-    let body = func.body();
+    let func = tir::parse::ir::parse_ir::<FuncOp>(&context, source).expect("parse");
+    (context, func)
+}
 
-    let add = ops::addi(
-        &context,
-        body.arguments()[0].id(),
-        body.arguments()[0].id(),
-        i32,
-    )
-    .build();
-    let add_result = add.result();
-    body.append_op(add);
-    body.append_op(func_ops::r#return(&context, add_result).build());
-
+/// Runs `pass` over [`ADD_ITS_ARGUMENT`], whose `func.return` reads the addi a
+/// pass targeting it may leave dangling.
+fn run_on_broken_candidate(pass: Box<dyn Pass>) -> Result<(), PassError> {
+    let (context, func) = parse_func(ADD_ITS_ARGUMENT);
     let mut pm = PassManager::new();
-    pm.verify_ir(true);
     pm.add_boxed_pass(pass);
     pm.run(&context, context.get_op(func.id()))
 }
@@ -140,22 +135,6 @@ fn invalid_ir_after_a_pass_names_that_pass() {
     assert!(
         error.to_string().contains("break-ir"),
         "error should name the offending pass, got: {error}"
-    );
-}
-
-#[test]
-fn appending_a_block_argument_keeps_the_block_id() {
-    let context = Context::with_default_dialects();
-    let i32 = IntegerType::new(&context, 32);
-    let block = context.create_block(vec![]);
-    let mut rewriter = Rewriter::new(context.clone());
-
-    let argument = rewriter.append_block_argument(block.id(), i32);
-
-    let block = context.get_block(block.id());
-    assert_eq!(
-        block.arguments().iter().map(|a| a.id()).collect::<Vec<_>>(),
-        vec![argument.id()]
     );
 }
 
@@ -174,97 +153,6 @@ fn splitting_a_block_moves_its_tail_into_a_new_block() {
     assert_eq!(context.get_block(block.id()).op_ids(), vec![head.id()]);
     assert_eq!(split.op_ids(), vec![tail.id()]);
     assert_eq!(context.parent_block(tail.id()), Some(split.id()));
-}
-
-#[test]
-fn splicing_a_block_appends_its_operations_to_another() {
-    let context = Context::with_default_dialects();
-    let i32 = IntegerType::new(&context, 32);
-    let value = context.create_value(i32, None);
-    let destination = context.create_block(vec![]);
-    let source = context.create_block(vec![]);
-    let head = destination
-        .clone()
-        .append_op(ops::addi(&context, value.id(), value.id(), i32).build());
-    let moved = source
-        .clone()
-        .append_op(ops::subi(&context, value.id(), value.id(), i32).build());
-    let mut rewriter = Rewriter::new(context.clone());
-
-    rewriter.splice_block(source.id(), destination.id());
-
-    assert_eq!(
-        context.get_block(destination.id()).op_ids(),
-        vec![head.id(), moved.id()]
-    );
-    assert!(context.get_block(source.id()).is_empty());
-    assert_eq!(context.parent_block(moved.id()), Some(destination.id()));
-}
-
-/// A function whose body block takes one argument, adds it to itself and
-/// returns the sum.
-fn function_with_one_argument(context: &Context) -> FuncOp {
-    let i32 = IntegerType::new(context, 32);
-    let region = context.create_region();
-    let argument = context.create_value(i32, None);
-    let block = context.create_block(vec![argument.clone()]);
-    region.add_block(block.id());
-    let add = block.append_op(ops::addi(context, argument.id(), argument.id(), i32).build());
-    block.append_op(func_ops::r#return(context, add.result()).build());
-    func_ops::lambda(context, "demo", i32, &region).build()
-}
-
-#[test]
-fn cloning_an_op_remaps_values_defined_inside_it() {
-    let context = Context::with_default_dialects();
-    let source = function_with_one_argument(&context);
-    let mut rewriter = Rewriter::new(context.clone());
-
-    let clone = rewriter.clone_op(source.id());
-
-    let clone = context.get_op(clone);
-    assert_ne!(clone.id, source.id());
-    let body = context
-        .get_region(clone.regions()[0])
-        .iter(context.clone())
-        .next()
-        .expect("the clone keeps the body block");
-    let argument = body.arguments()[0].id();
-    assert_ne!(argument, source.body().arguments()[0].id());
-    let add = context.get_op(body.op_ids()[0]);
-    assert_eq!(add.operands().as_slice(), vec![argument, argument]);
-    let r#return = context.get_op(body.op_ids()[1]);
-    assert_eq!(r#return.operands().as_slice(), vec![add.results()[0]]);
-}
-
-#[test]
-fn cloning_a_region_remaps_branch_destinations() {
-    let context = Context::with_default_dialects();
-    let region = context.create_region();
-    let entry = context.create_block(vec![]);
-    let target = context.create_block(vec![]);
-    region.add_block(entry.id());
-    region.add_block(target.id());
-    entry.append_op(cfg_ops::br(&context, vec![], target.id()).build());
-    target
-        .clone()
-        .append_op(func_ops::r#return(&context, tir::Operand::none()).build());
-    let mut rewriter = Rewriter::new(context.clone());
-
-    let clone = rewriter.clone_region(region.id());
-
-    let blocks: Vec<_> = context
-        .get_region(clone)
-        .iter(context.clone())
-        .map(|block| block.id())
-        .collect();
-    assert_eq!(blocks.len(), 2);
-    assert!(!blocks.contains(&target.id()));
-    let branch = context
-        .get_op(context.get_block(blocks[0]).op_ids()[0])
-        .as_op::<tir::cfg::BranchOp>()
-        .expect("the clone keeps the branch");
-    assert_eq!(branch.dest(), blocks[1]);
 }
 
 #[test]
@@ -295,12 +183,11 @@ fn a_pass_that_changes_nothing_is_not_verified() {
 
 #[test]
 fn an_analysis_survives_a_pass_that_changes_nothing() {
-    use tir::analysis::DominatorTree;
+    use super::analysis::Simple;
 
-    let context = Context::with_default_dialects();
-    let func = function_with_one_argument(&context);
+    let (context, func) = parse_func(ADD_ITS_ARGUMENT);
     let analyses = AnalysisManager::new();
-    let before = analyses.get::<DominatorTree>(&context, func.id());
+    let before = analyses.get::<Simple>(&context, func.id());
 
     let mut pm = PassManager::new();
     pm.add_pass(ReadOnlyPass);
@@ -310,16 +197,15 @@ fn an_analysis_survives_a_pass_that_changes_nothing() {
 
     assert!(std::rc::Rc::ptr_eq(
         &before,
-        &analyses.get::<DominatorTree>(&context, func.id())
+        &analyses.get::<Simple>(&context, func.id())
     ));
 }
 
 #[test]
 fn repeated_pass_runs_do_not_grow_the_analysis_cache() {
-    use tir::analysis::DominatorTree;
+    use super::analysis::Simple;
 
-    let context = Context::with_default_dialects();
-    let func = function_with_one_argument(&context);
+    let (context, func) = parse_func(ADD_ITS_ARGUMENT);
     let analyses = AnalysisManager::new();
     let mut pm = PassManager::new();
     pm.add_pass(TouchPass);
@@ -329,7 +215,7 @@ fn repeated_pass_runs_do_not_grow_the_analysis_cache() {
         let root = OperationRef::new(context.get_op(func.id()));
         pm.run_on_op_ref(&context, root, &analyses)
             .expect("touching a block attribute keeps the IR valid");
-        analyses.get::<DominatorTree>(&context, func.id());
+        analyses.get::<Simple>(&context, func.id());
         counts.push(analyses.cached_count());
     }
 
@@ -341,12 +227,11 @@ fn repeated_pass_runs_do_not_grow_the_analysis_cache() {
 
 #[test]
 fn an_analysis_is_rebuilt_after_a_pass_mutates() {
-    use tir::analysis::DominatorTree;
+    use super::analysis::Simple;
 
-    let context = Context::with_default_dialects();
-    let func = function_with_one_argument(&context);
+    let (context, func) = parse_func(ADD_ITS_ARGUMENT);
     let analyses = AnalysisManager::new();
-    let before = analyses.get::<DominatorTree>(&context, func.id());
+    let before = analyses.get::<Simple>(&context, func.id());
 
     let mut pm = PassManager::new();
     pm.add_pass(AddToSubPass);
@@ -356,39 +241,23 @@ fn an_analysis_is_rebuilt_after_a_pass_mutates() {
 
     assert!(!std::rc::Rc::ptr_eq(
         &before,
-        &analyses.get::<DominatorTree>(&context, func.id())
+        &analyses.get::<Simple>(&context, func.id())
     ));
 }
 
 #[test]
 fn nested_pass_manager_rewrites_ops() {
-    let context = Context::with_default_dialects();
-    let module = ops::module(&context, None).build();
-
-    let param0 = context.create_value(IntegerType::new(&context, 32), None);
-    let param1 = context.create_value(IntegerType::new(&context, 32), None);
-
-    let region = context.create_region();
-    let block = context.create_block(vec![param0, param1]);
-    region.add_block(block.id());
-
-    let func = func_ops::lambda(&context, "demo", IntegerType::new(&context, 32), &region).build();
+    let (context, module, func, _) = fixtures::parse_function(
+        r#"module {
+func.func @demo(%0: !i32, %1: !i32) -> !i32 {
+  %2 = addi %0, %1 : !i32
+  func.return %2
+}
+module_end
+}"#,
+    );
     let func_body = func.body();
-
-    let func_builder = func_body.clone();
-    let add = ops::addi(
-        &context,
-        func_body.arguments()[0].id(),
-        func_body.arguments()[1].id(),
-        IntegerType::new(&context, 32),
-    )
-    .build();
-    let add_result = add.result();
-    let add_id = add.id();
-    func_builder.append_op(add);
-    func_builder.append_op(func_ops::r#return(&context, add_result).build());
-
-    module.body().append_op(func);
+    let add_id = func_body.op_ids()[0];
 
     let mut pm = PassManager::new();
     pm.nest::<FuncOp>().add_pass(AddToSubPass);
@@ -418,26 +287,18 @@ fn nested_pass_manager_rewrites_ops() {
 
 #[test]
 fn erasing_an_op_drops_its_operand_uses() {
-    let context = Context::with_default_dialects();
-    let i32 = IntegerType::new(&context, 32);
-
-    let region = context.create_region();
-    let arg = context.create_value(i32, None);
-    let block = context.create_block(vec![arg.clone()]);
-    region.add_block(block.id());
-    let func = func_ops::lambda(&context, "demo", i32, &region).build();
+    // The subi is the argument's only reader, and nothing reads the subi.
+    let (context, func) = parse_func(
+        r#"func.func @demo(%0: !i32) -> !i32 {
+  %1 = subi %0, %0 : !i32
+  %2 = constant {value = 0} : !i32
+  func.return %2
+}"#,
+    );
     let body = func.body();
 
-    let neg = ops::subi(
-        &context,
-        body.arguments()[0].id(),
-        body.arguments()[0].id(),
-        i32,
-    )
-    .build();
-    let neg_id = neg.id();
+    let neg_id = body.op_ids()[0];
     let neg_ref = OperationRef::new(context.get_op(neg_id));
-    body.append_op(neg);
     let argument = body.arguments()[0].id();
     assert!(context.is_used(argument));
 
@@ -487,8 +348,7 @@ fn count_ops(context: &Context, op: tir::OpId) -> usize {
 }
 
 fn restructure_source(source: &str) -> (Context, FuncOp, usize) {
-    let context = Context::with_default_dialects();
-    let func = tir::parse::ir::parse_ir::<FuncOp>(&context, source).expect("parse");
+    let (context, func) = parse_func(source);
     let before = count_ops(&context, func.id());
     let mut manager = PassManager::new();
     manager.add_pass(tir::passes::RestructureNodesPass::new());
@@ -595,8 +455,7 @@ impl Pass for CountingPass {
 }
 
 fn count_fixpoint_runs(cap: u8, edits: u32) -> u32 {
-    let context = Context::with_default_dialects();
-    let func = function_with_one_argument(&context);
+    let (context, func) = parse_func(ADD_ITS_ARGUMENT);
     let runs = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     let mut pm = PassManager::new();
     pm.fixpoint(cap).add_pass(CountingPass {

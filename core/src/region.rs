@@ -3,9 +3,7 @@ use crate::{
     context::ContextRef,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(transparent)]
-pub struct RegionId(u32);
+id_newtype!(RegionId);
 
 /// What a region holds, and how what it holds is ordered.
 ///
@@ -143,8 +141,12 @@ impl RegionHandle {
     /// The owning context, after checking this handle still names its own region.
     fn context(&self) -> Context {
         let context = self.context.upgrade();
-        #[cfg(debug_assertions)]
-        context.assert_region_generation(self.id, self.generation);
+        debug_assert_eq!(
+            context.region_generation(self.id),
+            self.generation,
+            "handle to erased region {:?}",
+            self.id
+        );
         context
     }
 
@@ -160,12 +162,14 @@ impl RegionHandle {
 
     /// The operation owning this region, if it has been attached to one.
     pub fn parent_op(&self) -> Option<OpId> {
-        self.context().region_parent_op(self.id)
+        self.context().with_region(self.id, Region::parent_op)
     }
 
     /// Whether this region holds an unordered graph rather than blocks.
     pub fn is_nodes(&self) -> bool {
-        self.context().region_is_nodes(self.id)
+        self.context().with_region(self.id, |region| {
+            matches!(region.body(), RegionBody::Nodes { .. })
+        })
     }
 
     pub fn add_block(&self, id: BlockId) {
@@ -177,7 +181,8 @@ impl RegionHandle {
     }
 
     pub fn block_ids(&self) -> Vec<BlockId> {
-        self.context().region_block_ids(self.id)
+        self.context()
+            .with_region(self.id, |region| region.blocks().to_vec())
     }
 
     /// The entry block of an ordered region: where control enters and where its
@@ -190,14 +195,33 @@ impl RegionHandle {
     /// unordered region and in block order for an ordered one. What a walk of
     /// the region's contents iterates, whichever kind it is.
     pub fn op_ids(&self) -> Vec<OpId> {
-        self.context().region_op_ids(self.id)
+        let context = self.context();
+        let (ops, blocks) = context.with_region(self.id, |region| match region.body() {
+            RegionBody::Nodes { ops, .. } => (ops.clone(), Vec::new()),
+            RegionBody::Blocks(blocks) => (Vec::new(), blocks.clone()),
+        });
+        if blocks.is_empty() {
+            return ops;
+        }
+        blocks
+            .into_iter()
+            .flat_map(|block| context.get_block(block).op_ids())
+            .collect()
     }
 
     /// The region's arguments, values first and dependencies trailing: its own
     /// for an unordered region, its entry block's for an ordered one — the same
     /// values either way, so a reader need not know which kind it holds.
     pub fn ports(&self) -> Vec<Value> {
-        self.context().region_ports(self.id)
+        let context = self.context();
+        let (ports, entry) = context.with_region(self.id, |region| match region.body() {
+            RegionBody::Nodes { ports, .. } => (ports.clone(), None),
+            RegionBody::Blocks(blocks) => (Vec::new(), blocks.first().copied()),
+        });
+        match entry {
+            Some(entry) => context.get_block(entry).arguments(),
+            None => ports,
+        }
     }
 
     /// The arguments that carry a value.
@@ -214,10 +238,14 @@ impl RegionHandle {
     }
 
     /// The values an unordered region produces, dependencies trailing; empty
-    /// for an ordered one, which binds its results through its
-    /// [`crate::RegionExit`] operations instead.
+    /// for an ordered one, which binds its results through its terminator
+    /// instead.
     pub fn results(&self) -> Vec<ValueId> {
-        self.context().region_results(self.id)
+        self.context()
+            .with_region(self.id, |region| match region.body() {
+                RegionBody::Nodes { results, .. } => results.clone(),
+                RegionBody::Blocks(_) => Vec::new(),
+            })
     }
 
     /// The results that carry a value.
@@ -231,13 +259,6 @@ impl RegionHandle {
     pub fn dep_results(&self) -> Vec<ValueId> {
         let results = self.results();
         results[results.len() - self.context().region_dep_counts(self.id).1..].to_vec()
-    }
-
-    /// Replace the whole block list at once. Only [`Context::replace_region_contents`]
-    /// uses this: it owns the parent bookkeeping and the single version bump the
-    /// swap is allowed to make, which the per-block mutators above would each repeat.
-    pub(crate) fn set_blocks(&self, blocks: Vec<BlockId>) {
-        self.context().set_region_blocks(self.id, blocks);
     }
 
     pub fn iter(&self, context: Context) -> ContextIterator<BlockId> {
@@ -520,29 +541,6 @@ fn cycle_member(
                 .expect("a cycle is walked");
         }
         path.push(next);
-    }
-}
-
-impl RegionId {
-    pub(crate) fn new(id: u32) -> Self {
-        Self(id)
-    }
-
-    pub fn number(self) -> u32 {
-        self.0
-    }
-
-    pub fn from_number(n: u32) -> Self {
-        Self(n)
-    }
-
-    pub(crate) fn index(self) -> usize {
-        self.0 as usize
-    }
-
-    /// The hive handle backing this id.
-    pub(crate) fn raw(self) -> u32 {
-        self.0
     }
 }
 

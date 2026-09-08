@@ -247,11 +247,6 @@ impl MachineModel {
             .map(|i| i as u16)
     }
 
-    /// The protection mode of the phase at the given cycle, if within the pipeline.
-    pub fn protection_at(&self, cycle: u16) -> Option<Protection> {
-        self.pipeline.get(cycle as usize).map(|p| p.protection)
-    }
-
     /// The forwarded producer→consumer latency for a result moving from the `from`
     /// resource to the `to` resource, if a bypass path is declared.
     pub fn forward_latency(&self, from: &str, to: &str) -> Option<u16> {

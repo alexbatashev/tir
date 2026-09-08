@@ -4,20 +4,55 @@ extern crate self as tir;
 // downstream crates without each of them depending on it directly.
 pub use linkme;
 
+/// Declares an entity's identity: a `u32` handle into the context's slab of
+/// that entity.
+macro_rules! id_newtype {
+    ($name:ident) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[repr(transparent)]
+        pub struct $name(u32);
+
+        impl $name {
+            pub(crate) fn new(id: u32) -> Self {
+                Self(id)
+            }
+
+            /// Raw integer id, for stable identification across an FFI boundary.
+            pub fn number(self) -> u32 {
+                self.0
+            }
+
+            /// Reconstruct an id from its raw integer, the inverse of
+            /// [`Self::number`].
+            pub fn from_number(id: u32) -> Self {
+                Self(id)
+            }
+
+            pub(crate) fn index(self) -> usize {
+                self.0 as usize
+            }
+
+            /// The hive handle backing this id.
+            pub(crate) fn raw(self) -> u32 {
+                self.0
+            }
+        }
+    };
+}
+
 pub mod analysis;
 pub mod attributes;
 pub mod backend;
 pub mod binding;
 mod block;
 mod clone;
-pub use clone::clone_region_with_mapping;
+pub use clone::{clone_op, clone_region_with_mapping};
 mod context;
 pub mod dependency;
-mod edits;
-pub use edits::Wrap;
 mod diagnostics;
 mod dialect;
 mod dialects;
+mod edits;
 mod error;
 pub mod graph;
 mod interfaces;
@@ -57,7 +92,7 @@ pub use interfaces::{
     Apply, Binding, BranchGuard, BranchTerminator, Callable, Commutative, ConstantFold,
     ConstantLike, CountedLoop, ExitScope, ExitScopeKind, ExitTarget, Gamma, Global,
     IntegerArithmetic, MemoryRead, MemoryWrite, NonLocalExit, OpCost, PromotableAllocation, Pure,
-    RegionExit, SameOperandAndResultType, Speculatable, Symbol, Terminator, Theta, Visibility,
+    SameOperandAndResultType, Speculatable, Symbol, Terminator, Theta, Visibility,
 };
 pub use interp::{Interp, InterpError, Memory as InterpMemory, Value as InterpValue};
 pub use ir_formatter::IRFormatter;

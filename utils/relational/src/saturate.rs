@@ -115,6 +115,17 @@ impl<L: Label> Engine<L> {
     /// rebuilds — a node born this iteration is visible only to the next. Stops
     /// at a fixpoint (nothing the class and node counts or the fact columns see
     /// changed, or an empty change log) or at a limit.
+    ///
+    /// A [`Rule::post_saturation`] rule sits out those rounds and fires once
+    /// against the fixpoint, over the classes the saturation touched: the rest of
+    /// the graph was already at that phase's fixpoint when the caller handed it
+    /// over, so only those can hold a match it does not have. The phase is
+    /// terminal — nothing feeds its results back — so a saturation that reached a
+    /// fixpoint drains the change log on the way out, which leaves the next
+    /// assumption scope's entry log holding that scope's own assertion rather
+    /// than this fixpoint's tail. A stop on a limit is not a fixpoint: it marks
+    /// everything changed instead, since the matches it never reached are not
+    /// named by the log.
     pub fn saturate_rules(
         &mut self,
         rules: &[Rule<L>],
@@ -123,21 +134,21 @@ impl<L: Label> Engine<L> {
         node_limit: usize,
     ) {
         let timer = Timer::start();
-        let mut delta = self.take_changed().map(Delta::new);
+        let mut log = self.take_changed();
+        let mut touched = log.clone();
+        let mut delta = log.take().map(Delta::new);
         let mut iters = 0;
+        let mut on_a_limit = true;
         loop {
             let size = self.total_size();
             if iters >= iter_limit || size >= node_limit {
-                // Not a fixpoint: the matches this stop left unreached are not
-                // in the change log, so the next saturation may not trust it.
-                self.mark_all_changed();
                 break;
             }
             let before = (self.num_classes(), size, self.stats().raises);
 
             let mut stats = RoundStats::start(self, delta.as_ref());
             let mut found: Vec<(&Rule<L>, Vec<Match>)> = Vec::new();
-            for rule in rules {
+            for rule in rules.iter().filter(|rule| !rule.post_saturation) {
                 // Everything a rule reads is an atom or a guard over what an atom
                 // bound, so both narrowings come free of any hand-asserted
                 // licence — for a rule the change log can speak for. It cannot
@@ -173,20 +184,71 @@ impl<L: Label> Engine<L> {
             stats.finish(self);
 
             iters += 1;
-            delta = self.take_changed().map(Delta::new);
+            let log = self.take_changed();
+            match (&mut touched, &log) {
+                (Some(all), Some(changed)) => all.extend(changed.iter().copied()),
+                _ => touched = None,
+            }
+            delta = log.map(Delta::new);
             if delta.as_ref().is_some_and(Delta::is_empty) {
+                on_a_limit = false;
                 break;
             }
             if (self.num_classes(), self.total_size(), self.stats().raises) == before {
-                // The counts held, but the matches a stop never reached are not
-                // named by a log this break is about to drop. `None` is the
-                // widest such log there is, so it marks too.
-                if delta.as_ref().is_none_or(|delta| !delta.is_empty()) {
-                    self.mark_all_changed();
-                }
+                // The counts held, but a round that changed only facts changed
+                // nothing they count, and is not a fixpoint. `None` is the widest
+                // such log there is, so it counts too.
+                on_a_limit = delta.as_ref().is_none_or(|delta| !delta.is_empty());
                 break;
             }
         }
+        if on_a_limit {
+            self.mark_all_changed();
+            touched = None;
+        }
+        self.rebuild();
+        self.post_saturate(rules, externs, touched);
+        if !on_a_limit {
+            self.take_changed();
+        }
         timer.finish();
+    }
+
+    /// Fire every [`Rule::post_saturation`] rule once over `touched`, or over the
+    /// whole graph where the saturation could not name what it changed.
+    fn post_saturate(
+        &mut self,
+        rules: &[Rule<L>],
+        externs: &dyn Externs<L>,
+        touched: Option<Vec<ClassId>>,
+    ) {
+        let mut touched = touched.map(|mut all| {
+            for id in &mut all {
+                *id = self.find(*id);
+            }
+            all.sort_unstable();
+            all.dedup();
+            Delta::new(all)
+        });
+        let mut found: Vec<(&Rule<L>, Vec<Match>)> = Vec::new();
+        for rule in rules.iter().filter(|rule| rule.post_saturation) {
+            let roots = match touched.as_mut().filter(|_| !rule.plan.unbounded()) {
+                Some(touched) => round_roots(self, &rule.plan, touched),
+                None => rule.plan.roots(self),
+            };
+            if roots.is_empty() {
+                continue;
+            }
+            found.push((
+                rule,
+                rule.plan.search(self, roots, &|_, _| true, false, externs),
+            ));
+        }
+        for (rule, matches) in &found {
+            for m in matches {
+                self.apply_head(&rule.head, rule.head_vars, m);
+            }
+        }
+        self.rebuild();
     }
 }

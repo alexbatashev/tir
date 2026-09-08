@@ -1,9 +1,18 @@
+use proptest::prelude::*;
 use tir_relational::{ClassId as Id, Engine, Label as ENode};
 
 use super::test_lang::*;
 
 #[test]
 fn hash_consing_shares_identical_expressions() {
+    // The key spans the children, so only the same operator over the same
+    // children shares a node.
+    let a = Id::from_raw(1);
+    let b = Id::from_raw(2);
+    let c = Id::from_raw(3);
+    assert_eq!(Math::Add([a, b]).hash_cons(), Math::Add([a, b]).hash_cons());
+    assert_ne!(Math::Add([a, b]).hash_cons(), Math::Add([a, c]).hash_cons());
+
     let mut g = Engine::new();
     let a = sym(&mut g, 0);
     let b = sym(&mut g, 1);
@@ -13,16 +22,6 @@ fn hash_consing_shares_identical_expressions() {
     assert_eq!(g.nodes(e1).count(), 1);
     assert_eq!(g.total_size(), 3);
     assert_eq!(g.num_classes(), 3);
-}
-
-#[test]
-fn hash_cons_includes_children() {
-    let a = Id::from_raw(1);
-    let b = Id::from_raw(2);
-    let c = Id::from_raw(3);
-
-    assert_eq!(Math::Add([a, b]).hash_cons(), Math::Add([a, b]).hash_cons());
-    assert_ne!(Math::Add([a, b]).hash_cons(), Math::Add([a, c]).hash_cons());
 }
 
 #[test]
@@ -47,6 +46,16 @@ fn union_merges_classes() {
     assert!(g.connected(a, b));
     assert!(!g.connected(a, c));
     assert_eq!(g.num_classes(), 2);
+
+    // The same union under a scope is a hypothesis: the pop takes it back.
+    let mut g = Engine::new();
+    let a = sym(&mut g, 0);
+    let b = num(&mut g, 7);
+    g.push_context();
+    g.union(a, b);
+    assert!(g.connected(a, b));
+    g.pop_context();
+    assert!(!g.connected(a, b));
 }
 
 #[test]
@@ -116,18 +125,6 @@ fn unique_nodes_never_share_or_merge() {
     assert_ne!(g.find(ua), g.find(ub));
     let child = g.nodes(ua).next().unwrap().children()[0];
     assert!(g.connected(child, a));
-}
-
-#[test]
-fn scope_union_is_discarded_on_pop() {
-    let mut g = Engine::new();
-    let a = sym(&mut g, 0);
-    let b = num(&mut g, 7);
-    g.push_context();
-    g.union(a, b);
-    assert!(g.connected(a, b));
-    g.pop_context();
-    assert!(!g.connected(a, b));
 }
 
 #[test]
@@ -278,86 +275,144 @@ fn rewrite_under_scope_is_discarded_on_pop() {
     assert!(!g.connected(ab, ba));
 }
 
+/// A scope is a hypothesis: the classes, the nodes and the partition it
+/// changed are back where they started once it is popped.
 #[test]
-fn scope_add_then_pop_restores_class_count() {
-    let mut g = Engine::new();
-    let a = sym(&mut g, 0);
-    let b = sym(&mut g, 1);
-    g.rebuild();
-    let base = g.num_classes();
+fn pop_restores_the_base_graph() {
+    // Nodes minted under the scope leave no class behind.
+    {
+        let mut g = Engine::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        g.rebuild();
+        let base = g.num_classes();
 
-    g.push_context();
-    neg(&mut g, a);
-    add(&mut g, a, b);
-    g.rebuild();
-    assert_eq!(g.num_classes(), base + 2);
-    g.pop_context();
-    assert_eq!(g.num_classes(), base);
+        g.push_context();
+        neg(&mut g, a);
+        add(&mut g, a, b);
+        g.rebuild();
+        assert_eq!(g.num_classes(), base + 2);
+        g.pop_context();
+        assert_eq!(g.num_classes(), base);
+    }
+
+    {
+        let mut g = Engine::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        g.rebuild();
+        let base = g.num_classes();
+
+        g.push_context();
+        add(&mut g, a, b);
+        g.pop_context();
+
+        // The scope's node is gone from the base memo, so re-adding mints exactly one
+        // fresh class; it is then interned, so a repeat shares it (no accumulation).
+        let e1 = add(&mut g, a, b);
+        assert_eq!(g.num_classes(), base + 1);
+        let e2 = add(&mut g, a, b);
+        assert_eq!(g.find(e1), g.find(e2));
+        assert_eq!(g.num_classes(), base + 1);
+    }
+
+    {
+        // Commutativity introduces add(b, a) as a new node inside the scope; after pop
+        // the base graph must be structurally identical.
+        let comm = comm_rule();
+        let mut g = Engine::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        add(&mut g, a, b);
+        g.rebuild();
+        let base_classes = g.num_classes();
+        let base_size = g.total_size();
+
+        g.push_context();
+        g.saturate_rules(&[comm], &tir_relational::NoExterns, 10, 1000);
+        assert!(g.total_size() > base_size);
+        g.pop_context();
+
+        assert_eq!(g.num_classes(), base_classes);
+        assert_eq!(g.total_size(), base_size);
+    }
 }
 
+/// The counts and the partition a pop restores are the enclosing scope's, not
+/// always the base's.
 #[test]
-fn readd_after_pop_mints_one_class_no_accumulation() {
-    let mut g = Engine::new();
-    let a = sym(&mut g, 0);
-    let b = sym(&mut g, 1);
-    g.rebuild();
-    let base = g.num_classes();
+fn pop_restores_the_enclosing_counts_and_partition() {
+    // Each pop reverts one layer of adds.
+    {
+        let mut g = Engine::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        g.rebuild();
+        let base = g.num_classes();
 
-    g.push_context();
-    add(&mut g, a, b);
-    g.pop_context();
+        g.push_context();
+        neg(&mut g, a);
+        g.rebuild();
+        assert_eq!(g.num_classes(), base + 1);
+        g.push_context();
+        add(&mut g, a, b);
+        g.rebuild();
+        assert_eq!(g.num_classes(), base + 2);
+        g.pop_context();
+        assert_eq!(g.num_classes(), base + 1);
+        g.pop_context();
+        assert_eq!(g.num_classes(), base);
+    }
 
-    // The scope's node is gone from the base memo, so re-adding mints exactly one
-    // fresh class; it is then interned, so a repeat shares it (no accumulation).
-    let e1 = add(&mut g, a, b);
-    assert_eq!(g.num_classes(), base + 1);
-    let e2 = add(&mut g, a, b);
-    assert_eq!(g.find(e1), g.find(e2));
-    assert_eq!(g.num_classes(), base + 1);
-}
+    // An inner pop restores the outer scope's partition, not the base's.
+    {
+        let mut g = Engine::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        let c = sym(&mut g, 2);
+        let d = sym(&mut g, 3);
+        g.rebuild();
 
-#[test]
-fn nested_scope_pop_reverts_only_inner_adds() {
-    let mut g = Engine::new();
-    let a = sym(&mut g, 0);
-    let b = sym(&mut g, 1);
-    g.rebuild();
-    let base = g.num_classes();
+        g.push_context();
+        g.union(a, b);
+        g.rebuild();
+        let outer = g.find(a);
 
-    g.push_context();
-    neg(&mut g, a);
-    g.rebuild();
-    assert_eq!(g.num_classes(), base + 1);
-    g.push_context();
-    add(&mut g, a, b);
-    g.rebuild();
-    assert_eq!(g.num_classes(), base + 2);
-    g.pop_context();
-    assert_eq!(g.num_classes(), base + 1);
-    g.pop_context();
-    assert_eq!(g.num_classes(), base);
-}
+        g.push_context();
+        g.union(c, d);
+        g.rebuild();
+        assert_eq!(g.num_classes(), 2);
+        g.pop_context();
 
-#[test]
-fn scoped_saturate_leaves_base_identical() {
-    // Commutativity introduces add(b, a) as a new node inside the scope; after pop
-    // the base graph must be structurally identical.
-    let comm = comm_rule();
-    let mut g = Engine::new();
-    let a = sym(&mut g, 0);
-    let b = sym(&mut g, 1);
-    add(&mut g, a, b);
-    g.rebuild();
-    let base_classes = g.num_classes();
-    let base_size = g.total_size();
+        assert_eq!(g.num_classes(), 3);
+        assert_eq!(g.total_size(), 4);
+        assert_eq!(g.scope_members(outer), &[a, b][..]);
+        assert_eq!(g.nodes(outer).count(), 2);
+        assert!(!g.connected(c, d));
 
-    g.push_context();
-    g.saturate_rules(&[comm], &tir_relational::NoExterns, 10, 1000);
-    assert!(g.total_size() > base_size);
-    g.pop_context();
+        g.pop_context();
+        assert_eq!(g.num_classes(), 4);
+    }
 
-    assert_eq!(g.num_classes(), base_classes);
-    assert_eq!(g.total_size(), base_size);
+    {
+        let mut g = Engine::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        g.rebuild();
+
+        g.push_context();
+        g.union(a, b);
+        // A merge counts the moment it happens; congruence repair is what waits for
+        // the rebuild.
+        assert_eq!(g.num_classes(), 1);
+        assert_eq!(g.total_size(), 2);
+        g.rebuild();
+        assert_eq!(g.num_classes(), 1);
+        assert_eq!(g.total_size(), 2);
+        g.pop_context();
+        assert_eq!(g.num_classes(), 2);
+        assert_eq!(g.total_size(), 2);
+    }
 }
 
 #[test]
@@ -386,57 +441,6 @@ fn scope_merge_aggregates_nodes_in_base_order() {
 }
 
 #[test]
-fn nested_pop_restores_outer_scope_partition() {
-    let mut g = Engine::new();
-    let a = sym(&mut g, 0);
-    let b = sym(&mut g, 1);
-    let c = sym(&mut g, 2);
-    let d = sym(&mut g, 3);
-    g.rebuild();
-
-    g.push_context();
-    g.union(a, b);
-    g.rebuild();
-    let outer = g.find(a);
-
-    g.push_context();
-    g.union(c, d);
-    g.rebuild();
-    assert_eq!(g.num_classes(), 2);
-    g.pop_context();
-
-    assert_eq!(g.num_classes(), 3);
-    assert_eq!(g.total_size(), 4);
-    assert_eq!(g.scope_members(outer), &[a, b][..]);
-    assert_eq!(g.nodes(outer).count(), 2);
-    assert!(!g.connected(c, d));
-
-    g.pop_context();
-    assert_eq!(g.num_classes(), 4);
-}
-
-#[test]
-fn scope_counts_follow_the_hypothesis_and_the_pop_undoes_them() {
-    let mut g = Engine::new();
-    let a = sym(&mut g, 0);
-    let b = sym(&mut g, 1);
-    g.rebuild();
-
-    g.push_context();
-    g.union(a, b);
-    // A merge counts the moment it happens; congruence repair is what waits for
-    // the rebuild.
-    assert_eq!(g.num_classes(), 1);
-    assert_eq!(g.total_size(), 2);
-    g.rebuild();
-    assert_eq!(g.num_classes(), 1);
-    assert_eq!(g.total_size(), 2);
-    g.pop_context();
-    assert_eq!(g.num_classes(), 2);
-    assert_eq!(g.total_size(), 2);
-}
-
-#[test]
 fn classes_iterate_scope_roots_at_first_member_position() {
     let mut g = Engine::new();
     let a = sym(&mut g, 0);
@@ -452,113 +456,116 @@ fn classes_iterate_scope_roots_at_first_member_position() {
     g.pop_context();
 }
 
+/// The dirty set names every class a scope changed, and no more.
 #[test]
-fn scope_dirty_is_empty_without_a_scope() {
-    let mut g = Engine::new();
-    let a = sym(&mut g, 0);
-    let b = sym(&mut g, 1);
-    g.union(a, b);
-    g.rebuild();
-    assert!(g.scope_dirty().is_empty());
-}
+fn scope_dirty_names_the_classes_the_scope_changed() {
+    // Without a scope nothing is a hypothesis, so nothing is dirty.
+    {
+        let mut g = Engine::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        g.union(a, b);
+        g.rebuild();
+        assert!(g.scope_dirty().is_empty());
+    }
 
-#[test]
-fn scope_dirty_holds_the_class_a_scoped_union_merged() {
-    let mut g = Engine::new();
-    let a = sym(&mut g, 0);
-    let b = sym(&mut g, 1);
-    sym(&mut g, 2);
-    g.rebuild();
+    // The class a scoped union merged.
+    {
+        let mut g = Engine::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        sym(&mut g, 2);
+        g.rebuild();
 
-    g.push_context();
-    g.union(a, b);
-    g.rebuild();
-    assert_eq!(g.scope_dirty(), vec![g.find(a)]);
-    g.pop_context();
-}
+        g.push_context();
+        g.union(a, b);
+        g.rebuild();
+        assert_eq!(g.scope_dirty(), vec![g.find(a)]);
+        g.pop_context();
+    }
 
-#[test]
-fn scope_dirty_holds_a_class_minted_under_the_scope() {
-    let mut g = Engine::new();
-    let a = sym(&mut g, 0);
-    let b = sym(&mut g, 1);
-    g.rebuild();
+    // A class minted under the scope.
+    {
+        let mut g = Engine::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        g.rebuild();
 
-    g.push_context();
-    let sum = add(&mut g, a, b);
-    assert_eq!(g.scope_dirty(), vec![g.find(sum)]);
-    g.pop_context();
-    assert!(g.scope_dirty().is_empty());
-}
+        g.push_context();
+        let sum = add(&mut g, a, b);
+        assert_eq!(g.scope_dirty(), vec![g.find(sum)]);
+        g.pop_context();
+        assert!(g.scope_dirty().is_empty());
+    }
 
-#[test]
-fn scope_dirty_drops_the_inner_scope_on_pop() {
-    let mut g = Engine::new();
-    let a = sym(&mut g, 0);
-    let b = sym(&mut g, 1);
-    let c = sym(&mut g, 2);
-    let d = sym(&mut g, 3);
-    g.rebuild();
+    // Each pop drops its own scope's classes.
+    {
+        let mut g = Engine::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        let c = sym(&mut g, 2);
+        let d = sym(&mut g, 3);
+        g.rebuild();
 
-    g.push_context();
-    g.union(a, b);
-    g.rebuild();
-    g.push_context();
-    g.union(c, d);
-    g.rebuild();
-    assert_eq!(g.scope_dirty(), vec![g.find(a), g.find(c)]);
+        g.push_context();
+        g.union(a, b);
+        g.rebuild();
+        g.push_context();
+        g.union(c, d);
+        g.rebuild();
+        assert_eq!(g.scope_dirty(), vec![g.find(a), g.find(c)]);
 
-    g.pop_context();
-    assert_eq!(g.scope_dirty(), vec![g.find(a)]);
-    g.pop_context();
-    assert!(g.scope_dirty().is_empty());
-}
+        g.pop_context();
+        assert_eq!(g.scope_dirty(), vec![g.find(a)]);
+        g.pop_context();
+        assert!(g.scope_dirty().is_empty());
+    }
 
-#[test]
-fn innermost_dirty_holds_only_the_inner_scope_changes() {
-    let mut g = Engine::new();
-    let a = sym(&mut g, 0);
-    let b = sym(&mut g, 1);
-    let c = sym(&mut g, 2);
-    let d = sym(&mut g, 3);
-    g.rebuild();
+    // `innermost_dirty` narrows that to the innermost scope alone.
+    {
+        let mut g = Engine::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        let c = sym(&mut g, 2);
+        let d = sym(&mut g, 3);
+        g.rebuild();
 
-    g.push_context();
-    g.union(a, b);
-    g.rebuild();
-    g.push_context();
-    let sum = add(&mut g, c, d);
-    g.union(c, d);
-    g.rebuild();
-    let mut expected = vec![g.find(c), g.find(sum)];
-    expected.sort();
-    assert_eq!(g.innermost_dirty(), expected);
+        g.push_context();
+        g.union(a, b);
+        g.rebuild();
+        g.push_context();
+        let sum = add(&mut g, c, d);
+        g.union(c, d);
+        g.rebuild();
+        let mut expected = vec![g.find(c), g.find(sum)];
+        expected.sort();
+        assert_eq!(g.innermost_dirty(), expected);
 
-    g.pop_context();
-    assert_eq!(g.innermost_dirty(), vec![g.find(a)]);
-    g.pop_context();
-    assert!(g.innermost_dirty().is_empty());
-}
+        g.pop_context();
+        assert_eq!(g.innermost_dirty(), vec![g.find(a)]);
+        g.pop_context();
+        assert!(g.innermost_dirty().is_empty());
+    }
 
-#[test]
-fn scope_dirty_closes_upward_over_parents() {
-    // A parent's e-nodes re-canonicalize through the merge, so a pattern rooted
-    // there can match under the scope and not in the base graph.
-    let mut g = Engine::new();
-    let a = sym(&mut g, 0);
-    let b = sym(&mut g, 1);
-    let sum = add(&mut g, a, b);
-    let outer = neg(&mut g, sum);
-    sym(&mut g, 2);
-    g.rebuild();
+    {
+        // A parent's e-nodes re-canonicalize through the merge, so a pattern rooted
+        // there can match under the scope and not in the base graph.
+        let mut g = Engine::new();
+        let a = sym(&mut g, 0);
+        let b = sym(&mut g, 1);
+        let sum = add(&mut g, a, b);
+        let outer = neg(&mut g, sum);
+        sym(&mut g, 2);
+        g.rebuild();
 
-    g.push_context();
-    g.union(a, b);
-    g.rebuild();
-    let mut expected = vec![g.find(a), g.find(sum), g.find(outer)];
-    expected.sort();
-    assert_eq!(g.scope_dirty(), expected);
-    g.pop_context();
+        g.push_context();
+        g.union(a, b);
+        g.rebuild();
+        let mut expected = vec![g.find(a), g.find(sum), g.find(outer)];
+        expected.sort();
+        assert_eq!(g.scope_dirty(), expected);
+        g.pop_context();
+    }
 }
 
 #[test]
@@ -825,4 +832,114 @@ fn sorted(g: &Engine<Math>, ids: impl IntoIterator<Item = Id>) -> Vec<Id> {
     ids.sort();
     ids.dedup();
     ids
+}
+
+/// The operator of a node, without its operands.
+fn op_name(node: &Math) -> String {
+    match node {
+        Math::Num(n) => format!("num{n}"),
+        Math::FNum(v) => format!("fnum{v:?}"),
+        Math::Sym(s) => format!("sym{s}"),
+        Math::Neg(_) => "neg".to_string(),
+        Math::Add(_) => "add".to_string(),
+        Math::Effect(kind, _) => format!("effect{kind}"),
+    }
+}
+
+/// Everything a caller can observe, for the scope round-trip test.
+fn state(g: &Engine<Math>) -> Vec<(u32, Vec<String>, Vec<Vec<u32>>)> {
+    g.class_ids()
+        .map(|class| {
+            (
+                class.0,
+                g.nodes(class).map(op_name).collect(),
+                g.rows(class)
+                    .map(|row| g.children(row).iter().map(|c| g.find(*c).0).collect())
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// A random program: entry `i` applies an operator to ids built by earlier entries.
+fn programs() -> impl Strategy<Value = Vec<(usize, Vec<usize>)>> {
+    prop::collection::vec((0usize..4, prop::collection::vec(0usize..12, 0..2)), 1..24)
+}
+
+fn build(g: &mut Engine<Math>, program: &[(usize, Vec<usize>)]) -> Vec<Id> {
+    let mut ids: Vec<Id> = Vec::new();
+    for (op, args) in program {
+        let arg = |slot: usize, ids: &[Id]| ids[args.get(slot).copied().unwrap_or(0) % ids.len()];
+        let made = match op {
+            _ if ids.is_empty() => Math::Num(0),
+            0 => Math::Num(args.len() as i64),
+            1 => Math::Neg([arg(0, &ids)]),
+            2 => Math::Add([arg(0, &ids), arg(1, &ids)]),
+            _ => Math::Effect(0, [arg(0, &ids)]),
+        };
+        ids.push(g.add(made));
+    }
+    ids
+}
+
+proptest! {
+    #[test]
+    fn rebuild_restores_the_functional_dependency(
+        program in programs(),
+        merges in prop::collection::vec((0usize..24, 0usize..24), 0..8),
+    ) {
+        let mut g: Engine<Math> = Engine::new();
+        let ids = build(&mut g, &program);
+        g.rebuild();
+        for (a, b) in merges {
+            g.union(ids[a % ids.len()], ids[b % ids.len()]);
+        }
+        g.rebuild();
+        // No two live rows share a label and canonical children in
+        // different classes.
+        let mut seen: std::collections::HashMap<(u32, Vec<u32>), u32> = Default::default();
+        for class in g.class_ids() {
+            for row in g.rows(class) {
+                if g.node(row).is_unique() {
+                    continue;
+                }
+                let key = (
+                    g.label(row).0,
+                    g.children(row).iter().map(|c| g.find(*c).0).collect(),
+                );
+                prop_assert_eq!(*seen.entry(key).or_insert(class.0), class.0);
+            }
+        }
+    }
+
+    #[test]
+    fn the_same_program_builds_the_same_ids(program in programs()) {
+        let mut one: Engine<Math> = Engine::new();
+        let mut two: Engine<Math> = Engine::new();
+        let a = build(&mut one, &program);
+        let b = build(&mut two, &program);
+        one.rebuild();
+        two.rebuild();
+        prop_assert_eq!(a, b);
+        prop_assert_eq!(state(&one), state(&two));
+    }
+
+    #[test]
+    fn a_scope_round_trip_restores_every_column(
+        program in programs(),
+        merges in prop::collection::vec((0usize..24, 0usize..24), 0..8),
+    ) {
+        let mut g: Engine<Math> = Engine::new();
+        let ids = build(&mut g, &program);
+        g.rebuild();
+        let before = state(&g);
+        g.push_context();
+        for (a, b) in merges {
+            g.union(ids[a % ids.len()], ids[b % ids.len()]);
+        }
+        g.add(Math::Neg([ids[0]]));
+        g.rebuild();
+        g.pop_context();
+        prop_assert_eq!(state(&g), before);
+    }
 }

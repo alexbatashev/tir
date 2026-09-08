@@ -79,8 +79,8 @@ fn fp_math_flags_inherited_from_region_owner() {
     assert_eq!(fp_math_flags(&context, stray.id()), FastMathFlags::NONE);
 }
 
-/// A block-level `fpmath` shadows the enclosing op's, both to relax further
-/// and to restore strictness inside a fast region.
+/// A block-level `fpmath` shadows the flags the block would inherit, which is
+/// what restores strictness inside a fast region.
 #[test]
 fn fp_math_flags_block_overrides_owner() {
     let context = Context::with_default_dialects();
@@ -98,39 +98,17 @@ fn fp_math_flags_block_overrides_owner() {
     let a = context.create_value(f32_ty, None);
     let b = context.create_value(f32_ty, None);
 
-    // An op right in the body sees the func's flags.
-    let fast_add = ops::addf(&context, a.id(), b.id(), f32_ty).build();
-    func.body().insert(0, fast_add.id());
-    assert_eq!(fp_math_flags(&context, fast_add.id()), FastMathFlags::FAST);
+    // An op one region deeper than the func that carries the attribute.
+    let nested = context.create_region();
+    let nested_block = context.create_block(vec![]);
+    nested.add_block(nested_block.id());
+    func.body()
+        .append_op(func_ops::lambda(&context, "inner", unit, &nested).build());
+    let add = ops::addf(&context, a.id(), b.id(), f32_ty).build();
+    nested_block.append(add.id());
 
-    // An op in a nested block marked strict does not.
-    let i32_ty = tir::builtin::IntegerType::new(&context, 32);
-    let bound = context.create_value(i32_ty, None);
-    let body = context.create_region();
-    let counter = context.create_value(i32_ty, None);
-    let body_block = context.create_block(vec![counter]);
-    body.add_block(body_block.id());
-    body_block.append(tir::scf::ops::r#yield(&context, vec![]).build().id());
-    let loop_op = tir::scf::ForOpBuilder::new(&context)
-        .lb(bound.id())
-        .inits(vec![])
-        .ub(bound.id())
-        .step(bound.id())
-        .body(body.id())
-        .result_types(vec![i32_ty])
-        .build();
-    let strict_add = ops::addf(&context, a.id(), b.id(), f32_ty).build();
-    body_block.insert(0, strict_add.id());
-    func.body().insert(1, loop_op.id());
-
-    // Before the override the inner block inherits `fast` through the loop.
-    assert_eq!(
-        fp_math_flags(&context, strict_add.id()),
-        FastMathFlags::FAST
-    );
-    body_block.set_attr(FPMATH_ATTR, AttributeValue::Str("none".into()));
-    assert_eq!(
-        fp_math_flags(&context, strict_add.id()),
-        FastMathFlags::NONE
-    );
+    // Before the override the inner block inherits `fast` through the nesting.
+    assert_eq!(fp_math_flags(&context, add.id()), FastMathFlags::FAST);
+    nested_block.set_attr(FPMATH_ATTR, AttributeValue::Str("none".into()));
+    assert_eq!(fp_math_flags(&context, add.id()), FastMathFlags::NONE);
 }

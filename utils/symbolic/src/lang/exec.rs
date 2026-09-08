@@ -177,37 +177,19 @@ macro_rules! as_float {
     };
 }
 
-/// Binary arithmetic over int (width-coerced) or float; `$c(0)` selects the type.
+/// Binary float arithmetic; all-integer operands never reach here, the `SCALAR_OPS` table takes them.
 macro_rules! arith_op {
-    ($c:ident, $int_m:ident, $float_m:ident, $op:literal) => {
-        match $c(0) {
-            Value::Int(a) => {
-                let (a, b) = coerce_ints(a, as_int!($c(1), $op));
-                Value::Int(a.$int_m(&b))
-            }
-            Value::Float(a) => Value::Float(a.$float_m(&as_float!($c(1), $op))),
-            Value::Iterator(_) | Value::RawBits(_) => {
-                panic!(concat!($op, " requires scalar operands"))
-            }
-        }
+    ($c:ident, $float_m:ident, $op:literal) => {
+        Value::Float(as_float!($c(0), $op).$float_m(&as_float!($c(1), $op)))
     };
 }
 
-/// Signed/float comparison yielding a 1-bit `Int`.
+/// Float comparison yielding a 1-bit `Int`; integer comparisons come from the `SCALAR_OPS` table.
 macro_rules! cmp_op {
-    ($c:ident, $int_m:ident, $float_m:ident, $op:literal) => {
+    ($c:ident, $float_m:ident, $op:literal) => {
         Value::Int(APInt::new(
             1,
-            match $c(0) {
-                Value::Int(a) => {
-                    let (a, b) = coerce_ints(a, as_int!($c(1), $op));
-                    bool_result(a.$int_m(&b))
-                }
-                Value::Float(a) => bool_result(a.$float_m(&as_float!($c(1), $op))),
-                Value::Iterator(_) | Value::RawBits(_) => {
-                    panic!(concat!($op, " requires scalar operands"))
-                }
-            },
+            bool_result(as_float!($c(0), $op).$float_m(&as_float!($c(1), $op))),
         ))
     };
 }
@@ -687,10 +669,10 @@ fn eval_iterator<V>(
 
 fn eval_arith(kind: SymKind, c: &impl Fn(usize) -> Value) -> Value {
     match kind {
-        SymKind::Add => arith_op!(c, add, add, "add"),
-        SymKind::Sub => arith_op!(c, sub, sub, "sub"),
-        SymKind::Mul => arith_op!(c, mul, mul, "mul"),
-        _ => arith_op!(c, sdiv, div, "div"),
+        SymKind::Add => arith_op!(c, add, "add"),
+        SymKind::Sub => arith_op!(c, sub, "sub"),
+        SymKind::Mul => arith_op!(c, mul, "mul"),
+        _ => arith_op!(c, div, "div"),
     }
 }
 
@@ -698,10 +680,10 @@ fn eval_compare(kind: SymKind, c: &impl Fn(usize) -> Value) -> Value {
     match kind {
         SymKind::Eq => Value::Int(APInt::new(1, bool_result(scalar_equal(c(0), c(1))))),
         SymKind::Ne => Value::Int(APInt::new(1, bool_result(!scalar_equal(c(0), c(1))))),
-        SymKind::Lt => cmp_op!(c, slt, lt, "lt"),
-        SymKind::Le => cmp_op!(c, sle, le, "le"),
-        SymKind::Gt => cmp_op!(c, sgt, gt, "gt"),
-        _ => cmp_op!(c, sge, ge, "ge"),
+        SymKind::Lt => cmp_op!(c, lt, "lt"),
+        SymKind::Le => cmp_op!(c, le, "le"),
+        SymKind::Gt => cmp_op!(c, gt, "gt"),
+        _ => cmp_op!(c, ge, "ge"),
     }
 }
 

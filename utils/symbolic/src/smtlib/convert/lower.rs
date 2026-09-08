@@ -44,11 +44,6 @@ pub fn lower_script<V>(script: &Script) -> Result<Lowered<V>, ConvertError> {
             Command::DefineFun(def) => {
                 lw.defs.insert(def.name.0.clone(), def.clone());
             }
-            Command::DefineFunRec(_) | Command::DefineFunsRec(_, _) => {
-                return Err(ConvertError::Unsupported(
-                    "recursive function definitions".into(),
-                ));
-            }
             Command::Assert(term) => {
                 let id = lw.lower_term(term)?;
                 assertions.push(id);
@@ -189,8 +184,6 @@ impl<V> Lowerer<V> {
                 self.scope.pop();
                 result
             }
-            Term::Forall(..) | Term::Exists(..) => Err(ConvertError::Quantifier),
-            Term::Match(..) => Err(ConvertError::Unsupported("match".into())),
             Term::Annotated(inner, _) => self.lower_term(inner),
         }
     }

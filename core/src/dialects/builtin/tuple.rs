@@ -46,26 +46,13 @@ impl Type for TupleType {
         parser: &mut crate::parse::text::Parser<'src>,
         context: &Context,
     ) -> Result<TypeId, (Span, Error)> {
-        if !parser.parse_token("<") {
-            return Err((parser.span(), Error::ExpectedToken("<")));
-        }
-
-        let mut elements = vec![];
-        if !parser.parse_token(">") {
-            loop {
-                elements.push(
-                    parser
-                        .parse_type(context)?
-                        .ok_or_else(|| (parser.span(), Error::ExpectedType))?,
-                );
-                if parser.parse_token(">") {
-                    break;
-                }
-                if !parser.parse_token(",") {
-                    return Err((parser.span(), Error::ExpectedToken(",")));
-                }
-            }
-        }
+        let elements = parser
+            .parse_delimited("<", ">", |parser| {
+                parser
+                    .parse_type(context)?
+                    .ok_or_else(|| (parser.span(), Error::ExpectedType))
+            })?
+            .ok_or_else(|| (parser.span(), Error::ExpectedToken("<")))?;
 
         Ok(Self::new(context, elements))
     }
@@ -109,7 +96,6 @@ operation! {
     MakeTupleOp {
         name: "make_tuple",
         dialect: "builtin",
-        format: "custom",
         verifier: "true",
         operands: O {
             elements: "*AnyConstraint",
@@ -122,56 +108,6 @@ operation! {
 }
 
 impl crate::Speculatable for MakeTupleOp {}
-
-impl MakeTupleOp {
-    fn custom_print(&self, fmt: &mut IRFormatter) -> Result<(), std::fmt::Error> {
-        let context = self.0.context.upgrade();
-        fmt.write(format!("%{} = make_tuple", self.result().number()))?;
-        for (index, element) in self.operands().iter().enumerate() {
-            if index == 0 {
-                fmt.write(" ")?;
-            } else {
-                fmt.write(", ")?;
-            }
-            fmt.write(format!("%{}", element.number()))?;
-        }
-        fmt.write(" : ")?;
-        context.print_type(context.get_value(self.result()).ty(), fmt)?;
-        fmt.write("\n")
-    }
-
-    fn custom_parse(
-        parser: &mut crate::parse::text::Parser,
-        context: &Context,
-    ) -> Result<Box<dyn Operation>, (Span, Error)> {
-        let mut elements = vec![];
-        let mut next = parser.parse_value_ref();
-        while let Some(reference) = next {
-            elements.push(parser.resolve_value(context, reference));
-            if !parser.parse_token(",") {
-                break;
-            }
-            next = Some(
-                parser
-                    .parse_value_ref()
-                    .ok_or_else(|| (parser.span(), Error::ExpectedValueRef))?,
-            );
-        }
-        if !parser.parse_token(":") {
-            return Err((parser.span(), Error::ExpectedToken(":")));
-        }
-        let result_type = parser
-            .parse_type(context)?
-            .ok_or_else(|| (parser.span(), Error::ExpectedType))?;
-
-        Ok(Box::new(
-            MakeTupleOpBuilder::new(context)
-                .elements(elements)
-                .result_type(result_type)
-                .build(),
-        ))
-    }
-}
 
 impl tir::Verifiable for MakeTupleOp {
     fn verify_impl(&self, context: &Context) -> Result<(), Error> {
@@ -224,13 +160,6 @@ impl TupleGetOp {
     pub fn tuple(&self) -> crate::ValueId {
         self.operands()[0]
     }
-
-    pub fn index(&self) -> usize {
-        match self.attr("index") {
-            Some(crate::attributes::AttributeValue::UInt(index)) => index as usize,
-            _ => panic!("tuple_get must carry an index"),
-        }
-    }
 }
 
 impl tir::Verifiable for TupleGetOp {
@@ -242,7 +171,7 @@ impl tir::Verifiable for TupleGetOp {
             ));
         };
         let elements = tuple.elements(context);
-        let Some(&expected) = elements.get(self.index()) else {
+        let Some(&expected) = elements.get(self.index() as usize) else {
             return Err(Error::VerificationError(format!(
                 "tuple_get index {} is out of bounds for {} elements",
                 self.index(),

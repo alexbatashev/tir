@@ -267,17 +267,6 @@ impl TypeEnv {
         Self::default()
     }
 
-    pub fn enter_scope(self) -> Self {
-        TypeEnv {
-            bindings: HashMap::new(),
-            parent: Some(Box::new(self)),
-        }
-    }
-
-    pub fn exit_scope(self) -> Option<Self> {
-        self.parent.map(|p| *p)
-    }
-
     pub fn bind(&mut self, name: impl Into<String>, scheme: TypeScheme) {
         self.bindings.insert(name.into(), scheme);
     }

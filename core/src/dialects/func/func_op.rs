@@ -4,7 +4,7 @@ use crate::operation;
 use crate::symbol_table::{symbol_name_of, visibility_of};
 
 use crate as tir;
-use crate::{Callable, Context, Error, Operation, RegionExit, Symbol, Terminator, Visibility};
+use crate::{Callable, Context, Error, Operation, Symbol, Terminator, Visibility};
 
 operation! {
     FuncOp {
@@ -45,17 +45,6 @@ pub fn lambda(
 }
 
 impl FuncOpBuilder {
-    pub fn sym_name(self, name: &str) -> Self {
-        self.attr(
-            "sym_name",
-            tir::attributes::AttributeValue::Str(name.to_string().into()),
-        )
-    }
-
-    pub fn ret_type(self, ty: tir::TypeId) -> Self {
-        self.attr("ret_type", tir::attributes::AttributeValue::Type(ty))
-    }
-
     pub fn result_address(self) -> Self {
         self.attr(
             "result_address",
@@ -131,13 +120,6 @@ impl FuncOp {
         self.attr("result_address") == Some(tir::attributes::AttributeValue::Bool(true))
     }
 
-    pub fn ret_type(&self) -> tir::TypeId {
-        match self.attr("ret_type") {
-            Some(tir::attributes::AttributeValue::Type(ty)) => ty,
-            _ => panic!("func must carry ret_type"),
-        }
-    }
-
     pub fn argument_alignments(&self) -> Vec<u64> {
         super::argument_alignments(self)
     }
@@ -175,13 +157,11 @@ impl FuncOp {
     fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
         use tir::Operation;
 
-        // %2 = func.func @name(%0: i32, %1: i32) -> i32 {
         fmt.write(format!("%{} = func.func", self.fn_value().number()))?;
         if self.symbol_visibility() == Visibility::Private {
             fmt.write(" private")?;
         }
 
-        // Print symbol name
         let sym_name = match self.attr("sym_name") {
             Some(tir::attributes::AttributeValue::Str(s)) => s.to_string(),
             Some(_) => panic!("sym_name must be a string"),
@@ -190,7 +170,6 @@ impl FuncOp {
 
         fmt.write(format!(" @{}", sym_name))?;
 
-        // Print parameters from entry block arguments
         let context = self.0.context.upgrade();
         let args = self.parameters();
 
@@ -204,7 +183,6 @@ impl FuncOp {
         }
         fmt.write(")")?;
 
-        // Print return type
         let ret_type = self.ret_type();
 
         if ret_type != UnitType::new(&context) {
@@ -214,8 +192,8 @@ impl FuncOp {
         if self.has_result_address() {
             fmt.write(" result_address")?;
         }
-        super::print_argument_alignments(fmt, &self.argument_alignments())?;
-        super::print_noalias_arguments(fmt, &self.noalias_arguments())?;
+        super::print_keyed_list(fmt, "argument_alignments", &self.argument_alignments())?;
+        super::print_keyed_list(fmt, "noalias", &self.noalias_arguments())?;
 
         tir::region_format::print_op_region(fmt, &context, self, 0)?;
 
@@ -230,21 +208,13 @@ impl FuncOp {
 
         let is_private = parser.parse_token("private");
 
-        // Parse @name
         let sym_name = parser
             .parse_symbol_name()
             .ok_or_else(|| (parser.span(), tir::Error::ExpectedSymbolName))?
             .to_string();
 
-        // Parse parameter list: (%0: type, %1: type)
-        if !parser.parse_token("(") {
-            return Err((parser.span(), tir::Error::ExpectedToken("(")));
-        }
-
-        let mut block_args = vec![];
-
-        if !parser.parse_token(")") {
-            loop {
+        let block_args = parser
+            .parse_delimited("(", ")", |parser| {
                 let val_name = parser
                     .parse_value_ref()
                     .ok_or_else(|| (parser.span(), tir::Error::ExpectedValueRef))?
@@ -258,21 +228,12 @@ impl FuncOp {
                     .parse_type(context)?
                     .ok_or_else(|| (parser.span(), tir::Error::ExpectedType))?;
 
-                // Create a value in context with the parsed type
                 let value = context.create_value(ty, None);
                 parser.define_value(&val_name, value.id());
-                block_args.push(value);
+                Ok(value)
+            })?
+            .ok_or_else(|| (parser.span(), tir::Error::ExpectedToken("(")))?;
 
-                if parser.parse_token(")") {
-                    break;
-                }
-                if !parser.parse_token(",") {
-                    return Err((parser.span(), tir::Error::ExpectedToken(",")));
-                }
-            }
-        }
-
-        // Parse optional -> return_type
         let ret_type = if parser.parse_token("->") {
             parser
                 .parse_type(context)?
@@ -281,16 +242,15 @@ impl FuncOp {
             UnitType::new(context)
         };
         let result_address = parser.parse_token("result_address");
-        let argument_alignments = super::parse_argument_alignments(parser, context)?;
-        let noalias = super::parse_noalias_arguments(parser, context)?;
+        let argument_alignments =
+            super::parse_keyed_array(parser, context, "argument_alignments", "alignment list")?;
+        let noalias = super::parse_keyed_array(parser, context, "noalias", "argument list")?;
 
-        // Parse body region { ... }
-        let block_arg_types: Vec<tir::TypeId> = block_args.iter().map(tir::Value::ty).collect();
+        let parameters: Vec<tir::TypeId> = block_args.iter().map(tir::Value::ty).collect();
         let body_region = parser.parse_region_with_entry_args(context, block_args)?;
 
-        let parameters: Vec<_> = block_arg_types;
         let mut builder = FuncOpBuilder::new(context)
-            .sym_name(&sym_name)
+            .sym_name(sym_name.as_str())
             .ret_type(ret_type)
             .result_type(tir::builtin::FnType::new(context, &parameters, ret_type))
             .body(body_region.id());
@@ -397,7 +357,7 @@ operation! {
         operands: O {
             value: "?Any",
         },
-        interfaces: [Terminator, RegionExit],
+        interfaces: [Terminator],
         state: "in",
     }
 }
@@ -412,12 +372,3 @@ impl ReturnOp {
 }
 
 impl Terminator for ReturnOp {}
-
-impl RegionExit for ReturnOp {
-    /// Everything the return carries, memory state included: what the region
-    /// hands back is the whole tuple, so an unordered body naming the same
-    /// values in its `->` line binds exactly the same thing.
-    fn exit_values(&self) -> Vec<tir::ValueId> {
-        self.operands().to_vec()
-    }
-}

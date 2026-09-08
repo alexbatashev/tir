@@ -22,9 +22,8 @@ use crate::{
 };
 
 /// A concrete interpreter value: integers of explicit width, floats, tuples,
-/// pointers as byte offsets into one flat memory, and the linear/ordering
-/// token (`!token`) that carries no bits. Dependencies are never bound: they
-/// order evaluation and evaluate to nothing.
+/// and pointers as byte offsets into one flat memory. Dependencies are never
+/// bound: they order evaluation and evaluate to nothing.
 #[derive(Clone, Debug)]
 pub enum Value {
     Int(APInt),
@@ -33,7 +32,6 @@ pub enum Value {
     Ptr(u64),
     /// A λ node: what a call takes as its callee.
     Function(OpId),
-    Token,
     Unit,
 }
 
@@ -120,38 +118,9 @@ impl Memory {
         aligned
     }
 
+    /// The offset the `size` bytes at `address` start at, where the whole range
+    /// is memory this interpreter handed out.
     fn check(&self, address: u64, size: u64) -> Result<usize> {
-        let offset = address
-            .checked_sub(MEMORY_BASE)
-            .ok_or(InterpError::OutOfBounds { address, size })?;
-        let end = offset + size;
-        if end > self.bytes.len() as u64 {
-            return Err(InterpError::OutOfBounds { address, size });
-        }
-        if self.written[offset as usize..end as usize]
-            .iter()
-            .any(|&w| !w)
-        {
-            return Err(InterpError::Uninitialized { address, size });
-        }
-        Ok(offset as usize)
-    }
-
-    pub fn read(&self, address: u64, size: u64) -> Result<Vec<u8>> {
-        let offset = self.check(address, size)?;
-        Ok(self.bytes[offset..offset + size as usize].to_vec())
-    }
-
-    pub fn write(&mut self, address: u64, bytes: &[u8]) -> Result<()> {
-        let offset = self.check_bounds(address, bytes.len() as u64)?;
-        self.bytes[offset..offset + bytes.len()].copy_from_slice(bytes);
-        for flag in &mut self.written[offset..offset + bytes.len()] {
-            *flag = true;
-        }
-        Ok(())
-    }
-
-    fn check_bounds(&self, address: u64, size: u64) -> Result<usize> {
         let offset = address
             .checked_sub(MEMORY_BASE)
             .ok_or(InterpError::OutOfBounds { address, size })?;
@@ -159,6 +128,24 @@ impl Memory {
             return Err(InterpError::OutOfBounds { address, size });
         }
         Ok(offset as usize)
+    }
+
+    pub fn read(&self, address: u64, size: u64) -> Result<Vec<u8>> {
+        let offset = self.check(address, size)?;
+        let end = offset + size as usize;
+        if self.written[offset..end].iter().any(|&written| !written) {
+            return Err(InterpError::Uninitialized { address, size });
+        }
+        Ok(self.bytes[offset..end].to_vec())
+    }
+
+    pub fn write(&mut self, address: u64, bytes: &[u8]) -> Result<()> {
+        let offset = self.check(address, bytes.len() as u64)?;
+        self.bytes[offset..offset + bytes.len()].copy_from_slice(bytes);
+        for flag in &mut self.written[offset..offset + bytes.len()] {
+            *flag = true;
+        }
+        Ok(())
     }
 
     fn read_int(&self, address: u64, width_bits: u32) -> Result<APInt> {
@@ -690,13 +677,14 @@ fn pointer_width(context: &Context, instance: &crate::OpHandle) -> u32 {
         .unwrap_or(64)
 }
 
-/// The loop body's carried arguments: every entry argument but the token scope.
+/// The value as the semantics vocabulary spells it, for evaluating an op
+/// through its `semantic_expr`.
 fn to_sem_value(value: &Value, pointer_width: u32) -> Result<sem::Value> {
     Ok(match value {
         Value::Int(int) => sem::Value::Int(int.clone()),
         Value::Float(float) => sem::Value::Float(float.clone()),
         Value::Ptr(address) => sem::Value::Int(APInt::new(pointer_width, *address)),
-        Value::Tuple(_) | Value::Function(_) | Value::Token | Value::Unit => {
+        Value::Tuple(_) | Value::Function(_) | Value::Unit => {
             return Err(InterpError::Message(
                 "value kind has no semantic-expression form".into(),
             ));
@@ -825,7 +813,7 @@ impl Interp for TupleGetOp {
                 "tuple_get operand must be a tuple".into(),
             ));
         };
-        let element = elements.get(self.index()).ok_or_else(|| {
+        let element = elements.get(self.index() as usize).ok_or_else(|| {
             InterpError::Message(format!("tuple_get index {} out of bounds", self.index()))
         })?;
         Ok(vec![element.clone()])

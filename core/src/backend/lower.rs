@@ -6,6 +6,7 @@
 
 use tir::{AnalysisManager, Context, OperationRef, Pass, PassError, PassTarget, Rewriter, TypeId};
 
+use crate::backend::abi::encode_argument_group;
 use crate::backend::isel::OpLowering;
 use crate::backend::regalloc::RegClassId;
 use crate::backend::{RegClassType, type_class};
@@ -102,7 +103,7 @@ pub fn lower_function_and_return(
                 let Some(extract) = extract_instance.clone().as_op::<TupleGetOp>() else {
                     continue;
                 };
-                let Some(element) = elements.get_mut(extract.index()) else {
+                let Some(element) = elements.get_mut(extract.index() as usize) else {
                     return Err(PassError::InvalidRuleSet(
                         "tuple_get index is out of bounds".to_string(),
                     ));
@@ -130,16 +131,7 @@ pub fn lower_function_and_return(
                     Ok(AttributeValue::Value(element))
                 })
                 .collect::<Result<Vec<_>, PassError>>()?;
-            if alignment == 1 {
-                arguments.push(AttributeValue::Array(group.into()));
-            } else {
-                arguments.push(AttributeValue::Dict(Box::new(
-                    std::collections::BTreeMap::from([
-                        ("alignment".to_string(), AttributeValue::UInt(alignment)),
-                        ("members".to_string(), AttributeValue::Array(group.into())),
-                    ]),
-                )));
-            }
+            arguments.push(encode_argument_group(group, alignment));
         }
         // Block parameters carrying a region's results are the other values that
         // reach machine instructions without being defined by one, so they are

@@ -22,19 +22,18 @@ mod unionfind;
 #[cfg(test)]
 mod testing;
 
-pub use column::{Column, Fact, Join};
+pub use column::Fact;
 pub use csr::Csr;
 pub use engine::{ClassRef, Engine, Rows, Stats};
 pub use extract::Extraction;
 pub use label::Label;
 pub use query::{
-    Atom, Cmp, ColumnId, Expr, ExternId, Externs, Field, Guard, Match, Nested, NoExterns, Plan,
-    Query, Scalar, Source, Step, Var,
+    Atom, Cmp, ColumnId, Expr, Externs, Field, Guard, Match, Nested, NoExterns, Plan, Query,
+    Scalar, Source, Step, Var,
 };
 pub use rule::{HeadOp, LabelFill, Rule};
 pub use saturate::{Delta, round_roots};
 pub use telemetry::{RoundStats, Timer, report_saturation};
-pub use unionfind::UnionFind;
 
 /// Whether `TIR_SAT_TRACE` asked for a saturation trace on stderr: every class
 /// minted (`A id node children`) and every merge (`U a b -> survivor`), plus
@@ -79,16 +78,6 @@ impl RowId {
 pub struct LabelId(pub u32);
 
 impl LabelId {
-    pub fn index(self) -> usize {
-        self.0 as usize
-    }
-}
-
-/// One relation of the database: an operator family at a fixed arity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RelId(pub u32);
-
-impl RelId {
     pub fn index(self) -> usize {
         self.0 as usize
     }

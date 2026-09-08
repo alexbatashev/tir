@@ -4,8 +4,7 @@ use crate::{
     context::ContextRef,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BlockId(u32);
+id_newtype!(BlockId);
 
 /// A basic block's storage record, living densely in the context's block slab
 /// and edited in place through [`Context`] under its write lock. Reads go
@@ -25,27 +24,6 @@ impl BlockId {
     /// A block no context holds: what a branch is bound to before the block it
     /// will reach exists.
     pub const PLACEHOLDER: BlockId = BlockId(u32::MAX);
-
-    pub(crate) fn new(id: u32) -> Self {
-        Self(id)
-    }
-
-    pub fn number(&self) -> u32 {
-        self.0
-    }
-
-    pub fn from_number(n: u32) -> Self {
-        Self(n)
-    }
-
-    pub(crate) fn index(self) -> usize {
-        self.0 as usize
-    }
-
-    /// The hive handle backing this id.
-    pub(crate) fn raw(self) -> u32 {
-        self.0
-    }
 }
 
 impl Block {
@@ -121,15 +99,13 @@ impl BlockHandle {
     /// The owning context, after checking this handle still names its own block.
     fn context(&self) -> Context {
         let context = self.context.upgrade();
-        #[cfg(debug_assertions)]
-        context.assert_block_generation(self.id, self.generation);
+        debug_assert_eq!(
+            context.block_generation(self.id),
+            self.generation,
+            "handle to erased block {:?}",
+            self.id
+        );
         context
-    }
-
-    /// Whether this handle still names the block it was minted for; see
-    /// [`crate::OpHandle::is_live`].
-    pub fn is_live(&self) -> bool {
-        self.context.upgrade().block_generation(self.id) == self.generation
     }
 
     pub fn id(&self) -> BlockId {
@@ -212,24 +188,18 @@ impl BlockHandle {
     /// block is a linearization of its dependence graph, and this is how one is
     /// installed.
     pub fn set_ops(&self, ops: Vec<OpId>) {
-        self.context().set_block_ops(self.id, ops);
+        self.context().with_block_mut(self.id, |block| {
+            debug_assert_eq!(
+                block.operations().len(),
+                ops.len(),
+                "a reordering holds the block's own operations",
+            );
+            *block.operations_mut() = ops;
+        });
     }
 
     pub fn remove_op(&self, id: OpId) -> bool {
         self.context().remove_op_from_block(self.id, id)
-    }
-
-    /// Returns true if a comes before b in the block, false otherwise
-    pub fn is_before(&self, a: OpId, b: OpId) -> bool {
-        self.context().with_block(self.id, |block| {
-            let operations = block.operations();
-            let a_pos = operations.iter().position(|op_id| *op_id == a);
-            let b_pos = operations.iter().position(|op_id| *op_id == b);
-            match (a_pos, b_pos) {
-                (Some(a_pos), Some(b_pos)) => a_pos < b_pos,
-                _ => false,
-            }
-        })
     }
 
     pub fn iter(&self, context: Context) -> ContextIterator<OpId> {

@@ -124,16 +124,6 @@ impl Cfg {
         self.nodes.len() - 1
     }
 
-    /// A node with no operations, jumping to `target`.
-    pub fn add_synthetic(&mut self, target: NodeId) -> NodeId {
-        self.add_node(Node {
-            block: None,
-            assigns: Vec::new(),
-            term: Term::Jump(Edge::new(target)),
-            loop_body: None,
-        })
-    }
-
     pub fn int_type(&self, width: u32) -> TypeId {
         crate::builtin::IntegerType::new(&self.context, width)
     }
@@ -153,34 +143,8 @@ impl Cfg {
         }
     }
 
-    pub fn edges_mut(&mut self, node: NodeId) -> Vec<&mut Edge> {
-        match &mut self.nodes[node].term {
-            Term::Sink { .. } => vec![],
-            Term::Jump(edge) => vec![edge],
-            Term::Cond {
-                if_true, if_false, ..
-            } => vec![if_true, if_false],
-            Term::Dispatch { arms, default, .. } => arms
-                .iter_mut()
-                .map(|(_, edge)| edge)
-                .chain([default])
-                .collect(),
-            Term::LoopTail { repeat, exit, .. } => vec![repeat, exit],
-        }
-    }
-
     pub fn successors(&self, node: NodeId) -> Vec<NodeId> {
         self.edges(node).iter().map(|edge| edge.target).collect()
-    }
-
-    /// The edge control leaves `node` by once the structure has been read off:
-    /// a loop is one node whose body is a region of its own, so it is left
-    /// through its tail's exit edge.
-    pub fn structural_edge_owner(&self, node: NodeId) -> NodeId {
-        match self.nodes[node].loop_body {
-            Some(id) => self.loops[id].tail,
-            None => node,
-        }
     }
 
     pub fn structural_successors(&self, node: NodeId) -> Vec<NodeId> {
@@ -193,16 +157,31 @@ impl Cfg {
         }
     }
 
-    /// Apply `edit` to every edge that leaves `node` structurally.
+    /// Apply `edit` to every edge that leaves `node` structurally. A loop is one
+    /// node whose body is a region of its own, so it is left through its tail's
+    /// exit edge.
     pub fn edit_structural_edges(&mut self, node: NodeId, mut edit: impl FnMut(&mut Edge)) {
-        let owner = self.structural_edge_owner(node);
-        if owner != node {
-            if let Term::LoopTail { exit, .. } = &mut self.nodes[owner].term {
+        if let Some(id) = self.nodes[node].loop_body {
+            let tail = self.loops[id].tail;
+            if let Term::LoopTail { exit, .. } = &mut self.nodes[tail].term {
                 edit(exit);
             }
             return;
         }
-        for edge in self.edges_mut(node) {
+        let edges: Vec<&mut Edge> = match &mut self.nodes[node].term {
+            Term::Sink { .. } => vec![],
+            Term::Jump(edge) => vec![edge],
+            Term::Cond {
+                if_true, if_false, ..
+            } => vec![if_true, if_false],
+            Term::Dispatch { arms, default, .. } => arms
+                .iter_mut()
+                .map(|(_, edge)| edge)
+                .chain([default])
+                .collect(),
+            Term::LoopTail { repeat, exit, .. } => vec![repeat, exit],
+        };
+        for edge in edges {
             edit(edge);
         }
     }
@@ -384,9 +363,12 @@ impl Builder<'_> {
             .map(|argument| (self.arg_var[&argument.id()], Rhs::Value(argument.id())))
             .collect();
         let entry = self.node_of_block[&entry];
-        let preheader = self.cfg.add_synthetic(entry);
-        self.cfg.nodes[preheader].assigns = assigns;
-        self.cfg.entry = preheader;
+        self.cfg.entry = self.cfg.add_node(Node {
+            block: None,
+            assigns,
+            term: Term::Jump(Edge::new(entry)),
+            loop_body: None,
+        });
     }
 
     /// One dependency chain per object, each as a variable of its own: every

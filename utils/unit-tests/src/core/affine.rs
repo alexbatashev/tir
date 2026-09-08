@@ -1,7 +1,9 @@
 //! The affine view's arithmetic: forms, the wrap check, and the distance test.
 
 use tir::analysis::affine::{distances, AffineForm, AffineView, Component, Sign};
-use tir::{builtin, Context, Operation};
+use tir::Operation;
+
+use super::fixtures;
 
 #[test]
 fn forms_add_terms_of_the_same_variable() {
@@ -126,9 +128,7 @@ fn extents_widen_the_target_to_the_bytes_an_access_covers() {
 /// §7.1: a red view is read off the IR and allocates nothing into it.
 #[test]
 fn building_a_view_allocates_nothing() {
-    let context = Context::with_default_dialects();
-    let module: builtin::ModuleOp = tir::parse::ir::parse_ir(
-        &context,
+    let (context, module) = fixtures::parse(
         r#"module {data_layout = {types = {i32 = {abi = 32, size = 32}, i64 = {abi = 64, size = 64}, p = {abi = 64, size = 64}}}} {
   %0 = func.func @f() {
     %1 = ptr.alloca {size = 1024, align = 4} : !ptr.p
@@ -148,8 +148,7 @@ fn building_a_view_allocates_nothing() {
   }
   module_end
 }"#,
-    )
-    .expect("the fixture parses");
+    );
 
     let before = context.slab_census();
     let views = tir::analysis::affine::nests_under(&context, module.id());
@@ -165,9 +164,7 @@ fn building_a_view_allocates_nothing() {
 
 #[test]
 fn a_loop_that_does_not_count_has_no_view() {
-    let context = Context::with_default_dialects();
-    let module: builtin::ModuleOp = tir::parse::ir::parse_ir(
-        &context,
+    let (context, module) = fixtures::parse(
         r#"module {
   %0 = func.func @f(%1: !i1) {
     scf.loop {
@@ -177,8 +174,7 @@ fn a_loop_that_does_not_count_has_no_view() {
   }
   module_end
 }"#,
-    )
-    .expect("the fixture parses");
+    );
     assert!(tir::analysis::affine::nests_under(&context, module.id()).is_empty());
     assert!(AffineView::build(&context, module.id()).is_none());
 }
@@ -191,9 +187,7 @@ fn strip_mining_an_unordered_loop_keeps_its_sum() {
     use tir::interp::{self, Value};
     use tir::{Operation, Symbol};
 
-    let context = Context::with_default_dialects();
-    let module: builtin::ModuleOp = tir::parse::ir::parse_ir(
-        &context,
+    let (context, module) = fixtures::parse(
         r#"module {data_layout = {types = {i32 = {abi = 32, size = 32}, i64 = {abi = 64, size = 64}, p = {abi = 64, size = 64}}}} {
   %0 = func.func @f(%n: !i32) -> !i32 {
     %1 = ptr.alloca {size = 64, align = 4} : !ptr.p
@@ -222,8 +216,7 @@ fn strip_mining_an_unordered_loop_keeps_its_sum() {
   }
   module_end
 }"#,
-    )
-    .expect("the fixture parses");
+    );
     tir::verify_op_tree(&context, module.id()).expect("valid input");
     let function = context
         .get_op(module.id())

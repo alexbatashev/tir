@@ -179,6 +179,33 @@ impl<'src> Parser<'src> {
         Some(&self.src[start..start + len])
     }
 
+    /// The comma-separated list `open item, item, ... close`, each item parsed
+    /// by `item`. `None` when the text does not open one, so a caller that
+    /// requires the list says which token it missed.
+    pub fn parse_delimited<T>(
+        &mut self,
+        open: &str,
+        close: &str,
+        mut item: impl FnMut(&mut Self) -> Result<T, (Span, crate::Error)>,
+    ) -> Result<Option<Vec<T>>, (Span, crate::Error)> {
+        if !self.parse_token(open) {
+            return Ok(None);
+        }
+        let mut items = Vec::new();
+        if !self.parse_token(close) {
+            loop {
+                items.push(item(self)?);
+                if self.parse_token(close) {
+                    break;
+                }
+                if !self.parse_token(",") {
+                    return Err((self.span(), crate::Error::ExpectedToken(",")));
+                }
+            }
+        }
+        Ok(Some(items))
+    }
+
     pub fn parse_attribute_value(
         &mut self,
         context: &crate::Context,
@@ -197,50 +224,29 @@ impl<'src> Parser<'src> {
         if let Some(value) = self.parse_string() {
             return Ok(Some(AttributeValue::Str(value.to_string().into())));
         }
-        if self.parse_token("[") {
-            let mut values = Vec::new();
-            if !self.parse_token("]") {
-                loop {
-                    let value = self
-                        .parse_attribute_value(context)?
-                        .ok_or_else(|| (self.span(), crate::Error::ExpectedToken("attribute")))?;
-                    values.push(value);
-                    if self.parse_token("]") {
-                        break;
-                    }
-                    if !self.parse_token(",") {
-                        return Err((self.span(), crate::Error::ExpectedToken(",")));
-                    }
-                }
-            }
+        if let Some(values) = self.parse_delimited("[", "]", |parser| {
+            parser
+                .parse_attribute_value(context)?
+                .ok_or_else(|| (parser.span(), crate::Error::ExpectedToken("attribute")))
+        })? {
             return Ok(Some(AttributeValue::Array(values.into())));
         }
-        if self.parse_token("{") {
-            let mut values = std::collections::BTreeMap::new();
-            if !self.parse_token("}") {
-                loop {
-                    let name = self
-                        .parse_ident()
-                        .ok_or_else(|| {
-                            (self.span(), crate::Error::ExpectedToken("attribute name"))
-                        })?
-                        .to_string();
-                    if !self.parse_token("=") {
-                        return Err((self.span(), crate::Error::ExpectedToken("=")));
-                    }
-                    let value = self
-                        .parse_attribute_value(context)?
-                        .ok_or_else(|| (self.span(), crate::Error::ExpectedToken("attribute")))?;
-                    values.insert(name, value);
-                    if self.parse_token("}") {
-                        break;
-                    }
-                    if !self.parse_token(",") {
-                        return Err((self.span(), crate::Error::ExpectedToken(",")));
-                    }
-                }
+        if let Some(entries) = self.parse_delimited("{", "}", |parser| {
+            let name = parser
+                .parse_ident()
+                .ok_or_else(|| (parser.span(), crate::Error::ExpectedToken("attribute name")))?
+                .to_string();
+            if !parser.parse_token("=") {
+                return Err((parser.span(), crate::Error::ExpectedToken("=")));
             }
-            return Ok(Some(AttributeValue::Dict(Box::new(values))));
+            let value = parser
+                .parse_attribute_value(context)?
+                .ok_or_else(|| (parser.span(), crate::Error::ExpectedToken("attribute")))?;
+            Ok((name, value))
+        })? {
+            return Ok(Some(AttributeValue::Dict(Box::new(
+                entries.into_iter().collect(),
+            ))));
         }
         if let Some(value) = self.parse_register_attribute(context)? {
             return Ok(Some(value));
@@ -489,6 +495,17 @@ impl<'src> Parser<'src> {
         self.position = (start + 1 + len) as u32;
         self.skip_trivia();
         Some(&self.src[start + 1..start + 1 + len])
+    }
+
+    /// Whether the cursor still sits on the line the last token ended on.
+    /// Trivia is already behind it, so a construct that belongs to an op's own
+    /// line asks this before reading on.
+    pub fn on_same_line(&self) -> bool {
+        !self.src[..self.position as usize]
+            .chars()
+            .rev()
+            .take_while(|c| c.is_whitespace())
+            .any(|c| c == '\n')
     }
 
     pub fn pos(&self) -> u32 {

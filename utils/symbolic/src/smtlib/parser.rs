@@ -233,24 +233,6 @@ fn term_p<'a>() -> impl Parser<'a, &'a str, Term, Extra<'a>> + Clone {
             .then_ignore(rparen())
             .map(|(var, t)| VarBinding { var, term: t });
 
-        let pattern = choice((
-            lparen()
-                .ignore_then(symbol_p())
-                .then(symbol_p().repeated().at_least(1).collect::<Vec<_>>())
-                .then_ignore(rparen())
-                .map(|(ctor, vars)| Pattern::Constructor(ctor, vars)),
-            symbol_p().map(Pattern::Var),
-        ));
-        let match_case = lparen()
-            .ignore_then(pattern)
-            .then(term.clone())
-            .then_ignore(rparen())
-            .map(|(pattern, body)| MatchCase { pattern, body });
-
-        let quantified_vars = lparen()
-            .ignore_then(sorted_var_p().repeated().at_least(1).collect::<Vec<_>>())
-            .then_ignore(rparen());
-
         let let_form = lparen()
             .ignore_then(kw("let"))
             .ignore_then(
@@ -261,28 +243,6 @@ fn term_p<'a>() -> impl Parser<'a, &'a str, Term, Extra<'a>> + Clone {
             .then(term.clone())
             .then_ignore(rparen())
             .map(|(binds, body)| Term::Let(binds, Box::new(body)));
-        let forall_form = lparen()
-            .ignore_then(kw("forall"))
-            .ignore_then(quantified_vars.clone())
-            .then(term.clone())
-            .then_ignore(rparen())
-            .map(|(vars, body)| Term::Forall(vars, Box::new(body)));
-        let exists_form = lparen()
-            .ignore_then(kw("exists"))
-            .ignore_then(quantified_vars)
-            .then(term.clone())
-            .then_ignore(rparen())
-            .map(|(vars, body)| Term::Exists(vars, Box::new(body)));
-        let match_form = lparen()
-            .ignore_then(kw("match"))
-            .ignore_then(term.clone())
-            .then(
-                lparen()
-                    .ignore_then(match_case.repeated().at_least(1).collect::<Vec<_>>())
-                    .then_ignore(rparen()),
-            )
-            .then_ignore(rparen())
-            .map(|(scrutinee, cases)| Term::Match(Box::new(scrutinee), cases));
         let annot_form = lparen()
             .ignore_then(kw("!"))
             .ignore_then(term.clone())
@@ -301,15 +261,7 @@ fn term_p<'a>() -> impl Parser<'a, &'a str, Term, Extra<'a>> + Clone {
         ));
 
         // `atom` before `app_form` so `(_ bv13 8)`/`(as c S)` read as qual-identifier terms, not apps.
-        choice((
-            let_form,
-            forall_form,
-            exists_form,
-            match_form,
-            annot_form,
-            atom,
-            app_form,
-        ))
+        choice((let_form, annot_form, atom, app_form))
     })
 }
 
@@ -334,17 +286,6 @@ fn function_def_p<'a>() -> impl Parser<'a, &'a str, FunctionDef, Extra<'a>> + Cl
             params,
             return_sort,
             body,
-        })
-}
-
-fn function_dec_p<'a>() -> impl Parser<'a, &'a str, FunctionDec, Extra<'a>> + Clone {
-    lparen()
-        .ignore_then(function_sig_p())
-        .then_ignore(rparen())
-        .map(|(name, params, return_sort)| FunctionDec {
-            name,
-            params,
-            return_sort,
         })
 }
 
@@ -381,19 +322,6 @@ fn command_p<'a>() -> impl Parser<'a, &'a str, Command, Extra<'a>> + Clone {
         kw("set-option")
             .ignore_then(attribute_p())
             .map(Command::SetOption),
-        kw("declare-sort")
-            .ignore_then(symbol_p())
-            .then(numeral_p())
-            .map(|(name, arity)| Command::DeclareSort(name, arity)),
-        kw("define-sort")
-            .ignore_then(symbol_p())
-            .then(
-                lparen()
-                    .ignore_then(symbol_p().repeated().collect::<Vec<_>>())
-                    .then_ignore(rparen()),
-            )
-            .then(sort_p())
-            .map(|((name, params), def)| Command::DefineSort(name, params, def)),
         kw("declare-const")
             .ignore_then(symbol_p())
             .then(sort_p())
@@ -403,21 +331,6 @@ fn command_p<'a>() -> impl Parser<'a, &'a str, Command, Extra<'a>> + Clone {
             .then(sort_list())
             .then(sort_p())
             .map(|((name, args), ret)| Command::DeclareFun(name, args, ret)),
-        kw("define-fun-rec")
-            .ignore_then(function_def_p())
-            .map(Command::DefineFunRec),
-        kw("define-funs-rec")
-            .ignore_then(
-                lparen()
-                    .ignore_then(function_dec_p().repeated().at_least(1).collect::<Vec<_>>())
-                    .then_ignore(rparen()),
-            )
-            .then(
-                lparen()
-                    .ignore_then(term_p().repeated().at_least(1).collect::<Vec<_>>())
-                    .then_ignore(rparen()),
-            )
-            .map(|(decs, bodies)| Command::DefineFunsRec(decs, bodies)),
         kw("define-fun")
             .ignore_then(function_def_p())
             .map(Command::DefineFun),
@@ -433,7 +346,6 @@ fn command_p<'a>() -> impl Parser<'a, &'a str, Command, Extra<'a>> + Clone {
             )
             .map(Command::CheckSatAssuming),
         kw("check-sat").to(Command::CheckSat),
-        kw("get-assertions").to(Command::GetAssertions),
         kw("get-model").to(Command::GetModel),
         kw("get-value")
             .ignore_then(
@@ -442,16 +354,6 @@ fn command_p<'a>() -> impl Parser<'a, &'a str, Command, Extra<'a>> + Clone {
                     .then_ignore(rparen()),
             )
             .map(Command::GetValue),
-        kw("get-proof").to(Command::GetProof),
-        kw("get-unsat-core").to(Command::GetUnsatCore),
-        kw("get-unsat-assumptions").to(Command::GetUnsatAssumptions),
-        kw("get-assignment").to(Command::GetAssignment),
-        kw("get-info")
-            .ignore_then(keyword_p())
-            .map(Command::GetInfo),
-        kw("get-option")
-            .ignore_then(keyword_p())
-            .map(Command::GetOption),
     ));
 
     let group_c = choice((
@@ -463,8 +365,13 @@ fn command_p<'a>() -> impl Parser<'a, &'a str, Command, Extra<'a>> + Clone {
         kw("exit").to(Command::Exit),
     ));
 
+    // Never succeeds; listed first so its message wins over the `kw` failures it ties with.
+    let unknown = symbol_p().try_map(|name: Symbol, span| {
+        Err(Rich::custom(span, format!("unknown command `{}`", name.0)))
+    });
+
     lparen()
-        .ignore_then(choice((group_a, group_b, group_c)))
+        .ignore_then(choice((unknown, group_a, group_b, group_c)))
         .then_ignore(rparen())
 }
 

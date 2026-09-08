@@ -7,50 +7,11 @@
 //! from the body's results, since under demand evaluation an effect nothing
 //! demands never runs.
 
-use std::collections::HashSet;
+use crate::analysis::{AnalysisManager, Effect, effect_of};
+use crate::func::FuncOp;
+use crate::{Context, OpHandle, OperationRef, Pass, PassError, PassTarget, RegionKind, Rewriter};
 
-use crate::analysis::AnalysisManager;
-use crate::func::{CallOp, FuncOp, ReturnOp};
-use crate::ptr::MemcpyOp;
-use crate::{
-    Context, MemoryRead, MemoryWrite, OpHandle, OpId, OperationRef, Pass, PassError, PassTarget,
-    PromotableAllocation, RegionKind, Rewriter, ValueId,
-};
-
-/// What one operation does to memory, before the objects it names are read.
-enum Kind {
-    /// Opens the memory of a slot.
-    Open,
-    /// Observes the memory an address names and leaves it as it found it.
-    Read,
-    /// Leaves a memory at an address that the reads after it see.
-    Write,
-    /// Touches every object the outside can reach.
-    Clobber,
-    /// Hands every object the outside can reach to the function's caller.
-    Export,
-}
-
-/// What `op` does to memory.
-fn classify(op: &OpHandle) -> Option<Kind> {
-    if op.has_interface::<dyn PromotableAllocation>() {
-        return Some(Kind::Open);
-    }
-    // Both interfaces are asked before either answers: an operation declaring
-    // the two writes the extent it reads, and is no observer.
-    if op.has_interface::<dyn MemoryWrite>() {
-        return Some(Kind::Write);
-    }
-    if op.has_interface::<dyn MemoryRead>() {
-        return Some(Kind::Read);
-    }
-    if op.is::<MemcpyOp>() || op.is::<CallOp>() {
-        return Some(Kind::Clobber);
-    }
-    op.is::<ReturnOp>().then_some(Kind::Export)
-}
-
-/// cone never runs, and the order it was meant to keep is gone with it.
+/// Check the memory-order invariant of `function`'s unordered body.
 pub fn verify_deps(context: &Context, function: &OpHandle) -> Result<(), crate::Error> {
     let name = function
         .clone()
@@ -64,31 +25,7 @@ pub fn verify_deps(context: &Context, function: &OpHandle) -> Result<(), crate::
             op.name()
         )))
     };
-    // Demand runs from the body's results: an op is demanded through an operand
-    // of a demanded op or a result of a region of one, and an op in a region
-    // nobody demands is demanded by nothing, however its own region reads it.
-    let mut demanded: HashSet<OpId> = HashSet::new();
-    let defining = |values: Vec<ValueId>| {
-        values
-            .into_iter()
-            .filter_map(|value| context.get_value(value).defining_op())
-            .collect::<Vec<_>>()
-    };
-    let mut worklist: Vec<OpId> = function
-        .regions()
-        .iter()
-        .flat_map(|&region| defining(context.get_region(region).results()))
-        .collect();
-    while let Some(op) = worklist.pop() {
-        if !demanded.insert(op) {
-            continue;
-        }
-        let instance = context.get_op(op);
-        worklist.extend(defining(instance.operands().to_vec()));
-        for region in instance.regions() {
-            worklist.extend(defining(context.get_region(region).results()));
-        }
-    }
+    let demanded = super::demanded_ops(context, &function.regions());
     for region in function
         .regions()
         .iter()
@@ -100,10 +37,10 @@ pub fn verify_deps(context: &Context, function: &OpHandle) -> Result<(), crate::
         }
         for op_id in handle.op_ids() {
             let op = context.get_op(op_id);
-            let changes = match classify(&op) {
-                Some(Kind::Read) => false,
-                Some(Kind::Write | Kind::Clobber) => true,
-                _ => continue,
+            let changes = match effect_of(&op) {
+                Some(Effect::Read) => false,
+                Some(Effect::Change) => true,
+                None => continue,
             };
             if op.dep_operands().is_empty() {
                 return fail(&op, "names no dependency");

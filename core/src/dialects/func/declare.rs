@@ -74,13 +74,6 @@ impl DeclareOp {
         self.result()
     }
 
-    pub fn sym_name(&self) -> String {
-        match self.attr("sym_name") {
-            Some(AttributeValue::Str(name)) => name.to_string(),
-            _ => panic!("declare must carry sym_name"),
-        }
-    }
-
     fn signature(&self) -> Option<(Vec<TypeId>, TypeId)> {
         FnType::signature_of(&self.0.context.upgrade(), self.fn_value())
     }
@@ -122,26 +115,13 @@ impl DeclareOp {
             .parse_symbol_name()
             .ok_or_else(|| (parser.span(), Error::ExpectedSymbolName))?
             .to_string();
-        if !parser.parse_token("(") {
-            return Err((parser.span(), Error::ExpectedToken("(")));
-        }
-
-        let mut arg_types = Vec::new();
-        if !parser.parse_token(")") {
-            loop {
-                let ty = parser
+        let arg_types = parser
+            .parse_delimited("(", ")", |parser| {
+                parser
                     .parse_type(context)?
-                    .ok_or_else(|| (parser.span(), Error::ExpectedType))?;
-                arg_types.push(ty);
-
-                if parser.parse_token(")") {
-                    break;
-                }
-                if !parser.parse_token(",") {
-                    return Err((parser.span(), Error::ExpectedToken(",")));
-                }
-            }
-        }
+                    .ok_or_else(|| (parser.span(), Error::ExpectedType))
+            })?
+            .ok_or_else(|| (parser.span(), Error::ExpectedToken("(")))?;
 
         if !parser.parse_token("->") {
             return Err((parser.span(), Error::ExpectedToken("->")));

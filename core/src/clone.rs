@@ -19,7 +19,9 @@ struct Mapping {
     blocks: HashMap<BlockId, BlockId>,
 }
 
-pub(crate) fn clone_op(context: &Context, op: OpId) -> OpId {
+/// Copy `op` and everything under it, returning the copy. The copy is
+/// detached: the caller decides which block it joins.
+pub fn clone_op(context: &Context, op: OpId) -> OpId {
     clone_op_into(context, op, &mut Mapping::default())
 }
 

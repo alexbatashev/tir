@@ -1,5 +1,4 @@
 use crate::Any;
-use crate::attributes::AttributeValue;
 use crate::{
     BlockId, BranchGuard, BranchTerminator, Context, Error, Operation, Terminator, ValueId,
     dialect, operation,
@@ -47,10 +46,6 @@ impl BranchTerminator for BranchOp {
 }
 
 impl BranchOp {
-    pub fn dest(&self) -> BlockId {
-        block_attr(self, "dest")
-    }
-
     /// The values forwarded to the destination block's arguments.
     pub fn dest_args(&self) -> Vec<ValueId> {
         self.operands().to_vec()
@@ -70,7 +65,7 @@ impl BranchOp {
         let (dest, dest_args, deps) = parse_successor(parser, context)?;
         let op = BranchOpBuilder::new(context)
             .dest_args(dest_args)
-            .attr("dest", AttributeValue::Block(dest))
+            .dest(dest)
             .build();
         for dep in deps {
             context.append_dep_operand(op.id(), dep);
@@ -126,19 +121,10 @@ impl CondBranchOp {
         self.operands()[0]
     }
 
-    pub fn true_dest(&self) -> BlockId {
-        block_attr(self, "true_dest")
-    }
-
-    pub fn false_dest(&self) -> BlockId {
-        block_attr(self, "false_dest")
-    }
-
     /// The values forwarded to the true successor's block arguments, the
     /// dependencies among them last.
     pub fn true_args(&self) -> Vec<ValueId> {
-        let (start, end) = self.true_range();
-        let mut args = self.value_operands()[start..end].to_vec();
+        let mut args = self.value_operands()[self.args_range(1)].to_vec();
         args.extend(&self.dep_operands()[..self.true_deps()]);
         args
     }
@@ -146,8 +132,7 @@ impl CondBranchOp {
     /// The values forwarded to the false successor's block arguments, the
     /// dependencies among them last.
     pub fn false_args(&self) -> Vec<ValueId> {
-        let (start, end) = self.false_range();
-        let mut args = self.value_operands()[start..end].to_vec();
+        let mut args = self.value_operands()[self.args_range(2)].to_vec();
         args.extend(&self.dep_operands()[self.true_deps()..]);
         args
     }
@@ -159,20 +144,10 @@ impl CondBranchOp {
         context.get_block(self.true_dest()).dep_arguments().len()
     }
 
-    // Value operand layout is [condition, true_args.., false_args..]; the
-    // segment sizes [1, t, f] recovered from the op tell where each successor's
-    // args sit.
-    fn true_range(&self) -> (usize, usize) {
-        let segs = operand_segments(self);
-        let t = segs.get(1).copied().unwrap_or(0);
-        (1, 1 + t)
-    }
-
-    fn false_range(&self) -> (usize, usize) {
-        let segs = operand_segments(self);
-        let t = segs.get(1).copied().unwrap_or(0);
-        let f = segs.get(2).copied().unwrap_or(0);
-        (1 + t, 1 + t + f)
+    // Value operand layout is [condition, true_args.., false_args..], one
+    // declared operand group each.
+    fn args_range(&self, group: usize) -> std::ops::Range<usize> {
+        tir::binding::operand_segments(&self.0, 3)[group].clone()
     }
 
     fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
@@ -198,39 +173,14 @@ impl CondBranchOp {
             .condition(condition)
             .true_args(true_args)
             .false_args(false_args)
-            .attr("true_dest", AttributeValue::Block(true_dest))
-            .attr("false_dest", AttributeValue::Block(false_dest))
+            .true_dest(true_dest)
+            .false_dest(false_dest)
             .build();
         for dep in true_deps.into_iter().chain(false_deps) {
             context.append_dep_operand(op.id(), dep);
         }
         Ok(Box::new(op))
     }
-}
-
-fn block_attr(op: &impl Operation, name: &str) -> BlockId {
-    match op.attr(name) {
-        Some(AttributeValue::Block(id)) => id,
-        _ => panic!("{name} must be a block reference"),
-    }
-}
-
-fn operand_segments(op: &impl Operation) -> Vec<usize> {
-    op.attr("operand_segment_sizes")
-        .and_then(|value| match value {
-            AttributeValue::Array(items) => Some(items),
-            _ => None,
-        })
-        .map(|items| {
-            items
-                .iter()
-                .map(|v| match v {
-                    AttributeValue::UInt(n) => *n as usize,
-                    _ => 0,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// Print a successor as `^bbN` followed by an optional MLIR-style argument list

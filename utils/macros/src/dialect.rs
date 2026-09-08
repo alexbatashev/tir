@@ -216,7 +216,7 @@ fn make_register_operations(dialect: &Ident, operations: &[Ident]) -> proc_macro
             quote! {
                 assert_eq!(tir::DialectName::of_operation::<#name>(), tir::DialectName::of::<#dialect>());
                 self.dyn_converters.insert(tir::OperationName::of::<#name>(), #name::from_op_instance_dyn);
-                self.parsers.insert(#name::name(), #name::parse);
+                self.parsers.insert(<#name as tir::Operation>::name(), #name::parse);
                 #name::register_interfaces(context);
             }
         })

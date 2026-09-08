@@ -52,26 +52,12 @@ impl LowerCirStructsPass {
         OperationRef::new(context.get_op(operation.op().id))
     }
 
-    fn string_attribute(operation: &impl Operation, name: &str) -> String {
-        match operation.attr(name) {
-            Some(AttributeValue::Str(value)) => value.to_string(),
-            _ => panic!("{name} must be a string attribute"),
-        }
-    }
-
-    fn uint_attribute(operation: &impl Operation, name: &str) -> u64 {
-        match operation.attr(name) {
-            Some(AttributeValue::UInt(value)) => value,
-            _ => panic!("{name} must be an unsigned integer attribute"),
-        }
-    }
-
     fn layouts(descendants: &[OperationRef]) -> HashMap<String, StructLayout> {
         descendants
             .iter()
             .filter_map(|operation| operation.as_op::<cir::DefineStructOp>())
             .map(|definition| {
-                let name = Self::string_attribute(&definition, "sym_name");
+                let name = definition.sym_name();
                 let fields = definition
                     .attr("fields")
                     .and_then(|value| match value {
@@ -207,8 +193,8 @@ impl Pass for LowerCirStructsPass {
             let Some(member) = target.as_op::<cir::GetMemberOp>() else {
                 continue;
             };
-            let name = Self::string_attribute(&member, "struct_name");
-            let field = Self::uint_attribute(&member, "field") as usize;
+            let name = member.struct_name();
+            let field = member.field() as usize;
             let offset = layouts[&name].fields[field].offset;
             let result_type = context.get_value(member.result()).ty();
             let offset_value =
@@ -238,7 +224,7 @@ impl Pass for LowerCirStructsPass {
                 rewriter,
                 &target,
                 &layouts,
-                &Self::string_attribute(&copy, "struct_name"),
+                &copy.struct_name(),
                 copy.operands()[0],
                 copy.operands()[1],
             )?;

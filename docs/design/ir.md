@@ -61,8 +61,8 @@ Three rules are binding for everything below:
 The green core is the persistent ground truth: the `Context` and the entities
 it owns. "Green" means *immutable in place*: entities are edited only by
 building replacements and swapping them in through the tree-edit API, which
-stamps versions along the edited spine. Everything derived — use lists,
-dominance, e-graphs — lives outside the green core as red views (§7).
+stamps versions along the edited spine. Everything derived — use lists and
+e-graphs — lives outside the green core as red views (§7).
 
 ### 2.1 Entities and identity
 
@@ -143,7 +143,7 @@ spines, and maintain nothing but the green truth:
 | `insert_op_before` / `insert_op_after` | positional insertion in a block |
 | `set_op_operand(s)`, `set_op_attributes` | operand/attribute rewiring |
 | `replace_value_uses` (RAUW) | consults the `DefUse` view for use sites |
-| `append_block_argument`, `split_block`, `clone_op`, `clone_region`, `splice_region` | block/region surgery; block ids are stable across argument edits |
+| `append_block_argument`, `split_block`, `splice_region`, `clone::clone_op` | block/region surgery; block ids are stable across argument edits |
 | **port edit** | grow/shrink an op's results, its regions' arguments, and the corresponding yields *in one edit* |
 | `replace_region_contents(op, staged)` | the atomic commit: §2.5 |
 
@@ -226,7 +226,6 @@ or implementing an interface; it never means teaching core code about an op.
 | `Callable` | a λ: body (absent for a declaration), the value a call takes as its callee, parameter and result types |
 | `Apply` | an application of a callable to a run of the op's value operands |
 | `Global` | a δ: a data object with an address, and an initializer image where it defines one |
-| `RegionExit` | an operation of an *ordered* region binding that region's results. An unordered region names them outright and has none |
 | `NonLocalExit` | a `break`/`continue` leaving an enclosing structured op from inside its subtree, naming the target by kind or label; `ExitScope` marks what it may leave |
 | `Speculatable` | the op cannot trap, so it may run on a path the source did not take |
 | `MemoryRead` / `MemoryWrite` | location, value, **and state accessors**: the state operand read, and the state result produced (§6) |
@@ -291,8 +290,8 @@ Corollaries developers should internalize:
 - A frontend dialect may declare these bindings on its own ops and get the
   entire optimizer for free.
 - Multi-block regions and branch terminators do not occur in the middle-end
-  form. `mem2reg`-era dominance machinery does not exist here; nothing in
-  the mid-end computes a dominator tree (§8).
+  form. `mem2reg`-era dominance machinery does not exist here; nothing
+  computes a dominator tree (§8).
 
 ### 5.2 Arbitrary CFG: total restructuring
 
@@ -393,7 +392,7 @@ liveness and colouring never see one (`son-backend` B2).
 `restructure-nodes` draws the chains as it converts the CFG (§5.2), and
 `verify-deps` checks after every later pass that they are still whole rather
 than drawing them again. What it draws is **one chain per object**: one for
-every object `AliasFacts` can name at the accesses' addresses — a stack
+every object `object_base` can name at the accesses' addresses — a stack
 allocation, a global, a parameter — plus a *world* chain for the memory whose
 provenance it cannot read back. Each opens at an `state.entry_state` of its
 own and the return hands the caller the join of them all.
@@ -526,10 +525,10 @@ A red view is a derived structure over the green core:
 - Allocates **nothing** into the Context while being built or queried. (The
   historical "probe" hack — minting values to ask interface questions — is
   forbidden; views walk real ops.)
-- Read-only views (dominance, `DefUse`) answer queries. Mutating views
-  (the e-graph) change the program only through §2.5's atomic commit, or
-  discard silently. Between build and commit a view may diverge from the
-  green truth arbitrarily; mid-saturation an e-graph is not IR.
+- Read-only views (`DefUse`) answer queries. Mutating views (the e-graph)
+  change the program only through §2.5's atomic commit, or discard silently.
+  Between build and commit a view may diverge from the green truth
+  arbitrarily; mid-saturation an e-graph is not IR.
 - A pass that never asks for a view never pays for it.
 
 Views are ordinary structs with a build function. There is no view
@@ -537,8 +536,12 @@ framework, no view registry, no view base class.
 
 ### 7.2 The e-graph view
 
-The single optimizer substrate: one seeder, one vocabulary, one driver, two
-consumers (the mid-end canonicalizer and instruction selection).
+The single optimizer substrate: one vocabulary, one driver, two consumers (the
+mid-end canonicalizer and instruction selection), and a seeder each. Both read
+the gates and the chains off the same interfaces, but a value is a different
+term to each: what a peephole rewrites is an op's identity, and what a target
+rule matches is its `sem:` expansion, so neither seeder's graph is the
+other's.
 
 **Vocabulary.** `SemNode` (`core/src/sem`): `Kind::Ir` (op-identity terms),
 `Kind::Sym` (semantic terms: arithmetic, `If`, `Theta`, `LoadMemory`,
@@ -547,21 +550,24 @@ outside identity.
 
 **Seeding** walks a region's real ops through interfaces:
 
-- Pure ops seed as op identity ∪ their `sem:` expansion (both terms, one
-  class).
-- `Gamma` seeds each result as an `If`(predicate, per-arm result) term where
-  the result is speculatable; otherwise it anchors.
-- `Theta` seeds each carried *state* port as a `Theta(init, latch)`
-  projection, reading the alignment off the op's declared binding. A value
-  port the body carries unchanged is unioned with what the loop was entered
-  on; one the body changes is recorded for the hypothesis rounds below, which
-  is what keeps the port and the loop's result distinct terms.
+- A pure op seeds as one term: its op identity for the canonicalizer, its
+  `sem:` expansion for selection.
+- `Gamma` seeds each value result as an `If`(predicate, per-arm result) term,
+  one child per arm in the binding's order; arms that agree need no choice.
+  Selection unions the gate's own value into that class, so the cover may read
+  the gate as the register its regions leave it in.
+- `Theta` seeds each carried port off the op's declared binding — as
+  `Loop(init, next, exit, pred)` over a `Port` for the canonicalizer, as
+  `Theta(init, next)` for selection. A port the body carries unchanged is
+  unioned with what the loop was entered on; one the body changes is recorded
+  for the hypothesis rounds below, which is what keeps the port and the loop's
+  result distinct terms.
 - A head-controlled source loop is already a γ around a θ in the IR, so it
   seeds as the composition of the two terms above. No IR is rewritten to make
   this seeding possible.
 - Memory ops seed as `LoadMemory(addr, bytes, meta, state)` /
   `StoreMemory(addr, bytes, value, space, state)` over the actual dependency
-  edges, unioned with op identity. Identity *is* the state operand: loads
+  edges, and as nothing else. Identity *is* the state operand: loads
   agreeing on address and chain hash-cons; loads on different chains never
   meet.
 - Region arguments and unmodeled ops anchor.
@@ -607,8 +613,6 @@ view construction *is* value numbering; commit is the elimination.
 
 - **`DefUse`** — the only use/def index in the system, version-keyed. The
   green core does not maintain use lists; RAUW consults this view.
-- **Dominance** — machine-CFG analyses for the backend (regalloc,
-  liveness). The mid-end has no dominance consumer.
 - **Dependence** (backend) — per-block dependence graph over machine ops
   (register def/use plus memory constraints) feeding the scheduler.
 - **Affine** (`analysis::affine`) — iteration-space view over a maximal
@@ -636,11 +640,12 @@ and their single survivors:
 | `sccp` + `ConstantFacts` | a second engine for a fact the first one can state: constants are classes, reachability is a gate's own scope | the e-graph's scopes, hypothesis rounds included |
 | `dse` | same-chain overwrite is an extent question the placement facts answer; a slot with no reader is a dead definition | §6.5 + DCE on chains |
 | `scf_to_cfg` + `cfg_cleanup` | destruction lives inside emission and emits clean CFG once | destruction-at-emission |
-| three e-graph seeders (instcombine's, isel's `SemDagBuilder`, the sea view) | one program, one seeding | the §7.2 seeder |
+| the sea view's e-graph seeder | a seeding of an IR that no longer exists | the two §7.2 seeders, one per consumer vocabulary |
 | eager `Value::uses` in the green core | derived data in ground truth | `DefUse` view |
 | `IRBuilder` + ad-hoc Context mutators + per-pass port-growing helpers | five mutation surfaces | the tree-edit API |
 | PBQP in `core` with dead coherence machinery | generic math stranded behind the compiler | `tir-pbqp` utils crate (§9) |
 | `DominatingEdgeFacts` | dominator-scoped facts on a CFG the mid-end no longer has | gate-context scoping in selection |
+| `DominatorTree` | the region tree *is* the dominance in the mid-end, and the backend's regalloc and liveness walk the machine CFG directly | the region tree; `analysis::regions` |
 | `scf.if`, `scf.switch_legacy`, `scf.for_legacy`, `scf.while`, `scf.condition`, `scf.break`, `scf.continue` | ops over ordered regions with terminator-bound yields, from before the region kind existed | `scf.switch`, `scf.loop`, `scf.for` over unordered regions (§5.1) |
 | `Conditional`, `LoopLike`, `GuardedLoop` / `EntryGuard`, `TokenScope` | interfaces a walker used to rediscover a structured op's alignment from blocks and terminators, plus a zero-trip guard stated structurally because no operation computed it | `Gamma`, `Theta`, `CountedLoop`, declared by the op and derived by the macro (§5.1) |
 | `!token` and the loop-scope arguments naming it | a control token existed so a `break` could say which loop it left; a `NonLocalExit` names its target by kind or label | `NonLocalExit` + `ExitScope` |

@@ -10,17 +10,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::cfg::{Cfg, Edge, LoopId, Node, NodeId, Rhs, Src, Term, VarId, unsupported};
-use crate::{OpId, PassError};
+use crate::PassError;
 
 #[derive(Clone, Debug)]
 pub enum Stmt {
     /// The operations of a node, preceded by the assignments it makes on entry.
     Node(NodeId),
     Assign(Vec<(VarId, Rhs)>),
-    Exit {
-        op: OpId,
-        args: Option<Vec<VarId>>,
-    },
     If {
         pred: Src,
         then_arm: Vec<Stmt>,
@@ -49,10 +45,6 @@ pub fn restructure(cfg: &mut Cfg) -> Result<Vec<Stmt>, PassError> {
     let mut tree = structurer.region(entry, sink)?;
     structurer.claim(sink)?;
     tree.push(Stmt::Node(sink));
-    let Term::Sink { op, args } = structurer.cfg.nodes[sink].term.clone() else {
-        return Err(unsupported("a region whose exit moved"));
-    };
-    tree.push(Stmt::Exit { op, args });
     Ok(tree)
 }
 
@@ -87,10 +79,9 @@ impl Structurer<'_> {
                 continue;
             }
             match self.cfg.nodes[node].term.clone() {
-                Term::Sink { op, args } => {
-                    statements.push(Stmt::Exit { op, args });
-                    return Ok(statements);
-                }
+                // The one sink is where every region stops, so reaching it is
+                // reaching a node the tree would have to hold twice.
+                Term::Sink { .. } => return Err(unsupported("an exit inside a region")),
                 Term::Jump(edge) => {
                     statements.push(Stmt::Assign(edge.assigns));
                     node = edge.target;

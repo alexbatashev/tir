@@ -94,10 +94,6 @@ impl UnionFind {
         self.base.parent.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.base.parent.is_empty()
-    }
-
     /// Canonicalize bottom-up: the base, then each open layer in order. A
     /// top-down walk would miss a layer's redirect for an id that layer never
     /// touched.

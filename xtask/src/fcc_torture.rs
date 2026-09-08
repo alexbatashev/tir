@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use xshell::{cmd, Shell};
 
-use crate::utils::{run_parallel, run_with_timeout};
+use crate::utils::{collect_c_files, run_parallel, run_with_timeout};
 
 const GCC_REPOSITORY: &str = "https://github.com/gcc-mirror/gcc.git";
 const GCC_REVISION: &str = "9aab80ddc5b2fa0eef80008e718067ab45f42c50";
@@ -126,18 +126,6 @@ fn check(allowlist_path: &Path, results: Vec<(String, bool)>, bless: bool) -> an
     Ok(classification.unexpected_failures.is_empty()
         && classification.stale_failures.is_empty()
         && classification.missing_entries.is_empty())
-}
-
-fn collect_c_files(directory: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {
-    for entry in fs::read_dir(directory)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            collect_c_files(&path, files)?;
-        } else if path.extension().is_some_and(|extension| extension == "c") {
-            files.push(path);
-        }
-    }
-    Ok(())
 }
 
 /// Runs each case all the way through codegen: a case passes only when fcc

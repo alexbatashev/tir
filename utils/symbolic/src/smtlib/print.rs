@@ -134,25 +134,6 @@ impl Display for SortedVar {
     }
 }
 
-impl Display for Pattern {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Pattern::Var(s) => write!(f, "{s}"),
-            Pattern::Constructor(ctor, vars) => {
-                write!(f, "({ctor} ")?;
-                join(f, vars)?;
-                f.write_str(")")
-            }
-        }
-    }
-}
-
-impl Display for MatchCase {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "({} {})", self.pattern, self.body)
-    }
-}
-
 impl Display for Term {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
@@ -168,21 +149,6 @@ impl Display for Term {
                 join(f, binds)?;
                 write!(f, ") {body})")
             }
-            Term::Forall(vars, body) => {
-                f.write_str("(forall (")?;
-                join(f, vars)?;
-                write!(f, ") {body})")
-            }
-            Term::Exists(vars, body) => {
-                f.write_str("(exists (")?;
-                join(f, vars)?;
-                write!(f, ") {body})")
-            }
-            Term::Match(scrutinee, cases) => {
-                write!(f, "(match {scrutinee} (")?;
-                join(f, cases)?;
-                f.write_str("))")
-            }
             Term::Annotated(term, attrs) => {
                 write!(f, "(! {term} ")?;
                 join(f, attrs)?;
@@ -197,14 +163,6 @@ impl Display for FunctionDef {
         write!(f, "{} (", self.name)?;
         join(f, &self.params)?;
         write!(f, ") {} {}", self.return_sort, self.body)
-    }
-}
-
-impl Display for FunctionDec {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "({} (", self.name)?;
-        join(f, &self.params)?;
-        write!(f, ") {})", self.return_sort)
     }
 }
 
@@ -224,12 +182,6 @@ impl Display for Command {
             Command::SetLogic(s) => write!(f, "(set-logic {s})"),
             Command::SetOption(a) => write!(f, "(set-option {a})"),
             Command::SetInfo(a) => write!(f, "(set-info {a})"),
-            Command::DeclareSort(s, n) => write!(f, "(declare-sort {s} {n})"),
-            Command::DefineSort(name, params, def) => {
-                write!(f, "(define-sort {name} (")?;
-                join(f, params)?;
-                write!(f, ") {def})")
-            }
             Command::DeclareConst(name, sort) => write!(f, "(declare-const {name} {sort})"),
             Command::DeclareFun(name, args, ret) => {
                 write!(f, "(declare-fun {name} (")?;
@@ -237,14 +189,6 @@ impl Display for Command {
                 write!(f, ") {ret})")
             }
             Command::DefineFun(def) => write!(f, "(define-fun {def})"),
-            Command::DefineFunRec(def) => write!(f, "(define-fun-rec {def})"),
-            Command::DefineFunsRec(decs, bodies) => {
-                f.write_str("(define-funs-rec (")?;
-                join(f, decs)?;
-                f.write_str(") (")?;
-                join(f, bodies)?;
-                f.write_str("))")
-            }
             Command::Assert(t) => write!(f, "(assert {t})"),
             Command::CheckSat => f.write_str("(check-sat)"),
             Command::CheckSatAssuming(lits) => {
@@ -252,19 +196,12 @@ impl Display for Command {
                 join(f, lits)?;
                 f.write_str("))")
             }
-            Command::GetAssertions => f.write_str("(get-assertions)"),
             Command::GetModel => f.write_str("(get-model)"),
             Command::GetValue(terms) => {
                 f.write_str("(get-value (")?;
                 join(f, terms)?;
                 f.write_str("))")
             }
-            Command::GetProof => f.write_str("(get-proof)"),
-            Command::GetUnsatCore => f.write_str("(get-unsat-core)"),
-            Command::GetUnsatAssumptions => f.write_str("(get-unsat-assumptions)"),
-            Command::GetAssignment => f.write_str("(get-assignment)"),
-            Command::GetInfo(k) => write!(f, "(get-info {k})"),
-            Command::GetOption(k) => write!(f, "(get-option {k})"),
             Command::Push(n) => write!(f, "(push {n})"),
             Command::Pop(n) => write!(f, "(pop {n})"),
             Command::Reset => f.write_str("(reset)"),

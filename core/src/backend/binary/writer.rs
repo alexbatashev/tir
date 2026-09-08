@@ -7,10 +7,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{self, Display};
 
-use tir::attributes::AttributeValue;
-use tir::builtin::GlobalOp;
-use tir::builtin::{ModuleEndOp, ModuleOp};
-use tir::func::DeclareOp;
+use tir::builtin::ModuleOp;
 use tir::{BlockId, Context, Operation};
 
 use super::format::ObjectFormatInfo;
@@ -18,8 +15,7 @@ use super::{
     FixupTarget, ObjReloc, ObjSection, ObjSymbol, ObjectFile, SectionKind, SymBinding, SymKind,
 };
 use crate::backend::{
-    BlockEndOp, DataRelocOp, InstrInfo, LiteralOp, MachineInstruction, SectionEndOp, SectionOp,
-    SymbolEndOp, SymbolOp,
+    AsmItem, DataRelocOp, InstrInfo, LiteralOp, MachineInstruction, as_int_attr, as_string_attr,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,45 +141,21 @@ impl BinaryWriter {
         state: &mut ObjectEmission,
         fmt: &ObjectFormatInfo,
     ) -> Result<(), BinaryEmitError> {
-        if op.is::<ModuleEndOp>()
-            || op.is::<SectionEndOp>()
-            || op.is::<SymbolEndOp>()
-            || op.is::<BlockEndOp>()
-            // Memory order is notation, not code (see the assembly printer).
-            || crate::backend::names_memory_state(op)
-            // External declarations contribute nothing to the object; their
-            // symbols materialize as undefined entries via relocations.
-            || op.is::<DeclareOp>()
-            || op.clone().as_op::<GlobalOp>().is_some_and(|global| global.is_external())
-        {
-            return Ok(());
+        match crate::backend::asm_item(op) {
+            AsmItem::Skip => Ok(()),
+            AsmItem::Section(section) => {
+                let name = as_string_attr(op.attr("name")).unwrap_or_else(|| ".text".to_string());
+                let enclosing = state.current_section;
+                state.current_section = Some(ensure_section(&mut state.obj, &name));
+                self.walk_block(context, section.body(), state, fmt)?;
+                state.current_section = enclosing;
+                Ok(())
+            }
+            AsmItem::Symbol => self.walk_symbol(context, op, state, fmt),
+            AsmItem::Literal => emit_literal(op, state),
+            AsmItem::DataReloc => emit_data_reloc(op, state, fmt),
+            AsmItem::Instruction => self.encode_op(op, state),
         }
-
-        if let Some(section) = op.clone().as_op::<SectionOp>() {
-            let name = string_attr(op, "name").unwrap_or_else(|| ".text".to_string());
-            let enclosing = state.current_section;
-            state.current_section = Some(ensure_section(&mut state.obj, &name));
-            self.walk_block(context, section.body(), state, fmt)?;
-            state.current_section = enclosing;
-            return Ok(());
-        }
-
-        if op.clone().as_op::<SymbolOp>().is_some() {
-            self.walk_symbol(context, op, state, fmt)?;
-            return Ok(());
-        }
-
-        if op.clone().as_op::<LiteralOp>().is_some() {
-            emit_literal(op, state)?;
-            return Ok(());
-        }
-
-        if op.clone().as_op::<DataRelocOp>().is_some() {
-            emit_data_reloc(op, state, fmt)?;
-            return Ok(());
-        }
-
-        self.encode_op(op, state)
     }
 
     fn walk_symbol(
@@ -193,7 +165,7 @@ impl BinaryWriter {
         state: &mut ObjectEmission,
         fmt: &ObjectFormatInfo,
     ) -> Result<(), BinaryEmitError> {
-        let name = string_attr(op, "name").ok_or(BinaryEmitError::MissingSymbolName)?;
+        let name = as_string_attr(op.attr("name")).ok_or(BinaryEmitError::MissingSymbolName)?;
         state.assignment =
             crate::backend::RegAssignment::of_op(op, crate::backend::ASSIGNMENT_ATTR);
         let section = state
@@ -201,7 +173,7 @@ impl BinaryWriter {
             .unwrap_or_else(|| ensure_section(&mut state.obj, ".text"));
         state.current_section = Some(section);
 
-        let align = int_attr(op, "align")
+        let align = as_int_attr(op.attr("align"))
             .and_then(|align| u64::try_from(align).ok())
             .unwrap_or(1)
             .max(1);
@@ -209,11 +181,10 @@ impl BinaryWriter {
         state.obj.sections[section].data.resize(aligned as usize, 0);
         state.obj.sections[section].align = state.obj.sections[section].align.max(align);
         let start = state.obj.sections[section].data.len() as u64;
-        let region = context.get_region(op.regions()[0]);
-        for block in region.iter(context.clone()) {
+        for block_id in crate::backend::symbol_body_blocks(context, op) {
             let offset = state.obj.sections[section].data.len() as u64;
-            state.block_starts.insert(block.id(), offset);
-            self.walk_block(context, block, state, fmt)?;
+            state.block_starts.insert(block_id, offset);
+            self.walk_block(context, context.get_block(block_id), state, fmt)?;
         }
         let end = state.obj.sections[section].data.len() as u64;
 
@@ -222,12 +193,12 @@ impl BinaryWriter {
             section: Some(section),
             value: start,
             size: end - start,
-            binding: if string_attr(op, "binding").as_deref() == Some("local") {
+            binding: if as_string_attr(op.attr("binding")).as_deref() == Some("local") {
                 SymBinding::Local
             } else {
                 SymBinding::Global
             },
-            kind: if string_attr(op, "kind").as_deref() == Some("object") {
+            kind: if as_string_attr(op.attr("kind")).as_deref() == Some("object") {
                 SymKind::Object
             } else {
                 SymKind::Func
@@ -343,10 +314,10 @@ fn emit_literal(op: &tir::OpHandle, state: &mut ObjectEmission) -> Result<(), Bi
     let unsupported = || BinaryEmitError::UnsupportedOp {
         op: LiteralOp::name().to_string(),
     };
-    let kind = string_attr(op, "kind").ok_or_else(unsupported)?;
+    let kind = as_string_attr(op.attr("kind")).ok_or_else(unsupported)?;
     let bytes = match kind.as_str() {
         "asciz" | "string" | "ascii" => {
-            let value = string_attr(op, "value").ok_or_else(unsupported)?;
+            let value = as_string_attr(op.attr("value")).ok_or_else(unsupported)?;
             let mut bytes = value.as_bytes().to_vec();
             if kind != "ascii" {
                 bytes.push(0);
@@ -354,7 +325,7 @@ fn emit_literal(op: &tir::OpHandle, state: &mut ObjectEmission) -> Result<(), Bi
             bytes
         }
         "byte" | "half" | "word" | "dword" | "space" => {
-            let value = int_attr(op, "value").ok_or_else(unsupported)?;
+            let value = as_int_attr(op.attr("value")).ok_or_else(unsupported)?;
             match kind.as_str() {
                 "space" => vec![0u8; usize::try_from(value).map_err(|_| unsupported())?],
                 "dword" => value.to_le_bytes().to_vec(),
@@ -393,12 +364,12 @@ fn emit_data_reloc(
     let unsupported = || BinaryEmitError::UnsupportedOp {
         op: DataRelocOp::name().to_string(),
     };
-    let symbol = string_attr(op, "symbol").ok_or_else(unsupported)?;
-    let width = int_attr(op, "width")
+    let symbol = as_string_attr(op.attr("symbol")).ok_or_else(unsupported)?;
+    let width = as_int_attr(op.attr("width"))
         .and_then(|width| u8::try_from(width).ok())
         .ok_or_else(unsupported)?;
     let r_type = (fmt.absolute_reloc)(width).ok_or_else(unsupported)?;
-    let addend = int_attr(op, "addend").ok_or_else(unsupported)?;
+    let addend = as_int_attr(op.attr("addend")).ok_or_else(unsupported)?;
     let section = state
         .current_section
         .unwrap_or_else(|| ensure_section(&mut state.obj, ".data"));
@@ -439,15 +410,4 @@ fn ensure_section(obj: &mut ObjectFile, name: &str) -> usize {
         insn_spans: Vec::new(),
     });
     obj.sections.len() - 1
-}
-
-fn int_attr(op: &tir::OpHandle, name: &str) -> Option<i64> {
-    op.attr(name).as_ref().and_then(AttributeValue::as_int)
-}
-
-fn string_attr(op: &tir::OpHandle, name: &str) -> Option<String> {
-    match op.attr(name)? {
-        AttributeValue::Str(value) => Some(value.into_string()),
-        _ => None,
-    }
 }

@@ -16,20 +16,20 @@ pub fn project_root() -> PathBuf {
     PathBuf::from(dir).parent().unwrap().to_owned()
 }
 
-pub fn git_checkout(sh: &Shell, url: &str, tag: &str, dest: &str) -> anyhow::Result<()> {
-    let root = project_root();
-    let target_dir = root.join("target");
-    let dest_dir = target_dir.join(dest);
-
-    if std::env::var("TIR_SKIP_SAIL_FETCH").ok().as_deref() == Some("1") {
+/// Every `.c` file under `directory`, recursively. A path that is not a
+/// directory contributes nothing.
+pub fn collect_c_files(directory: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    if !directory.is_dir() {
         return Ok(());
     }
-
-    if let Some(parent) = dest_dir.parent() {
-        std::fs::create_dir_all(parent)?;
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_c_files(&path, files)?;
+        } else if path.extension().is_some_and(|extension| extension == "c") {
+            files.push(path);
+        }
     }
-    let _ = cmd!(sh, "git clone --depth 1 --branch {tag} {url} {dest_dir}").run();
-
     Ok(())
 }
 
@@ -103,31 +103,42 @@ fn should_report_progress(completed: usize, total: usize) -> bool {
     completed == total || completed.is_multiple_of(PROGRESS_CASE_INTERVAL)
 }
 
-/// Runs `command` to completion, killing its whole process group once
-/// `timeout` elapses. Returns whether it exited successfully in time.
-pub fn run_with_timeout(command: &mut std::process::Command, timeout: Duration) -> bool {
+/// Runs `command` in a process group of its own, polling until it exits or
+/// `timeout` elapses, in which case it is killed and `None` comes back. The
+/// output carries whatever pipes the caller configured on `command`.
+pub fn run_with_deadline(
+    command: &mut std::process::Command,
+    timeout: Duration,
+) -> Result<Option<std::process::Output>, String> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let Ok(mut child) = command.spawn() else {
-        return false;
-    };
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
     let deadline = Instant::now() + timeout;
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
-            Ok(None) => {}
-            Err(_) => return false,
+        match child.try_wait().map_err(|e| e.to_string())? {
+            Some(_) => {
+                return child
+                    .wait_with_output()
+                    .map(Some)
+                    .map_err(|e| format!("collect output: {e}"));
+            }
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(None);
+            }
+            None => std::thread::sleep(POLL_INTERVAL),
         }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return false;
-        }
-        std::thread::sleep(POLL_INTERVAL);
     }
+}
+
+/// Runs `command` to completion, killing it once `timeout` elapses. Returns
+/// whether it exited successfully in time.
+pub fn run_with_timeout(command: &mut std::process::Command, timeout: Duration) -> bool {
+    matches!(run_with_deadline(command, timeout), Ok(Some(output)) if output.status.success())
 }
 
 #[cfg(test)]

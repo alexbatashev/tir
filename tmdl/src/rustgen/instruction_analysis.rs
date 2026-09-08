@@ -600,23 +600,16 @@ fn value_reads_flag_register(expr: &ast::Expr, flag_classes: &HashSet<String>) -
 /// Whether a statement defines anything but a status flag — the guarded arms
 /// whose condition therefore feeds the value (see [`value_reads_flag_register`]).
 fn defines_value(expr: &ast::Expr, flag_classes: &HashSet<String>) -> bool {
-    match expr {
-        ast::Expr::Assign(a) => !assignment_dest_register_path(&a.dest)
-            .is_some_and(|(class, _)| flag_classes.contains(&class)),
-        ast::Expr::Block(b) => b
-            .stmts
-            .iter()
-            .any(|stmt| defines_value(stmt, flag_classes)),
-        ast::Expr::If(i) => {
-            defines_value(&i.then, flag_classes)
-                || i.else_
-                    .as_ref()
-                    .is_some_and(|e| defines_value(e, flag_classes))
-        }
-        ast::Expr::Try(t) => defines_value(&t.body, flag_classes),
-        ast::Expr::Lit(_) | ast::Expr::Ident(_) | ast::Expr::Path(_) => false,
-        _ => true,
-    }
+    let mut defines = false;
+    crate::utils::visit_statements(expr, &mut |stmt| {
+        defines |= match stmt {
+            ast::Expr::Assign(a) => !assignment_dest_register_path(&a.dest)
+                .is_some_and(|(class, _)| flag_classes.contains(&class)),
+            ast::Expr::Lit(_) | ast::Expr::Ident(_) | ast::Expr::Path(_) => false,
+            _ => true,
+        };
+    });
+    defines
 }
 
 /// Whether the behavior assigns a fixed register path (`GPR::rsp = …`) outside
@@ -625,46 +618,24 @@ fn defines_value(expr: &ast::Expr, flag_classes: &HashSet<String>) -> bool {
 /// fixed read binds as a free pattern variable — a `pop` rule matching any
 /// load. Flag-path writes stay legal: the flag machinery composes them.
 fn behavior_writes_fixed_register(expr: &ast::Expr, flag_classes: &HashSet<String>) -> bool {
-    match expr {
-        ast::Expr::Assign(a) => assignment_dest_register_path(&a.dest)
-            .is_some_and(|(class, _)| !flag_classes.contains(&class)),
-        ast::Expr::Block(b) => b
-            .stmts
-            .iter()
-            .any(|stmt| behavior_writes_fixed_register(stmt, flag_classes)),
-        ast::Expr::If(i) => {
-            behavior_writes_fixed_register(&i.then, flag_classes)
-                || i.else_
-                    .as_ref()
-                    .is_some_and(|e| behavior_writes_fixed_register(e, flag_classes))
+    let mut writes = false;
+    crate::utils::visit_statements(expr, &mut |stmt| {
+        if let ast::Expr::Assign(a) = stmt {
+            writes |= assignment_dest_register_path(&a.dest)
+                .is_some_and(|(class, _)| !flag_classes.contains(&class));
         }
-        ast::Expr::Try(t) => behavior_writes_fixed_register(&t.body, flag_classes),
-        _ => false,
-    }
+    });
+    writes
 }
 
 fn collect_behavior_assignments<'a>(expr: &'a ast::Expr, out: &mut Vec<(String, &'a ast::Expr)>) {
-    match expr {
-        ast::Expr::Assign(a) => {
-            if let Some(dst) = assignment_dest_name(&a.dest) {
-                out.push((dst, a.value.as_ref()));
-            }
+    crate::utils::visit_statements(expr, &mut |stmt| {
+        if let ast::Expr::Assign(a) = stmt
+            && let Some(dst) = assignment_dest_name(&a.dest)
+        {
+            out.push((dst, a.value.as_ref()));
         }
-        ast::Expr::Block(b) => {
-            for stmt in &b.stmts {
-                collect_behavior_assignments(stmt, out);
-            }
-        }
-        ast::Expr::If(i) => {
-            collect_behavior_assignments(i.then.as_ref(), out);
-            if let Some(else_expr) = &i.else_ {
-                collect_behavior_assignments(else_expr.as_ref(), out);
-            }
-        }
-        // Only the no-trap path defines values; handler writes are trap state.
-        ast::Expr::Try(t) => collect_behavior_assignments(&t.body, out),
-        _ => {}
-    }
+    });
 }
 
 /// Register operands the behavior *reads*: referenced anywhere outside an

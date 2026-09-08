@@ -321,11 +321,18 @@ fn median_ratio(level: Level, results: &Results) -> f64 {
     }
 }
 
-fn shared_sums(level: Level, baseline: &Results, current: &Results) -> (f64, f64) {
+/// What both runs measured for the cases they share, as
+/// `(path, baseline, current)`. A baseline that measured nothing for a case
+/// says nothing about it, so that case is dropped.
+fn shared_cases<'a, T: Copy + Default + PartialOrd>(
+    baseline: &Results,
+    current: &'a Results,
+    measure: impl Fn(&Sample) -> T,
+) -> Vec<(&'a str, T, T)> {
     let before = baseline
         .samples
         .iter()
-        .map(|sample| (sample.path.as_str(), level.fcc_ms(sample)))
+        .map(|sample| (sample.path.as_str(), measure(sample)))
         .collect::<HashMap<_, _>>();
     current
         .samples
@@ -333,43 +340,34 @@ fn shared_sums(level: Level, baseline: &Results, current: &Results) -> (f64, f64
         .filter_map(|sample| {
             before
                 .get(sample.path.as_str())
-                // A baseline with no time at this level says nothing about it.
-                .filter(|ms| **ms > 0.0)
-                .map(|ms| (ms, level.fcc_ms(sample)))
+                .filter(|measured| **measured > T::default())
+                .map(|measured| (sample.path.as_str(), *measured, measure(sample)))
         })
-        .fold((0.0, 0.0), |(b, a), (before, after)| {
+        .collect()
+}
+
+fn shared_sums(level: Level, baseline: &Results, current: &Results) -> (f64, f64) {
+    shared_cases(baseline, current, |sample| level.fcc_ms(sample))
+        .into_iter()
+        .fold((0.0, 0.0), |(b, a), (_, before, after)| {
             (b + before, a + after)
         })
 }
 
 fn shared_peak_sums(level: Level, baseline: &Results, current: &Results) -> (f64, f64) {
-    shared_peaks(level, baseline, current).fold((0.0, 0.0), |(b, a), (_, before, after)| {
-        (b + before as f64, a + after as f64)
-    })
+    shared_peaks(level, baseline, current)
+        .into_iter()
+        .fold((0.0, 0.0), |(b, a), (_, before, after)| {
+            (b + before as f64, a + after as f64)
+        })
 }
 
 fn shared_peaks<'a>(
     level: Level,
     baseline: &Results,
     current: &'a Results,
-) -> impl Iterator<Item = (&'a str, u64, u64)> {
-    let before = baseline
-        .samples
-        .iter()
-        .map(|sample| (sample.path.as_str(), level.fcc_peak_kb(sample)))
-        .collect::<HashMap<_, _>>();
-    current
-        .samples
-        .iter()
-        .filter_map(move |sample| {
-            before
-                .get(sample.path.as_str())
-                // A baseline with no peak at this level says nothing about it.
-                .filter(|kb| **kb > 0)
-                .map(|kb| (sample.path.as_str(), *kb, level.fcc_peak_kb(sample)))
-        })
-        .collect::<Vec<_>>()
-        .into_iter()
+) -> Vec<(&'a str, u64, u64)> {
+    shared_cases(baseline, current, |sample| level.fcc_peak_kb(sample))
 }
 
 fn check_peaks(level: Level, baseline: &Results, current: &Results) -> anyhow::Result<()> {
@@ -384,7 +382,7 @@ fn check_peaks(level: Level, baseline: &Results, current: &Results) -> anyhow::R
         after / 1e3,
         (after / before - 1.0) * 100.0
     );
-    let mut worst = shared_peaks(level, baseline, current).collect::<Vec<_>>();
+    let mut worst = shared_peaks(level, baseline, current);
     worst.sort_by(|a, b| (b.2 as f64 / b.1 as f64).total_cmp(&(a.2 as f64 / a.1 as f64)));
     for (path, before, after) in worst.iter().take(WORST_PEAKS_SHOWN) {
         println!(
