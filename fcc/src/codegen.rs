@@ -12,6 +12,7 @@
 //! raise, and so is a whole function holding a label or a `return` under a loop:
 //! both name edges a loop region cannot carry.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use tir::attributes::{AttributeValue, Predicate};
@@ -1581,38 +1582,16 @@ impl FnCodegen<'_> {
             && matches!(self.typed.types().kind(target), TypeKind::Pointer(_))
         {
             let address_width = self.typed.target().pointer_width();
-            let address_ty = IntegerType::new(self.context, address_width);
-            let address = if source_width < address_width {
-                if self.typed.integer_is_signed(source).unwrap() {
-                    self.emit(b::extsi(self.context, value, address_ty).build())
-                        .result()
-                } else {
-                    self.emit(b::extui(self.context, value, address_ty).build())
-                        .result()
-                }
-            } else if source_width > address_width {
-                self.emit(b::trunci(self.context, value, address_ty).build())
-                    .result()
-            } else {
-                value
-            };
+            let signed = self.typed.integer_is_signed(source).unwrap();
+            let address = self.resize(value, source_width, address_width, signed);
             return self.address_as_pointer(address);
         }
         if matches!(self.typed.types().kind(source), TypeKind::Pointer(_))
             && let Some(target_width) = self.typed.integer_width(target)
         {
-            let address = self.pointer_as_address(value);
             let address_width = self.typed.target().pointer_width();
-            let target_ty = lower_type(self.context, self.typed, target);
-            return match target_width.cmp(&address_width) {
-                std::cmp::Ordering::Less => self
-                    .emit(b::trunci(self.context, address, target_ty).build())
-                    .result(),
-                std::cmp::Ordering::Greater => self
-                    .emit(b::extui(self.context, address, target_ty).build())
-                    .result(),
-                std::cmp::Ordering::Equal => address,
-            };
+            let address = self.pointer_as_address(value);
+            return self.resize(address, address_width, target_width, false);
         }
         let (Some(source_width), Some(target_width)) = (
             self.typed.integer_width(source),
@@ -1624,20 +1603,24 @@ impl FnCodegen<'_> {
         // below describe the source type and not what is being converted.
         let value =
             self.promote_boolean_result(value, lower_type(self.context, self.typed, source));
-        let target_ty = lower_type(self.context, self.typed, target);
-        if source_width < target_width {
-            if self.typed.integer_is_signed(source).unwrap() {
-                self.emit(b::extsi(self.context, value, target_ty).build())
-                    .result()
-            } else {
-                self.emit(b::extui(self.context, value, target_ty).build())
-                    .result()
-            }
-        } else if source_width > target_width {
-            self.emit(b::trunci(self.context, value, target_ty).build())
-                .result()
-        } else {
-            value
+        let signed = self.typed.integer_is_signed(source).unwrap();
+        self.resize(value, source_width, target_width, signed)
+    }
+
+    /// `value`, an integer `from` bits wide, as one of `to` bits.
+    fn resize(&mut self, value: ValueId, from: u32, to: u32, signed: bool) -> ValueId {
+        let ty = IntegerType::new(self.context, to);
+        match to.cmp(&from) {
+            Ordering::Greater if signed => self
+                .emit(b::extsi(self.context, value, ty).build())
+                .result(),
+            Ordering::Greater => self
+                .emit(b::extui(self.context, value, ty).build())
+                .result(),
+            Ordering::Less => self
+                .emit(b::trunci(self.context, value, ty).build())
+                .result(),
+            Ordering::Equal => value,
         }
     }
 
