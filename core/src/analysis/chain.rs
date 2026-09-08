@@ -62,14 +62,13 @@ pub fn back(context: &Context, state: ValueId) -> Step {
     if let Some(observed) = super::access_of(&op).and_then(|access| access.state) {
         return Step::From(observed);
     }
-    if op.has_interface::<dyn Theta>() || op.has_interface::<dyn Gamma>() {
-        if let Some(index) = op.dep_results().iter().position(|&left| left == state) {
-            return Step::Port {
-                op: op.id,
-                index,
-                entering: false,
-            };
-        }
+    let structured = op.has_interface::<dyn Theta>() || op.has_interface::<dyn Gamma>();
+    if structured && let Some(index) = op.dep_results().iter().position(|&left| left == state) {
+        return Step::Port {
+            op: op.id,
+            index,
+            entering: false,
+        };
     }
     Step::Root
 }
