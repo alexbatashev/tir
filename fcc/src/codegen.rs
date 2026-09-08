@@ -1502,11 +1502,13 @@ fn lower_function(
 }
 
 impl FnCodegen<'_> {
+    fn emit<T: Operation>(&self, op: T) -> T {
+        self.builder.append_op(op)
+    }
+
     fn alloca(&mut self, elem: TypeId, size: u64, align: u64) -> Slot {
         let ptr_ty = PtrType::opaque(self.context);
-        let op = self
-            .builder
-            .append_op(p::alloca(self.context, size, align, ptr_ty).build());
+        let op = self.emit(p::alloca(self.context, size, align, ptr_ty).build());
         Slot {
             ptr: op.result(),
             elem,
@@ -1522,11 +1524,7 @@ impl FnCodegen<'_> {
                 && semantics.constant == Some(0)
             {
                 let target = lower_type(self.context, self.typed, target);
-                LoweredExpr::Value(
-                    self.builder
-                        .append_op(p::null(self.context, target).build())
-                        .result(),
-                )
+                LoweredExpr::Value(self.emit(p::null(self.context, target).build()).result())
             } else if matches!(self.typed.types().kind(source), TypeKind::Array(_, _))
                 && matches!(self.typed.types().kind(target), TypeKind::Pointer(_))
             {
@@ -1550,12 +1548,10 @@ impl FnCodegen<'_> {
         {
             let target_ty = lower_type(self.context, self.typed, target);
             return if self.typed.integer_is_signed(source) == Some(true) {
-                self.builder
-                    .append_op(b::sitofp(self.context, value, target_ty).build())
+                self.emit(b::sitofp(self.context, value, target_ty).build())
                     .result()
             } else {
-                self.builder
-                    .append_op(b::uitofp(self.context, value, target_ty).build())
+                self.emit(b::uitofp(self.context, value, target_ty).build())
                     .result()
             };
         }
@@ -1564,8 +1560,7 @@ impl FnCodegen<'_> {
         {
             let target_ty = lower_type(self.context, self.typed, target);
             return if self.typed.integer_is_signed(target) == Some(true) {
-                self.builder
-                    .append_op(b::fptosi(self.context, value, target_ty).build())
+                self.emit(b::fptosi(self.context, value, target_ty).build())
                     .result()
             } else if target_width < 64 {
                 // Every value an unsigned type narrower than 64 bits can hold is
@@ -1573,15 +1568,12 @@ impl FnCodegen<'_> {
                 // signed conversion is exact and avoids a narrow `fptoui`.
                 let wide = IntegerType::new(self.context, 64);
                 let converted = self
-                    .builder
-                    .append_op(b::fptosi(self.context, value, wide).build())
+                    .emit(b::fptosi(self.context, value, wide).build())
                     .result();
-                self.builder
-                    .append_op(b::trunci(self.context, converted, target_ty).build())
+                self.emit(b::trunci(self.context, converted, target_ty).build())
                     .result()
             } else {
-                self.builder
-                    .append_op(b::fptoui(self.context, value, target_ty).build())
+                self.emit(b::fptoui(self.context, value, target_ty).build())
                     .result()
             };
         }
@@ -1592,17 +1584,14 @@ impl FnCodegen<'_> {
             let address_ty = IntegerType::new(self.context, address_width);
             let address = if source_width < address_width {
                 if self.typed.integer_is_signed(source).unwrap() {
-                    self.builder
-                        .append_op(b::extsi(self.context, value, address_ty).build())
+                    self.emit(b::extsi(self.context, value, address_ty).build())
                         .result()
                 } else {
-                    self.builder
-                        .append_op(b::extui(self.context, value, address_ty).build())
+                    self.emit(b::extui(self.context, value, address_ty).build())
                         .result()
                 }
             } else if source_width > address_width {
-                self.builder
-                    .append_op(b::trunci(self.context, value, address_ty).build())
+                self.emit(b::trunci(self.context, value, address_ty).build())
                     .result()
             } else {
                 value
@@ -1617,12 +1606,10 @@ impl FnCodegen<'_> {
             let target_ty = lower_type(self.context, self.typed, target);
             return match target_width.cmp(&address_width) {
                 std::cmp::Ordering::Less => self
-                    .builder
-                    .append_op(b::trunci(self.context, address, target_ty).build())
+                    .emit(b::trunci(self.context, address, target_ty).build())
                     .result(),
                 std::cmp::Ordering::Greater => self
-                    .builder
-                    .append_op(b::extui(self.context, address, target_ty).build())
+                    .emit(b::extui(self.context, address, target_ty).build())
                     .result(),
                 std::cmp::Ordering::Equal => address,
             };
@@ -1640,17 +1627,14 @@ impl FnCodegen<'_> {
         let target_ty = lower_type(self.context, self.typed, target);
         if source_width < target_width {
             if self.typed.integer_is_signed(source).unwrap() {
-                self.builder
-                    .append_op(b::extsi(self.context, value, target_ty).build())
+                self.emit(b::extsi(self.context, value, target_ty).build())
                     .result()
             } else {
-                self.builder
-                    .append_op(b::extui(self.context, value, target_ty).build())
+                self.emit(b::extui(self.context, value, target_ty).build())
                     .result()
             }
         } else if source_width > target_width {
-            self.builder
-                .append_op(b::trunci(self.context, value, target_ty).build())
+            self.emit(b::trunci(self.context, value, target_ty).build())
                 .result()
         } else {
             value
@@ -1667,65 +1651,52 @@ impl FnCodegen<'_> {
         let ty = lower_type(self.context, self.typed, source_ty);
         match kind {
             AstKind::Add | AstKind::AddAssign => self
-                .builder
-                .append_op(b::addi(self.context, lhs, rhs, ty).build())
+                .emit(b::addi(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::Sub | AstKind::SubAssign => self
-                .builder
-                .append_op(b::subi(self.context, lhs, rhs, ty).build())
+                .emit(b::subi(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::Mul | AstKind::MulAssign => self
-                .builder
-                .append_op(b::muli(self.context, lhs, rhs, ty).build())
+                .emit(b::muli(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::Div | AstKind::DivAssign
                 if self.typed.integer_is_signed(source_ty).unwrap() =>
             {
-                self.builder
-                    .append_op(b::divsi(self.context, lhs, rhs, ty).build())
+                self.emit(b::divsi(self.context, lhs, rhs, ty).build())
                     .result()
             }
             AstKind::Div | AstKind::DivAssign => self
-                .builder
-                .append_op(b::divui(self.context, lhs, rhs, ty).build())
+                .emit(b::divui(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::Mod | AstKind::ModAssign
                 if self.typed.integer_is_signed(source_ty).unwrap() =>
             {
-                self.builder
-                    .append_op(b::remsi(self.context, lhs, rhs, ty).build())
+                self.emit(b::remsi(self.context, lhs, rhs, ty).build())
                     .result()
             }
             AstKind::Mod | AstKind::ModAssign => self
-                .builder
-                .append_op(b::remui(self.context, lhs, rhs, ty).build())
+                .emit(b::remui(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::BitAnd | AstKind::AndAssign => self
-                .builder
-                .append_op(b::andi(self.context, lhs, rhs, ty).build())
+                .emit(b::andi(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::BitXor | AstKind::XorAssign => self
-                .builder
-                .append_op(b::xori(self.context, lhs, rhs, ty).build())
+                .emit(b::xori(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::BitOr | AstKind::OrAssign => self
-                .builder
-                .append_op(b::ori(self.context, lhs, rhs, ty).build())
+                .emit(b::ori(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::Shl | AstKind::ShlAssign => self
-                .builder
-                .append_op(b::shli(self.context, lhs, rhs, ty).build())
+                .emit(b::shli(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::Shr | AstKind::ShrAssign
                 if self.typed.integer_is_signed(source_ty).unwrap() =>
             {
-                self.builder
-                    .append_op(b::shrsi(self.context, lhs, rhs, ty).build())
+                self.emit(b::shrsi(self.context, lhs, rhs, ty).build())
                     .result()
             }
             AstKind::Shr | AstKind::ShrAssign => self
-                .builder
-                .append_op(b::shrui(self.context, lhs, rhs, ty).build())
+                .emit(b::shrui(self.context, lhs, rhs, ty).build())
                 .result(),
             _ => unreachable!(),
         }
@@ -1752,16 +1723,15 @@ impl FnCodegen<'_> {
             (AstKind::Ne, _) => Predicate::Ne,
             _ => unreachable!(),
         };
-        self.builder
-            .append_op(
-                b::CmpIOpBuilder::new(self.context)
-                    .lhs(lhs)
-                    .rhs(rhs)
-                    .predicate(predicate)
-                    .result_type(IntegerType::new(self.context, 1))
-                    .build(),
-            )
-            .result()
+        self.emit(
+            b::CmpIOpBuilder::new(self.context)
+                .lhs(lhs)
+                .rhs(rhs)
+                .predicate(predicate)
+                .result_type(IntegerType::new(self.context, 1))
+                .build(),
+        )
+        .result()
     }
 
     /// A pointer's address as an integer: the distance from the null pointer,
@@ -1769,24 +1739,19 @@ impl FnCodegen<'_> {
     fn pointer_as_address(&mut self, pointer: ValueId) -> ValueId {
         let address_ty = IntegerType::new(self.context, self.typed.target().pointer_width());
         let null = self.null_pointer();
-        self.builder
-            .append_op(p::ptrdiff(self.context, pointer, null, address_ty).build())
+        self.emit(p::ptrdiff(self.context, pointer, null, address_ty).build())
             .result()
     }
 
     /// The pointer an address names: the offset from the null pointer.
     fn address_as_pointer(&mut self, address: ValueId) -> ValueId {
         let null = self.null_pointer();
-        self.builder
-            .append_op(
-                p::ptradd(self.context, null, address, PtrType::opaque(self.context)).build(),
-            )
+        self.emit(p::ptradd(self.context, null, address, PtrType::opaque(self.context)).build())
             .result()
     }
 
     fn null_pointer(&mut self) -> ValueId {
-        self.builder
-            .append_op(p::null(self.context, PtrType::opaque(self.context)).build())
+        self.emit(p::null(self.context, PtrType::opaque(self.context)).build())
             .result()
     }
 
@@ -1798,16 +1763,15 @@ impl FnCodegen<'_> {
         lhs: ValueId,
         rhs: ValueId,
     ) -> ValueId {
-        self.builder
-            .append_op(
-                p::CmpOpBuilder::new(self.context)
-                    .lhs(lhs)
-                    .rhs(rhs)
-                    .predicate(predicate)
-                    .result_type(IntegerType::new(self.context, 1))
-                    .build(),
-            )
-            .result()
+        self.emit(
+            p::CmpOpBuilder::new(self.context)
+                .lhs(lhs)
+                .rhs(rhs)
+                .predicate(predicate)
+                .result_type(IntegerType::new(self.context, 1))
+                .build(),
+        )
+        .result()
     }
 
     /// C comparisons are ordered (false when either operand is NaN), except
@@ -1822,36 +1786,31 @@ impl FnCodegen<'_> {
             AstKind::Ne => Predicate::Une,
             _ => unreachable!(),
         };
-        self.builder
-            .append_op(
-                b::CmpFOpBuilder::new(self.context)
-                    .lhs(lhs)
-                    .rhs(rhs)
-                    .predicate(predicate)
-                    .result_type(IntegerType::new(self.context, 1))
-                    .build(),
-            )
-            .result()
+        self.emit(
+            b::CmpFOpBuilder::new(self.context)
+                .lhs(lhs)
+                .rhs(rhs)
+                .predicate(predicate)
+                .result_type(IntegerType::new(self.context, 1))
+                .build(),
+        )
+        .result()
     }
 
     fn lower_double_binary(&mut self, kind: AstKind, lhs: ValueId, rhs: ValueId) -> ValueId {
         let ty = FloatType::f64(self.context);
         match kind {
             AstKind::Add | AstKind::AddAssign => self
-                .builder
-                .append_op(b::addf(self.context, lhs, rhs, ty).build())
+                .emit(b::addf(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::Sub | AstKind::SubAssign => self
-                .builder
-                .append_op(b::subf(self.context, lhs, rhs, ty).build())
+                .emit(b::subf(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::Mul | AstKind::MulAssign => self
-                .builder
-                .append_op(b::mulf(self.context, lhs, rhs, ty).build())
+                .emit(b::mulf(self.context, lhs, rhs, ty).build())
                 .result(),
             AstKind::Div | AstKind::DivAssign => self
-                .builder
-                .append_op(b::divf(self.context, lhs, rhs, ty).build())
+                .emit(b::divf(self.context, lhs, rhs, ty).build())
                 .result(),
             _ => unreachable!(),
         }
@@ -1873,52 +1832,44 @@ impl FnCodegen<'_> {
         let index_width = self.typed.integer_width(index_ty).unwrap();
         let index = if index_width < pointer_width {
             if self.typed.integer_is_signed(index_ty).unwrap() {
-                self.builder
-                    .append_op(b::extsi(self.context, index, offset_ty).build())
+                self.emit(b::extsi(self.context, index, offset_ty).build())
                     .result()
             } else {
-                self.builder
-                    .append_op(b::extui(self.context, index, offset_ty).build())
+                self.emit(b::extui(self.context, index, offset_ty).build())
                     .result()
             }
         } else if index_width > pointer_width {
-            self.builder
-                .append_op(b::trunci(self.context, index, offset_ty).build())
+            self.emit(b::trunci(self.context, index, offset_ty).build())
                 .result()
         } else {
             index
         };
         let size = source_type_layout(self.typed, *pointee).0;
         let scale = self
-            .builder
-            .append_op(b::constant(self.context, size as i64, offset_ty).build())
+            .emit(b::constant(self.context, size as i64, offset_ty).build())
             .result();
         let offset = self
-            .builder
-            .append_op(b::muli(self.context, index, scale, offset_ty).build())
+            .emit(b::muli(self.context, index, scale, offset_ty).build())
             .result();
         let offset = if subtract {
             let zero = self
-                .builder
-                .append_op(b::constant(self.context, 0, offset_ty).build())
+                .emit(b::constant(self.context, 0, offset_ty).build())
                 .result();
-            self.builder
-                .append_op(b::subi(self.context, zero, offset, offset_ty).build())
+            self.emit(b::subi(self.context, zero, offset, offset_ty).build())
                 .result()
         } else {
             offset
         };
-        self.builder
-            .append_op(
-                p::ptradd(
-                    self.context,
-                    base,
-                    offset,
-                    lower_type(self.context, self.typed, pointer_ty),
-                )
-                .build(),
+        self.emit(
+            p::ptradd(
+                self.context,
+                base,
+                offset,
+                lower_type(self.context, self.typed, pointer_ty),
             )
-            .result()
+            .build(),
+        )
+        .result()
     }
 
     fn lower_pointer_difference(
@@ -1933,19 +1884,16 @@ impl FnCodegen<'_> {
         };
         let result_ty = lower_type(self.context, self.typed, result_ty);
         let bytes = self
-            .builder
-            .append_op(p::ptrdiff(self.context, lhs, rhs, result_ty).build())
+            .emit(p::ptrdiff(self.context, lhs, rhs, result_ty).build())
             .result();
         let size = source_type_layout(self.typed, *pointee).0;
         if size == 1 {
             return bytes;
         }
         let divisor = self
-            .builder
-            .append_op(b::constant(self.context, size as i64, result_ty).build())
+            .emit(b::constant(self.context, size as i64, result_ty).build())
             .result();
-        self.builder
-            .append_op(b::divsi(self.context, bytes, divisor, result_ty).build())
+        self.emit(b::divsi(self.context, bytes, divisor, result_ty).build())
             .result()
     }
 
@@ -1955,11 +1903,9 @@ impl FnCodegen<'_> {
         }
         let offset_ty = IntegerType::new(self.context, self.typed.target().pointer_width());
         let offset = self
-            .builder
-            .append_op(b::constant(self.context, offset as i64, offset_ty).build())
+            .emit(b::constant(self.context, offset as i64, offset_ty).build())
             .result();
-        self.builder
-            .append_op(p::ptradd(self.context, base, offset, PtrType::opaque(self.context)).build())
+        self.emit(p::ptradd(self.context, base, offset, PtrType::opaque(self.context)).build())
             .result()
     }
 
@@ -1981,8 +1927,7 @@ impl FnCodegen<'_> {
             return self.lower_initializer(target, address, value);
         }
         let value = self.lower_expr(initializer)?;
-        self.builder
-            .append_op(p::store(self.context, value, address).build());
+        self.emit(p::store(self.context, value, address).build());
         Ok(())
     }
 
@@ -2104,12 +2049,10 @@ impl FnCodegen<'_> {
         let ir_type = lower_type(self.context, self.typed, target);
         let value = match self.typed.types().kind(target) {
             TypeKind::Double => self
-                .builder
-                .append_op(b::constantf(self.context, 0.0, ir_type).build())
+                .emit(b::constantf(self.context, 0.0, ir_type).build())
                 .result(),
             TypeKind::Integer(_) | TypeKind::Enum(_) => self
-                .builder
-                .append_op(b::constant(self.context, 0, ir_type).build())
+                .emit(b::constant(self.context, 0, ir_type).build())
                 .result(),
             _ => {
                 return Err(unsupported(
@@ -2119,8 +2062,7 @@ impl FnCodegen<'_> {
                 ));
             }
         };
-        self.builder
-            .append_op(p::store(self.context, value, address).build());
+        self.emit(p::store(self.context, value, address).build());
         Ok(())
     }
 
@@ -2173,15 +2115,14 @@ impl FnCodegen<'_> {
                     .iter()
                     .enumerate()
                     .map(|(index, piece)| {
-                        self.builder
-                            .append_op(
-                                b::TupleGetOpBuilder::new(self.context)
-                                    .tuple(tuple)
-                                    .attr("index", AttributeValue::UInt(index as u64))
-                                    .result_type(piece.ty)
-                                    .build(),
-                            )
-                            .result()
+                        self.emit(
+                            b::TupleGetOpBuilder::new(self.context)
+                                .tuple(tuple)
+                                .attr("index", AttributeValue::UInt(index as u64))
+                                .result_type(piece.ty)
+                                .build(),
+                        )
+                        .result()
                     })
                     .collect::<Vec<_>>()
             } else {
@@ -2191,8 +2132,7 @@ impl FnCodegen<'_> {
             };
             for (piece, value) in abi_param.pieces.iter().zip(values) {
                 let address = self.offset_address(slot.ptr, piece.offset);
-                self.builder
-                    .append_op(p::store(self.context, value, address).build());
+                self.emit(p::store(self.context, value, address).build());
             }
             self.locals.insert(node_entity(self.typed, param), slot);
         }
@@ -2243,8 +2183,7 @@ impl FnCodegen<'_> {
         self.context.get_region(self.region).add_block(exit.id());
         self.enter_block(exit);
         let operand = self.return_operand(result, returns_void);
-        self.builder
-            .append_op(func_ops::r#return(self.context, operand).build());
+        self.emit(func_ops::r#return(self.context, operand).build());
         self.terminated = true;
         Ok(())
     }
@@ -2300,8 +2239,7 @@ impl FnCodegen<'_> {
         if self.terminated {
             return;
         }
-        self.builder
-            .append_op(cb::br(self.context, arguments, block.id()).build());
+        self.emit(cb::br(self.context, arguments, block.id()).build());
         self.terminated = true;
     }
 
@@ -2311,7 +2249,7 @@ impl FnCodegen<'_> {
         if_true: &tir::BlockHandle,
         if_false: &tir::BlockHandle,
     ) {
-        self.builder.append_op(
+        self.emit(
             cb::cond_br(
                 self.context,
                 condition,
@@ -2430,7 +2368,7 @@ impl FnCodegen<'_> {
                     .condition_region(condition_region)
                     .body_region(body_region)
                     .build();
-                self.builder.append_op(op);
+                self.emit(op);
                 Ok(())
             }
             AstKind::DoWhile => {
@@ -2446,7 +2384,7 @@ impl FnCodegen<'_> {
                     .body_region(body_region)
                     .condition_region(condition_region)
                     .build();
-                self.builder.append_op(op);
+                self.emit(op);
                 Ok(())
             }
             AstKind::For => {
@@ -2473,7 +2411,7 @@ impl FnCodegen<'_> {
                     .step_region(step_region)
                     .body_region(body_region)
                     .build();
-                self.builder.append_op(op);
+                self.emit(op);
                 Ok(())
             }
             AstKind::Switch => self.lower_switch(stmt),
@@ -2615,7 +2553,7 @@ impl FnCodegen<'_> {
         if self.terminated {
             return;
         }
-        self.builder.append_op(terminator);
+        self.emit(terminator);
         self.terminated = true;
     }
 
@@ -2648,12 +2586,10 @@ impl FnCodegen<'_> {
                 continue;
             };
             let case = self
-                .builder
-                .append_op(b::constant(self.context, *case, value_ty).build())
+                .emit(b::constant(self.context, *case, value_ty).build())
                 .result();
             let matches = self
-                .builder
-                .append_op(
+                .emit(
                     b::CmpIOpBuilder::new(self.context)
                         .lhs(value)
                         .rhs(case)
@@ -2729,11 +2665,9 @@ impl FnCodegen<'_> {
             return;
         };
         let zero = self
-            .builder
-            .append_op(b::constant(self.context, 0, slot.elem).build())
+            .emit(b::constant(self.context, 0, slot.elem).build())
             .result();
-        self.builder
-            .append_op(p::store(self.context, zero, slot.ptr).build());
+        self.emit(p::store(self.context, zero, slot.ptr).build());
     }
 
     fn return_operand(&mut self, result: QualType, returns_void: bool) -> Operand {
@@ -2752,8 +2686,7 @@ impl FnCodegen<'_> {
             return Operand::from(self.abi_return_value(slot.ptr, result));
         }
         Operand::from(
-            self.builder
-                .append_op(p::load(self.context, slot.ptr, slot.elem).build())
+            self.emit(p::load(self.context, slot.ptr, slot.elem).build())
                 .result(),
         )
     }
@@ -2761,8 +2694,7 @@ impl FnCodegen<'_> {
     fn lower_for_condition(&mut self, condition: NodeId) -> Result<ValueId, Diagnostic> {
         if self.ast.get_node(condition).kind == AstKind::Empty {
             return Ok(self
-                .builder
-                .append_op(b::constant(self.context, 1, IntegerType::new(self.context, 1)).build())
+                .emit(b::constant(self.context, 1, IntegerType::new(self.context, 1)).build())
                 .result());
         }
         self.lower_condition(condition)
@@ -2801,8 +2733,7 @@ impl FnCodegen<'_> {
                         self.lower_record_copy(init, slot.ptr, record.as_str())?;
                     } else {
                         let value = self.lower_expr(init)?;
-                        self.builder
-                            .append_op(p::store(self.context, value, slot.ptr).build());
+                        self.emit(p::store(self.context, value, slot.ptr).build());
                     }
                 }
                 self.locals.insert(entity, slot);
@@ -2819,8 +2750,7 @@ impl FnCodegen<'_> {
                     self.lower_record_copy(value, slot.ptr, record.as_str())?;
                 } else {
                     let v = self.lower_expr(value)?;
-                    self.builder
-                        .append_op(p::store(self.context, v, slot.ptr).build());
+                    self.emit(p::store(self.context, v, slot.ptr).build());
                 }
                 Ok(())
             }
@@ -2883,8 +2813,7 @@ impl FnCodegen<'_> {
         if self.context.get_value(value).ty() != IntegerType::new(self.context, 1) {
             return value;
         }
-        self.builder
-            .append_op(b::extui(self.context, value, target).build())
+        self.emit(b::extui(self.context, value, target).build())
             .result()
     }
 
@@ -2902,8 +2831,7 @@ impl FnCodegen<'_> {
         let (value, ty) = if narrow {
             let i32_ty = IntegerType::new(self.context, 32);
             (
-                self.builder
-                    .append_op(b::extui(self.context, value, i32_ty).build())
+                self.emit(b::extui(self.context, value, i32_ty).build())
                     .result(),
                 i32_ty,
             )
@@ -2920,29 +2848,24 @@ impl FnCodegen<'_> {
             let null = self.null_pointer();
             return self.lower_pointer_compare(predicate, value, null);
         }
-        let zero = self
-            .builder
-            .append_op(b::constant(self.context, 0, ty).build())
-            .result();
-        self.builder
-            .append_op(
-                b::CmpIOpBuilder::new(self.context)
-                    .lhs(value)
-                    .rhs(zero)
-                    .predicate(predicate)
-                    .result_type(IntegerType::new(self.context, 1))
-                    .build(),
-            )
-            .result()
+        let zero = self.emit(b::constant(self.context, 0, ty).build()).result();
+        self.emit(
+            b::CmpIOpBuilder::new(self.context)
+                .lhs(value)
+                .rhs(zero)
+                .predicate(predicate)
+                .result_type(IntegerType::new(self.context, 1))
+                .build(),
+        )
+        .result()
     }
 
     fn materialize(&mut self, expression: LoweredExpr) -> ValueId {
         match expression {
             LoweredExpr::Value(value) => value,
-            LoweredExpr::Address { ptr, elem } => self
-                .builder
-                .append_op(p::load(self.context, ptr, elem).build())
-                .result(),
+            LoweredExpr::Address { ptr, elem } => {
+                self.emit(p::load(self.context, ptr, elem).build()).result()
+            }
         }
     }
 
@@ -2962,8 +2885,7 @@ impl FnCodegen<'_> {
         if self.ast.get_node(node).kind == AstKind::Call {
             let (size, _) = source_type_layout(self.typed, node_type(self.typed, node));
             let size = self
-                .builder
-                .append_op(
+                .emit(
                     b::constant(
                         self.context,
                         size as i64,
@@ -2972,12 +2894,10 @@ impl FnCodegen<'_> {
                     .build(),
                 )
                 .result();
-            self.builder
-                .append_op(p::memcpy(self.context, destination, source, size).build());
+            self.emit(p::memcpy(self.context, destination, source, size).build());
             return Ok(());
         }
-        self.builder
-            .append_op(cir::ops::copy_struct(self.context, destination, source, record).build());
+        self.emit(cir::ops::copy_struct(self.context, destination, source, record).build());
         Ok(())
     }
 
@@ -2998,14 +2918,10 @@ impl FnCodegen<'_> {
             let source_ty = node_type(self.typed, node);
             let (size, align) = source_type_layout(self.typed, source_ty);
             let destination = self
-                .builder
-                .append_op(
-                    p::alloca(self.context, size, align, PtrType::opaque(self.context)).build(),
-                )
+                .emit(p::alloca(self.context, size, align, PtrType::opaque(self.context)).build())
                 .result();
             let size = self
-                .builder
-                .append_op(
+                .emit(
                     b::constant(
                         self.context,
                         size as i64,
@@ -3014,8 +2930,7 @@ impl FnCodegen<'_> {
                     .build(),
                 )
                 .result();
-            self.builder
-                .append_op(p::memcpy(self.context, destination, source, size).build());
+            self.emit(p::memcpy(self.context, destination, source, size).build());
             return Ok(vec![destination]);
         }
         if matches!(
@@ -3039,8 +2954,7 @@ impl FnCodegen<'_> {
                 .iter()
                 .map(|piece| {
                     let address = self.offset_address(ptr, piece.offset);
-                    self.builder
-                        .append_op(p::load(self.context, address, piece.ty).build())
+                    self.emit(p::load(self.context, address, piece.ty).build())
                         .result()
                 })
                 .collect::<Vec<_>>();
@@ -3050,14 +2964,13 @@ impl FnCodegen<'_> {
                     parameter.pieces.iter().map(|piece| piece.ty).collect(),
                 );
                 return Ok(vec![
-                    self.builder
-                        .append_op(
-                            b::MakeTupleOpBuilder::new(self.context)
-                                .elements(values)
-                                .result_type(ty)
-                                .build(),
-                        )
-                        .result(),
+                    self.emit(
+                        b::MakeTupleOpBuilder::new(self.context)
+                            .elements(values)
+                            .result_type(ty)
+                            .build(),
+                    )
+                    .result(),
                 ]);
             }
             return Ok(values);
@@ -3080,8 +2993,7 @@ impl FnCodegen<'_> {
         }
 
         let destination = self
-            .builder
-            .append_op(
+            .emit(
                 p::alloca(
                     self.context,
                     abi_size,
@@ -3094,22 +3006,18 @@ impl FnCodegen<'_> {
         for piece in pieces {
             let zero = match type_kind(self.context, piece.ty) {
                 ValueKind::Float => self
-                    .builder
-                    .append_op(b::constantf(self.context, 0.0, piece.ty).build())
+                    .emit(b::constantf(self.context, 0.0, piece.ty).build())
                     .result(),
                 ValueKind::Int => self
-                    .builder
-                    .append_op(b::constant(self.context, 0, piece.ty).build())
+                    .emit(b::constant(self.context, 0, piece.ty).build())
                     .result(),
                 ValueKind::Vector => unreachable!("ABI padding uses scalar carriers"),
             };
             let address = self.offset_address(destination, piece.offset);
-            self.builder
-                .append_op(p::store(self.context, zero, address).build());
+            self.emit(p::store(self.context, zero, address).build());
         }
         let size = self
-            .builder
-            .append_op(
+            .emit(
                 b::constant(
                     self.context,
                     size as i64,
@@ -3118,8 +3026,7 @@ impl FnCodegen<'_> {
                 .build(),
             )
             .result();
-        self.builder
-            .append_op(p::memcpy(self.context, destination, source, size).build());
+        self.emit(p::memcpy(self.context, destination, source, size).build());
         destination
     }
 
@@ -3131,22 +3038,20 @@ impl FnCodegen<'_> {
             .iter()
             .map(|piece| {
                 let address = self.offset_address(ptr, piece.offset);
-                self.builder
-                    .append_op(p::load(self.context, address, piece.ty).build())
+                self.emit(p::load(self.context, address, piece.ty).build())
                     .result()
             })
             .collect::<Vec<_>>();
         if let [value] = values.as_slice() {
             return *value;
         }
-        self.builder
-            .append_op(
-                b::MakeTupleOpBuilder::new(self.context)
-                    .elements(values)
-                    .result_type(self.return_abi.ty)
-                    .build(),
-            )
-            .result()
+        self.emit(
+            b::MakeTupleOpBuilder::new(self.context)
+                .elements(values)
+                .result_type(self.return_abi.ty)
+                .build(),
+        )
+        .result()
     }
 
     /// Write what a `return` returns to the slot the function's one exit reads
@@ -3166,8 +3071,7 @@ impl FnCodegen<'_> {
                 };
                 let (size, _) = source_type_layout(self.typed, node_type(self.typed, node));
                 let size = self
-                    .builder
-                    .append_op(
+                    .emit(
                         b::constant(
                             self.context,
                             size as i64,
@@ -3176,8 +3080,7 @@ impl FnCodegen<'_> {
                         .build(),
                     )
                     .result();
-                self.builder
-                    .append_op(p::memcpy(self.context, slot.ptr, source, size).build());
+                self.emit(p::memcpy(self.context, slot.ptr, source, size).build());
             }
             Some(node) => {
                 let slot = self.return_slot.unwrap();
@@ -3186,8 +3089,7 @@ impl FnCodegen<'_> {
                 let source_ty = lower_type(self.context, self.typed, source);
                 let value = self.promote_boolean_result(value, source_ty);
                 let value = self.convert_scalar(value, source, self.result_type.unwrap());
-                self.builder
-                    .append_op(p::store(self.context, value, slot.ptr).build());
+                self.emit(p::store(self.context, value, slot.ptr).build());
             }
             None => {}
         }
@@ -3201,8 +3103,7 @@ impl FnCodegen<'_> {
         };
         let (size, _) = source_type_layout(self.typed, node_type(self.typed, node));
         let size = self
-            .builder
-            .append_op(
+            .emit(
                 b::constant(
                     self.context,
                     size as i64,
@@ -3211,7 +3112,7 @@ impl FnCodegen<'_> {
                 .build(),
             )
             .result();
-        self.builder.append_op(
+        self.emit(
             p::memcpy(
                 self.context,
                 self.indirect_return
@@ -3248,8 +3149,7 @@ impl FnCodegen<'_> {
         {
             let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
             let expression = LoweredExpr::Value(
-                self.builder
-                    .append_op(b::constant(self.context, value, ty).build())
+                self.emit(b::constant(self.context, value, ty).build())
                     .result(),
             );
             let expression = self.apply_conversions(node, expression);
@@ -3282,8 +3182,7 @@ impl FnCodegen<'_> {
                     };
                     let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
                     LoweredExpr::Value(
-                        self.builder
-                            .append_op(b::constant(self.context, n.value.to_i64(), ty).build())
+                        self.emit(b::constant(self.context, n.value.to_i64(), ty).build())
                             .result(),
                     )
                 }
@@ -3292,12 +3191,11 @@ impl FnCodegen<'_> {
                         unreachable!("floating literal node carries a floating payload");
                     };
                     LoweredExpr::Value(
-                        self.builder
-                            .append_op(
-                                b::constantf(self.context, n.value, FloatType::f64(self.context))
-                                    .build(),
-                            )
-                            .result(),
+                        self.emit(
+                            b::constantf(self.context, n.value, FloatType::f64(self.context))
+                                .build(),
+                        )
+                        .result(),
                     )
                 }
                 AstKind::Character => {
@@ -3313,8 +3211,7 @@ impl FnCodegen<'_> {
                     };
                     let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
                     LoweredExpr::Value(
-                        self.builder
-                            .append_op(b::constant(self.context, value, ty).build())
+                        self.emit(b::constant(self.context, value, ty).build())
                             .result(),
                     )
                 }
@@ -3322,8 +3219,7 @@ impl FnCodegen<'_> {
                     let value = ast.get_annotation(node).unwrap().constant.unwrap();
                     let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
                     LoweredExpr::Value(
-                        self.builder
-                            .append_op(b::constant(self.context, value, ty).build())
+                        self.emit(b::constant(self.context, value, ty).build())
                             .result(),
                     )
                 }
@@ -3429,8 +3325,7 @@ impl FnCodegen<'_> {
             if let Some(value) = ast.get_annotation(node).and_then(|info| info.constant) {
                 let ty = lower_type(self.context, self.typed, node_type(self.typed, node));
                 LoweredExpr::Value(
-                    self.builder
-                        .append_op(b::constant(self.context, value, ty).build())
+                    self.emit(b::constant(self.context, value, ty).build())
                         .result(),
                 )
             } else if ast
@@ -3443,8 +3338,7 @@ impl FnCodegen<'_> {
                 let lambda = self.symbols.function(self.context, name, &signature);
                 let ptr_ty = PtrType::opaque(self.context);
                 LoweredExpr::Value(
-                    self.builder
-                        .append_op(b::fn_to_ptr(self.context, lambda, ptr_ty).build())
+                    self.emit(b::fn_to_ptr(self.context, lambda, ptr_ty).build())
                         .result(),
                 )
             } else {
@@ -3499,7 +3393,7 @@ impl FnCodegen<'_> {
                 }
                 _ => unreachable!("member base has a record type"),
             };
-            let member = self.builder.append_op(
+            let member = self.emit(
                 cir::ops::get_member(self.context, base_ptr, field, record.name.as_str(), ptr_ty)
                     .build(),
             );
@@ -3594,8 +3488,7 @@ impl FnCodegen<'_> {
                 Some(address) => {
                     let ty =
                         FnType::new(self.context, &sig.argument_types(self.context), sig.ret.ty);
-                    self.builder
-                        .append_op(b::ptr_to_fn(self.context, address, ty).build())
+                    self.emit(b::ptr_to_fn(self.context, address, ty).build())
                         .result()
                 }
                 None => {
@@ -3616,7 +3509,7 @@ impl FnCodegen<'_> {
                 if argument_alignments.iter().any(|&alignment| alignment > 1) {
                     call = call.argument_alignments(&argument_alignments);
                 }
-                self.builder.append_op(call.build());
+                self.emit(call.build());
                 LoweredExpr::Address {
                     ptr: slot.ptr,
                     elem,
@@ -3630,7 +3523,7 @@ impl FnCodegen<'_> {
                     if argument_alignments.iter().any(|&alignment| alignment > 1) {
                         call = call.argument_alignments(&argument_alignments);
                     }
-                    self.builder.append_op(call.build()).result()
+                    self.emit(call.build()).result()
                 };
                 if let Some(pieces) = sig.ret.aggregate.as_deref() {
                     let (size, align) = source_type_layout(self.typed, source_ty);
@@ -3641,19 +3534,17 @@ impl FnCodegen<'_> {
                         let value = if pieces.len() == 1 {
                             result
                         } else {
-                            self.builder
-                                .append_op(
-                                    b::TupleGetOpBuilder::new(self.context)
-                                        .tuple(result)
-                                        .attr("index", AttributeValue::UInt(index as u64))
-                                        .result_type(piece.ty)
-                                        .build(),
-                                )
-                                .result()
+                            self.emit(
+                                b::TupleGetOpBuilder::new(self.context)
+                                    .tuple(result)
+                                    .attr("index", AttributeValue::UInt(index as u64))
+                                    .result_type(piece.ty)
+                                    .build(),
+                            )
+                            .result()
                         };
                         let address = self.offset_address(slot.ptr, piece.offset);
-                        self.builder
-                            .append_op(p::store(self.context, value, address).build());
+                        self.emit(p::store(self.context, value, address).build());
                     }
                     LoweredExpr::Address {
                         ptr: slot.ptr,
@@ -3744,35 +3635,28 @@ impl FnCodegen<'_> {
                     ) =>
                 {
                     let zero = self
-                        .builder
-                        .append_op(b::constantf(self.context, 0.0, result_ty).build())
+                        .emit(b::constantf(self.context, 0.0, result_ty).build())
                         .result();
-                    self.builder
-                        .append_op(b::subf(self.context, zero, operand, result_ty).build())
+                    self.emit(b::subf(self.context, zero, operand, result_ty).build())
                         .result()
                 }
                 AstKind::Neg => {
                     let zero = self
-                        .builder
-                        .append_op(b::constant(self.context, 0, result_ty).build())
+                        .emit(b::constant(self.context, 0, result_ty).build())
                         .result();
-                    self.builder
-                        .append_op(b::subi(self.context, zero, operand, result_ty).build())
+                    self.emit(b::subi(self.context, zero, operand, result_ty).build())
                         .result()
                 }
                 AstKind::BitNot => {
                     let ones = self
-                        .builder
-                        .append_op(b::constant(self.context, -1, result_ty).build())
+                        .emit(b::constant(self.context, -1, result_ty).build())
                         .result();
-                    self.builder
-                        .append_op(b::xori(self.context, operand, ones, result_ty).build())
+                    self.emit(b::xori(self.context, operand, ones, result_ty).build())
                         .result()
                 }
                 AstKind::Not => {
                     let comparison = self.compare_against_zero(operand, Predicate::Eq);
-                    self.builder
-                        .append_op(b::extui(self.context, comparison, result_ty).build())
+                    self.emit(b::extui(self.context, comparison, result_ty).build())
                         .result()
                 }
                 _ => unreachable!(),
@@ -3793,18 +3677,14 @@ impl FnCodegen<'_> {
                     "non-addressable increment operand".to_string(),
                 ));
             };
-            let old = self
-                .builder
-                .append_op(p::load(self.context, ptr, elem).build())
-                .result();
+            let old = self.emit(p::load(self.context, ptr, elem).build()).result();
             let operand_ty = node_type(self.typed, child);
             let increment = matches!(kind, AstKind::PreInc | AstKind::PostInc);
             let new = if let TypeKind::Pointer(pointee) = self.typed.types().kind(operand_ty) {
                 let offset_ty = IntegerType::new(self.context, self.typed.target().pointer_width());
                 let size = source_type_layout(self.typed, *pointee).0 as i64;
                 let offset = self
-                    .builder
-                    .append_op(
+                    .emit(
                         b::constant(
                             self.context,
                             if increment { size } else { -size },
@@ -3813,26 +3693,21 @@ impl FnCodegen<'_> {
                         .build(),
                     )
                     .result();
-                self.builder
-                    .append_op(p::ptradd(self.context, old, offset, elem).build())
+                self.emit(p::ptradd(self.context, old, offset, elem).build())
                     .result()
             } else {
                 let one = self
-                    .builder
-                    .append_op(b::constant(self.context, 1, elem).build())
+                    .emit(b::constant(self.context, 1, elem).build())
                     .result();
                 if increment {
-                    self.builder
-                        .append_op(b::addi(self.context, old, one, elem).build())
+                    self.emit(b::addi(self.context, old, one, elem).build())
                         .result()
                 } else {
-                    self.builder
-                        .append_op(b::subi(self.context, old, one, elem).build())
+                    self.emit(b::subi(self.context, old, one, elem).build())
                         .result()
                 }
             };
-            self.builder
-                .append_op(p::store(self.context, new, ptr).build());
+            self.emit(p::store(self.context, new, ptr).build());
             LoweredExpr::Value(if matches!(kind, AstKind::PostInc | AstKind::PostDec) {
                 old
             } else {
@@ -3886,8 +3761,7 @@ impl FnCodegen<'_> {
         if self.context.get_value(value).ty() == target {
             return value;
         }
-        self.builder
-            .append_op(b::extui(self.context, value, target).build())
+        self.emit(b::extui(self.context, value, target).build())
             .result()
     }
 
@@ -3905,9 +3779,7 @@ impl FnCodegen<'_> {
                     .is_some_and(|semantics| semantics.constant == Some(0))
             {
                 let target = lower_type(self.context, self.typed, target);
-                self.builder
-                    .append_op(p::null(self.context, target).build())
-                    .result()
+                self.emit(p::null(self.context, target).build()).result()
             } else {
                 self.convert_scalar(value, source, target)
             };
@@ -3935,10 +3807,7 @@ impl FnCodegen<'_> {
             let rhs_node = children.next().unwrap();
             let rhs = self.materialize(self.values[&rhs_node]);
             let rhs = self.as_value_of_node_type(rhs, rhs_node);
-            let lhs = self
-                .builder
-                .append_op(p::load(self.context, ptr, elem).build())
-                .result();
+            let lhs = self.emit(p::load(self.context, ptr, elem).build()).result();
             let source_ty = node_type(self.typed, lhs_node);
             let value = if let TypeKind::Pointer(_) = self.typed.types().kind(source_ty) {
                 self.lower_pointer_offset(
@@ -3957,8 +3826,7 @@ impl FnCodegen<'_> {
                 };
                 self.convert_scalar(result, operand_ty, source_ty)
             };
-            self.builder
-                .append_op(p::store(self.context, value, ptr).build());
+            self.emit(p::store(self.context, value, ptr).build());
             LoweredExpr::Value(value)
         };
         Ok(expression)
@@ -3986,7 +3854,7 @@ impl FnCodegen<'_> {
                         "non-addressable struct source".to_string(),
                     ));
                 };
-                self.builder.append_op(
+                self.emit(
                     cir::ops::copy_struct(
                         self.context,
                         ptr,
@@ -3998,8 +3866,7 @@ impl FnCodegen<'_> {
                 LoweredExpr::Address { ptr, elem }
             } else {
                 let value = self.materialize(rhs);
-                self.builder
-                    .append_op(p::store(self.context, value, ptr).build());
+                self.emit(p::store(self.context, value, ptr).build());
                 LoweredExpr::Value(value)
             }
         };
@@ -4023,15 +3890,14 @@ impl FnCodegen<'_> {
 
         let short_circuit = i64::from(kind == AstKind::LogOr);
         let short_circuit = self
-            .builder
-            .append_op(b::constant(self.context, short_circuit, result_ty).build())
+            .emit(b::constant(self.context, short_circuit, result_ty).build())
             .result();
         let (if_true, true_args, if_false, false_args) = if kind == AstKind::LogAnd {
             (&rhs_block, vec![], &merge, vec![short_circuit])
         } else {
             (&merge, vec![short_circuit], &rhs_block, vec![])
         };
-        self.builder.append_op(
+        self.emit(
             cb::cond_br(
                 self.context,
                 condition,
@@ -4049,8 +3915,7 @@ impl FnCodegen<'_> {
         let rhs = self.materialize(rhs);
         let rhs = self.truth_value(rhs);
         let rhs = self
-            .builder
-            .append_op(b::extui(self.context, rhs, result_ty).build())
+            .emit(b::extui(self.context, rhs, result_ty).build())
             .result();
         self.branch_to(&merge, vec![rhs]);
 
