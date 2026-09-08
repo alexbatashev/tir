@@ -3,9 +3,7 @@ use crate::{
     context::ContextRef,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(transparent)]
-pub struct RegionId(u32);
+id_newtype!(RegionId);
 
 /// What a region holds, and how what it holds is ordered.
 ///
@@ -543,29 +541,6 @@ fn cycle_member(
                 .expect("a cycle is walked");
         }
         path.push(next);
-    }
-}
-
-impl RegionId {
-    pub(crate) fn new(id: u32) -> Self {
-        Self(id)
-    }
-
-    pub fn number(self) -> u32 {
-        self.0
-    }
-
-    pub fn from_number(n: u32) -> Self {
-        Self(n)
-    }
-
-    pub(crate) fn index(self) -> usize {
-        self.0 as usize
-    }
-
-    /// The hive handle backing this id.
-    pub(crate) fn raw(self) -> u32 {
-        self.0
     }
 }
 

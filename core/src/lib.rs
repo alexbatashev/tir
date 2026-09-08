@@ -4,6 +4,42 @@ extern crate self as tir;
 // downstream crates without each of them depending on it directly.
 pub use linkme;
 
+/// Declares an entity's identity: a `u32` handle into the context's slab of
+/// that entity.
+macro_rules! id_newtype {
+    ($name:ident) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[repr(transparent)]
+        pub struct $name(u32);
+
+        impl $name {
+            pub(crate) fn new(id: u32) -> Self {
+                Self(id)
+            }
+
+            /// Raw integer id, for stable identification across an FFI boundary.
+            pub fn number(self) -> u32 {
+                self.0
+            }
+
+            /// Reconstruct an id from its raw integer, the inverse of
+            /// [`Self::number`].
+            pub fn from_number(id: u32) -> Self {
+                Self(id)
+            }
+
+            pub(crate) fn index(self) -> usize {
+                self.0 as usize
+            }
+
+            /// The hive handle backing this id.
+            pub(crate) fn raw(self) -> u32 {
+                self.0
+            }
+        }
+    };
+}
+
 pub mod analysis;
 pub mod attributes;
 pub mod backend;
