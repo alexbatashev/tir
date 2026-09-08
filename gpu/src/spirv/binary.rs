@@ -13,6 +13,17 @@ use super::*;
 
 const MAGIC: u32 = 0x0723_0203;
 
+/// The `spirv` ops written as an opcode over their value operands, as
+/// `(name, opcode, has_result)`. Everything the SPIR-V grammar generates is in
+/// [`opcode_for_name`]; these are the hand-written ops of the dialect.
+const CORE_OPS: &[(&str, u16, bool)] = &[
+    ("Load", 61, true),
+    ("Store", 62, false),
+    ("AccessChain", 65, true),
+    ("ControlBarrier", 224, false),
+    ("MemoryBarrier", 225, false),
+];
+
 type Result<T> = std::result::Result<T, String>;
 
 pub fn write_binary(context: &Context, root: &BuiltinModuleOp) -> Result<Vec<u8>> {
@@ -332,43 +343,23 @@ impl<'a> Writer<'a> {
         if op.dialect().as_str() == "state" {
             return Ok(());
         }
-        if let Some(load) = op.clone().as_op::<LoadOp>() {
-            self.write_result_op(61, load.result(), &load.value_operands(), out)
-        } else if let Some(store) = op.clone().as_op::<StoreOp>() {
-            instruction(
-                out,
-                62,
-                &[
-                    self.value(store.value_operands()[0])?,
-                    self.value(store.value_operands()[1])?,
-                ],
-            );
-            Ok(())
-        } else if let Some(access) = op.clone().as_op::<AccessChainOp>() {
-            self.write_result_op(65, access.result(), &access.value_operands(), out)
-        } else if let Some(barrier) = op.clone().as_op::<ControlBarrierOp>() {
-            instruction(
-                out,
-                224,
-                &barrier
-                    .operands()
-                    .iter()
-                    .map(|value| self.value(*value))
-                    .collect::<Result<Vec<_>>>()?,
-            );
-            Ok(())
-        } else if let Some(barrier) = op.clone().as_op::<MemoryBarrierOp>() {
-            instruction(
-                out,
-                225,
-                &barrier
-                    .operands()
-                    .iter()
-                    .map(|value| self.value(*value))
-                    .collect::<Result<Vec<_>>>()?,
-            );
-            Ok(())
-        } else if let Some(extract) = op.clone().as_op::<CompositeExtractOp>() {
+        if op.dialect().as_str() == "spirv"
+            && let Some(&(_, opcode, has_result)) = CORE_OPS
+                .iter()
+                .find(|(name, ..)| *name == op.name().as_str())
+        {
+            let values = op.value_operands();
+            if has_result {
+                return self.write_result_op(opcode, op.value_results()[0], &values, out);
+            }
+            let operands = values
+                .iter()
+                .map(|value| self.value(*value))
+                .collect::<Result<Vec<_>>>()?;
+            instruction(out, opcode, &operands);
+            return Ok(());
+        }
+        if let Some(extract) = op.clone().as_op::<CompositeExtractOp>() {
             let mut operands = self.result_prefix(extract.result())?;
             operands.push(self.value(extract.operands()[0])?);
             operands.extend(
