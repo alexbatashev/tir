@@ -12,6 +12,7 @@
 //! Objects are whole: the analysis is field-insensitive, flow-insensitive, and
 //! says nothing about what a call does to memory.
 
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use crate::analysis::escape_facts::is_pointer;
@@ -175,8 +176,15 @@ impl AliasFacts {
 /// while the function is still a graph of blocks and its parameters are the
 /// entry block's arguments.
 pub fn object_base(context: &Context, address: ValueId) -> Option<Base> {
+    let mut seen = HashSet::new();
     let mut current = address;
     loop {
+        // A slot whose one store is derived from a load of itself — a pointer a
+        // loop advances — reads back to where the walk already was, and names no
+        // object outside it.
+        if !seen.insert(current) {
+            return None;
+        }
         let Some(op) = context.get_value(current).defining_op() else {
             let region = parameter_region(context, current)?;
             let function = context.get_region(region).parent_op()?;
@@ -279,15 +287,42 @@ pub fn distinct_objects(context: &Context, a: Option<Base>, b: Option<Base>) -> 
 /// Whether every use of `address`, through pointer arithmetic, is as the
 /// location of a read or a write: the address itself never leaves the
 /// function's own accesses.
+///
+/// Pointer arithmetic branches and rejoins, so the uses form a DAG; a pointer
+/// two derivations reach is one to answer once, not once per path. The values
+/// a region result names are read once for the same reason: that list is the
+/// one place a use does not appear in, and finding it walks the region tree.
 pub fn accessed_only(context: &Context, address: ValueId) -> bool {
+    let published: HashSet<ValueId> = crate::region::defining_region(context, address)
+        .map(|region| {
+            context
+                .nested_regions(region)
+                .iter()
+                .flat_map(|&nested| context.get_region(nested).results())
+                .collect()
+        })
+        .unwrap_or_default();
+    accessed_only_seen(context, address, &published, &mut HashSet::new())
+}
+
+fn accessed_only_seen(
+    context: &Context,
+    address: ValueId,
+    published: &HashSet<ValueId>,
+    seen: &mut HashSet<ValueId>,
+) -> bool {
+    if published.contains(&address) || !seen.insert(address) {
+        return !published.contains(&address);
+    }
     context.users_of(address).into_iter().all(|user| {
         let instance = context.get_op(user);
         if instance.is::<PtrAddOp>() {
             return instance.operands()[0] == address
                 && instance
                     .results()
-                    .iter()
-                    .all(|&derived| accessed_only(context, derived));
+                    .to_vec()
+                    .into_iter()
+                    .all(|derived| accessed_only_seen(context, derived, published, seen));
         }
         let location = instance
             .clone()
@@ -306,11 +341,6 @@ pub fn accessed_only(context: &Context, address: ValueId) -> bool {
                 .filter(|&&v| v == address)
                 .count()
                 == 1
-    }) && !crate::region::defining_region(context, address).is_some_and(|region| {
-        context
-            .nested_regions(region)
-            .iter()
-            .any(|&r| context.get_region(r).results().contains(&address))
     })
 }
 
