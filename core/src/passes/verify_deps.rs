@@ -9,46 +9,12 @@
 
 use std::collections::HashSet;
 
-use crate::analysis::AnalysisManager;
-use crate::func::{CallOp, FuncOp, ReturnOp};
-use crate::ptr::MemcpyOp;
+use crate::analysis::{AnalysisManager, Effect, effect_of};
+use crate::func::FuncOp;
 use crate::{
-    Context, MemoryRead, MemoryWrite, OpHandle, OpId, OperationRef, Pass, PassError, PassTarget,
-    PromotableAllocation, RegionKind, Rewriter, ValueId,
+    Context, OpHandle, OpId, OperationRef, Pass, PassError, PassTarget, RegionKind, Rewriter,
+    ValueId,
 };
-
-/// What one operation does to memory, before the objects it names are read.
-enum Kind {
-    /// Opens the memory of a slot.
-    Open,
-    /// Observes the memory an address names and leaves it as it found it.
-    Read,
-    /// Leaves a memory at an address that the reads after it see.
-    Write,
-    /// Touches every object the outside can reach.
-    Clobber,
-    /// Hands every object the outside can reach to the function's caller.
-    Export,
-}
-
-/// What `op` does to memory.
-fn classify(op: &OpHandle) -> Option<Kind> {
-    if op.has_interface::<dyn PromotableAllocation>() {
-        return Some(Kind::Open);
-    }
-    // Both interfaces are asked before either answers: an operation declaring
-    // the two writes the extent it reads, and is no observer.
-    if op.has_interface::<dyn MemoryWrite>() {
-        return Some(Kind::Write);
-    }
-    if op.has_interface::<dyn MemoryRead>() {
-        return Some(Kind::Read);
-    }
-    if op.is::<MemcpyOp>() || op.is::<CallOp>() {
-        return Some(Kind::Clobber);
-    }
-    op.is::<ReturnOp>().then_some(Kind::Export)
-}
 
 /// cone never runs, and the order it was meant to keep is gone with it.
 pub fn verify_deps(context: &Context, function: &OpHandle) -> Result<(), crate::Error> {
@@ -100,10 +66,10 @@ pub fn verify_deps(context: &Context, function: &OpHandle) -> Result<(), crate::
         }
         for op_id in handle.op_ids() {
             let op = context.get_op(op_id);
-            let changes = match classify(&op) {
-                Some(Kind::Read) => false,
-                Some(Kind::Write | Kind::Clobber) => true,
-                _ => continue,
+            let changes = match effect_of(&op) {
+                Some(Effect::Read) => false,
+                Some(Effect::Change) => true,
+                None => continue,
             };
             if op.dep_operands().is_empty() {
                 return fail(&op, "names no dependency");

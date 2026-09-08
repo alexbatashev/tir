@@ -150,20 +150,10 @@ impl<'a> Builder<'a> {
                         }
                     }
                 }
-            } else if !op.regions().is_empty() || self.touches_memory(&op) {
+            } else if !op.regions().is_empty() || crate::analysis::effect_of(&op).is_some() {
                 self.opaque = true;
             }
         }
-    }
-
-    /// Whether an operation names a memory state without saying what it does to
-    /// the memory: a call, a copy, an export. A merge and a split only name the
-    /// chains an effect crosses; the effect itself is what was scanned.
-    fn touches_memory(&self, op: &OpHandle) -> bool {
-        if op.is::<JoinOp>() || op.is::<SplitOp>() {
-            return false;
-        }
-        !op.dep_operands().is_empty()
     }
 
     /// The chains an effect names: the one state it observes, or every chain
