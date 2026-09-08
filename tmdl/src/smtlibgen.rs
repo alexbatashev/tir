@@ -12,49 +12,52 @@ use crate::utils::{
 };
 use tir_graph::{Dag, NodeId};
 
-#[derive(serde::Serialize)]
-pub(crate) struct SmtMetadata {
-    version: u32,
-    isa: String,
-    dialect: String,
-    smt_prelude: String,
-    flat_state: Vec<FlatStateFieldMetadata>,
-    register_classes: Vec<RegisterClassMetadata>,
-    instructions: Vec<InstructionMetadata>,
+/// The SMT model of one ISA: its register files, its flattened state and one
+/// entry per instruction. Emitted as JSON and read back by the equivalence
+/// checker, so the emitter and the checker share these declarations.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SmtMetadata {
+    pub version: u32,
+    pub isa: String,
+    pub dialect: String,
+    pub smt_prelude: String,
+    pub flat_state: Vec<FlatStateFieldMetadata>,
+    pub register_classes: Vec<RegisterClassMetadata>,
+    pub instructions: Vec<InstructionMetadata>,
 }
 
-#[derive(serde::Serialize)]
-struct InstructionMetadata {
-    name: String,
-    writes_pc: bool,
-    width_bits: u16,
-    operands: Vec<OperandMetadata>,
-    supported: bool,
-    write_classes: Vec<String>,
-    uses_reservation: bool,
-    pc_source_operands: Vec<usize>,
-    memory_accesses: Vec<MemoryAccessMetadata>,
-    trap_kinds: Vec<String>,
-    shapes: Vec<EncodingShapeMetadata>,
-    execute: Option<String>,
-    flat_execute: Option<BTreeMap<String, String>>,
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct InstructionMetadata {
+    pub name: String,
+    pub writes_pc: bool,
+    pub width_bits: u16,
+    pub operands: Vec<OperandMetadata>,
+    pub supported: bool,
+    pub write_classes: Vec<String>,
+    pub uses_reservation: bool,
+    pub pc_source_operands: Vec<usize>,
+    pub memory_accesses: Vec<MemoryAccessMetadata>,
+    pub trap_kinds: Vec<String>,
+    pub shapes: Vec<EncodingShapeMetadata>,
+    pub execute: Option<String>,
+    pub flat_execute: Option<BTreeMap<String, String>>,
 }
 
-#[derive(serde::Serialize)]
-struct FlatStateFieldMetadata {
-    name: String,
-    sort: String,
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct FlatStateFieldMetadata {
+    pub name: String,
+    pub sort: String,
 }
 
-#[derive(serde::Serialize)]
-struct RegisterClassMetadata {
-    name: String,
-    storage: String,
-    index_width: u16,
-    value_width: u16,
-    storage_width: u16,
-    zero_index: Option<u16>,
-    bit_offset: u16,
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct RegisterClassMetadata {
+    pub name: String,
+    pub storage: String,
+    pub index_width: u16,
+    pub value_width: u16,
+    pub storage_width: u16,
+    pub zero_index: Option<u16>,
+    pub bit_offset: u16,
 }
 
 #[derive(Clone)]
@@ -71,43 +74,43 @@ impl Write for Capture {
     }
 }
 
-#[derive(serde::Serialize)]
-struct OperandMetadata {
-    name: String,
-    kind: String,
-    class: Option<String>,
-    width: u16,
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct OperandMetadata {
+    pub name: String,
+    pub kind: String,
+    pub class: Option<String>,
+    pub width: u16,
     /// The operand's declared `#[align(N)]`; 1 when it declares none.
-    align: u32,
+    pub align: u32,
     /// Whether the operand declares `#[nonzero]`.
-    nonzero: bool,
+    pub nonzero: bool,
 }
 
-#[derive(Clone, serde::Serialize)]
-struct MemoryAccessMetadata {
-    kind: &'static str,
-    bytes: u64,
-    address: String,
-    flat_address: String,
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct MemoryAccessMetadata {
+    pub kind: String,
+    pub bytes: u64,
+    pub address: String,
+    pub flat_address: String,
 }
 
-#[derive(serde::Serialize)]
-struct EncodingFieldMetadata {
-    word_low: u16,
-    word_high: u16,
-    operand: Option<String>,
-    operand_low: u16,
-    value: String,
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct EncodingFieldMetadata {
+    pub word_low: u16,
+    pub word_high: u16,
+    pub operand: Option<String>,
+    pub operand_low: u16,
+    pub value: String,
 }
 
 /// One fixed bit map of an instruction: what selects it, how wide it is, and
 /// the fields it spells.
-#[derive(serde::Serialize)]
-struct EncodingShapeMetadata {
-    name: String,
-    width_bits: u16,
-    guard: crate::shapes::Predicate,
-    fields: Vec<EncodingFieldMetadata>,
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct EncodingShapeMetadata {
+    pub name: String,
+    pub width_bits: u16,
+    pub guard: crate::shapes::Predicate,
+    pub fields: Vec<EncodingFieldMetadata>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2702,8 +2705,8 @@ fn build_smt_behavior<'a>(
                 flat_emitter.emit_val(operation.addr)?.as_bv();
             Some(MemoryAccessMetadata {
                 kind: match operation.kind {
-                    MemOpKind::Load => "load",
-                    MemOpKind::Store => "store",
+                    MemOpKind::Load => "load".to_string(),
+                    MemOpKind::Store => "store".to_string(),
                 },
                 bytes: operation.bytes,
                 address: fit_smt(&address, width, signed, u32::from(ctx.xlen)),

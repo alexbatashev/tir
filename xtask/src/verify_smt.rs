@@ -51,7 +51,7 @@
 //!     TMDL behavior writes them; the ALU ops deliberately leave flags
 //!     unmodeled, so their flag writes are ignored.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -59,7 +59,8 @@ use std::time::Instant;
 
 use crate::utils::{download_file, project_root};
 use anyhow::anyhow;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use tmdl::{FlatStateFieldMetadata, MemoryAccessMetadata, RegisterClassMetadata, SmtMetadata};
 use xshell::{cmd, Shell};
 
 /// A Sail bitfield flag register mapped to TMDL flag slots:
@@ -699,7 +700,7 @@ struct Instruction {
     /// The fixed bit maps this instruction encodes to, each with the guard over
     /// the operands that selects it. Every ISA but x86 has exactly one.
     shapes: Vec<Shape>,
-    flat_execute: Option<HashMap<String, String>>,
+    flat_execute: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -710,11 +711,6 @@ struct Shape {
     encoding: Vec<EncodingField>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct MemoryAccessMetadata {
-    flat_address: String,
-}
-
 #[derive(Clone, Debug)]
 struct EncodingField {
     word_low: u32,
@@ -722,76 +718,6 @@ struct EncodingField {
     operand_index: Option<usize>,
     operand_low: u32,
     value: u128,
-}
-
-#[derive(Deserialize)]
-struct MetadataFile {
-    version: u32,
-    isa: String,
-    dialect: String,
-    flat_state: Vec<FlatStateField>,
-    register_classes: Vec<RegisterClassMetadata>,
-    instructions: Vec<RawInstruction>,
-}
-
-#[derive(Deserialize)]
-struct RawInstruction {
-    name: String,
-    writes_pc: bool,
-    width_bits: u32,
-    operands: Vec<RawOperand>,
-    supported: bool,
-    write_classes: Vec<String>,
-    uses_reservation: bool,
-    pc_source_operands: Vec<usize>,
-    memory_accesses: Vec<MemoryAccessMetadata>,
-    trap_kinds: Vec<String>,
-    shapes: Vec<RawShape>,
-    flat_execute: Option<HashMap<String, String>>,
-}
-
-#[derive(Deserialize)]
-struct RawShape {
-    name: String,
-    width_bits: u32,
-    guard: tmdl::shapes::Predicate,
-    fields: Vec<RawEncodingField>,
-}
-
-#[derive(Clone, Deserialize)]
-struct FlatStateField {
-    name: String,
-    sort: String,
-}
-
-#[derive(Clone, Deserialize)]
-struct RegisterClassMetadata {
-    name: String,
-    storage: String,
-    index_width: u32,
-    value_width: u32,
-    storage_width: u32,
-    zero_index: Option<u64>,
-    bit_offset: u32,
-}
-
-#[derive(Deserialize)]
-struct RawOperand {
-    name: String,
-    kind: String,
-    class: Option<String>,
-    width: u32,
-    align: u64,
-    nonzero: bool,
-}
-
-#[derive(Deserialize)]
-struct RawEncodingField {
-    word_low: u32,
-    word_high: u32,
-    operand: Option<String>,
-    operand_low: u32,
-    value: String,
 }
 
 impl Instruction {
@@ -830,12 +756,12 @@ struct Inventory {
 
 #[derive(Clone)]
 struct FlatModel {
-    fields: Vec<FlatStateField>,
+    fields: Vec<FlatStateFieldMetadata>,
     classes: HashMap<String, RegisterClassMetadata>,
 }
 
 fn parse_inventory(json: &str) -> anyhow::Result<Inventory> {
-    let metadata: MetadataFile = serde_json::from_str(json)?;
+    let metadata: SmtMetadata = serde_json::from_str(json)?;
     anyhow::ensure!(metadata.version == 1, "unsupported SMT metadata version");
     let instructions = metadata
         .instructions
@@ -851,17 +777,18 @@ fn parse_inventory(json: &str) -> anyhow::Result<Inventory> {
                 .into_iter()
                 .map(|operand| {
                     let constraint = ImmConstraint {
-                        align: operand.align,
+                        align: u64::from(operand.align),
                         nonzero: operand.nonzero,
                     };
+                    let width = u32::from(operand.width);
                     let kind = match operand.kind.as_str() {
                         "register" => OperandKind::Reg {
                             class: operand
                                 .class
                                 .ok_or_else(|| anyhow!("register operand without class"))?,
-                            idx_width: operand.width,
+                            idx_width: width,
                         },
-                        "bits" => OperandKind::Bits(operand.width, constraint),
+                        "bits" => OperandKind::Bits(width, constraint),
                         "int" => OperandKind::Int(constraint),
                         kind => anyhow::bail!("unknown operand kind {kind}"),
                     };
@@ -888,17 +815,17 @@ fn parse_inventory(json: &str) -> anyhow::Result<Inventory> {
                                 })
                                 .transpose()?;
                             Ok(EncodingField {
-                                word_low: field.word_low,
-                                word_high: field.word_high,
+                                word_low: u32::from(field.word_low),
+                                word_high: u32::from(field.word_high),
                                 operand_index,
-                                operand_low: field.operand_low,
+                                operand_low: u32::from(field.operand_low),
                                 value: field.value.parse()?,
                             })
                         })
                         .collect::<anyhow::Result<Vec<_>>>()?;
                     Ok(Shape {
                         name: shape.name,
-                        width_bits: shape.width_bits,
+                        width_bits: u32::from(shape.width_bits),
                         guard: shape.guard,
                         encoding,
                     })
@@ -907,7 +834,7 @@ fn parse_inventory(json: &str) -> anyhow::Result<Inventory> {
             Ok(Instruction {
                 name: raw.name,
                 writes_pc: raw.writes_pc,
-                width_bits: raw.width_bits,
+                width_bits: u32::from(raw.width_bits),
                 operands,
                 supported: raw.supported,
                 write_classes: raw.write_classes,
@@ -2780,7 +2707,7 @@ mod tests {
             pc_source_operands: vec![],
             memory_accesses: vec![],
             shapes: vec![],
-            flat_execute: Some(HashMap::new()),
+            flat_execute: Some(BTreeMap::new()),
         };
         let trace = analyze_trace(
             spec,
