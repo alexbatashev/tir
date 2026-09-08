@@ -32,8 +32,6 @@ pub enum ColumnId {
     Type,
     /// The class it is derived from and the distance to it.
     Object,
-    /// A tag the host put on the class, for a property the terms do not carry.
-    Mark,
 }
 
 /// The host's primitive functions over what a match bound: labels an atom
