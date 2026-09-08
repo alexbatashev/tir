@@ -303,7 +303,7 @@ fn run_program(executable: &Path) -> Result<Behavior, String> {
     let mut command = Command::new(executable);
     command.stdout(std::process::Stdio::piped());
     let output = crate::utils::run_with_deadline(&mut command, RUN_TIMEOUT)
-        .map_err(|e| format!("spawn {}: {e}", executable.display()))?
+        .map_err(|e| format!("run {}: {e}", executable.display()))?
         .ok_or_else(|| format!("{} timed out after {RUN_TIMEOUT:?}", executable.display()))?;
     Ok(Behavior {
         stdout: output.stdout,
