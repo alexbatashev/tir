@@ -99,6 +99,13 @@ impl PatternNodeMeta {
             .map_or(0, |requirement| requirement.view_offset())
     }
 
+    /// The width this operand reads its register at, when it reads it whole
+    /// ([`RegisterRequirement::whole_width`]).
+    pub(crate) fn whole_width(&self) -> Option<u32> {
+        self.register
+            .and_then(|requirement| requirement.whole_width())
+    }
+
     /// The node demands its class in a register: a physical-register operand or
     /// an explicit register constraint.
     pub(crate) fn demands_register(&self) -> bool {
@@ -180,12 +187,15 @@ impl CompiledIselPattern {
 
     /// Whether `class` may bind under `pattern_node`: a width requirement rejects
     /// a value *known* to be of a different width than the instruction operates
-    /// at (a rewrite-introduced class of unknown width is produced at register
-    /// width, so it still matches), an immediate range rejects a constant the
-    /// encoding field cannot represent, and an immediate constraint requires a
-    /// constant member. Register constraints are checked by the cover: a constant
-    /// may bind here only if a selected materializer makes it available in a
-    /// register.
+    /// at, an immediate range rejects a constant the encoding field cannot
+    /// represent, and an immediate constraint requires a constant member.
+    /// Register constraints are checked by the cover: a constant may bind here
+    /// only if a selected materializer makes it available in a register.
+    ///
+    /// A rewrite-introduced class carries no width of its own, so nothing is
+    /// known to reject here. What pins it is the cover, which lets an operand
+    /// read whole meet only a tile defining exactly the bits it reads
+    /// ([`super::cover::alternatives_compatible`]).
     pub(crate) fn boundary_ok(
         &self,
         egraph: &SemEGraph,
