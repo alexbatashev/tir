@@ -175,13 +175,11 @@ impl FuncOp {
     fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
         use tir::Operation;
 
-        // %2 = func.func @name(%0: i32, %1: i32) -> i32 {
         fmt.write(format!("%{} = func.func", self.fn_value().number()))?;
         if self.symbol_visibility() == Visibility::Private {
             fmt.write(" private")?;
         }
 
-        // Print symbol name
         let sym_name = match self.attr("sym_name") {
             Some(tir::attributes::AttributeValue::Str(s)) => s.to_string(),
             Some(_) => panic!("sym_name must be a string"),
@@ -190,7 +188,6 @@ impl FuncOp {
 
         fmt.write(format!(" @{}", sym_name))?;
 
-        // Print parameters from entry block arguments
         let context = self.0.context.upgrade();
         let args = self.parameters();
 
@@ -204,7 +201,6 @@ impl FuncOp {
         }
         fmt.write(")")?;
 
-        // Print return type
         let ret_type = self.ret_type();
 
         if ret_type != UnitType::new(&context) {
@@ -230,13 +226,11 @@ impl FuncOp {
 
         let is_private = parser.parse_token("private");
 
-        // Parse @name
         let sym_name = parser
             .parse_symbol_name()
             .ok_or_else(|| (parser.span(), tir::Error::ExpectedSymbolName))?
             .to_string();
 
-        // Parse parameter list: (%0: type, %1: type)
         if !parser.parse_token("(") {
             return Err((parser.span(), tir::Error::ExpectedToken("(")));
         }
@@ -258,7 +252,6 @@ impl FuncOp {
                     .parse_type(context)?
                     .ok_or_else(|| (parser.span(), tir::Error::ExpectedType))?;
 
-                // Create a value in context with the parsed type
                 let value = context.create_value(ty, None);
                 parser.define_value(&val_name, value.id());
                 block_args.push(value);
@@ -272,7 +265,6 @@ impl FuncOp {
             }
         }
 
-        // Parse optional -> return_type
         let ret_type = if parser.parse_token("->") {
             parser
                 .parse_type(context)?
@@ -284,11 +276,9 @@ impl FuncOp {
         let argument_alignments = super::parse_argument_alignments(parser, context)?;
         let noalias = super::parse_noalias_arguments(parser, context)?;
 
-        // Parse body region { ... }
-        let block_arg_types: Vec<tir::TypeId> = block_args.iter().map(tir::Value::ty).collect();
+        let parameters: Vec<tir::TypeId> = block_args.iter().map(tir::Value::ty).collect();
         let body_region = parser.parse_region_with_entry_args(context, block_args)?;
 
-        let parameters: Vec<_> = block_arg_types;
         let mut builder = FuncOpBuilder::new(context)
             .sym_name(&sym_name)
             .ret_type(ret_type)
