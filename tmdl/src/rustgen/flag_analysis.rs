@@ -465,19 +465,35 @@ fn copy_subgraph_remap_symbols(
     remap: &mut HashMap<u32, u32>,
     next: &mut u32,
 ) -> tir_graph::NodeId {
+    copy_subgraph_remapping(dst, src, node, memo, &mut |id| {
+        Some(*remap.entry(id).or_insert_with(|| {
+            let assigned = *next;
+            *next += 1;
+            assigned
+        }))
+    })
+}
+
+/// Copy `node`'s subgraph into `dst`, rewriting each symbol id through `remap`.
+/// A symbol `remap` answers `None` for is copied unchanged.
+fn copy_subgraph_remapping(
+    dst: &mut tir_symbolic::sem::SemGraph,
+    src: &tir_symbolic::sem::SemGraph,
+    node: tir_graph::NodeId,
+    memo: &mut HashMap<usize, tir_graph::NodeId>,
+    remap: &mut dyn FnMut(u32) -> Option<u32>,
+) -> tir_graph::NodeId {
     use tir_graph::Dag;
     use tir_symbolic::lang::SymPayload;
     use tir_symbolic::sem::{CopyAction, copy_subgraph_with};
-    copy_subgraph_with(dst, src, node, memo, &mut |_, node| match src.get_leaf_data(node) {
-        Some(SymPayload::SymbolId(id)) => {
-            let new_id = *remap.entry(*id).or_insert_with(|| {
-                let assigned = *next;
-                *next += 1;
-                assigned
-            });
-            CopyAction::Payload(SymPayload::SymbolId(new_id))
+    copy_subgraph_with(dst, src, node, memo, &mut |_, node| {
+        match src.get_leaf_data(node).and_then(|leaf| match leaf {
+            SymPayload::SymbolId(id) => remap(*id),
+            _ => None,
+        }) {
+            Some(id) => CopyAction::Payload(SymPayload::SymbolId(id)),
+            None => CopyAction::Keep,
         }
-        _ => CopyAction::Keep,
     })
 }
 

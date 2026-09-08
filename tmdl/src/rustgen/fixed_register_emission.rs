@@ -286,35 +286,6 @@ fn fixed_write_slot_name(reg_name: &str) -> String {
     format!("{reg_name}_def")
 }
 
-/// Two subgraphs are structurally identical: same node kinds, leaf payloads, and
-/// children in order. Used to fold `a == a` (the composed guard after the
-/// definer's write substitutes for its read) to a constant true.
-fn subgraphs_equal(
-    graph: &tir_symbolic::sem::SemGraph,
-    a: tir_graph::NodeId,
-    b: tir_graph::NodeId,
-) -> bool {
-    use tir_graph::Dag;
-    if a == b {
-        return true;
-    }
-    if graph.get_node(a) != graph.get_node(b) {
-        return false;
-    }
-    if graph.get_leaf_data(a) != graph.get_leaf_data(b) {
-        return false;
-    }
-    let a_children: Vec<_> = graph.children(a).collect();
-    let b_children: Vec<_> = graph.children(b).collect();
-    if a_children.len() != b_children.len() {
-        return false;
-    }
-    a_children
-        .iter()
-        .zip(&b_children)
-        .all(|(&x, &y)| subgraphs_equal(graph, x, y))
-}
-
 /// Substitute the definer's write into the reader's guard, then fold: prove the
 /// composed condition is `Eq(x, x)` (structurally), i.e. the definer establishes
 /// exactly the region the reader's single-width arm is valid in. The definer's
@@ -371,7 +342,10 @@ fn guard_folds_to_true(
     let [lhs, rhs] = children.as_slice() else {
         return false;
     };
-    subgraphs_equal(&composed, *lhs, *rhs)
+    // The composed guard folds to true when its two sides are the same
+    // expression: the definer establishes exactly the region the reader is
+    // valid in.
+    tir_graph::subgraphs_equal(&composed, *lhs, &composed, *rhs)
 }
 
 /// Copy `node`'s subgraph from `src` into `dst`, replacing every `Symbol` leaf
