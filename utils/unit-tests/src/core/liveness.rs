@@ -3,12 +3,12 @@
 use std::collections::BTreeSet;
 
 use tir::backend::liveness::analyze;
-use tir::backend::regalloc::{RegClassId, RegClassInfo, RegisterView};
+use tir::backend::regalloc::{RegClassId, RegClassInfo};
 use tir::backend::{RegClassType, RegPort};
 use tir::builtin::{ops, IntegerType};
 use tir::{BlockHandle, Context, Operation, TypeId, ValueId};
 
-use super::fixtures::{machine_op, r};
+use super::fixtures::{machine_op, r, r_high, reg_class};
 
 // The test ops: each names one register slot. A slot's class is a per-opcode
 // fact, so there is one op per class the tests constrain a value through; the
@@ -47,74 +47,22 @@ slot_op!(
 );
 
 // A subclass of `R` over the same file and view: fewer encodable registers.
-static R_LOW_CLASS: RegClassInfo = RegClassInfo {
-    name: "Rlow",
-    dialect: "test",
-    file: "R",
-    registers: &[0, 1],
-    group_width: 1,
-    view: RegisterView {
-        bit_offset: 0,
-        merge: false,
-    },
-    print_name: tir::backend::regalloc::no_register_name,
-};
-
-// Same file and index set as `Rlow`, but a different architectural view (an
-// x86 high-byte class): no register satisfies both constraints.
-static R_HIGH_CLASS: RegClassInfo = RegClassInfo {
-    name: "Rhigh",
-    dialect: "test",
-    file: "R",
-    registers: &[0, 1],
-    group_width: 1,
-    view: RegisterView {
-        bit_offset: 8,
-        merge: true,
-    },
-    print_name: tir::backend::regalloc::no_register_name,
-};
+static R_LOW_CLASS: RegClassInfo = reg_class("Rlow", "R", &[0, 1], 1, 0, false);
 
 const fn r_low() -> RegClassId {
     RegClassId::new(&R_LOW_CLASS)
 }
 
-const fn r_high() -> RegClassId {
-    RegClassId::new(&R_HIGH_CLASS)
-}
-
 // Two classes over one view where neither contains the other (x86 `GPR32low`,
 // which includes esp, and `GPRaddrIndex`, which excludes rsp but reaches r8+).
-static R_MID_CLASS: RegClassInfo = RegClassInfo {
-    name: "Rmid",
-    dialect: "test",
-    file: "R",
-    registers: &[1, 2, 3],
-    group_width: 1,
-    view: RegisterView {
-        bit_offset: 0,
-        merge: false,
-    },
-    print_name: tir::backend::regalloc::no_register_name,
-};
+static R_MID_CLASS: RegClassInfo = reg_class("Rmid", "R", &[1, 2, 3], 1, 0, false);
 
 const fn r_mid() -> RegClassId {
     RegClassId::new(&R_MID_CLASS)
 }
 
 // Over one view with `Rlow`, but sharing no register with it.
-static R_OTHER_CLASS: RegClassInfo = RegClassInfo {
-    name: "Rother",
-    dialect: "test",
-    file: "R",
-    registers: &[2, 3],
-    group_width: 1,
-    view: RegisterView {
-        bit_offset: 0,
-        merge: false,
-    },
-    print_name: tir::backend::regalloc::no_register_name,
-};
+static R_OTHER_CLASS: RegClassInfo = reg_class("Rother", "R", &[2, 3], 1, 0, false);
 
 const fn r_other() -> RegClassId {
     RegClassId::new(&R_OTHER_CLASS)

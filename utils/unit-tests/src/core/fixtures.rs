@@ -26,23 +26,43 @@ pub fn module_ops(context: &Context, module: OpId) -> Vec<OpId> {
         .op_ids()
 }
 
+/// A test register class named `name` over the register file `file`, encoding
+/// `registers` as groups of `group_width` file indices, viewed at `bit_offset`
+/// (writes merging into the wider register iff `merge`).
+pub const fn reg_class(
+    name: &'static str,
+    file: &'static str,
+    registers: &'static [u16],
+    group_width: u16,
+    bit_offset: u32,
+    merge: bool,
+) -> RegClassInfo {
+    RegClassInfo {
+        name,
+        dialect: "test",
+        file,
+        registers,
+        group_width,
+        view: RegisterView { bit_offset, merge },
+        print_name: tir::backend::regalloc::no_register_name,
+    }
+}
+
 /// A single eight-register class `R` over its own file, the shared
 /// register-class fixture for the regalloc, liveness and encoding tests.
-pub static R_CLASSES: [RegClassInfo; 1] = [RegClassInfo {
-    name: "R",
-    dialect: "test",
-    file: "R",
-    registers: &[0, 1, 2, 3, 4, 5, 6, 7],
-    group_width: 1,
-    view: RegisterView {
-        bit_offset: 0,
-        merge: false,
-    },
-    print_name: tir::backend::regalloc::no_register_name,
-}];
+pub static R_CLASSES: [RegClassInfo; 1] =
+    [reg_class("R", "R", &[0, 1, 2, 3, 4, 5, 6, 7], 1, 0, false)];
 
 pub const fn r() -> RegClassId {
     RegClassId::new(&R_CLASSES[0])
+}
+
+/// Same file and indices as `Rlow`, but an x86 high-byte view: no register
+/// satisfies both it and an offset-0 class.
+pub static R_HIGH_CLASS: RegClassInfo = reg_class("Rhigh", "R", &[0, 1], 1, 8, true);
+
+pub const fn r_high() -> RegClassId {
+    RegClassId::new(&R_HIGH_CLASS)
 }
 
 /// `rd, rs`: one destination slot and one source slot, both of class `R`.

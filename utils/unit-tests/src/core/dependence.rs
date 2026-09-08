@@ -7,28 +7,17 @@
 use tir::analysis::defuse::CLOBBERS_ATTR;
 use tir::attributes::{AttributeRole, AttributeValue, ImplicitReg, RegisterAttr};
 use tir::backend::dependence::Dependences;
-use tir::backend::regalloc::{RegClassId, RegClassInfo, RegisterView};
+use tir::backend::regalloc::{RegClassId, RegClassInfo};
 use tir::backend::{
     verify_machine_ir, RegAssignment, RegClassType, RegPort, SymbolOp, SymbolOpBuilder,
 };
 use tir::{BlockHandle, Context, OpId, Operation, ValueId};
 
-use super::fixtures::{machine_op, r, RD_RS_PORTS};
+use super::fixtures::{machine_op, r, reg_class, RD_RS_PORTS};
 
 /// The one-register flag file the test opcodes touch implicitly, standing for
 /// x86 `EFLAGS`.
-static F_CLASS: RegClassInfo = RegClassInfo {
-    name: "F",
-    dialect: "test",
-    file: "F",
-    registers: &[0],
-    group_width: 1,
-    view: RegisterView {
-        bit_offset: 0,
-        merge: false,
-    },
-    print_name: tir::backend::regalloc::no_register_name,
-};
+static F_CLASS: RegClassInfo = reg_class("F", "F", &[0], 1, 0, false);
 
 const fn f() -> RegClassId {
     RegClassId::new(&F_CLASS)

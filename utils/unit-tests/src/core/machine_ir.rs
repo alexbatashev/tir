@@ -5,33 +5,14 @@
 //! rather than through a `.tir` check.
 
 use tir::attributes::AttributeValue;
-use tir::backend::regalloc::{RegClassId, RegClassInfo, RegisterView};
+use tir::backend::regalloc::RegClassId;
 use tir::backend::{
     phys_attr, verify_machine_ir, RegAssignment, RegClassType, RegPort, SymbolOpBuilder,
     ASSIGNMENT_ATTR, PINS_ATTR,
 };
 use tir::{Context, Operation, ValueId};
 
-use super::fixtures::{machine_op, r};
-
-/// A second class over the `R` file at a different bit offset: no register
-/// satisfies both views (an x86 high-byte class against an offset-0 one).
-static R_HIGH_CLASS: RegClassInfo = RegClassInfo {
-    name: "Rhigh",
-    dialect: "test",
-    file: "R",
-    registers: &[0, 1],
-    group_width: 1,
-    view: RegisterView {
-        bit_offset: 8,
-        merge: true,
-    },
-    print_name: tir::backend::regalloc::no_register_name,
-};
-
-const fn r_high() -> RegClassId {
-    RegClassId::new(&R_HIGH_CLASS)
-}
+use super::fixtures::{machine_op, r, r_high};
 
 // `add rd, rs`: one destination slot and one source slot, both of class `R`,
 // plus the implicit flag register the behavior writes.

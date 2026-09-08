@@ -8,13 +8,12 @@ use tir::backend::abi::{
 use tir::backend::liveness::{self, Liveness, PhysReg};
 use tir::backend::regalloc::{
     allocate, AllocConfig, AllocResult, RegAllocError, RegClassId, RegClassInfo, RegisterInfo,
-    RegisterView,
 };
 use tir::builtin::{ops, IntegerType};
 use tir::BlockHandle;
 use tir::{Context, ValueId};
 
-use super::fixtures::{r, register_info};
+use super::fixtures::{r, reg_class, register_info};
 
 fn test_abi(info: &RegisterInfo, register_indices: &[u16]) -> &'static AbiInfo {
     let caller_saved = Box::leak(
@@ -299,30 +298,8 @@ fn forbidden_register_is_avoided() {
 // Two register classes (`GPR` and `GPRsp`) over one shared file with a single
 // allocatable register, mirroring AArch64's slot-31 aliasing.
 static ALIASING_CLASSES: &[RegClassInfo] = &[
-    RegClassInfo {
-        name: "GPR",
-        dialect: "test",
-        file: "GPR",
-        registers: &[0, 1, 2, 3],
-        group_width: 1,
-        view: RegisterView {
-            bit_offset: 0,
-            merge: false,
-        },
-        print_name: tir::backend::regalloc::no_register_name,
-    },
-    RegClassInfo {
-        name: "GPRsp",
-        dialect: "test",
-        file: "GPR",
-        registers: &[0, 1, 2, 3],
-        group_width: 1,
-        view: RegisterView {
-            bit_offset: 0,
-            merge: false,
-        },
-        print_name: tir::backend::regalloc::no_register_name,
-    },
+    reg_class("GPR", "GPR", &[0, 1, 2, 3], 1, 0, false),
+    reg_class("GPRsp", "GPR", &[0, 1, 2, 3], 1, 0, false),
 ];
 
 fn two_class_liveness(class1: RegClassId, class2: RegClassId) -> Liveness {
@@ -366,30 +343,8 @@ fn distinct_files_do_not_alias() {
     // Same shape, but the classes belong to different files, so both vregs can
     // independently take index 0.
     static CLASSES: &[RegClassInfo] = &[
-        RegClassInfo {
-            name: "A",
-            dialect: "test",
-            file: "A",
-            registers: &[0, 1, 2, 3],
-            group_width: 1,
-            view: RegisterView {
-                bit_offset: 0,
-                merge: false,
-            },
-            print_name: tir::backend::regalloc::no_register_name,
-        },
-        RegClassInfo {
-            name: "B",
-            dialect: "test",
-            file: "B",
-            registers: &[0, 1, 2, 3],
-            group_width: 1,
-            view: RegisterView {
-                bit_offset: 0,
-                merge: false,
-            },
-            print_name: tir::backend::regalloc::no_register_name,
-        },
+        reg_class("A", "A", &[0, 1, 2, 3], 1, 0, false),
+        reg_class("B", "B", &[0, 1, 2, 3], 1, 0, false),
     ];
     let info = RegisterInfo { classes: CLASSES };
     let liveness = two_class_liveness(id_of(&info, "A"), id_of(&info, "B"));
@@ -415,30 +370,8 @@ fn group_registers_interfere_by_span() {
     // group's span. With only v0..v2 available, the group takes (VRM2, 0)
     // = v0..v1 and the scalar is pushed to v2 (not v1, which overlaps).
     static CLASSES: &[RegClassInfo] = &[
-        RegClassInfo {
-            name: "VR",
-            dialect: "test",
-            file: "VR",
-            registers: &[0, 1, 2, 3],
-            group_width: 1,
-            view: RegisterView {
-                bit_offset: 0,
-                merge: false,
-            },
-            print_name: tir::backend::regalloc::no_register_name,
-        },
-        RegClassInfo {
-            name: "VRM2",
-            dialect: "test",
-            file: "VR",
-            registers: &[0, 1, 2, 3],
-            group_width: 2,
-            view: RegisterView {
-                bit_offset: 0,
-                merge: false,
-            },
-            print_name: tir::backend::regalloc::no_register_name,
-        },
+        reg_class("VR", "VR", &[0, 1, 2, 3], 1, 0, false),
+        reg_class("VRM2", "VR", &[0, 1, 2, 3], 2, 0, false),
     ];
     let info = RegisterInfo { classes: CLASSES };
     let vrm2 = id_of(&info, "VRM2");
@@ -469,33 +402,9 @@ fn group_registers_interfere_by_span() {
 fn forbidden_register_aliases_across_classes() {
     // A `GPRsp` vreg forbidding `("GPR", 0)` — a clobber expressed through the
     // aliasing base class — must avoid index 0 and take the other register.
-    static CLASSES: &[RegClassInfo] = &[
-        RegClassInfo {
-            name: "GPR",
-            dialect: "test",
-            file: "GPR",
-            registers: &[0, 1, 2, 3],
-            group_width: 1,
-            view: RegisterView {
-                bit_offset: 0,
-                merge: false,
-            },
-            print_name: tir::backend::regalloc::no_register_name,
-        },
-        RegClassInfo {
-            name: "GPRsp",
-            dialect: "test",
-            file: "GPR",
-            registers: &[0, 1, 2, 3],
-            group_width: 1,
-            view: RegisterView {
-                bit_offset: 0,
-                merge: false,
-            },
-            print_name: tir::backend::regalloc::no_register_name,
-        },
-    ];
-    let info = RegisterInfo { classes: CLASSES };
+    let info = RegisterInfo {
+        classes: ALIASING_CLASSES,
+    };
     let mut liveness = Liveness::default();
     liveness.vregs.insert(1);
     liveness.vreg_class.insert(1, id_of(&info, "GPRsp"));
@@ -524,30 +433,8 @@ fn forbidden_register_aliases_across_classes() {
 
 // `GPR` (whole file) and its REX-free subclass `GPRlow` (indices 0..1).
 static SUBCLASS_CLASSES: &[RegClassInfo] = &[
-    RegClassInfo {
-        name: "GPR",
-        dialect: "test",
-        file: "GPR",
-        registers: &[0, 1, 2, 3],
-        group_width: 1,
-        view: RegisterView {
-            bit_offset: 0,
-            merge: false,
-        },
-        print_name: tir::backend::regalloc::no_register_name,
-    },
-    RegClassInfo {
-        name: "GPRlow",
-        dialect: "test",
-        file: "GPR",
-        registers: &[0, 1],
-        group_width: 1,
-        view: RegisterView {
-            bit_offset: 0,
-            merge: false,
-        },
-        print_name: tir::backend::regalloc::no_register_name,
-    },
+    reg_class("GPR", "GPR", &[0, 1, 2, 3], 1, 0, false),
+    reg_class("GPRlow", "GPR", &[0, 1], 1, 0, false),
 ];
 
 // A vreg pinned through the wide class but read by an operand of a narrow
