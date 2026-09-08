@@ -274,10 +274,6 @@ impl TypeEnv {
         }
     }
 
-    pub fn exit_scope(self) -> Option<Self> {
-        self.parent.map(|p| *p)
-    }
-
     pub fn bind(&mut self, name: impl Into<String>, scheme: TypeScheme) {
         self.bindings.insert(name.into(), scheme);
     }
