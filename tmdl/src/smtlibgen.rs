@@ -1327,6 +1327,52 @@ enum SmtSymbolInfo {
     },
 }
 
+/// The state a behavior transition threads: either the `TMDLState` datatype
+/// term or the flattened per-field model. One statement emitter walks a
+/// behavior for both; only these primitives differ.
+trait SmtState: Clone {
+    /// The entry state value terms read.
+    fn state_ref(&self) -> SmtStateRef<'_>;
+    fn write_pc(&self, value: &str) -> Self;
+    fn write_register(&self, ctx: &SmtCtx<'_>, class: &str, index: &str, value: &str) -> Self;
+    fn write_memory(&self, ctx: &SmtCtx<'_>, bytes: u16, address: &str, value: &str) -> Self;
+    fn select(condition: &str, then_state: &Self, else_state: &Self) -> Self;
+    fn bind_let(&self, variable: &str, value: &str) -> Self;
+    /// Thread an atomic's memory and reservation effect through the state.
+    /// The flat model has no reservation state, so it has no such transition.
+    fn atomic(emitter: &BehaviorEmitter<'_, Self>, op: &AtomicOp, state: &Self) -> Option<Self>;
+}
+
+impl SmtState for String {
+    fn state_ref(&self) -> SmtStateRef<'_> {
+        SmtStateRef::Datatype(self)
+    }
+
+    fn write_pc(&self, value: &str) -> Self {
+        format!("(write_pc {self} {value})")
+    }
+
+    fn write_register(&self, _ctx: &SmtCtx<'_>, class: &str, index: &str, value: &str) -> Self {
+        format!("(write_{class} {self} {index} {value})")
+    }
+
+    fn write_memory(&self, _ctx: &SmtCtx<'_>, bytes: u16, address: &str, value: &str) -> Self {
+        format!("(write_mem_{bytes} {self} {address} {value})")
+    }
+
+    fn select(condition: &str, then_state: &Self, else_state: &Self) -> Self {
+        format!("(ite {condition} {then_state} {else_state})")
+    }
+
+    fn bind_let(&self, variable: &str, value: &str) -> Self {
+        format!("(let (({variable} {value})) {self})")
+    }
+
+    fn atomic(emitter: &BehaviorEmitter<'_, Self>, op: &AtomicOp, state: &Self) -> Option<Self> {
+        emitter.atomic_effect(op, state)
+    }
+}
+
 #[derive(Clone)]
 struct FlatState {
     fields: BTreeMap<String, String>,
@@ -1344,6 +1390,18 @@ impl FlatState {
             fields.insert(name.to_string(), format!("st0_{name}"));
         }
         Self { fields }
+    }
+}
+
+impl SmtState for FlatState {
+    fn state_ref(&self) -> SmtStateRef<'_> {
+        SmtStateRef::Flat(self)
+    }
+
+    fn write_pc(&self, value: &str) -> Self {
+        let mut next = self.clone();
+        next.fields.insert("pc".to_string(), value.to_string());
+        next
     }
 
     fn write_register(&self, ctx: &SmtCtx<'_>, class: &str, index: &str, value: &str) -> Self {
@@ -1393,7 +1451,8 @@ impl FlatState {
         next
     }
 
-    fn write_memory(&self, xlen: u16, bytes: u16, address: &str, value: &str) -> Self {
+    fn write_memory(&self, ctx: &SmtCtx<'_>, bytes: u16, address: &str, value: &str) -> Self {
+        let xlen = ctx.xlen;
         let mut memory = self.fields["mem"].clone();
         for offset in 0..bytes {
             let slot = if offset == 0 {
@@ -1424,6 +1483,24 @@ impl FlatState {
             })
             .collect();
         Self { fields }
+    }
+
+    fn bind_let(&self, variable: &str, value: &str) -> Self {
+        let fields = self
+            .fields
+            .iter()
+            .map(|(name, expression)| {
+                (
+                    name.clone(),
+                    format!("(let (({variable} {value})) {expression})"),
+                )
+            })
+            .collect();
+        Self { fields }
+    }
+
+    fn atomic(_: &BehaviorEmitter<'_, Self>, _: &AtomicOp, _: &Self) -> Option<Self> {
+        None
     }
 }
 
@@ -1900,11 +1977,13 @@ fn find_atomic(
         .find_map(|child| find_atomic(graph, child))
 }
 
-/// Statement emitter folding a behavior into a TMDLState transition.
-struct BehaviorEmitter<'a> {
+/// Statement emitter folding a behavior into a state transition.
+struct BehaviorEmitter<'a, S> {
     ctx: &'a SmtCtx<'a>,
     operands: &'a HashMap<String, Type>,
     behavior: &'a sem_expr_state::BehaviorGraph,
+    /// The state value terms read: entry snapshots, not the threaded state.
+    entry: S,
     /// Exception payloads visible while a handler body is compiled.
     locals: std::cell::RefCell<HashMap<String, SmtVal>>,
     /// Uniquifies exception-payload `let` bindings across nested trys.
@@ -1918,9 +1997,9 @@ struct BehaviorEmitter<'a> {
     pc_value_roots: std::cell::RefCell<Vec<NodeId>>,
 }
 
-impl BehaviorEmitter<'_> {
+impl<S: SmtState> BehaviorEmitter<'_, S> {
     fn emit_val(&self, root: NodeId) -> Option<SmtVal> {
-        self.emit_val_in(root, SmtStateRef::Datatype("st"))
+        self.emit_val_in(root, self.entry.state_ref())
     }
 
     fn emit_val_in(&self, root: NodeId, state: SmtStateRef<'_>) -> Option<SmtVal> {
@@ -1973,7 +2052,9 @@ impl BehaviorEmitter<'_> {
             .children(node)
             .any(|child| self.has_uncommitted_atomic(child))
     }
+}
 
+impl BehaviorEmitter<'_, String> {
     /// Wrap the register-write state `w` (or the bare entry state for a
     /// discarded `store_conditional`) with an atomic's memory/reservation
     /// effect. Symbol reads use the sequenced expression graph over entry
@@ -2023,40 +2104,39 @@ impl BehaviorEmitter<'_> {
     }
 }
 
-impl sem_expr_state::BehaviorEmitter for BehaviorEmitter<'_> {
-    type State = String;
+impl<S: SmtState> sem_expr_state::BehaviorEmitter for BehaviorEmitter<'_, S> {
+    type State = S;
 
     fn assign(
         &self,
         destination: &sem_expr_state::Destination,
         value: NodeId,
-        st_name: &String,
-    ) -> Option<String> {
+        state: &S,
+    ) -> Option<S> {
         let ctx = self.ctx;
-        let rhs = self.emit_val(value)?;
-        let (expr, width, signed) = rhs.as_bv();
+        let (expr, width, signed) = self.emit_val(value)?.as_bv();
         let fit = |target: u16| fit_smt(&expr, width, signed, target as u32);
-        let write_pc = || {
-            if !self.in_handler.get() {
-                self.writes_pc.set(true);
-                self.pc_value_roots.borrow_mut().push(value);
-            }
-            format!("(write_pc {} {})", st_name, fit(ctx.xlen))
-        };
         // An atomic RHS threads its memory/reservation effect around the
-        // register write (`w`); a plain assignment is just `w`.
-        let wrap = |w: String| {
+        // register write; a plain assignment is just the write.
+        let commit = |written: S| {
             if !self.has_uncommitted_atomic(value) {
-                return Some(w);
+                return Some(written);
             }
             match self
                 .behavior
                 .value_graph(value)
                 .and_then(|(g, r)| find_atomic(&g, r))
             {
-                Some(op) => self.atomic_effect(&op, &w),
-                None => Some(w),
+                Some(op) => S::atomic(self, &op, &written),
+                None => Some(written),
             }
+        };
+        let write_pc = || {
+            if !self.in_handler.get() {
+                self.writes_pc.set(true);
+                self.pc_value_roots.borrow_mut().push(value);
+            }
+            state.write_pc(&fit(ctx.xlen))
         };
         let dest_name = match destination {
             sem_expr_state::Destination::Ident(name) => Some(name.as_str()),
@@ -2067,21 +2147,21 @@ impl sem_expr_state::BehaviorEmitter for BehaviorEmitter<'_> {
             _ => None,
         };
         if dest_name == Some("pc") {
-            return wrap(write_pc());
+            return commit(write_pc());
         }
         if let Some(name) = dest_name {
             match self.operands.get(name) {
                 Some(Type::Struct(rc)) if ctx.pc_classes.contains(&rc.to_lowercase()) => {
-                    return wrap(write_pc());
+                    return commit(write_pc());
                 }
                 Some(Type::Struct(rc)) => {
-                    self.write_classes.borrow_mut().insert(rc.to_lowercase());
-                    return wrap(format!(
-                        "(write_{} {} {} {})",
-                        rc.to_lowercase(),
-                        st_name,
-                        name.to_lowercase(),
-                        fit(ctx.val_width(rc))
+                    let class = rc.to_lowercase();
+                    self.write_classes.borrow_mut().insert(class.clone());
+                    return commit(state.write_register(
+                        ctx,
+                        &class,
+                        &name.to_lowercase(),
+                        &fit(ctx.val_width(&class)),
                     ));
                 }
                 _ => {}
@@ -2092,19 +2172,17 @@ impl sem_expr_state::BehaviorEmitter for BehaviorEmitter<'_> {
         if let sem_expr_state::Destination::FixedRegister { class, index, .. } = destination {
             let class = class.to_lowercase();
             self.write_classes.borrow_mut().insert(class.clone());
-            return wrap(format!(
-                "(write_{} {} (_ bv{} {}) {})",
-                class,
-                st_name,
-                index,
-                ctx.idx_width(&class),
-                fit(ctx.val_width(&class))
+            return commit(state.write_register(
+                ctx,
+                &class,
+                &format!("(_ bv{} {})", index, ctx.idx_width(&class)),
+                &fit(ctx.val_width(&class)),
             ));
         }
         None
     }
 
-    fn bind(&self, value: NodeId, st_name: &String) -> Option<String> {
+    fn bind(&self, value: NodeId, state: &S) -> Option<S> {
         // Value terms read entry state, so uses of the binding need no state
         // threading; only an atomic right-hand side transitions memory here.
         match self
@@ -2112,8 +2190,8 @@ impl sem_expr_state::BehaviorEmitter for BehaviorEmitter<'_> {
             .value_graph(value)
             .and_then(|(g, r)| find_atomic(&g, r))
         {
-            Some(op) => self.atomic_effect(&op, st_name),
-            None => Some(st_name.clone()),
+            Some(op) => S::atomic(self, &op, state),
+            None => Some(state.clone()),
         }
     }
 
@@ -2121,21 +2199,22 @@ impl sem_expr_state::BehaviorEmitter for BehaviorEmitter<'_> {
         &self,
         kind: tir_symbolic::lang::SymKind,
         value: NodeId,
-        st_name: &String,
-    ) -> Option<String> {
+        state: &S,
+    ) -> Option<S> {
         if kind == tir_symbolic::lang::SymKind::StateFence {
-            return Some(st_name.clone());
+            return Some(state.clone());
         }
         if kind == tir_symbolic::lang::SymKind::StateStoreConditional {
             let (values, root) = self.behavior.value_graph(value)?;
-            return self.atomic_effect(&atomic_of_node(&values, root)?, st_name);
+            return S::atomic(self, &atomic_of_node(&values, root)?, state);
         }
         if kind == tir_symbolic::lang::SymKind::StateStore {
             let (values, root) = self.behavior.value_graph(value)?;
             if *values.get_node(root) == tir_symbolic::lang::SymKind::AtomicRmw {
-                return self.atomic_effect(&atomic_of_node(&values, root)?, st_name);
+                return S::atomic(self, &atomic_of_node(&values, root)?, state);
             }
         }
+        let ctx = self.ctx;
         let children = self.behavior.graph.children(value).collect::<Vec<_>>();
         let (byte_values, byte_root) = self.behavior.value_graph(*children.get(1)?)?;
         let bytes = crate::semgen::eval_const(&byte_values, byte_root)?.0 as u16;
@@ -2144,10 +2223,11 @@ impl sem_expr_state::BehaviorEmitter for BehaviorEmitter<'_> {
         }
         let (addr, wa, sa) = self.emit_val(*children.first()?)?.as_bv();
         let (val, wv, sv) = self.emit_val(*children.get(2)?)?.as_bv();
-        Some(format!(
-            "(write_mem_{bytes} {st_name} {} {})",
-            fit_smt(&addr, wa, sa, self.ctx.xlen as u32),
-            fit_smt(&val, wv, sv, bytes as u32 * 8)
+        Some(state.write_memory(
+            ctx,
+            bytes,
+            &fit_smt(&addr, wa, sa, u32::from(ctx.xlen)),
+            &fit_smt(&val, wv, sv, u32::from(bytes) * 8),
         ))
     }
 
@@ -2156,24 +2236,24 @@ impl sem_expr_state::BehaviorEmitter for BehaviorEmitter<'_> {
         arguments: &[NodeId],
         params: &[String],
         handler: Option<NodeId>,
-        st_name: &String,
-        compile: &dyn Fn(NodeId, &String) -> String,
-    ) -> Option<String> {
-        let xlen = self.ctx.xlen as u32;
+        state: &S,
+        compile: &dyn Fn(NodeId, &S) -> S,
+    ) -> Option<S> {
+        let xlen = u32::from(self.ctx.xlen);
         // Bind handler parameters to the call arguments; missing trailing
         // arguments (ecall has no tval) read as zero.
         let mut shadowed = Vec::new();
         for (i, param) in params.iter().enumerate() {
             let value = match arguments.get(i) {
                 Some(arg) => self.emit_val(*arg)?,
-                None => SmtVal::bv(format!("(_ bv0 {})", xlen), xlen, false),
+                None => SmtVal::bv(format!("(_ bv0 {xlen})"), xlen, false),
             };
             shadowed.push((
                 param.clone(),
                 self.locals.borrow_mut().insert(param.clone(), value),
             ));
         }
-        let state = compile(handler?, st_name);
+        let result = compile(handler?, state);
         for (param, previous) in shadowed {
             let mut locals = self.locals.borrow_mut();
             match previous {
@@ -2181,30 +2261,24 @@ impl sem_expr_state::BehaviorEmitter for BehaviorEmitter<'_> {
                 None => locals.remove(&param),
             };
         }
-        Some(state)
+        Some(result)
     }
 
-    fn branch(
-        &self,
-        condition: NodeId,
-        _entry: &String,
-        then_state: &String,
-        else_state: &String,
-    ) -> String {
-        let cond = self
+    fn branch(&self, condition: NodeId, _entry: &S, then_state: &S, else_state: &S) -> S {
+        let condition = self
             .emit_val(condition)
             .map(|value| value.as_bool())
             .unwrap_or_else(|| "false".to_string());
-        format!("(ite {cond} {then_state} {else_state})")
+        S::select(&condition, then_state, else_state)
     }
 
     fn try_except(
         &self,
         body: NodeId,
         handlers: &[NodeId],
-        st_name: &String,
-        compile: &dyn Fn(NodeId, &String) -> String,
-    ) -> Option<String> {
+        state: &S,
+        compile: &dyn Fn(NodeId, &S) -> S,
+    ) -> Option<S> {
         let operations = effect_memory_operations(self.behavior, body)?;
         if operations.len() > 1 {
             return None;
@@ -2240,287 +2314,37 @@ impl sem_expr_state::BehaviorEmitter for BehaviorEmitter<'_> {
             if let Some(binding) = binding {
                 self.locals.borrow_mut().insert(
                     binding.clone(),
-                    SmtVal::bv(variable.clone(), xlen as u32, false),
+                    SmtVal::bv(variable.clone(), u32::from(xlen), false),
                 );
             }
             let child = self.behavior.graph.children(handler).next()?;
             let was_in_handler = self.in_handler.replace(true);
-            let handler_state = compile(child, st_name);
+            let handler_state = compile(child, state);
             self.in_handler.set(was_in_handler);
             if let Some(binding) = binding {
                 self.locals.borrow_mut().remove(binding);
             }
             arms.push((condition, handler_state));
         }
-        let body_state = compile(body, st_name);
+        let body_state = compile(body, state);
         if arms.is_empty() {
             return Some(body_state);
         }
         let operation = operation?;
         let (address, width, signed) = self.emit_val(operation.addr)?.as_bv();
-        let address = fit_smt(&address, width, signed, xlen as u32);
+        let address = fit_smt(&address, width, signed, u32::from(xlen));
         self.let_counter.set(self.let_counter.get() + 1);
         let folded = arms
             .into_iter()
             .rev()
             .fold(body_state, |otherwise, (condition, handler)| {
-                format!("(ite {condition} {handler} {otherwise})")
+                S::select(&condition, &handler, &otherwise)
             });
-        Some(format!("(let (({variable} {address})) {folded})"))
+        Some(folded.bind_let(&variable, &address))
     }
 
     fn unsupported(&self) {
         self.failed.set(true);
-    }
-}
-
-struct FlatBehaviorEmitter<'a> {
-    values: BehaviorEmitter<'a>,
-    initial: FlatState,
-}
-
-impl FlatBehaviorEmitter<'_> {
-    fn emit_val(&self, expression: NodeId) -> Option<SmtVal> {
-        self.values
-            .emit_val_in(expression, SmtStateRef::Flat(&self.initial))
-    }
-}
-
-impl sem_expr_state::BehaviorEmitter for FlatBehaviorEmitter<'_> {
-    type State = FlatState;
-
-    fn assign(
-        &self,
-        destination: &sem_expr_state::Destination,
-        value: NodeId,
-        state: &FlatState,
-    ) -> Option<FlatState> {
-        if self
-            .values
-            .behavior
-            .value_graph(value)
-            .and_then(|(g, r)| find_atomic(&g, r))
-            .is_some()
-        {
-            return None;
-        }
-        let ctx = self.values.ctx;
-        let (expression, width, signed) = self.emit_val(value)?.as_bv();
-        let fit = |target: u16| fit_smt(&expression, width, signed, target as u32);
-        let destination_name = match destination {
-            sem_expr_state::Destination::Ident(name) => Some(name.as_str()),
-            sem_expr_state::Destination::Path { members, .. } if members.len() == 1 => {
-                Some(members[0].as_str())
-            }
-            sem_expr_state::Destination::FixedRegister { name, .. } => Some(name.as_str()),
-            _ => None,
-        };
-        if destination_name == Some("pc") {
-            let mut next = state.clone();
-            next.fields.insert("pc".to_string(), fit(ctx.xlen));
-            return Some(next);
-        }
-        if let Some(name) = destination_name {
-            match self.values.operands.get(name) {
-                Some(Type::Struct(class)) if ctx.pc_classes.contains(&class.to_lowercase()) => {
-                    let mut next = state.clone();
-                    next.fields.insert("pc".to_string(), fit(ctx.xlen));
-                    return Some(next);
-                }
-                Some(Type::Struct(class)) => {
-                    let class = class.to_lowercase();
-                    return Some(state.write_register(
-                        ctx,
-                        &class,
-                        &name.to_lowercase(),
-                        &fit(ctx.val_width(&class)),
-                    ));
-                }
-                _ => {}
-            }
-        }
-        if let sem_expr_state::Destination::FixedRegister { class, index, .. } = destination {
-            let class = class.to_lowercase();
-            return Some(state.write_register(
-                ctx,
-                &class,
-                &format!("(_ bv{} {})", index, ctx.idx_width(&class)),
-                &fit(ctx.val_width(&class)),
-            ));
-        }
-        None
-    }
-
-    fn bind(&self, value: NodeId, state: &FlatState) -> Option<FlatState> {
-        // The flat model has no memory-ordering state, so an atomic binding is
-        // unsupported here, exactly as an atomic assignment is.
-        if self
-            .values
-            .behavior
-            .value_graph(value)
-            .and_then(|(g, r)| find_atomic(&g, r))
-            .is_some()
-        {
-            return None;
-        }
-        Some(state.clone())
-    }
-
-    fn value_effect(
-        &self,
-        kind: tir_symbolic::lang::SymKind,
-        value: NodeId,
-        state: &FlatState,
-    ) -> Option<FlatState> {
-        if kind == tir_symbolic::lang::SymKind::StateFence {
-            return Some(state.clone());
-        }
-        if kind == tir_symbolic::lang::SymKind::StateStoreConditional {
-            return None;
-        }
-        let children = self
-            .values
-            .behavior
-            .graph
-            .children(value)
-            .collect::<Vec<_>>();
-        let (byte_values, byte_root) = self.values.behavior.value_graph(*children.get(1)?)?;
-        let bytes = crate::semgen::eval_const(&byte_values, byte_root)?.0 as u16;
-        if !MEM_ACCESS_BYTES.contains(&bytes) {
-            return None;
-        }
-        let xlen = self.values.ctx.xlen;
-        let (address, address_width, address_signed) = self.emit_val(*children.first()?)?.as_bv();
-        let (value, value_width, value_signed) = self.emit_val(*children.get(2)?)?.as_bv();
-        Some(state.write_memory(
-            xlen,
-            bytes,
-            &fit_smt(&address, address_width, address_signed, u32::from(xlen)),
-            &fit_smt(&value, value_width, value_signed, u32::from(bytes) * 8),
-        ))
-    }
-
-    fn trap(
-        &self,
-        arguments: &[NodeId],
-        params: &[String],
-        handler: Option<NodeId>,
-        state: &FlatState,
-        compile: &dyn Fn(NodeId, &FlatState) -> FlatState,
-    ) -> Option<FlatState> {
-        let xlen = u32::from(self.values.ctx.xlen);
-        let mut shadowed = Vec::new();
-        for (index, parameter) in params.iter().enumerate() {
-            let value = match arguments.get(index) {
-                Some(argument) => self.emit_val(*argument)?,
-                None => SmtVal::bv(format!("(_ bv0 {xlen})"), xlen, false),
-            };
-            shadowed.push((
-                parameter.clone(),
-                self.values
-                    .locals
-                    .borrow_mut()
-                    .insert(parameter.clone(), value),
-            ));
-        }
-        let result = compile(handler?, state);
-        for (parameter, previous) in shadowed {
-            let mut locals = self.values.locals.borrow_mut();
-            match previous {
-                Some(value) => locals.insert(parameter, value),
-                None => locals.remove(&parameter),
-            };
-        }
-        Some(result)
-    }
-
-    fn branch(
-        &self,
-        condition: NodeId,
-        _entry: &FlatState,
-        then_state: &FlatState,
-        else_state: &FlatState,
-    ) -> FlatState {
-        let condition = self
-            .emit_val(condition)
-            .map(|value| value.as_bool())
-            .unwrap_or_else(|| "false".to_string());
-        FlatState::select(&condition, then_state, else_state)
-    }
-
-    fn try_except(
-        &self,
-        body: NodeId,
-        handlers: &[NodeId],
-        state: &FlatState,
-        compile: &dyn Fn(NodeId, &FlatState) -> FlatState,
-    ) -> Option<FlatState> {
-        let operations = effect_memory_operations(self.values.behavior, body)?;
-        if operations.len() > 1 {
-            return None;
-        }
-        let operation = operations.first();
-        let xlen = self.values.ctx.xlen;
-        let variable = format!("exc_addr{}", self.values.let_counter.get());
-        let mut arms = Vec::new();
-        for &handler in handlers {
-            let Some(sem_expr_state::EffectPayload::Handler { kind, binding }) =
-                self.values.behavior.effect_payload(handler)
-            else {
-                return None;
-            };
-            let wanted = match kind.as_str() {
-                "misaligned_load" => MemOpKind::Load,
-                "misaligned_store" => MemOpKind::Store,
-                _ => return None,
-            };
-            let Some(operation) = operation.filter(|operation| operation.kind == wanted) else {
-                continue;
-            };
-            if operation.bytes <= 1 {
-                continue;
-            }
-            if !operation.bytes.is_power_of_two() {
-                return None;
-            }
-            let condition = format!(
-                "(distinct (bvand {variable} (_ bv{} {xlen})) (_ bv0 {xlen}))",
-                operation.bytes - 1
-            );
-            if let Some(binding) = binding {
-                self.values.locals.borrow_mut().insert(
-                    binding.clone(),
-                    SmtVal::bv(variable.clone(), u32::from(xlen), false),
-                );
-            }
-            let child = self.values.behavior.graph.children(handler).next()?;
-            let handler_state = compile(child, state);
-            if let Some(binding) = binding {
-                self.values.locals.borrow_mut().remove(binding);
-            }
-            arms.push((condition, handler_state));
-        }
-        let mut result = compile(body, state);
-        if arms.is_empty() {
-            return Some(result);
-        }
-        let operation = operation?;
-        let (address, width, signed) = self.emit_val(operation.addr)?.as_bv();
-        let address = fit_smt(&address, width, signed, u32::from(xlen));
-        self.values
-            .let_counter
-            .set(self.values.let_counter.get() + 1);
-        for (condition, handler) in arms.into_iter().rev() {
-            result = FlatState::select(&condition, &handler, &result);
-        }
-        for expression in result.fields.values_mut() {
-            *expression = format!("(let (({variable} {address})) {expression})");
-        }
-        Some(result)
-    }
-
-    fn unsupported(&self) {
-        self.values.failed.set(true);
     }
 }
 
@@ -2666,6 +2490,7 @@ fn build_smt_behavior<'a>(
         ctx,
         operands: &operands,
         behavior: &behavior_graph,
+        entry: "st".to_string(),
         locals: Default::default(),
         let_counter: Default::default(),
         in_handler: Default::default(),
@@ -2674,29 +2499,26 @@ fn build_smt_behavior<'a>(
         write_classes: Default::default(),
         pc_value_roots: Default::default(),
     };
-    let body = sem_expr_state::fold_behavior(&behavior_graph, &"st".to_string(), &emitter);
+    let body = sem_expr_state::fold_behavior(&behavior_graph, &emitter.entry.clone(), &emitter);
     let mem_ops = graph_memory_operations(&behavior_graph)?;
     let uses_reservation = mem_ops.iter().any(|op| op.reservation);
     let trap_kinds = graph_trap_kinds(&behavior_graph);
-    let initial_flat_state = FlatState::initial(ctx);
-    let flat_emitter = FlatBehaviorEmitter {
-        values: BehaviorEmitter {
-            ctx,
-            operands: &operands,
-            behavior: &behavior_graph,
-            locals: Default::default(),
-            let_counter: Default::default(),
-            in_handler: Default::default(),
-            failed: Default::default(),
-            writes_pc: Default::default(),
-            write_classes: Default::default(),
-            pc_value_roots: Default::default(),
-        },
-        initial: initial_flat_state.clone(),
+    let flat_emitter = BehaviorEmitter {
+        ctx,
+        operands: &operands,
+        behavior: &behavior_graph,
+        entry: FlatState::initial(ctx),
+        locals: Default::default(),
+        let_counter: Default::default(),
+        in_handler: Default::default(),
+        failed: Default::default(),
+        writes_pc: Default::default(),
+        write_classes: Default::default(),
+        pc_value_roots: Default::default(),
     };
     let flat_state =
-        sem_expr_state::fold_behavior(&behavior_graph, &initial_flat_state, &flat_emitter);
-    let flat_execute = (!flat_emitter.values.failed.get()).then_some(flat_state.fields);
+        sem_expr_state::fold_behavior(&behavior_graph, &flat_emitter.entry.clone(), &flat_emitter);
+    let flat_execute = (!flat_emitter.failed.get()).then_some(flat_state.fields);
     let memory_accesses = mem_ops
         .iter()
         .map(|operation| {
