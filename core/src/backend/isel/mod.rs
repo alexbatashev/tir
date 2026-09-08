@@ -49,7 +49,7 @@ use cover::{
 };
 use emit::{AuxEmit, GuardBranch, RegionPlan, ScheduledEmit, order_tiles, resolve_match};
 use matches::{MatchRef, Matches};
-use node::{is_low_extract_view, low_extract_source};
+use node::{chase_low_extract, is_low_extract_view};
 use pattern::{CompiledIselPattern, PatternNode, compile_isel_pattern};
 use scopes::Scopes;
 use tir::sem::axioms::{self, verify_axioms};
@@ -175,25 +175,6 @@ impl<'a> EmitRequest<'a> {
         self.op.map(|op| op.op().id).unwrap_or_default()
     }
 }
-
-/// The optimization objective the PBQP builder minimizes: the cost placed on
-/// the *root* alternative of a pattern match (non-root alternatives carry zero,
-/// per the paper). The default is the rule's TMDL-derived `base_cost`.
-pub trait IselCostModel: Send + Sync {
-    fn node_cost(
-        &self,
-        _context: &Context,
-        _op: &OperationRef,
-        rule: &Rule,
-        _m: &RuleMatch,
-    ) -> u64 {
-        rule.base_cost as u64
-    }
-}
-
-pub struct DefaultIselCostModel;
-
-impl IselCostModel for DefaultIselCostModel {}
 
 pub type RuleEmitFn =
     fn(&Context, &EmitRequest, &RuleMatch) -> Result<Box<dyn Operation>, PassError>;
@@ -447,48 +428,6 @@ impl Rule {
             emit_fn,
         }
     }
-
-    /// Constrain operand symbols to register or immediate operands, so e.g. an
-    /// immediate-shift pattern only matches a constant shift amount.
-    pub fn with_operand_constraints(mut self, constraints: Vec<(u32, OperandConstraint)>) -> Self {
-        self.operand_constraints = constraints;
-        self
-    }
-
-    /// Describe which semantic values each physical register operand can store
-    /// and whether the instruction consumes all of their architectural bits.
-    pub fn with_operand_registers(mut self, registers: Vec<(u32, RegisterRequirement)>) -> Self {
-        self.operand_registers = registers;
-        self
-    }
-
-    pub fn with_result_register(mut self, register: RegisterRequirement) -> Self {
-        self.result_register = Some(register);
-        self
-    }
-
-    /// Restrict immediate operand symbols to constants their encoding field can
-    /// represent (see [`Rule::operand_imm_ranges`]).
-    pub fn with_operand_imm_ranges(mut self, ranges: Vec<(u32, ImmRange)>) -> Self {
-        self.operand_imm_ranges = ranges;
-        self
-    }
-
-    /// Attach the destination's full guarded semantics (see
-    /// [`Rule::guarded_semantics`]), so pass construction proves that relaxing to
-    /// [`Rule::pattern`] is sound.
-    pub fn with_guarded_semantics(mut self, guarded: SemGraph) -> Self {
-        self.guarded_semantics = Some(guarded);
-        self
-    }
-
-    /// Emit a companion instruction ahead of the rule's own (see
-    /// [`Rule::prelude_emit`]). The prelude emitter reads the same [`RuleMatch`]
-    /// bindings as the rule's emitter.
-    pub fn with_prelude_emitter(mut self, emit_fn: RuleEmitFn) -> Self {
-        self.prelude_emit = Some(emit_fn);
-        self
-    }
 }
 
 /// Target hooks for lowering control-flow terminators, enabling rule-driven
@@ -516,8 +455,8 @@ pub struct BranchEmitters {
 struct FunctionSelection {
     egraph: SemEGraph,
     pointer_width: Option<u32>,
-    /// Every op whose (canonical) root is the class, across all regions.
-    ops_by_root: HashMap<Id, Vec<OpId>>,
+    /// Every class rooting a lowered op, across all regions.
+    op_roots: HashSet<Id>,
     /// The canonical e-class of every lowered op's root (total over all ops).
     op_root: HashMap<OpId, Id>,
     /// Every IR value a (canonical) class computes, so a boundary can resolve to a
@@ -583,8 +522,7 @@ impl FunctionSelection {
 
     /// Whether any base member of `class` roots a lowered op (function-wide).
     fn is_op_root(&self, class: Id) -> bool {
-        self.base_members(class)
-            .any(|m| self.ops_by_root.contains_key(&m))
+        self.base_members(class).any(|m| self.op_roots.contains(&m))
     }
 
     /// Whether any base member of `class` is used as an operand by more than one
@@ -755,10 +693,7 @@ impl FunctionSelection {
     ) -> Option<ValueId> {
         // A low-bit truncation re-views its operand's register: bind the operand
         // (chasing a chain of truncations), never the erased truncation itself.
-        let mut class = self.egraph.find(class);
-        while let Some(source) = low_extract_source(&self.egraph, class) {
-            class = source;
-        }
+        let class = chase_low_extract(&self.egraph, class);
         // A class a fact proves equal to a literal may read a register already
         // holding that literal, and a literal may read the register of a value
         // proven equal to it: the union used to make them one class, and this is
@@ -833,16 +768,6 @@ impl FunctionSelection {
         }
         best.map(|(_, v)| v)
     }
-
-    /// The class whose tile defines the register a low-extract view re-reads:
-    /// `class` itself unless it is a chain of low-bit truncations.
-    fn chase_low_extract(&self, class: Id) -> Id {
-        let mut class = self.egraph.find(class);
-        while let Some(source) = low_extract_source(&self.egraph, class) {
-            class = source;
-        }
-        class
-    }
 }
 
 /// A region-entry condition prepared against the base graph (see
@@ -877,12 +802,9 @@ pub struct InstructionSelectPass {
     default_layout: Option<crate::attributes::AttributeValue>,
     /// Semantic invariants the program e-graph is saturated with before covering.
     theory: Theory,
-    /// Instructions that define a register implicitly; selection introduces one
-    /// ahead of any op whose `implicit_uses` name a matching register.
     /// Target hooks for terminator lowering; branch selection is off without them
     /// (terminators are then left to the target's op lowerings).
     branch_emitters: Option<BranchEmitters>,
-    cost_model: Box<dyn IselCostModel>,
     op_lowerings: Vec<OpLowering>,
     call_lowering: Option<crate::backend::call_lowering::CallLowering>,
     /// The solved emission plan of every region (or the error explaining why it
@@ -1084,22 +1006,15 @@ fn symbol_ids(g: &SemGraph) -> Vec<u32> {
 }
 
 impl InstructionSelectPass {
-    /// Build the pass, panicking if a guarded rule's relaxation cannot be proved.
-    /// The generated backends call this: an unprovable rule is a target-definition
-    /// bug that must fail loudly, not at runtime.
-    pub fn new(rules: Vec<Rule>) -> Self {
-        Self::try_new(rules).unwrap_or_else(|e| panic!("{e}"))
-    }
-
-    /// Build the pass, returning [`PassError::InvalidRuleSet`] naming the offending
-    /// rule when a guarded rule's guard-relaxation obligation
+    /// Build the pass, panicking when a guarded rule's guard-relaxation obligation
     /// `D(pattern) => guarded_semantics == pattern` does not hold — checked only
-    /// under [`verify_axioms`].
-    pub fn try_new(rules: Vec<Rule>) -> Result<Self, PassError> {
+    /// under [`verify_axioms`]. The generated backends call this: an unprovable
+    /// rule is a target-definition bug that must fail loudly, not at runtime.
+    pub fn new(rules: Vec<Rule>) -> Self {
         if verify_axioms() {
-            prove_guarded_relaxations(&rules)?;
+            prove_guarded_relaxations(&rules).unwrap_or_else(|e| panic!("{e}"));
         }
-        Ok(Self::build(rules))
+        Self::build(rules)
     }
 
     fn build(rules: Vec<Rule>) -> Self {
@@ -1165,7 +1080,6 @@ impl InstructionSelectPass {
             default_layout: None,
             theory,
             branch_emitters: None,
-            cost_model: Box::new(DefaultIselCostModel),
             op_lowerings: vec![],
             call_lowering: None,
             plans: HashMap::new(),
@@ -1213,11 +1127,6 @@ impl InstructionSelectPass {
         self
     }
 
-    pub fn with_cost_model(mut self, cost_model: Box<dyn IselCostModel>) -> Self {
-        self.cost_model = cost_model;
-        self
-    }
-
     pub fn with_op_lowering(
         mut self,
         lowering: impl Fn(&Context, &OperationRef, &mut Rewriter) -> Result<bool, PassError>
@@ -1242,7 +1151,7 @@ impl InstructionSelectPass {
 
     /// Drop the scratch of the previous function when `op` starts a new one.
     ///
-    /// Everything below is keyed by op, block or value id and describes one
+    /// Everything below is keyed by op, region or value id and describes one
     /// function; nothing of it is true of the next. An op with regions that
     /// sits *under* a function already solved is part of that function, and is
     /// told apart by having a solved op above it.
@@ -1279,18 +1188,9 @@ impl InstructionSelectPass {
         // pattern's e-match is region-independent: search once here and reuse
         // for all such regions (fact-bearing regions re-search under their scope).
         let mut matches = self.base_value_matches(&fs, context);
-        let mut solved = 0;
         if let Some(&body) = op.op().regions().first() {
-            self.solve_region_subtree(context, &mut fs, body, &mut matches, &mut solved);
+            self.solve_region_subtree(context, &mut fs, body, &mut matches);
         }
-        telemetry::report(
-            &op.op()
-                .clone()
-                .as_interface::<dyn tir::Symbol>()
-                .map_or_else(|| format!("{root:?}"), |symbol| symbol.symbol_name()),
-            solved,
-            fs.egraph.num_classes(),
-        );
         // The regions were solved here, so the operations carrying them must not
         // solve graphs of their own when the walk reaches them.
         for op_id in fs.scopes.op_region.keys() {
@@ -1309,7 +1209,6 @@ impl InstructionSelectPass {
         fs: &mut FunctionSelection,
         region: RegionId,
         matches: &mut Matches,
-        solved: &mut usize,
     ) {
         let own_fact = fs.region_facts.get(&region).copied();
         if let Some((condition, holds)) = own_fact {
@@ -1325,12 +1224,11 @@ impl InstructionSelectPass {
         if !order.is_empty() || fs.region_aux.contains_key(&region) {
             let plan = self.solve_region(context, region, fs, matches);
             self.plans.insert(region, plan);
-            *solved += 1;
         }
 
         for op_id in order {
             for nested in context.get_op(op_id).regions().to_vec() {
-                self.solve_region_subtree(context, fs, nested, matches, solved);
+                self.solve_region_subtree(context, fs, nested, matches);
             }
         }
         if own_fact.is_some() {
@@ -1420,7 +1318,6 @@ impl InstructionSelectPass {
     ) {
         rewrites::saturate(context, &mut fs.egraph, &self.theory, Default::default());
         let changed = fs.egraph.innermost_dirty();
-        telemetry::record_scope(changed.len());
         matches.open_scope(changed);
     }
 
@@ -1477,7 +1374,14 @@ impl InstructionSelectPass {
 
         crate::memstats::egraph_census("isel", &egraph);
 
-        let (ops_by_root, op_root) = canonical_roots(&egraph, &lowering.roots_by_op);
+        // Saturation may merge classes, so every root recorded against the
+        // pre-saturation graph is re-resolved here.
+        let op_root: HashMap<OpId, Id> = lowering
+            .roots_by_op
+            .iter()
+            .map(|(&op, &root)| (op, egraph.find(root)))
+            .collect();
+        let op_roots: HashSet<Id> = op_root.values().copied().collect();
         let (class_values, value_region) = class_value_tables(
             context,
             &egraph,
@@ -1510,7 +1414,7 @@ impl InstructionSelectPass {
         FunctionSelection {
             egraph,
             pointer_width,
-            ops_by_root,
+            op_roots,
             op_root,
             class_values,
             scopes,
@@ -1625,19 +1529,12 @@ impl InstructionSelectPass {
         };
         // A low-bit truncation re-views its source's register, so demand lands
         // on the chased source class — the one a tile can define.
-        let chase = |egraph: &SemEGraph, class: Id| {
-            let mut class = egraph.find(class);
-            while let Some(source) = low_extract_source(egraph, class) {
-                class = source;
-            }
-            class
-        };
         let mut demand = HashSet::new();
         for (&op_id, &class) in roots_by_op {
             let def_region = scopes.op_region[&op_id];
             for result in context.get_op(op_id).results() {
                 if needs_register(result, class, def_region) {
-                    demand.insert((chase(egraph, class), def_region));
+                    demand.insert((chase_low_extract(egraph, class), def_region));
                 }
             }
         }
@@ -1645,7 +1542,7 @@ impl InstructionSelectPass {
             let def_region = scopes.op_region[&op_id];
             for result in context.get_op(op_id).results() {
                 if needs_register(result, class, def_region) {
-                    demand.insert((chase(egraph, class), def_region));
+                    demand.insert((chase_low_extract(egraph, class), def_region));
                 }
             }
         }
@@ -1911,11 +1808,6 @@ impl InstructionSelectPass {
         value_matches: &mut Matches,
     ) -> Result<RegionPlan, String> {
         let op_ids = fs.scopes.order[&region].clone();
-        let mut op_refs = HashMap::new();
-        for op_id in op_ids.iter().copied() {
-            let op = context.get_op(op_id);
-            op_refs.insert(op_id, OperationRef::new(op));
-        }
 
         // The earliest op of the region rooting each class (for costing / the
         // Emit anchor); its keys are the region's op-root classes. The order
@@ -1936,7 +1828,6 @@ impl InstructionSelectPass {
         let (matches, covered) = self.collect_region_matches(
             context,
             fs,
-            &op_refs,
             &region_op_by_root,
             &guard_classes,
             value_matches,
@@ -1976,7 +1867,7 @@ impl InstructionSelectPass {
             match self.best_guard_branch(context, fs, region, anchor(op), candidates) {
                 Some(guard) => {
                     for boundary in guard.boundaries {
-                        mm_overlay.insert(fs.chase_low_extract(boundary));
+                        mm_overlay.insert(chase_low_extract(&fs.egraph, boundary));
                     }
                     aux_branches.push((
                         op,
@@ -1988,7 +1879,7 @@ impl InstructionSelectPass {
                     ));
                 }
                 None => {
-                    mm_overlay.insert(fs.chase_low_extract(class));
+                    mm_overlay.insert(chase_low_extract(&fs.egraph, class));
                     aux_branches.push((op, slot, None));
                 }
             }
@@ -2008,7 +1899,7 @@ impl InstructionSelectPass {
             // defines the register the view reads). Treating the view itself as
             // unconditionally available would leave a demanded class with no
             // tile and its erased value dangling.
-            let source = fs.chase_low_extract(class);
+            let source = chase_low_extract(&fs.egraph, class);
             let source_available = fs.available_at(context, source, region)
                 || (self.constant_materializer_ranges.is_empty()
                     && class_int_binding(&fs.egraph, source).is_some());
@@ -2173,7 +2064,7 @@ impl InstructionSelectPass {
             }
         }
         for &op in &op_ids {
-            let Some(mut class) = fs.op_root.get(&op).map(|class| fs.egraph.find(*class)) else {
+            let Some(class) = fs.op_root.get(&op).map(|class| fs.egraph.find(*class)) else {
                 continue;
             };
             // A view the extraction tiled in its own right already defines the
@@ -2181,9 +2072,7 @@ impl InstructionSelectPass {
             if !is_low_extract_view(&fs.egraph, class) || destinations.contains_key(&class) {
                 continue;
             }
-            while let Some(source) = low_extract_source(&fs.egraph, class) {
-                class = source;
-            }
+            let class = chase_low_extract(&fs.egraph, class);
             if let Some(source) = destinations.get(&class).copied().or_else(|| {
                 fs.resolve_binding(context, class, region, consumer, false)
                     .value
@@ -2215,7 +2104,7 @@ impl InstructionSelectPass {
             .get(&region)
             .into_iter()
             .flatten()
-            .map(|&(op, slot, class)| ((op, slot), fs.chase_low_extract(fs.egraph.find(class))))
+            .map(|&(op, slot, class)| ((op, slot), chase_low_extract(&fs.egraph, class)))
             .collect();
         let resolve_class = |class: Id, at: Option<OpId>| {
             destinations
@@ -2402,14 +2291,12 @@ impl InstructionSelectPass {
     /// Every value match the cover can reach from what the region computes, and
     /// the classes it reached. Demand-driven: a class is searched only once something
     /// already covered binds it, which is the fixpoint the cover's class set is
-    /// anyway — searching the block's whole reachable cone instead generates two
+    /// anyway — searching the region's whole reachable cone instead generates two
     /// orders of magnitude more matches than the cover has any use for.
-    #[allow(clippy::too_many_arguments)]
     fn collect_region_matches(
         &self,
         context: &Context,
         fs: &FunctionSelection,
-        op_refs: &HashMap<OpId, OperationRef>,
         region_op_by_root: &HashMap<Id, OpId>,
         guard_classes: &HashSet<Id>,
         value_matches: &mut Matches,
@@ -2426,7 +2313,6 @@ impl InstructionSelectPass {
             let mut at_class = self.root_matches(
                 context,
                 fs,
-                op_refs,
                 region_op_by_root,
                 guard_classes,
                 value_matches,
@@ -2455,24 +2341,17 @@ impl InstructionSelectPass {
     /// select. The index answers from the function-wide search where the open
     /// assumption left the class alone, and from a re-search under the assumption
     /// where it did not.
-    #[allow(clippy::too_many_arguments)]
     fn root_matches(
         &self,
         context: &Context,
         fs: &FunctionSelection,
-        op_refs: &HashMap<OpId, OperationRef>,
         region_op_by_root: &HashMap<Id, OpId>,
         guard_classes: &HashSet<Id>,
         value_matches: &mut Matches,
         class: Id,
     ) -> Vec<PbqpIselMatch> {
-        value_matches.ensure(class, || {
-            let found = self.value_matches_at(fs, context, class);
-            telemetry::record_research(found.len());
-            found
-        });
+        value_matches.ensure(class, || self.value_matches_at(fs, context, class));
         let at_class: Vec<MatchRef<'_>> = value_matches.at(class).collect();
-        telemetry::record_root_matches(at_class.len());
 
         let mut matches = Vec::new();
         for m in at_class {
@@ -2485,20 +2364,20 @@ impl InstructionSelectPass {
             if compiled.is_copy() && fs.has_values(m.bindings[pattern_root.index()]) {
                 continue;
             }
-            let block_op = region_op_by_root.get(&root).copied();
+            let region_op = region_op_by_root.get(&root).copied();
             let is_guard_class = guard_classes.contains(&root);
-            // A match roots an instruction only if it produces a value B
-            // computes: an op of B, a guard condition of B, a
+            // A match roots an instruction only if it produces a value the
+            // region computes: an op of the region, a guard condition of it, a
             // rewrite-introduced intermediate, or a terminal constant covered
             // by a real target materializer instruction.
             let is_computed = fs.egraph.nodes(root).any(|n| !n.children().is_empty());
             let synthetic = is_computed || compiled.constant_materializer_range().is_some();
-            if block_op.is_none() && !is_guard_class && !synthetic {
+            if region_op.is_none() && !is_guard_class && !synthetic {
                 continue;
             }
 
-            // Narrow the function-wide legality to B: a non-pure interior class
-            // is legal only when its backing op is in B and it is not shared
+            // Narrow the function-wide legality to the region: a non-pure interior
+            // class is legal only when its backing op is in it and it is not shared
             // (boundary constraints were already enforced during the search).
             let interior_ok = (0..compiled.nodes.len()).all(|index| {
                 let node = Id::from_raw(index as u32);
@@ -2537,7 +2416,7 @@ impl InstructionSelectPass {
                     // schedule's dependencies, and availability all target
                     // the class a tile can actually define.
                     if is_boundary && meta.demand == cover::BoundaryDemand::Register {
-                        class = fs.chase_low_extract(class);
+                        class = chase_low_extract(&fs.egraph, class);
                     }
                     PatternNodeBinding {
                         pattern_node: Id::from_raw(index as u32),
@@ -2581,18 +2460,7 @@ impl InstructionSelectPass {
                 pattern_nodes,
             };
 
-            // Cost is op-relative when there is a backing op in B; a
-            // rewrite-introduced root has no op, so it takes the rule's
-            // target-independent base cost.
-            let rule_match = bindings
-                .captures
-                .to_rule_match(&fs.egraph, &fs.class_values);
-            let cost = if let Some(op_ref) = block_op.and_then(|id| op_refs.get(&id)) {
-                self.cost_model
-                    .node_cost(context, op_ref, rule, &rule_match)
-            } else {
-                rule.base_cost as u64
-            };
+            let cost = rule.base_cost as u64;
             matches.push(PbqpIselMatch {
                 pattern_index,
                 rule_index: compiled.rule_index,
@@ -2605,69 +2473,6 @@ impl InstructionSelectPass {
             });
         }
         matches
-    }
-}
-
-/// Whether the per-scope match index is paying: how much of the graph each
-/// assumption changed, how many matches re-searching those classes produced, and
-/// how many the cover read in total. Printed as `tir-isel:` lines on stderr under
-/// `TIR_TIME_PASSES`, alongside the pass-timing table.
-mod telemetry {
-    use std::cell::Cell;
-
-    const SCOPED: usize = 0;
-    const CHANGED_SUM: usize = 1;
-    const CHANGED_MAX: usize = 2;
-    const READ: usize = 3;
-    const RESEARCHED: usize = 4;
-    const COVERED: usize = 5;
-
-    thread_local! {
-        static COUNTS: Cell<[usize; 6]> = const { Cell::new([0; 6]) };
-    }
-
-    fn bump(update: impl Fn(&mut [usize; 6])) {
-        if !crate::pass::timing::enabled() {
-            return;
-        }
-        COUNTS.with(|counts| {
-            let mut current = counts.get();
-            update(&mut current);
-            counts.set(current);
-        });
-    }
-
-    pub(super) fn record_scope(changed: usize) {
-        bump(|counts| {
-            counts[SCOPED] += 1;
-            counts[CHANGED_SUM] += changed;
-            counts[CHANGED_MAX] = counts[CHANGED_MAX].max(changed);
-        });
-    }
-
-    pub(super) fn record_research(found: usize) {
-        bump(|counts| counts[RESEARCHED] += found);
-    }
-
-    pub(super) fn record_root_matches(read: usize) {
-        bump(|counts| {
-            counts[COVERED] += 1;
-            counts[READ] += read;
-        });
-    }
-
-    pub(super) fn report(function: &str, blocks: usize, classes: usize) {
-        if !crate::pass::timing::enabled() {
-            return;
-        }
-        tir_relational::report_saturation("isel");
-        let c = COUNTS.replace([0; 6]);
-        let changed_avg = c[CHANGED_SUM].checked_div(c[SCOPED]).unwrap_or(0);
-        eprintln!(
-            "tir-isel: fn={function} blocks={blocks} classes={classes} scopes={} \
-             changed_avg={changed_avg} changed_max={} covered={} read={} researched={}",
-            c[SCOPED], c[CHANGED_MAX], c[COVERED], c[READ], c[RESEARCHED]
-        );
     }
 }
 
@@ -2688,7 +2493,7 @@ fn entry_facts(context: &Context, op: &OpHandle) -> Vec<(RegionId, ValueId, bool
 }
 
 /// Whether `class` may bind under `pattern_node` in a value match, before the
-/// per-block narrowing: boundary constraints (register / immediate / width), and
+/// per-region narrowing: boundary constraints (register / immediate / width), and
 /// interior nodes restricted to pure or function-wide op-root, non-shared classes
 /// (a memory effect recomputed inside a fused instruction must have its backing
 /// op reachable). The root and duplicable nodes are always allowed.
@@ -2766,7 +2571,6 @@ fn assert_equal(egraph: &mut SemEGraph, lhs: Id, rhs: Id) {
     }
 }
 
-/// The closure of B's op-root and guard-condition classes under the bindings of
 impl Pass for InstructionSelectPass {
     fn name(&self) -> &'static str {
         "instruction-select"
@@ -2821,27 +2625,6 @@ struct RegionLowering {
     prepared: HashMap<ValueId, ConditionExpr>,
     region_facts: HashMap<RegionId, (ValueId, bool)>,
     region_control: builder::RegionControl,
-}
-
-/// Canonicalize the op roots through `find`: saturation may merge classes, so
-/// every id recorded against the pre-saturation graph is re-resolved here.
-fn canonical_roots(
-    egraph: &SemEGraph,
-    roots_by_op: &HashMap<OpId, Id>,
-) -> (HashMap<Id, Vec<OpId>>, HashMap<OpId, Id>) {
-    let mut ops_by_root: HashMap<Id, Vec<OpId>> = HashMap::new();
-    let mut op_root: HashMap<OpId, Id> = HashMap::new();
-    for (&op, &root) in roots_by_op {
-        let class = egraph.find(root);
-        ops_by_root.entry(class).or_default().push(op);
-        op_root.insert(op, class);
-    }
-    // `roots_by_op` iterates in hash order; the per-class lists decide
-    // emission order, so they are sorted into program order.
-    for ops in ops_by_root.values_mut() {
-        ops.sort_unstable();
-    }
-    (ops_by_root, op_root)
 }
 
 /// Every value a class computes: the input leaves it interned plus every op

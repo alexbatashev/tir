@@ -9,17 +9,16 @@ Quadratic Problem (PBQP) — inside an assumption scope carrying the entry facts
 the regions that enclose it.
 
 Nothing in the pass hardcodes a semantics, cost, or rule. A target supplies a list
-of `Rule`s (a semantic pattern + an emitter) and an optional cost model; the pass
-does the rest.
+of `Rule`s (a semantic pattern + an emitter); the pass does the rest.
 
 ## Module layout
 
 | module | responsibility |
 |--------|----------------|
-| `isel/mod.rs` | public API (`Rule`, `EmitRequest`, cost-model traits), the pass driver, the shared `FunctionSelection`, and per-block solving |
+| `isel/mod.rs` | public API (`Rule`, `EmitRequest`), the pass driver, the shared `FunctionSelection`, and per-region solving |
 | `sem/node.rs` | the `SemNode` label and `SemPayload` — the vocabulary |
 | `sem/egraph.rs` | `SemEGraph` and the vocabulary's e-class readings (`class_int_binding`, widths, IR↔semantic types) |
-| `isel/node.rs` | what selection reads beyond that: low-bit register views, `class_value_binding`, `class_register_type` |
+| `isel/node.rs` | what selection reads beyond that: low-bit register views (`chase_low_extract`), `class_register_type`, class purity |
 | `isel/builder.rs` | `SemDagBuilder`: the function's IR ops → one shared semantic e-graph, including memory effects and the structured operations' own control (`build_region_control`) |
 | `isel/pattern.rs` | `compile_isel_pattern`: rule semantics → `tir_relational` query plans + per-node metadata |
 | `sem/axioms.rs` | axioms and their compilation into proved rewrites |
@@ -28,7 +27,7 @@ does the rest.
 | `sem/rewrites.rs` | theory-family selection and saturation driver |
 | `isel/matches.rs` | `Matches`: the function's value matches in columns, indexed by root class, with one frame per open assumption scope |
 | `isel/cover.rs` | PBQP construction, match dominance pruning, completeness check |
-| `isel/emit.rs` | `BlockPlan`: cover → an ordered tile schedule (`schedule_tiles`) with its operands resolved (`resolve_match`) |
+| `isel/emit.rs` | `RegionPlan`: cover → an ordered tile schedule (`order_tiles`) with its operands resolved (`resolve_match`) |
 | `isel/destruct.rs` | `Destructor`: the structured regions become machine blocks, at emission |
 
 ## Pipeline
@@ -41,29 +40,29 @@ flowchart TB
     subgraph per_function["per function (FunctionSelection), up front"]
         ir["every block's IR"] -->|"1 - build (one SemDagBuilder)"| eg["shared SemEGraph\n(cross-block CSE)"]
         eg -->|"2 - saturate once\non the base graph"| sat["base-saturated e-graph"]
-        subgraph per_block["for each block B"]
-            facts["region entry fact (B)"] -->|"3 - push scope\n+ scoped saturate"| scoped["B's assumed graph"]
+        subgraph per_region["for each region R"]
+            facts["region entry fact (R)"] -->|"3 - push scope\n+ scoped saturate"| scoped["R's assumed graph"]
             sat --> scoped
             rules["rules"] -->|compile_isel_pattern| pats["CompiledIselPattern"]
-            scoped -->|"4 - ematch + prune,\nlegality restricted to B\n(collect_block_matches)"| matches["PbqpIselMatch list"]
+            scoped -->|"4 - ematch + prune,\nlegality restricted to R\n(collect_region_matches)"| matches["PbqpIselMatch list"]
             pats --> matches
-            matches -->|"5 - build_eclass_cover + pbqp::solve\n(B's class closure)"| cover["ClassCover"]
-            cover -->|"6 - solve_block_inner\n(schedule_tiles + resolve_match)"| plan["BlockPlan"]
+            matches -->|"5 - build_eclass_cover + pbqp::solve\n(R's class closure)"| cover["ClassCover"]
+            cover -->|"6 - solve_region\n(order_tiles + resolve_match)"| plan["RegionPlan"]
         end
     end
-    plan -->|"7 - commit_function\n(every block, then destruct)"| out["rewriter: insert tiles / remap values / erase ops / build the CFG"]
+    plan -->|"7 - commit_function\n(every region, then destruct)"| out["rewriter: insert tiles / remap values / erase ops / build the CFG"]
 ```
 
 The pass runs per function. Visiting the function op triggers `solve_function`,
-which builds one `FunctionSelection` — every block lowered into a single shared,
-base-saturated e-graph — and solves **every block up front**, walking the
-dominator tree so each block sees the facts of the regions enclosing it
-(`solve_dominator_subtree`, `solve_block`). Solving before any commit is required:
+which builds one `FunctionSelection` — every region lowered into a single shared,
+base-saturated e-graph — and solves **every region up front**, walking the region
+nesting (`Scopes`) so each region sees the facts of the regions enclosing it
+(`solve_region_subtree`, `solve_region`). Solving before any commit is required:
 a region's entry fact reads its condition's *defining op*, which an enclosing
-block's commit would replace. Plans are stored in `plans` keyed by `BlockId`;
-`commit_function` then commits every block (`commit_block_solution`, guarded
-against re-entry by `emitted_blocks`) and runs the destruction over the function's
-region, so building, solving, and emitting each happen once.
+region's commit would replace. Plans are stored in `plans` keyed by `RegionId`;
+`commit_function` then commits every region (`commit_region_solution`) and runs
+the destruction over the function's region, so building, solving, and emitting
+each happen once.
 
 The driver (`lower_and_emit`) runs the whole pipeline on **one function at a
 time** and erases its machine IR as soon as the symbol is emitted, so the machine
@@ -239,7 +238,7 @@ with the chain the access reads appended. The state operand *is*
 memory identity: two reads of one address on one chain are one term and select
 one instruction, a write takes the chain to a state nothing before it names, and
 the accesses after it read that. The chain does not yet order anything — the
-emission schedule is the block's own op order (`schedule_tiles` serializes the
+emission schedule is the region's own op order (`order_tiles` serializes the
 effect tiles by position) — but it is the order the edges will be read as (B3).
 
 The chains are the IR's, not selection's. `build_memory_effect` lowers the access's
@@ -335,7 +334,7 @@ saturation (which may merge classes). All live on `FunctionSelection`.
 
 | table | meaning |
 |-------|---------|
-| `ops_by_root: Id → Vec<OpId>` | every op whose canonical root is the class, across all blocks |
+| `op_roots: HashSet<Id>` | every class rooting a lowered op, across all regions |
 | `op_root: OpId → Id` | every lowered op's canonical root class (total) |
 | `class_values: Id → Vec<ValueId>` | every IR value a class computes (input leaves it interned + every op result rooting it), sorted and deduped for a deterministic binding order |
 | `op_position: OpId → usize` | an op's index within its own block (orders same-block candidates) |
@@ -477,7 +476,7 @@ target with no sub-word sign-extend instruction can still cover it via shifts. T
 introduced shift nodes carry the register width used by the invariant; untyped
 instruction patterns still match them.
 
-> Saturation may merge classes, so `ops_by_root`, `class_values`, and the other
+> Saturation may merge classes, so `op_root`, `class_values`, and the other
 > side tables are re-canonicalized through `egraph.find` afterwards; each keeps
 > **every** merged candidate (multi-valued, see §1). This base saturation runs
 > once per function; a fact-bearing block re-saturates inside its own scope.
@@ -496,7 +495,7 @@ interior nodes become typed/untyped templates, with per-node register /
 immediate / width requirements kept in `node_meta`. `specificity` counts
 type-constrained nodes — the tie-breaker (see below).
 
-`collect_block_matches` e-matches every value pattern against the shared e-graph
+`collect_region_matches` e-matches every value pattern against the shared e-graph
 (via the `tir_relational` evaluator — the same matcher `instcombine-nodes` uses
 — with operand constraints and match legality supplied as a legality callback),
 then **restricts every hit to the solving block B**: a match survives only if its
@@ -550,7 +549,7 @@ popping the scope drops the frame with the matches it added.
 
 Three properties make the frame sound, and each is structural rather than
 asserted. The changed set is a fixed point for the frame's lifetime, because
-`solve_block` takes `&FunctionSelection` and so cannot mutate the graph, and a
+`solve_region` takes `&FunctionSelection` and so cannot mutate the graph, and a
 nested scope's own frame shadows this one until its `pop_context` restores the
 graph exactly. `innermost_dirty` rather than `scope_dirty` is the right delta
 only because frames layer: each sits on the enclosing frame's answers, which sit
@@ -682,7 +681,7 @@ constant materializer prunes it to a handful).
 
 `build_eclass_cover` maps the tiling problem onto PBQP over a **supplied class
 list** — B's op-root classes and the classes a destruction reads there, closed under the surviving
-matches' bindings (the fixpoint `collect_block_matches` computes as it searches),
+matches' bindings (the fixpoint `collect_region_matches` computes as it searches),
 so rewrite-introduced intermediates reached from B are covered but nothing from
 another block is. **One PBQP node per class in
 that closure**, each offering a set of **alternatives**:
@@ -769,12 +768,12 @@ that register-binds it.
 
 ## 5. Planning emission
 
-`solve_block_inner` reads the cover into a `BlockPlan`. The plan is not a decision
+`solve_region` reads the cover into a `RegionPlan`. The plan is not a decision
 per op — the block's *instructions* are the chosen tiles, and every op the graph
 covered goes away:
 
 ```rust
-struct BlockPlan {
+struct RegionPlan {
     schedule: Vec<ScheduledEmit>,             // the tiles, in emission order
     erase_ops: Vec<OpId>,                     // every op the cover replaced
     value_remaps: Vec<(ValueId, ValueId)>,    // an erased value → the register holding it
@@ -785,7 +784,7 @@ struct BlockPlan {
 - Each chosen `Tile` becomes a `ScheduledEmit`: the rule, the resolved match, the
   op backing it (`None` for a rewrite-introduced tile, which mints a fresh
   destination value), and the **anchor** op to insert before.
-- `schedule_tiles` orders them: a tile follows the tiles defining the registers it
+- `order_tiles` orders them: a tile follows the tiles defining the registers it
   reads, effect tiles keep the block's own op order, and ties break on the source
   op's position. A pure tile is pulled up to its earliest consumer, so a constant
   merged into an earlier class is still defined before it is read.
@@ -1052,11 +1051,10 @@ runs arm 1 on that predicate holding and arm 0 on its not holding. A region a
 structured operation says nothing about — an arm of a wider switch, a loop body —
 carries no fact.
 
-The dominator tree is region-aware — a block flows into each region its operations
-carry — so a region's entry block is an ordinary node of the tree whose subtree is
-exactly that region, and the fact holds throughout that subtree.
+A region's fact holds throughout it and every region nested in it, which is
+exactly the subtree `solve_region_subtree` walks.
 
-Because every block solves against the *one shared* graph, a block's facts are
+Because every region solves against the *one shared* graph, a region's facts are
 asserted in an **assumption scope** (`push_context`) private to its solve. The
 scope may hold **several** facts (one per enclosing region); `assert_fact` applies
 each, reading the condition's `prepared` `ConditionExpr`:
@@ -1106,7 +1104,7 @@ untouched.
 ## Binding resolution
 
 Because matches now come from a function-wide graph, resolving a boundary class to
-an operand for a consumer op `C` in block `B` is the **one cross-block correctness
+an operand for a consumer op `C` in region `R` is the **one cross-region correctness
 rule**. One resolver (`resolve_binding`) backs guard selection and emission (§5),
 and the cover's availability policy (§4) asks the same questions of the same
 tables, so a class the cover accepted as available resolves at emit time. For a
@@ -1117,42 +1115,41 @@ class (chasing low-bit truncations to the class that owns the register):
    materializer and emission binds the tile's destination;
 2. and/or a register value `V` from the class's candidates, choosing the first
    legal under, in preference order:
-   - a same-block def **preceding** `C` (`is_before`), earliest first — an
+   - a same-region def **preceding** `C` (`is_before`), earliest first — an
      op-rooted def only for the caller that is about to demand the class here (a
      fused branch's operands), since otherwise its tile is what defines it, then
-   - an **entry input**, or a **block argument of a block that dominates `B`**
-     (always in a register, but written by that block's incoming edges — two
-     mutually exclusive blocks may carry equal arguments while only one of them
-     ran), then
-   - a def in a **dominator** of `B` that has run wherever `B` runs and whose own
-     block was asked to place it (`placed_at`), or that selection never touched at
-     all — closest dominator first, via `dom_distance`.
+   - an **entry input**, or a **port of an enclosing region** (always in a
+     register, but written on the way into its own region, so it holds the class
+     only inside it — never in a sibling arm), then
+   - a def in an **enclosing region** that has run wherever `R` runs
+     (`has_run_at`) and whose own region was asked to place it (`placed_at`), or
+     that selection never touched at all — closest enclosing region first, via
+     `Scopes::distance`.
 
 A class may resolve to both (an assumption proves it equal to its truth constant). A
 class with candidate values but none legal is *unresolvable*, and the cover treats
-it as unavailable: the block tiles it itself.
+it as unavailable: the region tiles it itself.
 
 ### Region scoping of the rule
 
-`DominatorTree` already spans regions (MLIR's "Extending Dominance to MLIR
-Regions": a block holding a region-carrying operation flows into each region's
-entry block), so dominance is the region rule, not a CFG-only one — two sibling
-arms dominate each other in neither direction, and `dom_distance` counts region
-nesting as ordinary dominator steps. Two things dominance alone does not say,
-both of which the rule applies on top of it:
+Visibility is region nesting (`Scopes`): a definition is visible inside a region
+exactly when it sits in that region or one enclosing it, and `Scopes::distance`
+counts the steps out. Two sibling arms enclose each other in neither direction.
+Two things nesting alone does not say, both of which the rule applies on top of
+it:
 
-- **A block is only partly ordered against a region it holds.** Its own
-  operations *after* the carrier do not run before the region does, so a
-  definition is visible inside only when it precedes the carrier (`has_run_at`,
-  applied transitively up the region chain). Without this the term an arm shares
-  with a computation placed after the gate binds that computation's register and
-  reads it before it is written.
-- **A block argument holds its class only where its own block has run.** Every
-  block a region holds records its arguments, so an arm's entry argument and a
-  loop port are scoped like any other argument. Without this they resolve as
-  entry inputs — available everywhere, including in a sibling arm.
+- **A region is only partly ordered against a region it holds.** The operations
+  *after* the carrier do not run before the region does, so a definition is
+  visible inside only when it precedes the carrier (`has_run_at`, applied
+  transitively up the region chain). Without this the term an arm shares with a
+  computation placed after the gate binds that computation's register and reads
+  it before it is written.
+- **A port holds its class only where its own region has run.** An arm's port
+  and a loop port are scoped to the region carrying them (`port_region`). Without
+  this they resolve as entry inputs — available everywhere, including in a
+  sibling arm.
 - **A value read inside a region is asked for before that region.** Remapping a
-  block's own values of an available class onto the register holding it resolves
+  region's own values of an available class onto the register holding it resolves
   at the earliest carrier under which one of them is read (`region_ask`, off
   `region_use`), not at the block's terminator. A name the region itself
   publishes — a gate's result, which destruction adopts as its join's parameter —
@@ -1162,14 +1159,11 @@ both of which the rule applies on top of it:
 
 ## Cost model
 
-A target may install an `IselCostModel` (`with_cost_model`); its single hook,
-`node_cost(context, op, rule, match)`, prices the `Tile` alternative of an
-op-backed match. The default is the rule's TMDL-derived `base_cost`: the sum of
-the modeled costs of the target instructions the rule emits. A rule's symbolic
-graph size never contributes to instruction cost. The same base cost prices a
-rewrite-introduced match (which has no backing op). Costs enter PBQP unmodified;
-equal-cost ties between interchangeable matches are resolved by dominance
-pruning (§3), not by cost tweaks.
+The `Tile` alternative of a match is priced by the rule's TMDL-derived
+`base_cost`: the sum of the modeled costs of the target instructions the rule
+emits. A rule's symbolic graph size never contributes to instruction cost. Costs
+enter PBQP unmodified; equal-cost ties between interchangeable matches are
+resolved by dominance pruning (§3), not by cost tweaks.
 
 ## Emitters
 
@@ -1211,8 +1205,7 @@ instruction names is a register, which the machine-IR verifier checks.
 | `CompiledIselPattern` | a rule's pattern compiled for e-matching, with per-node metadata + specificity |
 | `PbqpIselMatch` | one e-match hit: root class, bindings, cost |
 | `FunctionSelection` | the function's shared e-graph + multi-valued side tables + every block's plan |
-| `BlockPlan` / `ScheduledEmit` | the emission plan: the ordered tiles, the ops they replace, and the value remaps |
+| `RegionPlan` / `ScheduledEmit` | the emission plan: the ordered tiles, the ops they replace, and the value remaps |
 | `AuxEmit` | what a block leaves a destruction to read: a fused branch, a materialized value, or a decided test |
 | `Destructor` | turns the structured regions into machine blocks once every block has committed |
 | `EmitRequest` | what an emitter writes into: backing op (if any) + destination values |
-| `IselCostModel` | target hook for match cost (`node_cost`) |

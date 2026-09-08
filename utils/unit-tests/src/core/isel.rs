@@ -11,8 +11,8 @@ use tir::{
 };
 
 use tir::backend::isel::{
-    EmitRequest, ImmRange, InstructionSelectPass, IselCostModel, RegisterCapability,
-    RegisterRequirement, Rule, RuleEmitFn, RuleMatch, LATENCY_COST_SCALE,
+    EmitRequest, ImmRange, InstructionSelectPass, RegisterCapability, RegisterRequirement, Rule,
+    RuleEmitFn, RuleMatch, LATENCY_COST_SCALE,
 };
 use tir::sem::template_node;
 
@@ -301,24 +301,28 @@ fn shifted_register_view_rule_does_not_select_for_offset_zero_values() {
         let plain = RegisterRequirement::low_bits(capability);
         let rules = vec![
             // The cheaper rule, distinguished by emitting `muli`.
-            Rule::new(
-                "shifted-add",
-                atomic_pattern(SymKind::Add),
-                LATENCY_COST_SCALE,
-                emit_mul,
-            )
-            .with_operand_registers(vec![(0, operand), (1, operand)])
-            .with_result_register(
-                RegisterRequirement::low_bits(capability).at_view_offset(result_offset),
-            ),
-            Rule::new(
-                "add",
-                atomic_pattern(SymKind::Add),
-                10 * LATENCY_COST_SCALE,
-                emit_add,
-            )
-            .with_operand_registers(vec![(0, plain), (1, plain)])
-            .with_result_register(plain),
+            Rule {
+                operand_registers: vec![(0, operand), (1, operand)],
+                result_register: Some(
+                    RegisterRequirement::low_bits(capability).at_view_offset(result_offset),
+                ),
+                ..Rule::new(
+                    "shifted-add",
+                    atomic_pattern(SymKind::Add),
+                    LATENCY_COST_SCALE,
+                    emit_mul,
+                )
+            },
+            Rule {
+                operand_registers: vec![(0, plain), (1, plain)],
+                result_register: Some(plain),
+                ..Rule::new(
+                    "add",
+                    atomic_pattern(SymKind::Add),
+                    10 * LATENCY_COST_SCALE,
+                    emit_add,
+                )
+            },
         ];
 
         select(&context, &module, func, rules);
@@ -418,50 +422,6 @@ fn add_mul_add_pattern() -> SemGraph {
     let d = symbol(&mut g, 3);
     binary(&mut g, SymKind::Add, mul, d);
     g
-}
-
-/// A cost model that makes the fused `add-mul` rule prohibitively expensive,
-/// so selection must fall back to the atomic `mul` + `add` cover.
-struct NoFusionCostModel;
-
-impl IselCostModel for NoFusionCostModel {
-    fn node_cost(
-        &self,
-        _context: &Context,
-        _op: &tir::OperationRef,
-        rule: &Rule,
-        _m: &RuleMatch,
-    ) -> u64 {
-        if rule.name == "add-mul" {
-            1000
-        } else {
-            rule.base_cost as u64
-        }
-    }
-}
-
-#[test]
-fn cost_model_override_changes_selection() {
-    let context = Context::with_default_dialects();
-    let i32_ty = IntegerType::new(&context, 32);
-    let (module, func, region, args) = function(&context, &[i32_ty, i32_ty, i32_ty], i32_ty);
-    let (x, y, z) = (args[0], args[1], args[2]);
-
-    let mul = ops::muli(&context, x, y, i32_ty).build();
-    let mul_result = mul.result();
-    func.body().append_op(mul);
-    let add = ops::addi(&context, mul_result, z, i32_ty).build();
-    let add_result = add.result();
-    func.body().append_op(add);
-    func.body()
-        .append_op(func_ops::r#return(&context, add_result).build());
-
-    let pass =
-        InstructionSelectPass::new(add_mul_rules()).with_cost_model(Box::new(NoFusionCostModel));
-    run_pass(&context, &module, func, pass).expect("pass pipeline should succeed");
-
-    // With fusion priced out, the default add-mul cost-1 win is overridden.
-    assert_eq!(body_names(&context, region), vec!["muli", "addi"]);
 }
 
 #[test]
@@ -660,22 +620,24 @@ fn emit_materializer_marker(
 }
 
 fn materializer_rule(emit: RuleEmitFn) -> Rule {
-    Rule::new(
-        "li",
-        zero_materializer_pattern(),
-        5 * LATENCY_COST_SCALE,
-        emit,
-    )
-    .with_operand_constraints(vec![(1, OperandConstraint::Immediate)])
-    .with_operand_imm_ranges(vec![(
-        1,
-        ImmRange {
-            width: 12,
-            signed: true,
-            align: 1,
-            nonzero: false,
-        },
-    )])
+    Rule {
+        operand_constraints: vec![(1, OperandConstraint::Immediate)],
+        operand_imm_ranges: vec![(
+            1,
+            ImmRange {
+                width: 12,
+                signed: true,
+                align: 1,
+                nonzero: false,
+            },
+        )],
+        ..Rule::new(
+            "li",
+            zero_materializer_pattern(),
+            5 * LATENCY_COST_SCALE,
+            emit,
+        )
+    }
 }
 
 fn emit_integer_materializer_marker(
@@ -758,22 +720,24 @@ fn immediate_rule_materializes_an_unannotated_constant_register_operand() {
         .append_op(func_ops::r#return(&context, add_result).build());
 
     let rules = vec![
-        Rule::new(
-            "addi",
-            atomic_pattern(SymKind::Add),
-            LATENCY_COST_SCALE,
-            emit_add_imm_marker,
-        )
-        .with_operand_constraints(vec![(1, OperandConstraint::Immediate)])
-        .with_operand_imm_ranges(vec![(
-            1,
-            ImmRange {
-                width: 12,
-                signed: true,
-                align: 1,
-                nonzero: false,
-            },
-        )]),
+        Rule {
+            operand_constraints: vec![(1, OperandConstraint::Immediate)],
+            operand_imm_ranges: vec![(
+                1,
+                ImmRange {
+                    width: 12,
+                    signed: true,
+                    align: 1,
+                    nonzero: false,
+                },
+            )],
+            ..Rule::new(
+                "addi",
+                atomic_pattern(SymKind::Add),
+                LATENCY_COST_SCALE,
+                emit_add_imm_marker,
+            )
+        },
         materializer_rule(emit_materializer_marker),
     ];
 
@@ -800,22 +764,24 @@ fn run_immediate_range(constant: i64) -> Vec<&'static str> {
         .append_op(func_ops::r#return(&context, add_result).build());
 
     let rules = vec![
-        Rule::new(
-            "addi",
-            atomic_pattern(SymKind::Add),
-            LATENCY_COST_SCALE,
-            emit_add_imm_marker,
-        )
-        .with_operand_constraints(vec![(1, OperandConstraint::Immediate)])
-        .with_operand_imm_ranges(vec![(
-            1,
-            ImmRange {
-                width: 12,
-                signed: true,
-                align: 1,
-                nonzero: false,
-            },
-        )]),
+        Rule {
+            operand_constraints: vec![(1, OperandConstraint::Immediate)],
+            operand_imm_ranges: vec![(
+                1,
+                ImmRange {
+                    width: 12,
+                    signed: true,
+                    align: 1,
+                    nonzero: false,
+                },
+            )],
+            ..Rule::new(
+                "addi",
+                atomic_pattern(SymKind::Add),
+                LATENCY_COST_SCALE,
+                emit_add_imm_marker,
+            )
+        },
         Rule::new(
             "add",
             atomic_pattern(SymKind::Add),
@@ -923,13 +889,15 @@ fn select_sign_extension(slli_rule: Rule) -> Vec<&'static str> {
             emit_add,
         ),
         slli_rule,
-        Rule::new(
-            "srai",
-            shift_imm_pattern(SymKind::ShiftRightArithmetic),
-            LATENCY_COST_SCALE,
-            emit_srai,
-        )
-        .with_operand_constraints(vec![(1, OperandConstraint::Immediate)]),
+        Rule {
+            operand_constraints: vec![(1, OperandConstraint::Immediate)],
+            ..Rule::new(
+                "srai",
+                shift_imm_pattern(SymKind::ShiftRightArithmetic),
+                LATENCY_COST_SCALE,
+                emit_srai,
+            )
+        },
     ];
 
     run_pass(&context, &module, func, InstructionSelectPass::new(rules))
@@ -943,13 +911,15 @@ fn select_sign_extension(slli_rule: Rule) -> Vec<&'static str> {
 /// introduced `slli` (an e-class with no original op) before the `srai`.
 #[test]
 fn square_sign_extension_lowers_to_shift_pair() {
-    let slli_rule = Rule::new(
-        "slli",
-        shift_imm_pattern(SymKind::ShiftLeft),
-        LATENCY_COST_SCALE,
-        emit_slli,
-    )
-    .with_operand_constraints(vec![(1, OperandConstraint::Immediate)]);
+    let slli_rule = Rule {
+        operand_constraints: vec![(1, OperandConstraint::Immediate)],
+        ..Rule::new(
+            "slli",
+            shift_imm_pattern(SymKind::ShiftLeft),
+            LATENCY_COST_SCALE,
+            emit_slli,
+        )
+    };
     let body_ops = select_sign_extension(slli_rule);
 
     // add (from the addi), then the slli/srai sign-extension idiom, then return.
@@ -958,14 +928,16 @@ fn square_sign_extension_lowers_to_shift_pair() {
 
 #[test]
 fn introduced_rule_emits_prelude_before_instruction() {
-    let slli_rule = Rule::new(
-        "slli",
-        shift_imm_pattern(SymKind::ShiftLeft),
-        LATENCY_COST_SCALE,
-        emit_slli,
-    )
-    .with_operand_constraints(vec![(1, OperandConstraint::Immediate)])
-    .with_prelude_emitter(emit_shift_prelude);
+    let slli_rule = Rule {
+        operand_constraints: vec![(1, OperandConstraint::Immediate)],
+        prelude_emit: Some(emit_shift_prelude),
+        ..Rule::new(
+            "slli",
+            shift_imm_pattern(SymKind::ShiftLeft),
+            LATENCY_COST_SCALE,
+            emit_slli,
+        )
+    };
     let body_ops = select_sign_extension(slli_rule);
 
     assert_eq!(body_ops, vec!["addi", "subi", "shli", "shrsi"]);
