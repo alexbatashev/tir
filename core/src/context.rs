@@ -77,7 +77,6 @@ pub struct ContextIterator<I: GetFromContext> {
     context: Context,
     elements: Vec<I>,
     current_front: usize,
-    current_back: usize,
 }
 
 pub trait GetFromContext {
@@ -109,8 +108,8 @@ fn clear_slot<T>(slab: &mut [Option<T>], idx: usize) {
     }
 }
 
-/// Erase counts per entity id, so a handle minted before a slot was reused can
-/// be told from one naming the entity that now holds it.
+/// Erase counts per entity id, so a handle minted before its entity was erased
+/// can be told from one naming a live entity.
 #[derive(Default)]
 struct Generations {
     ops: GenerationTable,
@@ -153,14 +152,15 @@ struct Owned {
 
 struct ContextInstance {
     // Entities live in chunked [`Hive`]s; an id *is* its hive handle, so a read
-    // costs no indirection. Slots and ids are reused once an entity is erased.
+    // costs no indirection. An erased entity's slot is never handed out again;
+    // see [`Context::recycle`].
     ops: Hive<OpInstance>,
     values: Hive<Value>,
     regions: Hive<Region>,
     blocks: Hive<Block>,
-    /// Erase counts per entity kind. A slot is reused as soon as its entity is
-    /// erased, so an id alone no longer identifies an entity across an erase;
-    /// the pair of id and generation does. See [`OpHandle`].
+    /// Erase counts per entity kind. Erasing bumps the count, so a handle
+    /// minted before the erase reads as a panic rather than as whatever the
+    /// slot holds. See [`OpHandle`].
     generations: Generations,
     /// Reverse index from an operation to whatever holds it, maintained by
     /// `Block`'s membership mutators and by [`Context::set_region_nodes`]. Lets
@@ -552,21 +552,6 @@ impl ContextInstance {
         let entries = self.runs.entries_mut(run);
         entries[at..=count].rotate_right(1);
         entries[at] = Entry::new(id);
-    }
-
-    /// Drop the port at `at`, shifting the ports after it back.
-    ///
-    /// Everything after `at` moves, so the caller must have unlinked the port
-    /// at `at` and must leave no linked operand behind it: the callers drop the
-    /// *last* operand or a result, so only unlinked entries move.
-    fn remove_port(&mut self, op: OpId, at: usize) -> u32 {
-        debug_assert!(at + 1 >= self.op(op).expect("live op").operand_count as usize);
-        let count = self.op(op).expect("live op").port_count();
-        let run = self.op(op).expect("live op").run;
-        let entries = self.runs.entries_mut(run);
-        let id = entries[at].id;
-        entries[at..count].rotate_left(1);
-        id
     }
 
     /// Record every operand slot of `op` under the value it holds.
@@ -987,8 +972,8 @@ impl Context {
                 attr_count: op.attributes.len() as u16,
                 version: 0,
             }));
-            // An id reused after an erase must not answer a cached analysis of
-            // the op that held it; the version carries across the reuse.
+            // A fresh op answers no cached analysis of the erased one whose
+            // storage it took.
             inner.bump_version(op_id);
 
             let ids: Vec<u32> = op
@@ -1539,30 +1524,6 @@ impl Context {
         true
     }
 
-    /// Drop `block`'s `index`-th argument and return it. Nothing may read the
-    /// argument: it stops being a definition with the edit.
-    pub fn remove_block_argument(&self, block: BlockId, index: usize) -> Value {
-        let mut inner = self.0.write();
-        let entry = inner.block_mut(block).expect("live block");
-        let deps = entry.dep_argument_count();
-        if index >= entry.arguments().len() - deps {
-            entry.set_dep_argument_count(deps - 1);
-        }
-        let argument = entry.arguments_mut().remove(index);
-        clear_slot(&mut inner.value_block, argument.id().index());
-        inner.erase_value(argument.id());
-        inner.edit_block(block);
-        argument
-    }
-
-    /// Drop every dependency argument of `block`.
-    pub fn clear_dep_arguments(&self, block: BlockId) {
-        while let Some(last) = self.get_block(block).dep_arguments().len().checked_sub(1) {
-            let values = self.get_block(block).arguments().len() - last - 1;
-            self.remove_block_argument(block, values + last);
-        }
-    }
-
     /// Append `value` to `op`'s value operands, ahead of its dependencies,
     /// keeping the segment sizes that describe the trailing variadic group in
     /// step.
@@ -1589,25 +1550,16 @@ impl Context {
         inner.edit_op(op);
     }
 
-    /// Append `value` to `op`'s value results, moving its definition onto `op`.
-    pub fn adopt_result(&self, op: OpId, value: ValueId) {
-        self.adopt_result_port(op, value, false);
-    }
-
     /// Append `value` to `op`'s dependency results, moving its definition onto
     /// `op`. A lowering that replaces an instruction hands the replacement the
     /// chain the original published this way, so the chain crosses the rewrite
     /// intact.
     pub fn adopt_dep_result(&self, op: OpId, value: ValueId) {
-        self.adopt_result_port(op, value, true);
-    }
-
-    fn adopt_result_port(&self, op: OpId, value: ValueId, dependency: bool) {
         let mut inner = self.0.write();
         if inner.op(op).is_none() {
             return;
         }
-        inner.append_result_port(op, value, dependency);
+        inner.append_result_port(op, value, true);
         if let Some(value) = inner.value_mut(value) {
             value.set_defining_op(op);
         }
@@ -1667,75 +1619,6 @@ impl Context {
             _ => panic!("only an unordered region drops a port by position"),
         }
         inner.edit_region(region);
-    }
-
-    /// Drop `op`'s last value operand, keeping the segment sizes that describe
-    /// the grouping in step. The inverse of [`Context::append_operand`].
-    pub fn pop_operand(&self, op: OpId) {
-        let mut inner = self.0.write();
-        let values = match inner.op(op) {
-            Some(instance) if instance.operand_count > instance.dep_operand_count => {
-                (instance.operand_count - instance.dep_operand_count) as usize
-            }
-            _ => return,
-        };
-        inner.remove_operand(op, values - 1);
-        inner.adjust_last_segment(op, -1);
-        inner.edit_op(op);
-    }
-
-    /// Drop every dependency operand of `op`.
-    pub fn clear_dep_operands(&self, op: OpId) {
-        let mut inner = self.0.write();
-        let deps = match inner.op(op) {
-            Some(instance) if instance.dep_operand_count > 0 => instance.dep_operand_count as usize,
-            _ => return,
-        };
-        let (mut operands, results, regions) = inner.ports(op);
-        operands.truncate(operands.len() - deps);
-        inner.set_ports(op, &operands, &results, &regions);
-        inner.op_mut(op).expect("live op").dep_operand_count = 0;
-        inner.edit_op(op);
-    }
-
-    /// Drop `op`'s last value result. Nothing may read it: it stops being a
-    /// definition with the edit. The inverse of the result [`Context::grow_port`]
-    /// adds.
-    pub fn pop_result(&self, op: OpId) {
-        let mut inner = self.0.write();
-        let at = match inner.op(op) {
-            Some(instance) if instance.result_count > instance.dep_result_count => {
-                (instance.operand_count + instance.result_count - instance.dep_result_count)
-                    as usize
-                    - 1
-            }
-            _ => return,
-        };
-        let result = inner.remove_port(op, at);
-        inner.op_mut(op).expect("live op").result_count -= 1;
-        inner.erase_value(ValueId::from_number(result));
-        inner.edit_op(op);
-    }
-
-    /// Drop every dependency result of `op`. Nothing may read them.
-    pub fn clear_dep_results(&self, op: OpId) {
-        let mut inner = self.0.write();
-        let Some(instance) = inner.op(op) else {
-            return;
-        };
-        let (deps, mut end) = (
-            instance.dep_result_count as usize,
-            (instance.operand_count + instance.result_count) as usize,
-        );
-        for _ in 0..deps {
-            end -= 1;
-            let result = inner.remove_port(op, end);
-            inner.erase_value(ValueId::from_number(result));
-        }
-        let instance = inner.op_mut(op).expect("live op");
-        instance.result_count -= deps as u16;
-        instance.dep_result_count = 0;
-        inner.edit_op(op);
     }
 
     /// Grow `op` by one carried port of type `ty`.
@@ -1900,7 +1783,7 @@ impl Context {
         let owner = handle.parent_op();
 
         self.detach_subtree(&handle.block_ids());
-        handle.set_blocks(staged.blocks.clone());
+        self.set_region_blocks(region, staged.blocks.clone());
 
         {
             let mut inner = self.0.write();
@@ -2067,10 +1950,9 @@ impl Context {
     /// Drop the storage of entities that have left the IR, and the reverse-index
     /// entries that pointed into it.
     ///
-    /// The hive slot goes back on its chunk's free list, so a later entity of the
-    /// same kind can take the id. A handle minted before the reuse names the
-    /// generation it was minted with and panics rather than reading its
-    /// successor; see [`OpHandle`].
+    /// The hive slot is dropped and its generation bumped; the id itself is
+    /// never handed to another entity, so a handle minted before the erase
+    /// panics rather than reading a successor. See [`OpHandle`].
     fn free(&self, owned: Owned) {
         let mut inner = self.0.write();
         for op in owned.ops {
@@ -2154,22 +2036,6 @@ impl Context {
         true
     }
 
-    /// Reorder the operations `block` holds. `ops` must be a permutation of
-    /// them: an order is chosen, nothing is added or removed, and no parent
-    /// changes.
-    pub(crate) fn set_block_ops(&self, block: BlockId, ops: Vec<OpId>) {
-        let mut inner = self.0.write();
-        if let Some(entry) = inner.block_mut(block) {
-            debug_assert_eq!(
-                entry.operations().len(),
-                ops.len(),
-                "a reordering holds the block's own operations",
-            );
-            *entry.operations_mut() = ops;
-        }
-        inner.edit_block(block);
-    }
-
     pub(crate) fn remove_op_from_block(&self, block: BlockId, op: OpId) -> bool {
         let mut inner = self.0.write();
         let Some(entry) = inner.block_mut(block) else {
@@ -2230,67 +2096,22 @@ impl Context {
         read(inner.block(id).expect("live block"))
     }
 
-    /// The operation owning `region`, if it has been attached to one.
-    pub(crate) fn region_parent_op(&self, region: RegionId) -> Option<OpId> {
-        self.0
-            .read()
-            .region(region)
-            .expect("live region")
-            .parent_op()
+    /// Edit a block's storage record under the context lock, dirtying the
+    /// subtree it sits in. For an edit that changes nothing but the record:
+    /// one touching another table goes through a [`Context`] method of its own.
+    ///
+    /// `edit` must not touch the context: the lock is not reentrant.
+    pub(crate) fn with_block_mut<R>(&self, id: BlockId, edit: impl FnOnce(&mut Block) -> R) -> R {
+        let mut inner = self.0.write();
+        let edited = edit(inner.block_mut(id).expect("live block"));
+        inner.edit_block(id);
+        edited
     }
 
-    pub(crate) fn region_block_ids(&self, region: RegionId) -> Vec<BlockId> {
-        self.0
-            .read()
-            .region(region)
-            .expect("live region")
-            .blocks()
-            .to_vec()
-    }
-
-    pub(crate) fn region_is_nodes(&self, region: RegionId) -> bool {
-        matches!(
-            self.0.read().region(region).expect("live region").body(),
-            crate::region::RegionBody::Nodes { .. }
-        )
-    }
-
-    /// Every operation the region holds; see [`RegionHandle::op_ids`].
-    pub(crate) fn region_op_ids(&self, region: RegionId) -> Vec<OpId> {
-        let blocks = {
-            let inner = self.0.read();
-            match inner.region(region).expect("live region").body() {
-                crate::region::RegionBody::Nodes { ops, .. } => return ops.clone(),
-                crate::region::RegionBody::Blocks(blocks) => blocks.clone(),
-            }
-        };
-        blocks
-            .into_iter()
-            .flat_map(|block| self.get_block(block).op_ids())
-            .collect()
-    }
-
-    /// See [`RegionHandle::ports`].
-    pub(crate) fn region_ports(&self, region: RegionId) -> Vec<Value> {
-        let entry = {
-            let inner = self.0.read();
-            match inner.region(region).expect("live region").body() {
-                crate::region::RegionBody::Nodes { ports, .. } => return ports.clone(),
-                crate::region::RegionBody::Blocks(blocks) => match blocks.first() {
-                    Some(entry) => *entry,
-                    None => return Vec::new(),
-                },
-            }
-        };
-        self.get_block(entry).arguments()
-    }
-
-    /// See [`RegionHandle::results`].
-    pub(crate) fn region_results(&self, region: RegionId) -> Vec<ValueId> {
-        match self.0.read().region(region).expect("live region").body() {
-            crate::region::RegionBody::Nodes { results, .. } => results.clone(),
-            crate::region::RegionBody::Blocks(_) => Vec::new(),
-        }
+    /// [`Context::with_block`] for a region.
+    pub(crate) fn with_region<R>(&self, id: RegionId, read: impl FnOnce(&Region) -> R) -> R {
+        let inner = self.0.read();
+        read(inner.region(id).expect("live region"))
     }
 
     /// How many of the region's ports and results are dependencies.
@@ -2339,6 +2160,10 @@ impl Context {
         true
     }
 
+    /// Replace `region`'s whole block list at once. Only
+    /// [`Context::replace_region_contents`] uses this: it owns the parent
+    /// bookkeeping and the single version bump the swap is allowed to make,
+    /// which the per-block mutators would each repeat.
     pub(crate) fn set_region_blocks(&self, region: RegionId, blocks: Vec<BlockId>) {
         let mut inner = self.0.write();
         if let Some(entry) = inner.region_mut(region) {
@@ -2425,37 +2250,6 @@ impl Context {
         self.0.read().generations.regions.get(id.index())
     }
 
-    /// Panic if `id`'s slot has been reused since a handle was minted with
-    /// `generation`.
-    #[cfg(debug_assertions)]
-    pub(crate) fn assert_op_generation(&self, id: OpId, generation: u32) {
-        assert_eq!(
-            self.0.read().generations.ops.get(id.index()),
-            generation,
-            "handle to erased operation {id:?}"
-        );
-    }
-
-    /// [`Context::assert_op_generation`] for a block.
-    #[cfg(debug_assertions)]
-    pub(crate) fn assert_block_generation(&self, id: BlockId, generation: u32) {
-        assert_eq!(
-            self.0.read().generations.blocks.get(id.index()),
-            generation,
-            "handle to erased block {id:?}"
-        );
-    }
-
-    /// [`Context::assert_op_generation`] for a region.
-    #[cfg(debug_assertions)]
-    pub(crate) fn assert_region_generation(&self, id: RegionId, generation: u32) {
-        assert_eq!(
-            self.0.read().generations.regions.get(id.index()),
-            generation,
-            "handle to erased region {id:?}"
-        );
-    }
-
     /// Read an attribute of `op` in place. For an attribute large enough that
     /// cloning it per lookup would matter — the register assignment of a whole
     /// function, read once per instruction slot.
@@ -2507,17 +2301,6 @@ impl Context {
     pub(crate) fn op_attr_sym(&self, id: OpId, name: Sym) -> Option<AttributeValue> {
         self.0
             .read()
-            .op_attrs(id)
-            .iter()
-            .find(|attribute| attribute.name == name)
-            .map(|attribute| attribute.value.clone())
-    }
-
-    /// [`OpHandle::attr`]: the name is resolved in the same lock as the lookup.
-    pub(crate) fn op_attr(&self, id: OpId, name: &str) -> Option<AttributeValue> {
-        let inner = self.0.read();
-        let name = inner.names.lookup(name)?;
-        inner
             .op_attrs(id)
             .iter()
             .find(|attribute| attribute.name == name)
@@ -2732,12 +2515,10 @@ impl ContextRef {
 
 impl<I: GetFromContext> ContextIterator<I> {
     pub fn new(context: Context, elements: Vec<I>) -> Self {
-        let current_back = elements.len();
         Self {
             context,
             elements,
             current_front: 0,
-            current_back,
         }
     }
 }
@@ -2759,17 +2540,5 @@ impl<I: GetFromContext> Iterator for ContextIterator<I> {
 impl<I: GetFromContext> ExactSizeIterator for ContextIterator<I> {
     fn len(&self) -> usize {
         self.elements.len()
-    }
-}
-
-impl<I: GetFromContext> DoubleEndedIterator for ContextIterator<I> {
-    fn next_back(&mut self) -> Option<Self::Item> {
-        if self.current_back == 0 {
-            None
-        } else {
-            self.current_back -= 1;
-            let element = self.elements[self.current_back].get_from_context(&self.context);
-            Some(element)
-        }
     }
 }

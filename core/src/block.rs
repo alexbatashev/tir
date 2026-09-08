@@ -121,15 +121,13 @@ impl BlockHandle {
     /// The owning context, after checking this handle still names its own block.
     fn context(&self) -> Context {
         let context = self.context.upgrade();
-        #[cfg(debug_assertions)]
-        context.assert_block_generation(self.id, self.generation);
+        debug_assert_eq!(
+            context.block_generation(self.id),
+            self.generation,
+            "handle to erased block {:?}",
+            self.id
+        );
         context
-    }
-
-    /// Whether this handle still names the block it was minted for; see
-    /// [`crate::OpHandle::is_live`].
-    pub fn is_live(&self) -> bool {
-        self.context.upgrade().block_generation(self.id) == self.generation
     }
 
     pub fn id(&self) -> BlockId {
@@ -212,24 +210,18 @@ impl BlockHandle {
     /// block is a linearization of its dependence graph, and this is how one is
     /// installed.
     pub fn set_ops(&self, ops: Vec<OpId>) {
-        self.context().set_block_ops(self.id, ops);
+        self.context().with_block_mut(self.id, |block| {
+            debug_assert_eq!(
+                block.operations().len(),
+                ops.len(),
+                "a reordering holds the block's own operations",
+            );
+            *block.operations_mut() = ops;
+        });
     }
 
     pub fn remove_op(&self, id: OpId) -> bool {
         self.context().remove_op_from_block(self.id, id)
-    }
-
-    /// Returns true if a comes before b in the block, false otherwise
-    pub fn is_before(&self, a: OpId, b: OpId) -> bool {
-        self.context().with_block(self.id, |block| {
-            let operations = block.operations();
-            let a_pos = operations.iter().position(|op_id| *op_id == a);
-            let b_pos = operations.iter().position(|op_id| *op_id == b);
-            match (a_pos, b_pos) {
-                (Some(a_pos), Some(b_pos)) => a_pos < b_pos,
-                _ => false,
-            }
-        })
     }
 
     pub fn iter(&self, context: Context) -> ContextIterator<OpId> {

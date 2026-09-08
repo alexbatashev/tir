@@ -292,8 +292,9 @@ impl<'a> Writer<'a> {
                         vec![self.type_id(argument.ty())?, self.value_ids[&argument.id()]];
                     for pred in &blocks {
                         let terminator = pred
-                            .iter(self.context.clone())
-                            .next_back()
+                            .op_ids()
+                            .last()
+                            .map(|&op| self.context.get_op(op))
                             .ok_or("empty predecessor block")?;
                         if let Some(incoming) = branch_argument(terminator, block.id(), index) {
                             operands.extend([self.value(incoming)?, block_ids[&pred.id()]]);

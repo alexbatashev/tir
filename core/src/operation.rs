@@ -906,8 +906,12 @@ impl OpHandle {
     /// The owning context, after checking this handle still names its own op.
     fn context(&self) -> crate::Context {
         let context = self.context.upgrade();
-        #[cfg(debug_assertions)]
-        context.assert_op_generation(self.id, self.generation);
+        debug_assert_eq!(
+            context.op_generation(self.id),
+            self.generation,
+            "handle to erased operation {:?}",
+            self.id
+        );
         context
     }
 
@@ -964,7 +968,7 @@ impl OpHandle {
     /// The value of the attribute called `name`, resolving the name through the
     /// owning context's interner.
     pub fn attr(&self, name: &str) -> Option<crate::attributes::AttributeValue> {
-        self.context().op_attr(self.id, name)
+        self.context().with_attr(self.id, name, Clone::clone)
     }
 
     /// [`OpHandle::attr`] for a name already interned, which is the form a
