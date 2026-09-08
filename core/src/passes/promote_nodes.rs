@@ -24,9 +24,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::analysis::regions;
 use crate::analysis::slots::{SlotState, agreed_value_type, collect_slots};
 use crate::analysis::{AnalysisManager, EscapeFacts};
+use crate::analysis::{chain, regions};
 use crate::func::FuncOp;
 use crate::{
     Context, Gamma, MemoryRead, MemoryWrite, OpHandle, OpId, OperationRef, Pass, PassError,
@@ -293,7 +293,7 @@ impl Promoter<'_> {
         }
         let context = self.context;
         let found = match context.get_value(dep).defining_op() {
-            None => self.reach_port(dep),
+            None => self.crossing(dep),
             Some(def) => {
                 let instance = context.get_op(def);
                 if let Some(written) = self.writes(&instance) {
@@ -308,9 +308,12 @@ impl Promoter<'_> {
                             found.merge(self.reach(state))
                         })
                 } else if instance.regions().is_empty() {
+                    // An effect the walk cannot read still names the memory
+                    // before it: the seam an inlined body leaves sits on the
+                    // chain, and stepping over it would hide the write it holds.
                     self.reach(instance.dep_operands()[0])
                 } else {
-                    self.reach_result(&instance, dep)
+                    self.crossing(dep)
                 }
             }
         };
@@ -318,44 +321,28 @@ impl Promoter<'_> {
         found
     }
 
-    /// The slot's value on entry to the region whose dependency port `dep` is.
-    fn reach_port(&mut self, dep: ValueId) -> Reach {
-        let context = self.context;
-        let Some(region) = context.region_of_port(dep) else {
+    /// The slot's value where the chain crosses a loop or a gate: the port a
+    /// region is entered on, or the state the operation left. A gate's arms are
+    /// entered on the state the gate took; only a loop's port carries a value of
+    /// its own, since an iteration may write the slot the next one reads.
+    fn crossing(&mut self, dep: ValueId) -> Reach {
+        let chain::Step::Port {
+            op,
+            index,
+            entering,
+        } = chain::back(self.context, dep)
+        else {
             return Reach::Undefined;
         };
-        let handle = context.get_region(region);
-        let ports: Vec<ValueId> = handle
-            .dep_arguments()
-            .iter()
-            .map(crate::Value::id)
-            .collect();
-        let index = dep_index(&ports, dep);
-        let Some(owner) = handle.parent_op() else {
-            return Reach::Undefined;
-        };
-        let owner = context.get_op(owner);
-        if owner.has_interface::<dyn Gamma>() || !self.writes_under(&owner) {
-            return self.reach(owner.dep_operands()[index]);
-        }
-        if !owner.has_interface::<dyn Theta>() {
-            return Reach::Undefined;
-        }
-        self.grow_theta(&owner, index);
-        self.reach[&dep]
-    }
-
-    /// The slot's value after `op`, a loop or a gate, along its dependency
-    /// result `dep`.
-    fn reach_result(&mut self, op: &OpHandle, dep: ValueId) -> Reach {
-        let index = dep_index(&op.dep_results(), dep);
-        if !self.writes_under(op) {
+        let op = self.context.get_op(op);
+        let repeats = op.has_interface::<dyn Theta>();
+        if !self.writes_under(&op) || (entering && !repeats) {
             return self.reach(op.dep_operands()[index]);
         }
-        if op.has_interface::<dyn Theta>() {
-            self.grow_theta(op, index);
+        if repeats {
+            self.grow_theta(&op, index);
         } else {
-            self.grow_gamma(op, index);
+            self.grow_gamma(&op, index);
         }
         self.reach[&dep]
     }
@@ -515,10 +502,4 @@ impl Promoter<'_> {
             .into_iter()
             .any(|inner| self.writes(&self.context.get_op(inner)).is_some())
     }
-}
-
-fn dep_index(deps: &[ValueId], dep: ValueId) -> usize {
-    deps.iter()
-        .position(|held| *held == dep)
-        .expect("a dependency of the region or op it was read off")
 }

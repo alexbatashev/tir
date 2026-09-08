@@ -1,5 +1,6 @@
 pub mod affine;
 pub mod alias_facts;
+pub mod chain;
 pub mod defuse;
 mod dominance;
 pub mod escape_facts;
