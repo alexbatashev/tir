@@ -72,6 +72,10 @@ pub fn emit(
         ports: Ports { context, cfg, live },
     };
     emitter.statements(tree, body, &mut env)?;
+    let Term::Sink { op, args } = &cfg.nodes[cfg.sink].term else {
+        return Err(unsupported("a region whose exit moved"));
+    };
+    emitter.exit(*op, args.as_deref(), body, &mut env)?;
     context.replace_region_with_nodes(region, body);
     Ok(())
 }
@@ -105,7 +109,6 @@ impl Emitter<'_> {
         match statement {
             Stmt::Node(node) => self.node(*node, region, env),
             Stmt::Assign(assigns) => self.assign(assigns, region, env),
-            Stmt::Exit { op, args } => self.exit(*op, args.as_deref(), region, env),
             Stmt::If {
                 pred,
                 then_arm,

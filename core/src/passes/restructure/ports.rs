@@ -75,7 +75,6 @@ impl Ports<'_> {
                     }
                 }
                 Stmt::Assign(assigns) => assigned.extend(assigns.iter().map(|(var, _)| *var)),
-                Stmt::Exit { .. } => {}
                 Stmt::If {
                     then_arm,
                     else_arm,
