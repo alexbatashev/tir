@@ -231,12 +231,7 @@ fn compile_and_run(
             run_command(&mut link, "cc").map_err(Failed::reported)?;
             return run_program(&executable).map_err(Failed::from);
         }
-        Backend::Gcc => {
-            let mut command = Command::new(variant.compiler());
-            command.arg("-O1").arg("-o").arg(&executable).arg(source);
-            command
-        }
-        Backend::Clang => {
+        Backend::Gcc | Backend::Clang => {
             let mut command = Command::new(variant.compiler());
             command.arg("-O1").arg("-o").arg(&executable).arg(source);
             command
