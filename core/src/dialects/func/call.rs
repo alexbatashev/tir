@@ -139,7 +139,7 @@ impl CallOp {
         if let Some(symbol) = self.callee_symbol() {
             fmt.write(format!(" callee @{symbol}"))?;
         }
-        super::print_argument_alignments(fmt, &self.argument_alignments())?;
+        super::print_keyed_list(fmt, "argument_alignments", &self.argument_alignments())?;
         tir::dependency::print_dep_operands(fmt, &self.0)?;
         fmt.write("\n")
     }
@@ -166,7 +166,8 @@ impl CallOp {
                     .ok_or_else(|| (parser.span(), Error::ExpectedSymbolName))
             })
             .transpose()?;
-        let argument_alignments = super::parse_argument_alignments(parser, context)?;
+        let argument_alignments =
+            super::parse_keyed_array(parser, context, "argument_alignments", "alignment list")?;
 
         let mut builder = CallOpBuilder::new(context)
             .callee(callee)

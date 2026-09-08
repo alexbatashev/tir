@@ -55,36 +55,41 @@ fn noalias_arguments(op: &impl Operation) -> Vec<usize> {
     }
 }
 
-fn parse_noalias_arguments(
+/// The `keyword [a, b, ...]` an argument list is spelled as, absent when the
+/// keyword is not there. `what` names the list in the error.
+fn parse_keyed_array(
     parser: &mut tir::parse::text::Parser,
     context: &Context,
+    keyword: &str,
+    what: &'static str,
 ) -> Result<Option<AttributeValue>, (Span, Error)> {
     use tir::parse::common::Cursor;
-    if !parser.parse_token("noalias") {
+    if !parser.parse_token(keyword) {
         return Ok(None);
     }
     let value = parser
         .parse_attribute_value(context)?
-        .ok_or_else(|| (parser.span(), Error::ExpectedToken("argument list")))?;
+        .ok_or_else(|| (parser.span(), Error::ExpectedToken(what)))?;
     if !matches!(value, AttributeValue::Array(_)) {
-        return Err((parser.span(), Error::ExpectedToken("argument list")));
+        return Err((parser.span(), Error::ExpectedToken(what)));
     }
     Ok(Some(value))
 }
 
-fn print_noalias_arguments(
+fn print_keyed_list<T: std::fmt::Display>(
     fmt: &mut IRFormatter,
-    arguments: &[usize],
+    keyword: &str,
+    items: &[T],
 ) -> Result<(), std::fmt::Error> {
-    if arguments.is_empty() {
+    if items.is_empty() {
         return Ok(());
     }
-    fmt.write(" noalias [")?;
-    for (index, argument) in arguments.iter().enumerate() {
+    fmt.write(format!(" {keyword} ["))?;
+    for (index, item) in items.iter().enumerate() {
         if index > 0 {
             fmt.write(", ")?;
         }
-        fmt.write(argument.to_string())?;
+        fmt.write(item.to_string())?;
     }
     fmt.write("]")
 }
@@ -122,40 +127,6 @@ fn verify_noalias_arguments(
         }
     }
     Ok(())
-}
-
-fn parse_argument_alignments(
-    parser: &mut tir::parse::text::Parser,
-    context: &Context,
-) -> Result<Option<AttributeValue>, (Span, Error)> {
-    use tir::parse::common::Cursor;
-    if !parser.parse_token("argument_alignments") {
-        return Ok(None);
-    }
-    let value = parser
-        .parse_attribute_value(context)?
-        .ok_or_else(|| (parser.span(), Error::ExpectedToken("alignment list")))?;
-    if !matches!(value, AttributeValue::Array(_)) {
-        return Err((parser.span(), Error::ExpectedToken("alignment list")));
-    }
-    Ok(Some(value))
-}
-
-fn print_argument_alignments(
-    fmt: &mut IRFormatter,
-    alignments: &[u64],
-) -> Result<(), std::fmt::Error> {
-    if alignments.is_empty() {
-        return Ok(());
-    }
-    fmt.write(" argument_alignments [")?;
-    for (index, alignment) in alignments.iter().enumerate() {
-        if index > 0 {
-            fmt.write(", ")?;
-        }
-        fmt.write(alignment.to_string())?;
-    }
-    fmt.write("]")
 }
 
 fn verify_argument_alignments(

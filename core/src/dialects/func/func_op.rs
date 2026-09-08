@@ -210,8 +210,8 @@ impl FuncOp {
         if self.has_result_address() {
             fmt.write(" result_address")?;
         }
-        super::print_argument_alignments(fmt, &self.argument_alignments())?;
-        super::print_noalias_arguments(fmt, &self.noalias_arguments())?;
+        super::print_keyed_list(fmt, "argument_alignments", &self.argument_alignments())?;
+        super::print_keyed_list(fmt, "noalias", &self.noalias_arguments())?;
 
         tir::region_format::print_op_region(fmt, &context, self, 0)?;
 
@@ -273,8 +273,9 @@ impl FuncOp {
             UnitType::new(context)
         };
         let result_address = parser.parse_token("result_address");
-        let argument_alignments = super::parse_argument_alignments(parser, context)?;
-        let noalias = super::parse_noalias_arguments(parser, context)?;
+        let argument_alignments =
+            super::parse_keyed_array(parser, context, "argument_alignments", "alignment list")?;
+        let noalias = super::parse_keyed_array(parser, context, "noalias", "argument list")?;
 
         let parameters: Vec<tir::TypeId> = block_args.iter().map(tir::Value::ty).collect();
         let body_region = parser.parse_region_with_entry_args(context, block_args)?;
