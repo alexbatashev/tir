@@ -70,6 +70,9 @@ pub(crate) struct PatternNodeBinding {
     /// Where this operand's register class views its storage element (see
     /// [`super::RegisterRequirement::view_offset`]).
     pub(crate) view_offset: u32,
+    /// The width this operand reads its register at, when it reads it whole
+    /// (see [`super::RegisterRequirement::whole_width`]).
+    pub(crate) whole_width: Option<u32>,
 }
 
 /// What a boundary binding requires of its class. A register operand needs the
@@ -110,6 +113,9 @@ pub(crate) struct PbqpIselMatch {
     /// crosses a boundary for free only between equal offsets: no instruction
     /// moves bits across views implicitly.
     pub(crate) result_view_offset: u32,
+    /// The width of the register the rule defines. A reader that reads its
+    /// operand whole answers only at this width.
+    pub(crate) result_width: Option<u32>,
 }
 /// A solved cover: the chosen alternative for every PBQP node and the e-class
 /// each PBQP node stands for (same index).
@@ -506,6 +512,16 @@ fn produced_view_offset(alternative: &PbqpIselAlternative, matches: &[PbqpIselMa
     }
 }
 
+/// The width a tile defines its destination at. An already-available value is
+/// not one this cover produces: its width is the one its own class carries, and
+/// the operand's [`super::RegisterRequirement::accepts`] is what checks it.
+fn produced_width(alternative: &PbqpIselAlternative, matches: &[PbqpIselMatch]) -> Option<u32> {
+    match alternative {
+        PbqpIselAlternative::Tile { match_id } => matches[*match_id].result_width,
+        PbqpIselAlternative::NotDemanded => None,
+    }
+}
+
 pub(crate) fn alternatives_compatible(
     egraph: &SemEGraph,
     child: Id,
@@ -522,6 +538,7 @@ pub(crate) fn alternatives_compatible(
     let mut immediate = false;
     let mut owned_effect = false;
     let mut demanded_offsets: Vec<u32> = Vec::new();
+    let mut demanded_widths: Vec<u32> = Vec::new();
     for binding in &matched.bindings.pattern_nodes {
         if binding.class != child
             || (binding.pattern_node == matched.pattern_root && binding.class == matched.root)
@@ -531,10 +548,15 @@ pub(crate) fn alternatives_compatible(
         if binding.is_boundary {
             register |= binding.demand == BoundaryDemand::Register;
             immediate |= binding.demand == BoundaryDemand::Immediate;
-            if binding.demand == BoundaryDemand::Register
-                && !demanded_offsets.contains(&binding.view_offset)
-            {
-                demanded_offsets.push(binding.view_offset);
+            if binding.demand == BoundaryDemand::Register {
+                if !demanded_offsets.contains(&binding.view_offset) {
+                    demanded_offsets.push(binding.view_offset);
+                }
+                if let Some(width) = binding.whole_width
+                    && !demanded_widths.contains(&width)
+                {
+                    demanded_widths.push(width);
+                }
             }
         } else if binding.pattern_node != matched.pattern_root
             && !binding.is_state
@@ -545,6 +567,16 @@ pub(crate) fn alternatives_compatible(
     }
     if register {
         if demanded_offsets != [produced_view_offset(child_alt, matches)] {
+            return false;
+        }
+        // An operand read whole is answered only by a tile that defines exactly
+        // the bits it reads: a narrower one leaves the rest of the register
+        // undefined, a wider one holds bits this operand drops. A value already
+        // in a register carries its own width, which the operand's requirement
+        // has already accepted.
+        if let Some(width) = produced_width(child_alt, matches)
+            && demanded_widths.iter().any(|demanded| *demanded != width)
+        {
             return false;
         }
         match child_alt {
