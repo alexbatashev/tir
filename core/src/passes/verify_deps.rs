@@ -16,7 +16,7 @@ use crate::{
     ValueId,
 };
 
-/// cone never runs, and the order it was meant to keep is gone with it.
+/// Check the memory-order invariant of `function`'s unordered body.
 pub fn verify_deps(context: &Context, function: &OpHandle) -> Result<(), crate::Error> {
     let name = function
         .clone()

@@ -1,19 +1,11 @@
-//! Memory order constructed over ordered blocks, before the order is gone.
+//! Memory order constructed over ordered blocks, before the order is gone:
+//! `docs/design/ir.md` §6.2 states which chains an effect names and §6.3 how
+//! reads fork off a change.
 //!
-//! One chain per object the pointer analysis can name, plus a chain for the
-//! memory of unknown provenance. An effect observes its own object's chain and,
-//! where it changes memory, every chain it may alias: those are joined into the
-//! state it takes and split back out of the state it leaves. Reads fork off a
-//! change without ordering one another; the next change, or whatever leaves the
-//! block, takes `state.join` of what the fork left, so a read never trails the
-//! write that overtakes it. A change's result is split only where something
-//! names one of its chains on its own: a run of changes crossing the same
-//! chains would split and join the same set at every step, which orders
-//! nothing the first join did not.
-//!
-//! Two accesses whose objects [`Base::distinct`] tells apart share no chain and
-//! therefore no edge: independence is a property of the graph, not something a
-//! consumer recovers on the side.
+//! What the construction adds to that: a change's result is split only where
+//! something names one of its chains on its own, since a run of changes
+//! crossing the same chains would split and join the same set at every step,
+//! which orders nothing the first join did not.
 
 use std::collections::{BTreeMap, BTreeSet};
 

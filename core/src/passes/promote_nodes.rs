@@ -1,26 +1,12 @@
-//! Demand annotation over unordered regions: a local slot's value on the
-//! ports of the loops and gates its accesses cross.
+//! Demand annotation over unordered regions: a local slot's value on the ports
+//! of the loops and gates its accesses cross. `docs/design/ir.md` §5.3 states
+//! what is promoted and what stays a slot.
 //!
-//! The converter left every access on the memory chain, so the chain says
-//! which write a read sees: walk the dependency a read observes back to the
-//! nearest write of the slot. Where that walk leaves a loop body through its
-//! dependency port, the value crosses an iteration boundary and the loop
-//! carries it as a port of its own; where it leaves a gate through the gate's
-//! dependency result, each arm produces the value it leaves the slot holding
-//! and the gate joins them. Region membership decides nothing: two accesses in
-//! one region are ordered by the chain alone, and insertion order is never read.
-//!
-//! The walk runs twice: once probing, which grows no port and rewrites
-//! nothing, and again for real once the probe has shown that every state the
-//! growth reads holds one value for the slot. What the probe refuses stays a
-//! slot, since a port there would carry no value: two chains a merge brings
-//! together holding different values for it — the seam an inlined body leaves,
-//! where the callee's accesses of the caller's slot sit on a chain of the
-//! callee's own — and a loop whose body writes the slot that nothing wrote it
-//! before.
-//!
-//! What else stays a slot: an escaping address, a partial access, disagreeing
-//! types, and an access off the chain, which nothing can order.
+//! The walk runs twice: once probing, which grows no port and rewrites nothing,
+//! and again for real once the probe has shown that every state the growth
+//! reads holds one value for the slot. Region membership decides nothing: two
+//! accesses in one region are ordered by the chain alone, and insertion order
+//! is never read.
 
 use std::collections::{HashMap, HashSet};
 

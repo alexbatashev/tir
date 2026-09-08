@@ -1,39 +1,11 @@
 //! The laws of the state algebra the memory terms live in, and the placement
-//! facts a memory rewrite reads off them.
-//!
-//! They are definitional, not proved: the axiom prover is QF_BV and has no array
-//! model to quantify a memory over, so a read and a write mean here what addition
-//! means for `addi`. What keeps them honest is that they are narrow. Both read
-//! the state operand the seeder threads, which is the whole of memory identity in
-//! the term graph: a chain reaches an access only through the writes that
-//! actually happened on it, so a law that fires has already been told the two
-//! accesses alias exactly.
-//!
-//! * **S1, store-to-load forwarding.** `Load(a, n, m, Store(s, a, n, v))` is `v`.
-//!   The two accesses name one extent of one object, so the read covers exactly
-//!   the bytes the write left. They must also agree on an IR type: the vocabulary
-//!   is bit-level, and a byte count alone would forward the float a slot was
-//!   written with into the integer a reader spells it as.
-//!
-//! Dead-store elimination is *not* among them. It used to be, as "the
-//! overwritten write leaves the state it was handed" — a claim about who may
-//! observe a memory rather than an equality between two, fenced with a dozen
-//! negated conditions. Saturation only ever merges, so each of those could be
-//! unsaid a round after it was read: two writes whose values differed when the
-//! law fired could be one term by the time it was applied, the surviving write
-//! became congruent to the one it had just retired, and the chain folded back to
-//! the memory before all of them — every write dropped rather than one.
-//!
-//! What that law wanted from the graph is not an equality at all. It is one
-//! question about two writes: do they name the one extent? [`pointer_derivation`]
-//! answers it, and the commit asks once the graph has saturated, walking the
-//! chain in the IR where the answer is yes (see `Driver::shortened_state`). A
-//! read of the saturated graph cannot be unsaid, and it costs one lookup per
-//! adjacent pair rather than a rebuilt term per pair.
+//! facts a memory rewrite reads off them. `docs/design/ir.md` §6.5 states which
+//! laws hold, why they are definitional rather than proved, and why dead-store
+//! elimination is the commit's rather than a law.
 //!
 //! An access is placed by its *extent* — the object its address is derived from,
-//! the byte offset into it, and the byte count — rather than by its address
-//! class, so `p + 4` and `p + 2 + 2` are the one extent they are.
+//! the byte offset into it, and the byte count — which is what
+//! [`pointer_derivation`] answers.
 
 use smallvec::smallvec;
 use tir_relational::ClassId as Id;
