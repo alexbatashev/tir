@@ -29,7 +29,7 @@ pub use target::{
     ModelCheckTarget, TARGETS, TargetInfo, TargetMachine, select_target, select_target_with_abi,
     supported_targets,
 };
-pub use target_boilerplate::{apply_mattr, block_attr, normalize_name, string_attr};
+pub use target_boilerplate::{apply_mattr, normalize_name};
 
 // Re-exported so the `register_target!` macro can reference linkme from the
 // backend crates without each of them depending on it directly.
@@ -665,7 +665,7 @@ pub fn emit_uncond_branch(
     Box::new(
         VirtualBranchOpBuilder::new(context)
             .dest_args(args.to_vec())
-            .attr("dest", AttributeValue::Block(dest))
+            .dest(dest)
             .build(),
     )
 }

@@ -92,13 +92,6 @@ impl GlobalOp {
         self.result()
     }
 
-    pub fn sym_name(&self) -> String {
-        match self.attr("sym_name") {
-            Some(AttributeValue::Str(name)) => name.to_string(),
-            _ => panic!("global must carry sym_name"),
-        }
-    }
-
     /// Whether this only declares an object another module defines.
     pub fn is_external(&self) -> bool {
         self.attr("external") == Some(AttributeValue::Bool(true))

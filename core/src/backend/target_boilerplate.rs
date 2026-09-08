@@ -72,24 +72,6 @@ macro_rules! target_abis {
     };
 }
 
-/// The block a branch op targets through its `name` attribute.
-pub fn block_attr(op: &dyn tir::Operation, name: &str) -> Result<tir::BlockId, tir::PassError> {
-    match op.attr(name) {
-        Some(tir::attributes::AttributeValue::Block(block)) => Some(block),
-        _ => None,
-    }
-    .ok_or_else(|| tir::PassError::InvalidRuleSet(format!("branch is missing its '{name}' target")))
-}
-
-/// The string an op carries in its `name` attribute (a call's callee symbol).
-pub fn string_attr(op: &dyn tir::Operation, name: &str) -> Result<String, tir::PassError> {
-    match op.attr(name) {
-        Some(tir::attributes::AttributeValue::Str(s)) => Some(s.to_string()),
-        _ => None,
-    }
-    .ok_or_else(|| tir::PassError::InvalidRuleSet(format!("call is missing its '{name}'")))
-}
-
 /// Implement [`TargetMachine`](crate::backend::TargetMachine) for a target
 /// struct holding a `config` and a `selected_abi` field.
 ///

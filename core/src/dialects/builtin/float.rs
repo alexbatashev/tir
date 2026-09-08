@@ -313,13 +313,6 @@ operation! {
 
 impl crate::Speculatable for FPToUIOp {}
 
-impl ConstantFOpBuilder {
-    /// The constant, held as `f64`; every supported format embeds in it exactly.
-    pub fn value(self, v: f64) -> Self {
-        self.attr("value", AttributeValue::F64(v))
-    }
-}
-
 operation! {
     AddFOp {
         name: "addf",

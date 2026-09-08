@@ -28,7 +28,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::analysis::AnalysisManager;
-use crate::attributes::{AttributeValue, Predicate};
+use crate::attributes::Predicate;
 use crate::builtin::{CmpIOpBuilder, ConstantOpBuilder, IntegerType};
 use crate::cfg::{BranchOpBuilder, CondBranchOpBuilder};
 use crate::func::{FuncOp, ReturnOpBuilder};
@@ -128,8 +128,8 @@ impl CfgEdges<'_> {
             .condition(condition)
             .true_args(taken_values)
             .false_args(fallthrough_values)
-            .attr("true_dest", AttributeValue::Block(taken.dest))
-            .attr("false_dest", AttributeValue::Block(fallthrough.dest))
+            .true_dest(taken.dest)
+            .false_dest(fallthrough.dest)
             .build();
         for dep in taken_deps.into_iter().chain(fallthrough_deps) {
             self.context.append_dep_operand(op.id(), dep);
@@ -149,7 +149,7 @@ impl Edges for CfgEdges<'_> {
         let (values, deps) = self.split(&edge.args);
         let op = BranchOpBuilder::new(self.context)
             .dest_args(values)
-            .attr("dest", AttributeValue::Block(edge.dest))
+            .dest(edge.dest)
             .build();
         for dep in deps {
             self.context.append_dep_operand(op.id(), dep);

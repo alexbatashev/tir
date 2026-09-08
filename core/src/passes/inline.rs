@@ -479,7 +479,7 @@ fn fold_tuple_gets(
         let Some(made) = context.get_op(source).as_op::<MakeTupleOp>() else {
             continue;
         };
-        let Some(&element) = Operation::operands(&made).get(get.index()) else {
+        let Some(&element) = Operation::operands(&made).get(get.index() as usize) else {
             continue;
         };
         rename(context, body, get.result(), element);

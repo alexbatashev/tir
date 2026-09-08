@@ -1,4 +1,3 @@
-use tir::attributes::AttributeValue;
 use tir::helpers::operation;
 use tir::{Any, Operation, Terminator};
 
@@ -103,19 +102,10 @@ impl tir::Speculatable for SymbolAddressOp {}
 
 impl tir::Pure for SymbolAddressOp {}
 
-impl SymbolAddressOp {
-    pub fn sym_name(&self) -> String {
-        match self.attr("sym_name") {
-            Some(AttributeValue::Str(name)) => name.to_string(),
-            _ => panic!("asm.symbol_address must carry sym_name"),
-        }
-    }
-}
-
 /// The address of `name`, as an opaque pointer.
 pub fn symbol_address_of(context: &tir::Context, name: &str) -> SymbolAddressOp {
     SymbolAddressOpBuilder::new(context)
-        .attr("sym_name", AttributeValue::Str(name.to_string().into()))
+        .sym_name(name)
         .result_type(tir::ptr::PtrType::opaque(context))
         .build()
 }
@@ -279,43 +269,4 @@ impl MachineInstruction for VirtualIndirectCallOp {
     fn instance(&self) -> &tir::OpHandle {
         &self.0
     }
-}
-
-impl VirtualCallOpBuilder {
-    pub fn outgoing_stack_size(self, size: u64) -> Self {
-        self.attr(
-            "outgoing_stack_size",
-            tir::attributes::AttributeValue::UInt(size),
-        )
-    }
-}
-
-impl VirtualIndirectCallOpBuilder {
-    pub fn outgoing_stack_size(self, size: u64) -> Self {
-        self.attr(
-            "outgoing_stack_size",
-            tir::attributes::AttributeValue::UInt(size),
-        )
-    }
-}
-
-impl VirtualCallOp {
-    pub fn outgoing_stack_size(&self) -> u64 {
-        outgoing_stack_size(self)
-    }
-}
-
-impl VirtualIndirectCallOp {
-    pub fn outgoing_stack_size(&self) -> u64 {
-        outgoing_stack_size(self)
-    }
-}
-
-fn outgoing_stack_size(op: &impl Operation) -> u64 {
-    op.attr("outgoing_stack_size")
-        .and_then(|value| match value {
-            tir::attributes::AttributeValue::UInt(value) => Some(value),
-            _ => None,
-        })
-        .expect("verified virtual calls have an outgoing stack size")
 }

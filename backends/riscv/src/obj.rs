@@ -6,8 +6,7 @@ use tir::Operation;
 use tir::attributes::AttributeValue;
 use tir::backend::binary::{EM_RISCV, ElfClass, ObjectFormatInfo, RelocKind};
 use tir::backend::{
-    VirtualBranchOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp, block_attr, phys_attr,
-    string_attr,
+    VirtualBranchOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp, phys_attr,
 };
 
 use crate::{JumpAndLinkOpBuilder, JumpAndLinkRegOpBuilder, gpr_ty};
@@ -198,10 +197,9 @@ pub(crate) fn finalize_virtual_ops(
                 "block arguments on branch edges are not supported by codegen yet".to_string(),
             ));
         }
-        let dest = block_attr(&br, "dest")?;
         let jump = JumpAndLinkOpBuilder::new(context)
             .attr("rd", phys_attr((crate::RegClass::GPR.id(), 0)))
-            .attr("imm", AttributeValue::Block(dest))
+            .attr("imm", AttributeValue::Block(br.dest()))
             .build();
         rewriter.replace_op(op, &jump)?;
         return Ok(true);
@@ -211,13 +209,12 @@ pub(crate) fn finalize_virtual_ops(
     // the encoder as a fixup and is emitted as an R_RISCV_JAL relocation, since
     // the callee's address is unknown until link time.
     if let Some(call) = op.as_op::<VirtualCallOp>() {
-        let callee = string_attr(&call, "callee")?;
         let jal = JumpAndLinkOpBuilder::new(context)
             .attr(
                 "rd",
                 phys_attr(crate::default_abi().ra.expect("RISC-V ABI must define ra")),
             )
-            .attr("imm", AttributeValue::Str(callee.into()))
+            .attr("imm", AttributeValue::Str(call.callee().into()))
             .build();
         tir::backend::forward_state(context, op.op(), &jal);
         rewriter.replace_op(op, &jal)?;

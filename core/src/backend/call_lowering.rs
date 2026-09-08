@@ -213,7 +213,7 @@ impl CallLowering {
         for (index, element_ty) in tuple.elements(context).into_iter().enumerate() {
             let extract = TupleGetOpBuilder::new(context)
                 .tuple(value)
-                .attr("index", AttributeValue::UInt(index as u64))
+                .index(index as u64)
                 .result_type(element_ty)
                 .build();
             context.add(region, extract.id());
@@ -403,7 +403,7 @@ impl CallLowering {
         let call: Box<dyn Operation> = match callee {
             Callee::Direct(name) => {
                 let mut builder = super::VirtualCallOpBuilder::new(context)
-                    .attr("callee", AttributeValue::Str(name.into()))
+                    .callee(name)
                     .outgoing_stack_size(u64::from(outgoing_size))
                     .attr("clobbers", clobbers)
                     .attr("uses", uses);
@@ -607,9 +607,12 @@ impl CallLowering {
             let extract = instance.clone().as_op::<TupleGetOp>().ok_or_else(|| {
                 PassError::InvalidRuleSet("tuple call result has a non-extraction use".to_string())
             })?;
-            let register = registers.get(extract.index()).copied().ok_or_else(|| {
-                PassError::InvalidRuleSet("tuple extraction index is out of bounds".to_string())
-            })?;
+            let register = registers
+                .get(extract.index() as usize)
+                .copied()
+                .ok_or_else(|| {
+                    PassError::InvalidRuleSet("tuple extraction index is out of bounds".to_string())
+                })?;
             extracts.push((
                 extract.index(),
                 extract.result(),
@@ -656,7 +659,7 @@ fn insert_tuple_extractions(
     for (index, element_ty) in tuple.elements(context).into_iter().enumerate() {
         let extract = TupleGetOpBuilder::new(context)
             .tuple(tuple_value)
-            .attr("index", AttributeValue::UInt(index as u64))
+            .index(index as u64)
             .result_type(element_ty)
             .build();
         elements.push(extract.result());

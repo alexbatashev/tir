@@ -260,15 +260,8 @@ mod isa {
                     "block arguments on branch edges are not supported by codegen yet".to_string(),
                 ));
             }
-            let dest = match br.attr("dest") {
-                Some(AttributeValue::Block(block)) => Some(block),
-                _ => None,
-            }
-            .ok_or_else(|| {
-                tir::PassError::InvalidRuleSet("branch is missing its 'dest' target".to_string())
-            })?;
             let jump = JmpOpBuilder::new(context)
-                .attr("imm", AttributeValue::Block(dest))
+                .attr("imm", AttributeValue::Block(br.dest()))
                 .build();
             rewriter.replace_op(op, &jump)?;
             return Ok(true);
@@ -278,15 +271,8 @@ mod isa {
         // the encoder as a fixup, emitted as an R_X86_64_PLT32 relocation since the
         // callee's address is unknown until link time.
         if let Some(call) = op.as_op::<VirtualCallOp>() {
-            let callee = match call.attr("callee") {
-                Some(AttributeValue::Str(s)) => Some(s.clone()),
-                _ => None,
-            }
-            .ok_or_else(|| {
-                tir::PassError::InvalidRuleSet("vcall is missing its 'callee'".to_string())
-            })?;
             let real = CallOpBuilder::new(context)
-                .attr("imm", AttributeValue::Str(callee))
+                .attr("imm", AttributeValue::Str(call.callee().into()))
                 .build();
             tir::backend::forward_state(context, op.op(), &real);
             rewriter.replace_op(op, &real)?;

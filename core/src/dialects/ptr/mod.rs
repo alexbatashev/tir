@@ -173,33 +173,6 @@ operation! {
     }
 }
 
-impl AllocaOpBuilder {
-    pub fn size(self, size: u64) -> Self {
-        self.attr("size", AttributeValue::UInt(size))
-    }
-
-    pub fn align(self, align: u64) -> Self {
-        self.attr("align", AttributeValue::UInt(align))
-    }
-}
-
-impl AllocaOp {
-    pub fn size(&self) -> u64 {
-        uint_attribute(self, "size")
-    }
-
-    pub fn align(&self) -> u64 {
-        uint_attribute(self, "align")
-    }
-}
-
-fn uint_attribute(op: &impl Operation, name: &str) -> u64 {
-    match op.attr(name) {
-        Some(AttributeValue::UInt(value)) => value,
-        _ => panic!("{name} must be an unsigned integer attribute"),
-    }
-}
-
 operation! {
     NullOp {
         name: "null",

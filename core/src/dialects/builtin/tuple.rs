@@ -173,13 +173,6 @@ impl TupleGetOp {
     pub fn tuple(&self) -> crate::ValueId {
         self.operands()[0]
     }
-
-    pub fn index(&self) -> usize {
-        match self.attr("index") {
-            Some(crate::attributes::AttributeValue::UInt(index)) => index as usize,
-            _ => panic!("tuple_get must carry an index"),
-        }
-    }
 }
 
 impl tir::Verifiable for TupleGetOp {
@@ -191,7 +184,7 @@ impl tir::Verifiable for TupleGetOp {
             ));
         };
         let elements = tuple.elements(context);
-        let Some(&expected) = elements.get(self.index()) else {
+        let Some(&expected) = elements.get(self.index() as usize) else {
             return Err(Error::VerificationError(format!(
                 "tuple_get index {} is out of bounds for {} elements",
                 self.index(),

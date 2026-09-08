@@ -145,7 +145,11 @@ Only `name` and `dialect` are required. Most operations use a subset of the
 sections above.
 
 - `attributes`: declares required attribute names and their expected attribute
-  kinds. The generated verifier checks the shape.
+  kinds. The generated verifier checks the shape, and each attribute of a scalar
+  kind earns a setter on the builder and a getter on the operation, both named
+  after it: `BranchOpBuilder::dest(block)` and `BranchOp::dest()`. `Array`,
+  `Dict` and `any` have no single Rust type, so they are read and written
+  through `attr`.
 - `operands`: declares ordered operands and their type constraints.
 - `results`: declares result slots and their type constraints. Builders use one
   `result_type` field, or `result_types`/`result_values` for a variadic result
