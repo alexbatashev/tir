@@ -28,19 +28,47 @@ pub use restructure::RestructureNodesPass;
 pub use symbol_uniqueness::CheckUniqueSymbolsPass;
 pub use verify_deps::{VerifyDepsPass, verify_deps};
 
-use crate::{ConstantLike, Context, OpHandle, OpId, Pure, RegionId};
+use std::collections::HashSet;
+
+use crate::{ConstantLike, Context, OpHandle, OpId, Pure, RegionId, ValueId};
 
 /// Every region under `root`, each one ahead of the regions nested inside it.
 pub(crate) fn regions_under(context: &Context, root: OpId) -> Vec<RegionId> {
-    let mut found = Vec::new();
-    let mut pending = context.get_op(root).regions().to_vec();
-    while let Some(region) = pending.pop() {
-        found.push(region);
-        for op in context.get_region(region).op_ids() {
-            pending.extend(context.get_op(op).regions().iter().copied());
+    context
+        .get_op(root)
+        .regions()
+        .iter()
+        .flat_map(|&region| context.nested_regions(region))
+        .collect()
+}
+
+/// The operations the results of `roots` demand: an operation is demanded
+/// through an operand of a demanded one, or through the results of a region of
+/// one. An operation in a region nobody demands is demanded by nothing, however
+/// its own region reads it.
+pub(crate) fn demanded_ops(context: &Context, roots: &[RegionId]) -> HashSet<OpId> {
+    let defining = |values: Vec<ValueId>| {
+        values
+            .into_iter()
+            .filter_map(|value| context.get_value(value).defining_op())
+            .collect::<Vec<_>>()
+    };
+    let mut worklist: Vec<OpId> = roots
+        .iter()
+        .flat_map(|&region| defining(context.get_region(region).results()))
+        .collect();
+    let mut demanded = HashSet::new();
+    while let Some(op) = worklist.pop() {
+        if !demanded.insert(op) {
+            continue;
+        }
+        let instance = context.get_op(op);
+        worklist.extend(defining(instance.operands().to_vec()));
+        for region in instance.regions() {
+            worklist.extend(defining(context.get_region(region).results()));
         }
     }
-    found
+    demanded
 }
 
 /// A value op the transforms may reason about as an expression: one that

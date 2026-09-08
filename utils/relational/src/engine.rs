@@ -1023,12 +1023,6 @@ impl<L: Label> Engine<L> {
             .flat_map(|label| self.consts.classes_with(label))
     }
 
-    /// The type every term of `class` carries, as the language spells it.
-    /// `None` when no row of the class is typed.
-    pub fn type_of(&self, class: ClassId) -> Option<u64> {
-        self.types.get(self.find(class))
-    }
-
     /// The node interned under `label`.
     pub fn label_node(&self, label: LabelId) -> Option<&L> {
         (label.index() < self.labels.len()).then(|| self.labels.node(label))

@@ -262,10 +262,6 @@ fn gpr_ty(context: &tir::Context) -> tir::TypeId {
     tir::backend::RegClassType::new(context, RegClass::GPR.id())
 }
 
-pub fn create_isel_pass(context: &tir::Context) -> tir::backend::isel::InstructionSelectPass {
-    create_isel_pass_for(context, Feature::ALL, arm64_default_abi())
-}
-
 fn create_isel_pass_for(
     context: &tir::Context,
     features: &[Feature],
@@ -511,10 +507,6 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
                 .build(),
         )])
     }
-}
-
-pub fn create_regalloc_stage() -> Vec<Box<dyn tir::Pass>> {
-    tir::backend::prealloc::regalloc_stage_for(|| Box::new(Arm64RegAlloc) as _, arm64_default_abi())
 }
 
 /// The AArch64 application-profile target, selected via `--march`/`--mcpu`.

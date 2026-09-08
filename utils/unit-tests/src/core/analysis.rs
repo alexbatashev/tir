@@ -9,7 +9,7 @@ use tir::{
     Analysis, AnalysisManager, Context, OpId, Operand, Operation,
 };
 
-struct Simple;
+pub(crate) struct Simple;
 
 impl Analysis for Simple {
     fn build(_: &AnalysisManager, _: &Context, _: OpId) -> Self {

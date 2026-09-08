@@ -206,7 +206,7 @@ impl<'a> Writer<'a> {
             return self.write_blocks(func, &Destructured::default(), debug, out);
         }
         let mut rewriter = tir::Rewriter::new(self.context.clone());
-        let copy = rewriter.clone_op(func.id());
+        let copy = tir::clone_op(self.context, func.id());
         self.module.body().append(copy);
         let copy = FuncOp::from_op_instance(self.context.get_op(copy));
         let name = attr_str(func, "sym_name")?;

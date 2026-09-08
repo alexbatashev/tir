@@ -10,7 +10,7 @@ pub mod backend;
 pub mod binding;
 mod block;
 mod clone;
-pub use clone::clone_region_with_mapping;
+pub use clone::{clone_op, clone_region_with_mapping};
 mod context;
 pub mod dependency;
 mod edits;

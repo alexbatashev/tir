@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use linkme::distributed_slice;
 
-use crate::{Context, OpHandle, OpId, Operation, RegionKind, Value, analysis::AnalysisManager};
+use crate::{Context, OpHandle, OpId, Operation, RegionKind, analysis::AnalysisManager};
 
 /// A pass made available to the pipeline parser by name.
 ///
@@ -418,12 +418,6 @@ impl Rewriter {
         &self.context
     }
 
-    /// Give `block` one more entry argument. The block keeps its id, so the
-    /// branches naming it as a destination stay valid.
-    pub fn append_block_argument(&mut self, block: crate::BlockId, ty: crate::TypeId) -> Value {
-        self.context.append_block_argument(block, ty)
-    }
-
     /// Move everything `block` holds from `at` onward into a fresh block, which
     /// is returned detached: the caller decides where in a region it belongs.
     pub fn split_block(&mut self, block: crate::BlockId, at: usize) -> BlockHandle {
@@ -435,18 +429,6 @@ impl Rewriter {
             split.append(op);
         }
         split
-    }
-
-    /// Copy `op` and everything under it, returning the copy. The copy is
-    /// detached: the caller decides which block it joins.
-    pub fn clone_op(&mut self, op: OpId) -> OpId {
-        crate::clone::clone_op(&self.context, op)
-    }
-
-    /// Copy `region` and everything under it, returning the copy. The copy is
-    /// detached: the caller decides which operation owns it.
-    pub fn clone_region(&mut self, region: crate::RegionId) -> crate::RegionId {
-        crate::clone::clone_region(&self.context, region)
     }
 
     /// Move every block of `source` to the end of `destination`, emptying
@@ -461,17 +443,6 @@ impl Rewriter {
         {
             source.remove_block(block);
             destination.add_block(block);
-        }
-    }
-
-    /// Move every operation of `source` to the end of `destination`, emptying
-    /// `source`.
-    pub fn splice_block(&mut self, source: crate::BlockId, destination: crate::BlockId) {
-        let source = self.context.get_block(source);
-        let destination = self.context.get_block(destination);
-        for op in source.op_ids() {
-            source.remove_op(op);
-            destination.append(op);
         }
     }
 
@@ -713,22 +684,11 @@ enum PassNode {
 
 pub struct PassManager {
     passes: Vec<PassNode>,
-    verify_ir: Option<bool>,
 }
 
 impl PassManager {
     pub fn new() -> Self {
-        Self {
-            passes: vec![],
-            verify_ir: None,
-        }
-    }
-
-    /// Force post-pass IR verification on or off for this pipeline, overriding
-    /// the `TIR_VERIFY_IR` environment default.
-    pub fn verify_ir(&mut self, enabled: bool) -> &mut Self {
-        self.verify_ir = Some(enabled);
-        self
+        Self { passes: vec![] }
     }
 
     pub fn add_pass<P: Pass + 'static>(&mut self, pass: P) -> &mut Self {
@@ -802,7 +762,7 @@ impl PassManager {
         analyses: &AnalysisManager,
     ) -> Result<OperationRef, PassError> {
         for entry in &mut self.passes {
-            Self::run_entry(entry, self.verify_ir, context, &root, rewriter, analyses)?;
+            Self::run_entry(entry, context, &root, rewriter, analyses)?;
             if let Some(current) = refreshed(rewriter, &root) {
                 root = current;
             }
@@ -812,7 +772,6 @@ impl PassManager {
 
     fn run_entry(
         entry: &mut PassNode,
-        verify_ir: Option<bool>,
         context: &Context,
         root: &OperationRef,
         rewriter: &mut Rewriter,
@@ -842,7 +801,7 @@ impl PassManager {
                 // than from the pass's own report.
                 let mutated = context.op_version(root.op.id) != version_before;
                 let dirty = context.take_dirty_ops();
-                if mutated && verify_ir.unwrap_or_else(ir_verification_enabled) {
+                if mutated && ir_verification_enabled() {
                     context
                         .verify_use_lists()
                         .map_err(|error| PassError::InvalidIR {

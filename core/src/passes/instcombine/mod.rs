@@ -50,8 +50,6 @@ struct Driver<'a> {
     context: &'a Context,
     eg: Engine<Node>,
     value_class: HashMap<ValueId, Id>,
-    /// The block each block argument belongs to: it has no defining op, so the
-    /// scope check has no other way to place it.
     ruleset: Ruleset,
     /// The value whose readers are being rewired. It answers for its own class
     /// and would answer every rewrite with itself, so no spelling may pick it.

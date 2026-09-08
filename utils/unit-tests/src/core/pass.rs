@@ -4,7 +4,6 @@ use std::collections::HashMap;
 
 use tir::{
     builtin::{ops, AddIOp, IntegerType},
-    cfg::ops as cfg_ops,
     func::{ops as func_ops, FuncOp},
     AnalysisManager, Context, Operation, OperationRef, Pass, PassError, PassManager, PassTarget,
     Rewriter,
@@ -128,7 +127,6 @@ fn run_on_broken_candidate(pass: Box<dyn Pass>) -> Result<(), PassError> {
     body.append_op(func_ops::r#return(&context, add_result).build());
 
     let mut pm = PassManager::new();
-    pm.verify_ir(true);
     pm.add_boxed_pass(pass);
     pm.run(&context, context.get_op(func.id()))
 }
@@ -140,22 +138,6 @@ fn invalid_ir_after_a_pass_names_that_pass() {
     assert!(
         error.to_string().contains("break-ir"),
         "error should name the offending pass, got: {error}"
-    );
-}
-
-#[test]
-fn appending_a_block_argument_keeps_the_block_id() {
-    let context = Context::with_default_dialects();
-    let i32 = IntegerType::new(&context, 32);
-    let block = context.create_block(vec![]);
-    let mut rewriter = Rewriter::new(context.clone());
-
-    let argument = rewriter.append_block_argument(block.id(), i32);
-
-    let block = context.get_block(block.id());
-    assert_eq!(
-        block.arguments().iter().map(|a| a.id()).collect::<Vec<_>>(),
-        vec![argument.id()]
     );
 }
 
@@ -176,31 +158,6 @@ fn splitting_a_block_moves_its_tail_into_a_new_block() {
     assert_eq!(context.parent_block(tail.id()), Some(split.id()));
 }
 
-#[test]
-fn splicing_a_block_appends_its_operations_to_another() {
-    let context = Context::with_default_dialects();
-    let i32 = IntegerType::new(&context, 32);
-    let value = context.create_value(i32, None);
-    let destination = context.create_block(vec![]);
-    let source = context.create_block(vec![]);
-    let head = destination
-        .clone()
-        .append_op(ops::addi(&context, value.id(), value.id(), i32).build());
-    let moved = source
-        .clone()
-        .append_op(ops::subi(&context, value.id(), value.id(), i32).build());
-    let mut rewriter = Rewriter::new(context.clone());
-
-    rewriter.splice_block(source.id(), destination.id());
-
-    assert_eq!(
-        context.get_block(destination.id()).op_ids(),
-        vec![head.id(), moved.id()]
-    );
-    assert!(context.get_block(source.id()).is_empty());
-    assert_eq!(context.parent_block(moved.id()), Some(destination.id()));
-}
-
 /// A function whose body block takes one argument, adds it to itself and
 /// returns the sum.
 fn function_with_one_argument(context: &Context) -> FuncOp {
@@ -212,59 +169,6 @@ fn function_with_one_argument(context: &Context) -> FuncOp {
     let add = block.append_op(ops::addi(context, argument.id(), argument.id(), i32).build());
     block.append_op(func_ops::r#return(context, add.result()).build());
     func_ops::lambda(context, "demo", i32, &region).build()
-}
-
-#[test]
-fn cloning_an_op_remaps_values_defined_inside_it() {
-    let context = Context::with_default_dialects();
-    let source = function_with_one_argument(&context);
-    let mut rewriter = Rewriter::new(context.clone());
-
-    let clone = rewriter.clone_op(source.id());
-
-    let clone = context.get_op(clone);
-    assert_ne!(clone.id, source.id());
-    let body = context
-        .get_region(clone.regions()[0])
-        .iter(context.clone())
-        .next()
-        .expect("the clone keeps the body block");
-    let argument = body.arguments()[0].id();
-    assert_ne!(argument, source.body().arguments()[0].id());
-    let add = context.get_op(body.op_ids()[0]);
-    assert_eq!(add.operands().as_slice(), vec![argument, argument]);
-    let r#return = context.get_op(body.op_ids()[1]);
-    assert_eq!(r#return.operands().as_slice(), vec![add.results()[0]]);
-}
-
-#[test]
-fn cloning_a_region_remaps_branch_destinations() {
-    let context = Context::with_default_dialects();
-    let region = context.create_region();
-    let entry = context.create_block(vec![]);
-    let target = context.create_block(vec![]);
-    region.add_block(entry.id());
-    region.add_block(target.id());
-    entry.append_op(cfg_ops::br(&context, vec![], target.id()).build());
-    target
-        .clone()
-        .append_op(func_ops::r#return(&context, tir::Operand::none()).build());
-    let mut rewriter = Rewriter::new(context.clone());
-
-    let clone = rewriter.clone_region(region.id());
-
-    let blocks: Vec<_> = context
-        .get_region(clone)
-        .iter(context.clone())
-        .map(|block| block.id())
-        .collect();
-    assert_eq!(blocks.len(), 2);
-    assert!(!blocks.contains(&target.id()));
-    let branch = context
-        .get_op(context.get_block(blocks[0]).op_ids()[0])
-        .as_op::<tir::cfg::BranchOp>()
-        .expect("the clone keeps the branch");
-    assert_eq!(branch.dest(), blocks[1]);
 }
 
 #[test]
@@ -295,12 +199,12 @@ fn a_pass_that_changes_nothing_is_not_verified() {
 
 #[test]
 fn an_analysis_survives_a_pass_that_changes_nothing() {
-    use tir::analysis::DominatorTree;
+    use super::analysis::Simple;
 
     let context = Context::with_default_dialects();
     let func = function_with_one_argument(&context);
     let analyses = AnalysisManager::new();
-    let before = analyses.get::<DominatorTree>(&context, func.id());
+    let before = analyses.get::<Simple>(&context, func.id());
 
     let mut pm = PassManager::new();
     pm.add_pass(ReadOnlyPass);
@@ -310,13 +214,13 @@ fn an_analysis_survives_a_pass_that_changes_nothing() {
 
     assert!(std::rc::Rc::ptr_eq(
         &before,
-        &analyses.get::<DominatorTree>(&context, func.id())
+        &analyses.get::<Simple>(&context, func.id())
     ));
 }
 
 #[test]
 fn repeated_pass_runs_do_not_grow_the_analysis_cache() {
-    use tir::analysis::DominatorTree;
+    use super::analysis::Simple;
 
     let context = Context::with_default_dialects();
     let func = function_with_one_argument(&context);
@@ -329,7 +233,7 @@ fn repeated_pass_runs_do_not_grow_the_analysis_cache() {
         let root = OperationRef::new(context.get_op(func.id()));
         pm.run_on_op_ref(&context, root, &analyses)
             .expect("touching a block attribute keeps the IR valid");
-        analyses.get::<DominatorTree>(&context, func.id());
+        analyses.get::<Simple>(&context, func.id());
         counts.push(analyses.cached_count());
     }
 
@@ -341,12 +245,12 @@ fn repeated_pass_runs_do_not_grow_the_analysis_cache() {
 
 #[test]
 fn an_analysis_is_rebuilt_after_a_pass_mutates() {
-    use tir::analysis::DominatorTree;
+    use super::analysis::Simple;
 
     let context = Context::with_default_dialects();
     let func = function_with_one_argument(&context);
     let analyses = AnalysisManager::new();
-    let before = analyses.get::<DominatorTree>(&context, func.id());
+    let before = analyses.get::<Simple>(&context, func.id());
 
     let mut pm = PassManager::new();
     pm.add_pass(AddToSubPass);
@@ -356,7 +260,7 @@ fn an_analysis_is_rebuilt_after_a_pass_mutates() {
 
     assert!(!std::rc::Rc::ptr_eq(
         &before,
-        &analyses.get::<DominatorTree>(&context, func.id())
+        &analyses.get::<Simple>(&context, func.id())
     ));
 }
 

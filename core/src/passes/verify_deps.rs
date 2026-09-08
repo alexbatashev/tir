@@ -7,14 +7,12 @@
 //! from the body's results, since under demand evaluation an effect nothing
 //! demands never runs.
 
-use std::collections::HashSet;
-
 use crate::analysis::AnalysisManager;
 use crate::func::{CallOp, FuncOp, ReturnOp};
 use crate::ptr::MemcpyOp;
 use crate::{
-    Context, MemoryRead, MemoryWrite, OpHandle, OpId, OperationRef, Pass, PassError, PassTarget,
-    PromotableAllocation, RegionKind, Rewriter, ValueId,
+    Context, MemoryRead, MemoryWrite, OpHandle, OperationRef, Pass, PassError, PassTarget,
+    PromotableAllocation, RegionKind, Rewriter,
 };
 
 /// What one operation does to memory, before the objects it names are read.
@@ -50,7 +48,9 @@ fn classify(op: &OpHandle) -> Option<Kind> {
     op.is::<ReturnOp>().then_some(Kind::Export)
 }
 
-/// cone never runs, and the order it was meant to keep is gone with it.
+/// Check the dependency chains of `function`: every operation touching memory
+/// names the state it observes, every one changing memory leaves a state
+/// behind, and every such operation is demanded from the body's results.
 pub fn verify_deps(context: &Context, function: &OpHandle) -> Result<(), crate::Error> {
     let name = function
         .clone()
@@ -64,31 +64,7 @@ pub fn verify_deps(context: &Context, function: &OpHandle) -> Result<(), crate::
             op.name()
         )))
     };
-    // Demand runs from the body's results: an op is demanded through an operand
-    // of a demanded op or a result of a region of one, and an op in a region
-    // nobody demands is demanded by nothing, however its own region reads it.
-    let mut demanded: HashSet<OpId> = HashSet::new();
-    let defining = |values: Vec<ValueId>| {
-        values
-            .into_iter()
-            .filter_map(|value| context.get_value(value).defining_op())
-            .collect::<Vec<_>>()
-    };
-    let mut worklist: Vec<OpId> = function
-        .regions()
-        .iter()
-        .flat_map(|&region| defining(context.get_region(region).results()))
-        .collect();
-    while let Some(op) = worklist.pop() {
-        if !demanded.insert(op) {
-            continue;
-        }
-        let instance = context.get_op(op);
-        worklist.extend(defining(instance.operands().to_vec()));
-        for region in instance.regions() {
-            worklist.extend(defining(context.get_region(region).results()));
-        }
-    }
+    let demanded = super::demanded_ops(context, &function.regions());
     for region in function
         .regions()
         .iter()

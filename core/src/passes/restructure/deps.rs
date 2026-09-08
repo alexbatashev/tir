@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::analysis::alias_facts::{Base, accessed_only, object_base};
+use crate::analysis::objects::{Base, accessed_only, object_base};
 use crate::func::CallOp;
 use crate::ptr::MemcpyOp;
 use crate::state::{JoinOpBuilder, SplitOpBuilder};

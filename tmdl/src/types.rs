@@ -267,13 +267,6 @@ impl TypeEnv {
         Self::default()
     }
 
-    pub fn enter_scope(self) -> Self {
-        TypeEnv {
-            bindings: HashMap::new(),
-            parent: Some(Box::new(self)),
-        }
-    }
-
     pub fn exit_scope(self) -> Option<Self> {
         self.parent.map(|p| *p)
     }

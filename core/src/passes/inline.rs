@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::analysis::AnalysisManager;
+use crate::analysis::{AnalysisManager, regions::subtree_ops};
 use crate::builtin::{MakeTupleOp, ModuleOp, TupleGetOp};
 use crate::func::{CallOp, FuncOp};
 use crate::ptr::AllocaOp;
@@ -142,8 +142,10 @@ struct Node {
 
 impl CallGraph {
     fn read(context: &Context, module: &OpHandle) -> Self {
-        let functions: Vec<OpId> = region_ops(context, module)
-            .into_iter()
+        let functions: Vec<OpId> = module
+            .regions()
+            .iter()
+            .flat_map(|&region| context.get_region(region).op_ids())
             .filter(|&op| context.get_op(op).is::<FuncOp>())
             .collect();
         let by_op: HashMap<OpId, usize> = functions
@@ -440,7 +442,7 @@ fn splice_nodes(
     rewriter.erase_op(&site.call)?;
 
     let caller = context.get_op(graph.nodes[site.caller].func);
-    let tuples = fold_tuple_gets(context, rewriter, body, &ops_under(context, &caller))?;
+    let tuples = fold_tuple_gets(context, rewriter, body, &subtree_ops(context, &caller))?;
     erase_unused(context, rewriter, &tuples)?;
     Ok(copied)
 }
@@ -501,10 +503,10 @@ fn erase_unused(
 }
 
 fn cost_of(context: &Context, function: OpId) -> u32 {
-    fn count(context: &Context, root: &OpHandle, total: &mut u32) {
-        for op in region_ops(context, root) {
+    subtree_ops(context, &context.get_op(function))
+        .into_iter()
+        .filter(|&op| {
             let instance = context.get_op(op);
-            count(context, &instance, total);
             // Dependency bookkeeping computes nothing, so it costs nothing.
             let free = instance
                 .clone()
@@ -513,14 +515,9 @@ fn cost_of(context: &Context, function: OpId) -> u32 {
                 || instance.clone().as_interface::<dyn Terminator>().is_some()
                 || instance.is::<crate::state::EntryStateOp>()
                 || instance.is::<crate::state::JoinOp>();
-            if !free {
-                *total += 1;
-            }
-        }
-    }
-    let mut total = 0;
-    count(context, &context.get_op(function), &mut total);
-    total
+            !free
+        })
+        .count() as u32
 }
 
 fn callee_node(
@@ -542,23 +539,6 @@ fn is_constant(context: &Context, value: ValueId) -> bool {
     })
 }
 
-fn ops_under(context: &Context, root: &OpHandle) -> Vec<OpId> {
-    let mut ops = region_ops(context, root);
-    let mut index = 0;
-    while index < ops.len() {
-        ops.extend(region_ops(context, &context.get_op(ops[index])));
-        index += 1;
-    }
-    ops
-}
-
-fn region_ops(context: &Context, root: &OpHandle) -> Vec<OpId> {
-    root.regions()
-        .iter()
-        .flat_map(|&region| context.get_region(region).op_ids())
-        .collect()
-}
-
 fn calls_under(context: &Context, root: &OpHandle) -> Vec<OperationRef> {
     let mut calls = Vec::new();
     collect_calls(context, root, &mut calls);
@@ -566,7 +546,11 @@ fn calls_under(context: &Context, root: &OpHandle) -> Vec<OperationRef> {
 }
 
 fn collect_calls(context: &Context, root: &OpHandle, calls: &mut Vec<OperationRef>) {
-    for op in region_ops(context, root) {
+    for op in root
+        .regions()
+        .iter()
+        .flat_map(|&region| context.get_region(region).op_ids())
+    {
         let instance = context.get_op(op);
         collect_calls(context, &instance, calls);
         if instance.is::<CallOp>() {
