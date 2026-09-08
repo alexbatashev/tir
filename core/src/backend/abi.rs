@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::attributes::AttributeValue;
 use crate::backend::liveness::PhysReg;
-use crate::{Context, TypeId, ValueId};
+use crate::backend::regalloc::RegClassId;
+use crate::{Context, PassError, TypeId, ValueId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ValueKind {
@@ -159,6 +161,120 @@ impl AbiInfo {
                 .position(|candidate| *candidate == register)
                 .map(|slot| (sequence.kind, slot + 1))
         })
+    }
+}
+
+/// One member of an atomic argument group: the ABI sequence it draws from and,
+/// on the callee side, the register class its pin is named in.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ArgumentMember {
+    pub kind: ValueKind,
+    pub class: Option<RegClassId>,
+}
+
+/// An argument placed as a unit, with the alignment its source type demanded.
+#[derive(Debug, Clone)]
+pub(crate) struct ArgumentGroup {
+    pub members: Vec<ArgumentMember>,
+    pub alignment: u64,
+}
+
+/// Where [`place_arguments`] put one group member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArgumentSlot {
+    Register(PhysReg),
+    Stack(usize),
+}
+
+/// Place every argument group in registers where the convention has room for
+/// the whole group, and on the stack otherwise. Groups are atomic — all members
+/// land in registers or all on the stack — and the ABI's rollback policy decides
+/// whether a spilled group also exhausts the remaining argument registers.
+/// Returns one slot per member, in order, and the number of stack slots used.
+pub(crate) fn place_arguments(
+    abi: &AbiInfo,
+    groups: &[ArgumentGroup],
+    has_result_address: bool,
+) -> (Vec<ArgumentSlot>, usize) {
+    let mut next_slot = HashMap::new();
+    if has_result_address {
+        reserve_indirect_result_argument(abi, &mut next_slot);
+    }
+    let mut slots = Vec::new();
+    let mut stack_slots = 0;
+    for group in groups {
+        let mut trial_slots = next_slot.clone();
+        align_argument_group(
+            abi,
+            group.alignment,
+            group.members.iter().map(|member| member.kind),
+            &mut trial_slots,
+        );
+        let direct = abi
+            .argument_group_fits_register_limit(group.members.len())
+            .then(|| {
+                group
+                    .members
+                    .iter()
+                    .map(|member| {
+                        next_argument_register(abi, member.class, member.kind, &mut trial_slots)
+                    })
+                    .collect::<Option<Vec<_>>>()
+            })
+            .flatten();
+        if let Some(registers) = direct {
+            next_slot = trial_slots;
+            slots.extend(registers.into_iter().map(ArgumentSlot::Register));
+            continue;
+        }
+        for member in &group.members {
+            if abi.argument_group_rollback() == GroupRollback::Exhaust {
+                exhaust_argument_registers(abi, member.kind, &mut next_slot);
+            }
+            slots.push(ArgumentSlot::Stack(stack_slots));
+            stack_slots += 1;
+        }
+    }
+    (slots, stack_slots)
+}
+
+/// The attribute an argument group is carried in: a bare member list, or a
+/// dictionary naming the alignment its source type demanded.
+pub(crate) fn encode_argument_group(members: Vec<AttributeValue>, alignment: u64) -> AttributeValue {
+    if alignment == 1 {
+        return AttributeValue::Array(members.into());
+    }
+    AttributeValue::Dict(Box::new(std::collections::BTreeMap::from([
+        ("alignment".to_string(), AttributeValue::UInt(alignment)),
+        ("members".to_string(), AttributeValue::Array(members.into())),
+    ])))
+}
+
+/// The members and alignment of an argument group attribute, or `None` for an
+/// attribute that does not carry a group.
+pub(crate) fn decode_argument_group(
+    attribute: &AttributeValue,
+) -> Result<Option<(&[AttributeValue], u64)>, PassError> {
+    match attribute {
+        AttributeValue::Array(members) => Ok(Some((members, 1))),
+        AttributeValue::Dict(group) => {
+            let Some(AttributeValue::Array(members)) = group.get("members") else {
+                return Err(PassError::InvalidRuleSet(
+                    "ABI argument group has no members".to_string(),
+                ));
+            };
+            let alignment = match group.get("alignment") {
+                Some(AttributeValue::UInt(alignment)) => *alignment,
+                Some(AttributeValue::Int(alignment)) if *alignment >= 0 => *alignment as u64,
+                _ => {
+                    return Err(PassError::InvalidRuleSet(
+                        "ABI argument group has invalid alignment".to_string(),
+                    ));
+                }
+            };
+            Ok(Some((members, alignment)))
+        }
+        _ => Ok(None),
     }
 }
 

@@ -10,9 +10,8 @@ use tir::func::{CallOp, ReturnOp};
 use tir::{Context, OpId, Operand, Operation, OperationRef, PassError, Rewriter, ValueId};
 
 use crate::backend::abi::{
-    AbiInfo, GroupRollback, Overflow, ValueKind, align_argument_group, exhaust_argument_registers,
-    next_argument_register, next_return_register, reserve_indirect_result_argument, type_kind,
-    value_kind,
+    AbiInfo, ArgumentGroup, ArgumentMember, ArgumentSlot, Overflow, ValueKind, next_return_register,
+    place_arguments, type_kind, value_kind,
 };
 use crate::backend::liveness::PhysReg;
 use crate::backend::regalloc::RegClassId;
@@ -534,69 +533,45 @@ impl CallLowering {
         lowered_arguments: ArgumentGroups,
         has_result_address: bool,
     ) -> Result<(Vec<ValueId>, Vec<ArgumentLocation>, u32), PassError> {
-        let mut next_slot = HashMap::new();
-        if has_result_address {
-            reserve_indirect_result_argument(self.abi, &mut next_slot);
-        }
-        let mut argument_values = Vec::new();
-        let mut argument_locations = Vec::new();
-        let mut stack_args = 0u32;
-        for (values, alignment) in lowered_arguments {
-            let mut trial_slots = next_slot.clone();
-            align_argument_group(
-                self.abi,
-                alignment,
-                values
+        let groups = lowered_arguments
+            .iter()
+            .map(|(values, alignment)| ArgumentGroup {
+                members: values
                     .iter()
-                    .map(|&value| value_kind(context, self.abi, value)),
-                &mut trial_slots,
-            );
-            let direct = if self.abi.argument_group_fits_register_limit(values.len()) {
-                values
-                    .iter()
-                    .map(|&value| {
-                        next_argument_register(
-                            self.abi,
-                            None,
-                            value_kind(context, self.abi, value),
-                            &mut trial_slots,
-                        )
+                    .map(|&value| ArgumentMember {
+                        kind: value_kind(context, self.abi, value),
+                        class: None,
                     })
-                    .collect::<Option<Vec<_>>>()
-            } else {
-                None
-            };
-            if let Some(registers) = direct {
-                next_slot = trial_slots;
-                argument_values.extend(values);
-                argument_locations.extend(registers.into_iter().map(ArgumentLocation::Register));
-                continue;
-            }
-
-            for &value in &values {
-                if self.abi.argument_group_rollback() == GroupRollback::Exhaust {
-                    exhaust_argument_registers(
-                        self.abi,
-                        value_kind(context, self.abi, value),
-                        &mut next_slot,
-                    );
+                    .collect(),
+                alignment: *alignment,
+            })
+            .collect::<Vec<_>>();
+        let (slots, stack_args) = place_arguments(self.abi, &groups, has_result_address);
+        let argument_values = lowered_arguments
+            .into_iter()
+            .flat_map(|(values, _)| values)
+            .collect::<Vec<_>>();
+        let argument_locations = argument_values
+            .iter()
+            .zip(slots)
+            .map(|(&value, slot)| match slot {
+                ArgumentSlot::Register(register) => Ok(ArgumentLocation::Register(register)),
+                ArgumentSlot::Stack(index) => {
+                    let class = stack_class(self.abi, value_kind(context, self.abi, value))
+                        .ok_or_else(|| {
+                            PassError::InvalidRuleSet("ABI has no argument sequence".to_string())
+                        })?;
+                    Ok(ArgumentLocation::Stack {
+                        class,
+                        offset: i64::from(index as u32 * self.abi.stack.slot_size),
+                    })
                 }
-                let class = stack_class(self.abi, value_kind(context, self.abi, value))
-                    .ok_or_else(|| {
-                        PassError::InvalidRuleSet("ABI has no argument sequence".to_string())
-                    })?;
-                argument_values.push(value);
-                argument_locations.push(ArgumentLocation::Stack {
-                    class,
-                    offset: i64::from(stack_args * self.abi.stack.slot_size),
-                });
-                stack_args += 1;
-            }
-        }
+            })
+            .collect::<Result<Vec<_>, PassError>>()?;
         let outgoing_size = if stack_args == 0 {
             0
         } else {
-            let bytes = stack_args * self.abi.stack.slot_size;
+            let bytes = stack_args as u32 * self.abi.stack.slot_size;
             bytes.div_ceil(self.abi.stack.align) * self.abi.stack.align
         };
         Ok((argument_values, argument_locations, outgoing_size))

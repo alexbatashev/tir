@@ -9,8 +9,8 @@ use tir::attributes::AttributeValue;
 use tir::{AnalysisManager, Context, OperationRef, Pass, PassError, PassTarget, Rewriter, ValueId};
 
 use crate::backend::abi::{
-    GroupRollback, align_argument_group, next_argument_register, next_return_register,
-    reserve_indirect_result_argument, value_kind,
+    ArgumentGroup, ArgumentMember, ArgumentSlot, decode_argument_group, next_return_register,
+    place_arguments, value_kind,
 };
 use crate::backend::liveness::PhysReg;
 use crate::backend::regalloc::{
@@ -492,44 +492,19 @@ fn plan_arguments(
     result_address: Option<ValueId>,
 ) -> Result<ArgumentPlan, PassError> {
     let mut plan = ArgumentPlan::default();
-    let mut next_slot: HashMap<crate::backend::abi::ValueKind, usize> = HashMap::new();
-    let mut next_stack_slot = 0;
-
     if let Some(value) = result_address {
         let register = abi.indirect_result.ok_or_else(|| {
             PassError::InvalidRuleSet("ABI has no result-address register".to_string())
         })?;
         plan.pins.push((value, register));
-        reserve_indirect_result_argument(abi, &mut next_slot);
     }
 
+    let mut groups = Vec::new();
+    let mut placed: Vec<(ValueId, RegClassId)> = Vec::new();
     for attribute in args {
-        let group = match attribute {
-            AttributeValue::Array(group) => Some((group, 1)),
-            AttributeValue::Dict(group) => {
-                let members = match group.get("members") {
-                    Some(AttributeValue::Array(members)) => members,
-                    _ => {
-                        return Err(PassError::InvalidRuleSet(
-                            "ABI argument group has no members".to_string(),
-                        ));
-                    }
-                };
-                let alignment = match group.get("alignment") {
-                    Some(AttributeValue::UInt(alignment)) => *alignment,
-                    Some(AttributeValue::Int(alignment)) if *alignment >= 0 => *alignment as u64,
-                    _ => {
-                        return Err(PassError::InvalidRuleSet(
-                            "ABI argument group has invalid alignment".to_string(),
-                        ));
-                    }
-                };
-                Some((members, alignment))
-            }
-            _ => None,
-        };
-        let members = if let Some((group, _)) = group {
-            group
+        let group = decode_argument_group(attribute)?;
+        let members = match group {
+            Some((members, _)) => members
                 .iter()
                 .map(|member| {
                     let AttributeValue::Value(value) = member else {
@@ -544,64 +519,39 @@ fn plan_arguments(
                                 "ABI argument group has no register class".to_string(),
                             )
                         })?;
-                    Ok((*value, class, value_kind(context, abi, *value)))
+                    Ok((*value, class))
                 })
-                .collect::<Result<Vec<_>, PassError>>()?
-        } else {
-            let AttributeValue::Value(value) = attribute else {
-                continue;
-            };
-            let Some(class) =
-                value_class(context, *value).or_else(|| info.default_integer_class(abi))
-            else {
-                continue;
-            };
-            vec![(*value, class, value_kind(context, abi, *value))]
-        };
-
-        if let Some((_, alignment)) = group {
-            // A group is placed atomically: trial-assign every member, commit
-            // only if all fit.
-            let mut trial_slots = next_slot.clone();
-            align_argument_group(
-                abi,
-                alignment,
-                members.iter().map(|&(_, _, kind)| kind),
-                &mut trial_slots,
-            );
-            let pins = if abi.argument_group_fits_register_limit(members.len()) {
-                members
-                    .iter()
-                    .map(|&(_, class, kind)| {
-                        next_argument_register(abi, Some(class), kind, &mut trial_slots)
-                    })
-                    .collect::<Option<Vec<_>>>()
-            } else {
-                None
-            };
-            if let Some(pins) = pins {
-                next_slot = trial_slots;
-                plan.pins
-                    .extend(members.iter().map(|&(value, _, _)| value).zip(pins));
-            } else {
-                for (value, class, kind) in members {
-                    if abi.argument_group_rollback() == GroupRollback::Exhaust {
-                        crate::backend::abi::exhaust_argument_registers(abi, kind, &mut next_slot);
-                    }
-                    plan.stack_args.push((value, class, next_stack_slot));
-                    next_stack_slot += 1;
-                }
-            }
-            continue;
-        }
-
-        let (value, class, kind) = members[0];
-        match next_argument_register(abi, Some(class), kind, &mut next_slot) {
-            Some(pin) => plan.pins.push((value, pin)),
+                .collect::<Result<Vec<_>, PassError>>()?,
             None => {
-                plan.stack_args.push((value, class, next_stack_slot));
-                next_stack_slot += 1;
+                let AttributeValue::Value(value) = attribute else {
+                    continue;
+                };
+                let Some(class) =
+                    value_class(context, *value).or_else(|| info.default_integer_class(abi))
+                else {
+                    continue;
+                };
+                vec![(*value, class)]
             }
+        };
+        groups.push(ArgumentGroup {
+            members: members
+                .iter()
+                .map(|&(value, class)| ArgumentMember {
+                    kind: value_kind(context, abi, value),
+                    class: Some(class),
+                })
+                .collect(),
+            alignment: group.map_or(1, |(_, alignment)| alignment),
+        });
+        placed.extend(members);
+    }
+
+    let (slots, _) = place_arguments(abi, &groups, result_address.is_some());
+    for ((value, class), slot) in placed.into_iter().zip(slots) {
+        match slot {
+            ArgumentSlot::Register(register) => plan.pins.push((value, register)),
+            ArgumentSlot::Stack(index) => plan.stack_args.push((value, class, index)),
         }
     }
     Ok(plan)
