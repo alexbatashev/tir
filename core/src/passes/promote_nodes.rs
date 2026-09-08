@@ -69,18 +69,13 @@ impl Pass for PromoteNodesPass {
             let Some(ty) = promotable(context, slot, &state, body) else {
                 continue;
             };
-            let mut promoter = Promoter {
-                context,
-                slot,
-                ty,
-                reach: HashMap::new(),
-                grown: HashSet::new(),
-                kept: false,
-                substituted: HashMap::new(),
-                probing: false,
-                refused: false,
-            };
-            promoter.promote(&state, rewriter)?;
+            // A read the chain cannot answer, and a port the growth would
+            // have no value to enter, keep the slot memory: the write either
+            // would go with the promotion or was never there.
+            if Promoter::new(context, slot, ty, true).refuses(&state) {
+                continue;
+            }
+            Promoter::new(context, slot, ty, false).promote(&state, rewriter)?;
         }
         Ok(())
     }
@@ -206,14 +201,37 @@ struct Promoter<'a> {
     refused: bool,
 }
 
-impl Promoter<'_> {
-    fn promote(&mut self, state: &SlotState, rewriter: &mut Rewriter) -> Result<(), PassError> {
-        // A read the chain cannot answer, and a port the growth would have no
-        // value to enter, keep the slot memory: the write either would go with
-        // the promotion or was never there.
-        if self.refuses(state) {
-            return Ok(());
+impl<'a> Promoter<'a> {
+    fn new(context: &'a Context, slot: ValueId, ty: TypeId, probing: bool) -> Self {
+        Self {
+            context,
+            slot,
+            ty,
+            reach: HashMap::new(),
+            grown: HashSet::new(),
+            kept: false,
+            substituted: HashMap::new(),
+            probing,
+            refused: false,
         }
+    }
+
+    /// Whether the chain answers every state the growth would read. The walk is
+    /// the growth's own, with the ports it would grow recorded rather than
+    /// grown, so what it proves is what the growth then does.
+    fn refuses(&mut self, state: &SlotState) -> bool {
+        for &load in &state.loads {
+            let Some(&observed) = self.context.get_op(load).dep_operands().first() else {
+                return true;
+            };
+            if self.reach(observed) == Reach::Unknown {
+                return true;
+            }
+        }
+        self.refused
+    }
+
+    fn promote(&mut self, state: &SlotState, rewriter: &mut Rewriter) -> Result<(), PassError> {
         let context = self.context;
         let reached: Vec<Reach> = state
             .loads
@@ -377,11 +395,9 @@ impl Promoter<'_> {
             let grown = Reach::Written(op.id, index);
             self.reach.insert(port_dep, grown);
             self.reach.insert(op.dep_results()[index], grown);
-            self.demand(init);
-            let carried = self.reach(continue_dep);
-            let left = self.reach(exit_dep);
-            self.demand(carried);
-            self.demand(left);
+            for state in [entered, continue_dep, exit_dep] {
+                self.demand(state);
+            }
             return;
         }
         let init = self.value_of(init);
@@ -428,9 +444,7 @@ impl Promoter<'_> {
             self.reach
                 .insert(op.dep_results()[index], Reach::Written(op.id, index));
             for arm in op.regions() {
-                let left = context.get_region(arm).dep_results()[index];
-                let found = self.reach(left);
-                self.demand(found);
+                self.demand(context.get_region(arm).dep_results()[index]);
             }
             return;
         }
@@ -456,38 +470,12 @@ impl Promoter<'_> {
         }
     }
 
-    /// Record that the growth reads a state which has to hold one value for the
-    /// slot; where it does not, the slot stays memory.
-    fn demand(&mut self, found: Reach) {
-        if !matches!(found, Reach::Value(_) | Reach::Written(..)) {
+    /// Read a state the growth would enter a port on, which has to hold one
+    /// value for the slot; where it does not, the slot stays memory.
+    fn demand(&mut self, state: ValueId) {
+        if !matches!(self.reach(state), Reach::Value(_) | Reach::Written(..)) {
             self.refused = true;
         }
-    }
-
-    /// Whether the chain answers every state the growth would read. The walk is
-    /// the growth's own, with the ports it would grow recorded rather than
-    /// grown, so what it proves is what the growth then does.
-    fn refuses(&self, state: &SlotState) -> bool {
-        let mut probe = Promoter {
-            context: self.context,
-            slot: self.slot,
-            ty: self.ty,
-            reach: HashMap::new(),
-            grown: HashSet::new(),
-            kept: false,
-            substituted: HashMap::new(),
-            probing: true,
-            refused: false,
-        };
-        for &load in &state.loads {
-            let Some(&observed) = self.context.get_op(load).dep_operands().first() else {
-                return true;
-            };
-            if probe.reach(observed) == Reach::Unknown {
-                return true;
-            }
-        }
-        probe.refused
     }
 
     /// The value a write to the slot leaves it holding.
