@@ -29,6 +29,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         builder.build().compile()
     };
 
+    tmdl::emit_model_check_sources(
+        &inputs,
+        &std::path::Path::new(&out_dir).join("model_check_sources.rs"),
+    )?;
+
     compile(Action::EmitRust, "arm64.rs")?;
     compile(Action::EmitOperationList, "arm64_ops.rs")?;
 

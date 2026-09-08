@@ -2,22 +2,7 @@ use tir::Operation;
 use tir::backend::{RegSlot, normalize_name, phys_attr};
 use tir::helpers::{dialect, operation};
 
-const MODEL_CHECK_SOURCES: &[(&str, &str)] = &[
-    ("main.tmdl", include_str!("../defs/main.tmdl")),
-    ("versions.tmdl", include_str!("../defs/versions.tmdl")),
-    ("float.tmdl", include_str!("../defs/float.tmdl")),
-    (
-        "data_processing.tmdl",
-        include_str!("../defs/data_processing.tmdl"),
-    ),
-    (
-        "loads_stores.tmdl",
-        include_str!("../defs/loads_stores.tmdl"),
-    ),
-    ("atomics.tmdl", include_str!("../defs/atomics.tmdl")),
-    ("branches.tmdl", include_str!("../defs/branches.tmdl")),
-    ("perf.tmdl", include_str!("../defs/perf.tmdl")),
-];
+include!(concat!(env!("OUT_DIR"), "/model_check_sources.rs"));
 
 mod obj;
 

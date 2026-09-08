@@ -1,17 +1,6 @@
 //! x86-64 backend prototype, generated from the TMDL descriptions in `defs/`.
 
-const MODEL_CHECK_SOURCES: &[(&str, &str)] = &[
-    ("main.tmdl", include_str!("../defs/main.tmdl")),
-    ("encoding.tmdl", include_str!("../defs/encoding.tmdl")),
-    ("base.tmdl", include_str!("../defs/base.tmdl")),
-    ("arith_ext.tmdl", include_str!("../defs/arith_ext.tmdl")),
-    ("conditional.tmdl", include_str!("../defs/conditional.tmdl")),
-    ("memory_ext.tmdl", include_str!("../defs/memory_ext.tmdl")),
-    ("atomics.tmdl", include_str!("../defs/atomics.tmdl")),
-    ("ordering.tmdl", include_str!("../defs/ordering.tmdl")),
-    ("float.tmdl", include_str!("../defs/float.tmdl")),
-    ("perf.tmdl", include_str!("../defs/perf.tmdl")),
-];
+include!(concat!(env!("OUT_DIR"), "/model_check_sources.rs"));
 
 pub use isa::{
     Feature, get_isel_rules, instruction_infos, register_info, register_views, register_widths,

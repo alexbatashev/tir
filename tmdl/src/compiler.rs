@@ -679,3 +679,23 @@ fn write_ast_json(_files: &[crate::ast::File], _output: &mut dyn Write) -> Resul
 fn json_disabled() -> TMDLError {
     TMDLError::Codegen("tmdl was built without the `json` feature".to_string())
 }
+
+/// Write the `MODEL_CHECK_SOURCES` table a backend embeds for hardware model
+/// checking: every TMDL input this build compiles, named by file and inlined
+/// with `include_str!`. A backend `include!`s the result, so the sources it
+/// embeds cannot drift from the ones it was generated from.
+pub fn emit_model_check_sources(inputs: &[&str], output: &std::path::Path) -> std::io::Result<()> {
+    let mut table = String::from("const MODEL_CHECK_SOURCES: &[(&str, &str)] = &[\n");
+    for input in inputs {
+        let path = std::fs::canonicalize(input)?;
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let path = path.to_string_lossy().into_owned();
+        table.push_str(&format!("    ({name:?}, include_str!({path:?})),\n"));
+    }
+    table.push_str("];\n");
+    std::fs::write(output, table)
+}

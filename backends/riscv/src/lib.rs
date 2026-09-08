@@ -2,38 +2,7 @@ use tir::Operation;
 use tir::backend::{RegSlot, normalize_name, phys_attr};
 use tir::helpers::{dialect, operation};
 
-const MODEL_CHECK_SOURCES: &[(&str, &str)] = &[
-    ("main.tmdl", include_str!("../defs/main.tmdl")),
-    ("base.tmdl", include_str!("../defs/base.tmdl")),
-    (
-        "multiplication.tmdl",
-        include_str!("../defs/multiplication.tmdl"),
-    ),
-    ("float.tmdl", include_str!("../defs/float.tmdl")),
-    ("compressed.tmdl", include_str!("../defs/compressed.tmdl")),
-    ("atomics.tmdl", include_str!("../defs/atomics.tmdl")),
-    ("zifencei.tmdl", include_str!("../defs/zifencei.tmdl")),
-    ("zicsr.tmdl", include_str!("../defs/zicsr.tmdl")),
-    ("perf.tmdl", include_str!("../defs/perf.tmdl")),
-    ("vector.tmdl", include_str!("../defs/vector.tmdl")),
-    ("vector_int.tmdl", include_str!("../defs/vector_int.tmdl")),
-    ("vector_mask.tmdl", include_str!("../defs/vector_mask.tmdl")),
-    ("vector_red.tmdl", include_str!("../defs/vector_red.tmdl")),
-    ("vector_perm.tmdl", include_str!("../defs/vector_perm.tmdl")),
-    (
-        "vector_widen.tmdl",
-        include_str!("../defs/vector_widen.tmdl"),
-    ),
-    (
-        "vector_fixed.tmdl",
-        include_str!("../defs/vector_fixed.tmdl"),
-    ),
-    ("vector_mem.tmdl", include_str!("../defs/vector_mem.tmdl")),
-    (
-        "vector_float.tmdl",
-        include_str!("../defs/vector_float.tmdl"),
-    ),
-];
+include!(concat!(env!("OUT_DIR"), "/model_check_sources.rs"));
 
 mod compress;
 mod obj;
