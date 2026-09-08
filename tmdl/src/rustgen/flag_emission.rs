@@ -276,15 +276,7 @@ fn copy_subgraph_alias(
     map: &HashMap<u32, u32>,
     memo: &mut HashMap<usize, tir_graph::NodeId>,
 ) -> tir_graph::NodeId {
-    use tir_graph::Dag;
-    use tir_symbolic::lang::SymPayload;
-    use tir_symbolic::sem::{CopyAction, copy_subgraph_with};
-    copy_subgraph_with(dst, src, node, memo, &mut |_, node| match src.get_leaf_data(node) {
-        Some(SymPayload::SymbolId(id)) if map.contains_key(id) => {
-            CopyAction::Payload(SymPayload::SymbolId(map[id]))
-        }
-        _ => CopyAction::Keep,
-    })
+    copy_subgraph_remapping(dst, src, node, memo, &mut |id| map.get(&id).copied())
 }
 
 /// A single-symbol comparison against a literal zero (`Ne(s0, 0)`/`Eq(s0, 0)`),

@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 use tir::{
     AnalysisManager, BlockId, Context, Gamma, OpHandle, OpId, Operation, OperationRef, Pass,
     PassError, PassTarget, RegionId, Rewriter, TypeId, ValueId,
-    graph::{Dag, MutDag, NodeId, OperandConstraint},
+    graph::{Dag, MutDag, NodeId, OperandConstraint, subgraphs_equal},
     sem::{
         EquivalenceOracle, SemGraph, SmtOracle, SymKind, SymPayload, canonicalize_for_selection,
         definedness_condition,
@@ -894,28 +894,6 @@ fn prove_relaxation(rule: &Rule, guarded: &SemGraph) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-/// Whether the subgraphs rooted at `r1`/`r2` are structurally identical (same
-/// kinds, leaf payloads and children, in order). Generic over the graph backend so
-/// the canonicalizer's [`GenericDag`](tir::graph::GenericDag) output compares
-/// against the [`SemGraph`] selection pattern.
-fn subgraphs_equal<L: PartialEq>(
-    g1: &impl Dag<Node = SymKind, Leaf = L>,
-    r1: NodeId,
-    g2: &impl Dag<Node = SymKind, Leaf = L>,
-    r2: NodeId,
-) -> bool {
-    if g1.get_node(r1) != g2.get_node(r2) || g1.get_leaf_data(r1) != g2.get_leaf_data(r2) {
-        return false;
-    }
-    let c1: Vec<NodeId> = g1.children(r1).collect();
-    let c2: Vec<NodeId> = g2.children(r2).collect();
-    c1.len() == c2.len()
-        && c1
-            .iter()
-            .zip(&c2)
-            .all(|(&a, &b)| subgraphs_equal(g1, a, g2, b))
 }
 
 /// The conjunction of definedness conditions of every partial-kind node reachable

@@ -52,6 +52,27 @@ pub trait Dag {
     fn preorder(&self, start: NodeId) -> impl Iterator<Item = NodeId>;
 }
 
+/// Whether the subgraphs rooted at `r1`/`r2` are structurally identical: same
+/// node kinds, leaf payloads and children, in order. Generic over the graph
+/// backend so a canonicalizer's output compares against a stored pattern.
+pub fn subgraphs_equal<N: PartialEq, L: PartialEq>(
+    g1: &impl Dag<Node = N, Leaf = L>,
+    r1: NodeId,
+    g2: &impl Dag<Node = N, Leaf = L>,
+    r2: NodeId,
+) -> bool {
+    if g1.get_node(r1) != g2.get_node(r2) || g1.get_leaf_data(r1) != g2.get_leaf_data(r2) {
+        return false;
+    }
+    let c1: Vec<NodeId> = g1.children(r1).collect();
+    let c2: Vec<NodeId> = g2.children(r2).collect();
+    c1.len() == c2.len()
+        && c1
+            .iter()
+            .zip(&c2)
+            .all(|(&a, &b)| subgraphs_equal(g1, a, g2, b))
+}
+
 pub trait MutDag: Dag {
     fn add_node(&mut self, n: Self::Node) -> NodeId;
     fn add_edge(&mut self, from: NodeId, to: NodeId);

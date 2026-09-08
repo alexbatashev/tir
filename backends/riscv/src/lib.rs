@@ -1,39 +1,8 @@
 use tir::Operation;
-use tir::backend::RegSlot;
+use tir::backend::{RegSlot, normalize_name, phys_attr};
 use tir::helpers::{dialect, operation};
 
-const MODEL_CHECK_SOURCES: &[(&str, &str)] = &[
-    ("main.tmdl", include_str!("../defs/main.tmdl")),
-    ("base.tmdl", include_str!("../defs/base.tmdl")),
-    (
-        "multiplication.tmdl",
-        include_str!("../defs/multiplication.tmdl"),
-    ),
-    ("float.tmdl", include_str!("../defs/float.tmdl")),
-    ("compressed.tmdl", include_str!("../defs/compressed.tmdl")),
-    ("atomics.tmdl", include_str!("../defs/atomics.tmdl")),
-    ("zifencei.tmdl", include_str!("../defs/zifencei.tmdl")),
-    ("zicsr.tmdl", include_str!("../defs/zicsr.tmdl")),
-    ("perf.tmdl", include_str!("../defs/perf.tmdl")),
-    ("vector.tmdl", include_str!("../defs/vector.tmdl")),
-    ("vector_int.tmdl", include_str!("../defs/vector_int.tmdl")),
-    ("vector_mask.tmdl", include_str!("../defs/vector_mask.tmdl")),
-    ("vector_red.tmdl", include_str!("../defs/vector_red.tmdl")),
-    ("vector_perm.tmdl", include_str!("../defs/vector_perm.tmdl")),
-    (
-        "vector_widen.tmdl",
-        include_str!("../defs/vector_widen.tmdl"),
-    ),
-    (
-        "vector_fixed.tmdl",
-        include_str!("../defs/vector_fixed.tmdl"),
-    ),
-    ("vector_mem.tmdl", include_str!("../defs/vector_mem.tmdl")),
-    (
-        "vector_float.tmdl",
-        include_str!("../defs/vector_float.tmdl"),
-    ),
-];
+include!(concat!(env!("OUT_DIR"), "/model_check_sources.rs"));
 
 mod compress;
 mod obj;
@@ -55,7 +24,7 @@ impl TargetConfig {
     pub fn parse(march: &str, mcpu: Option<&str>, mattr: Option<&str>) -> Result<Self, String> {
         let mut config = parse_march(march)?;
         if let Some(mattr) = mattr {
-            apply_mattr(&mut config.features, mattr)?;
+            tir::backend::apply_mattr(&mut config.features, mattr, "RISC-V", attr_features)?;
         }
         // D64 is the internal D∧RV64 conjunction (rv64-only D instructions
         // like fmv.d.x); it follows the D/XLEN selection automatically.
@@ -171,7 +140,7 @@ impl TargetConfig {
 }
 
 fn parse_march(march: &str) -> Result<TargetConfig, String> {
-    let march = normalize(march);
+    let march = normalize_name(march);
     match march.as_str() {
         // Bare architecture names select the generic profile with every
         // modeled extension, mirroring how toolchains treat a bare triple.
@@ -186,7 +155,7 @@ fn parse_march(march: &str) -> Result<TargetConfig, String> {
 /// other name must be a TMDL machine (by name or alias) compatible with the
 /// enabled features.
 fn parse_mcpu(mcpu: &str, config: &TargetConfig) -> Result<Option<String>, String> {
-    let mcpu = normalize(mcpu);
+    let mcpu = normalize_name(mcpu);
     let name = match (
         mcpu.strip_prefix("riscv32-"),
         mcpu.strip_prefix("riscv64-"),
@@ -230,36 +199,10 @@ fn parse_mcpu(mcpu: &str, config: &TargetConfig) -> Result<Option<String>, Strin
     ))
 }
 
-/// Apply an LLVM-style `--mattr` list (`+feat`/`-feat`, comma-separated) on top
-/// of the march-derived feature set.
-fn apply_mattr(features: &mut Vec<Feature>, mattr: &str) -> Result<(), String> {
-    for item in mattr.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        let (add, name) = if let Some(name) = item.strip_prefix('+') {
-            (true, name)
-        } else if let Some(name) = item.strip_prefix('-') {
-            (false, name)
-        } else {
-            return Err(format!(
-                "invalid --mattr entry '{item}' (expected '+feature' or '-feature')"
-            ));
-        };
-        let toggled = attr_features(name)
-            .ok_or_else(|| format!("unknown RISC-V feature '{name}' in --mattr"))?;
-        for feature in toggled {
-            if add && !features.contains(&feature) {
-                features.push(feature);
-            } else if !add {
-                features.retain(|f| *f != feature);
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Features named by a `--mattr` entry: the march extension letter spellings
 /// plus the TMDL feature names.
 fn attr_features(name: &str) -> Option<Vec<Feature>> {
-    let name = normalize(name);
+    let name = normalize_name(name);
     match name.as_str() {
         // The M extension implies Zmmul.
         "m" => Some(vec![Feature::RVM, Feature::Zmmul]),
@@ -267,10 +210,6 @@ fn attr_features(name: &str) -> Option<Vec<Feature>> {
         "d" => Some(vec![Feature::D, Feature::F]),
         _ => Feature::from_name(&name).map(|f| vec![f]),
     }
-}
-
-fn normalize(s: &str) -> String {
-    s.trim().to_ascii_lowercase().replace('_', "-")
 }
 
 fn parse_riscv_isa_string(march: &str) -> Result<TargetConfig, String> {
@@ -550,7 +489,7 @@ fn emit_branch_nonzero(
         Box::new(
             BranchNotEqOpBuilder::new(context)
                 .rs1(bit)
-                .attr("rs2", phys(&(RegClass::GPR.id(), 0)))
+                .attr("rs2", phys_attr((RegClass::GPR.id(), 0)))
                 .attr("imm", tir::attributes::AttributeValue::Block(dest))
                 .build(),
         ),
@@ -641,7 +580,7 @@ impl tir::backend::call_lowering::CallEmitter for RiscvCallEmitter {
         if class == RegClass::FPR64.id() {
             Ok(Box::new(
                 FStoreDoubleOpBuilder::new(context)
-                    .attr("rs1", phys(&abi.sp))
+                    .attr("rs1", phys_attr(abi.sp))
                     .fs2(value)
                     .attr("imm", offset)
                     .build(),
@@ -649,7 +588,7 @@ impl tir::backend::call_lowering::CallEmitter for RiscvCallEmitter {
         } else {
             Ok(Box::new(
                 StoreDoubleWordOpBuilder::new(context)
-                    .attr("rs1", phys(&abi.sp))
+                    .attr("rs1", phys_attr(abi.sp))
                     .rs2(value)
                     .attr("imm", offset)
                     .build(),
@@ -677,13 +616,6 @@ impl tir::backend::call_lowering::CallEmitter for RiscvCallEmitter {
     }
 }
 
-fn phys(reg: &tir::backend::liveness::PhysReg) -> tir::attributes::AttributeValue {
-    tir::attributes::AttributeValue::Register(tir::attributes::RegisterAttr::Physical {
-        class: reg.0,
-        index: reg.1,
-    })
-}
-
 /// Store a physical register to `[frame + offset]`, dispatching on its file
 /// (`fsw`/`fsd` for the float files, `sd` otherwise). Used to preserve
 /// callee-saved registers in the prologue.
@@ -697,22 +629,22 @@ fn reg_store(
     match reg.0.name() {
         "FPR32" => Box::new(
             FStoreWordOpBuilder::new(context)
-                .attr("rs1", phys(frame))
-                .attr("fs2", phys(reg))
+                .attr("rs1", phys_attr(*frame))
+                .attr("fs2", phys_attr(*reg))
                 .attr("imm", offset)
                 .build(),
         ),
         "FPR64" => Box::new(
             FStoreDoubleOpBuilder::new(context)
-                .attr("rs1", phys(frame))
-                .attr("fs2", phys(reg))
+                .attr("rs1", phys_attr(*frame))
+                .attr("fs2", phys_attr(*reg))
                 .attr("imm", offset)
                 .build(),
         ),
         _ => Box::new(
             StoreDoubleWordOpBuilder::new(context)
-                .attr("rs1", phys(frame))
-                .attr("rs2", phys(reg))
+                .attr("rs1", phys_attr(*frame))
+                .attr("rs2", phys_attr(*reg))
                 .attr("imm", offset)
                 .build(),
         ),
@@ -731,22 +663,22 @@ fn reg_reload(
     match reg.0.name() {
         "FPR32" => Box::new(
             FLoadWordOpBuilder::new(context)
-                .attr("fd", phys(reg))
-                .attr("rs1", phys(frame))
+                .attr("fd", phys_attr(*reg))
+                .attr("rs1", phys_attr(*frame))
                 .attr("imm", offset)
                 .build(),
         ),
         "FPR64" => Box::new(
             FLoadDoubleOpBuilder::new(context)
-                .attr("fd", phys(reg))
-                .attr("rs1", phys(frame))
+                .attr("fd", phys_attr(*reg))
+                .attr("rs1", phys_attr(*frame))
                 .attr("imm", offset)
                 .build(),
         ),
         _ => Box::new(
             LoadDoubleWordOpBuilder::new(context)
-                .attr("rd", phys(reg))
-                .attr("rs1", phys(frame))
+                .attr("rd", phys_attr(*reg))
+                .attr("rs1", phys_attr(*frame))
                 .attr("imm", offset)
                 .build(),
         ),
@@ -774,21 +706,21 @@ impl tir::backend::regalloc::TargetRegAlloc for RiscvRegAlloc {
         match class.name() {
             "FPR32" => Box::new(
                 FStoreWordOpBuilder::new(context)
-                    .attr("rs1", phys(frame))
+                    .attr("rs1", phys_attr(*frame))
                     .fs2(value)
                     .attr("imm", offset)
                     .build(),
             ),
             "FPR64" => Box::new(
                 FStoreDoubleOpBuilder::new(context)
-                    .attr("rs1", phys(frame))
+                    .attr("rs1", phys_attr(*frame))
                     .fs2(value)
                     .attr("imm", offset)
                     .build(),
             ),
             _ => Box::new(
                 StoreDoubleWordOpBuilder::new(context)
-                    .attr("rs1", phys(frame))
+                    .attr("rs1", phys_attr(*frame))
                     .rs2(value)
                     .attr("imm", offset)
                     .build(),
@@ -810,21 +742,21 @@ impl tir::backend::regalloc::TargetRegAlloc for RiscvRegAlloc {
             "FPR32" => Box::new(
                 FLoadWordOpBuilder::new(context)
                     .result_values(results)
-                    .attr("rs1", phys(frame))
+                    .attr("rs1", phys_attr(*frame))
                     .attr("imm", offset)
                     .build(),
             ),
             "FPR64" => Box::new(
                 FLoadDoubleOpBuilder::new(context)
                     .result_values(results)
-                    .attr("rs1", phys(frame))
+                    .attr("rs1", phys_attr(*frame))
                     .attr("imm", offset)
                     .build(),
             ),
             _ => Box::new(
                 LoadDoubleWordOpBuilder::new(context)
                     .result_values(results)
-                    .attr("rs1", phys(frame))
+                    .attr("rs1", phys_attr(*frame))
                     .attr("imm", offset)
                     .build(),
             ),
@@ -867,8 +799,8 @@ impl tir::backend::regalloc::TargetRegAlloc for RiscvRegAlloc {
         let sp = abi.sp;
         let mut ops: Vec<Box<dyn Operation>> = vec![Box::new(
             AddImmOpBuilder::new(context)
-                .attr("rd", phys(&sp))
-                .attr("rs1", phys(&sp))
+                .attr("rd", phys_attr(sp))
+                .attr("rs1", phys_attr(sp))
                 .attr("imm", tir::attributes::AttributeValue::Int(-(size as i64)))
                 .build(),
         )];
@@ -892,8 +824,8 @@ impl tir::backend::regalloc::TargetRegAlloc for RiscvRegAlloc {
         }
         ops.push(Box::new(
             AddImmOpBuilder::new(context)
-                .attr("rd", phys(&sp))
-                .attr("rs1", phys(&sp))
+                .attr("rd", phys_attr(sp))
+                .attr("rs1", phys_attr(sp))
                 .attr("imm", tir::attributes::AttributeValue::Int(size as i64))
                 .build(),
         ));
@@ -917,7 +849,7 @@ impl tir::backend::regalloc::TargetRegAlloc for RiscvRegAlloc {
         Ok(vec![Box::new(
             AddImmOpBuilder::new(context)
                 .result_values(vec![dst])
-                .attr("rs1", phys(frame))
+                .attr("rs1", phys_attr(*frame))
                 .attr("imm", tir::attributes::AttributeValue::Int(offset))
                 .build(),
         )])
@@ -930,112 +862,14 @@ pub struct RiscvTarget {
     selected_abi: &'static tir::backend::abi::AbiInfo,
 }
 
-impl tir::backend::TargetMachine for RiscvTarget {
-    fn name(&self) -> &'static str {
-        self.config.canonical_name()
-    }
-
-    fn model_check_target(&self) -> Option<tir::backend::ModelCheckTarget> {
-        Some(tir::backend::ModelCheckTarget {
-            isa: if self.config.xlen == 32 {
-                "RV32I"
-            } else {
-                "RV64I"
-            },
-            features: self.config.features.iter().map(Feature::name).collect(),
-            sources: MODEL_CHECK_SOURCES,
-        })
-    }
-
-    fn register_dialects(&self, context: &tir::Context) {
-        context.register_dialect::<tir::backend::AsmDialect>();
-        context.register_dialect::<RiscvDialect>();
-        context.register_reg_classes(register_info().classes);
-    }
-
-    fn data_layout(&self) -> Option<tir::attributes::AttributeValue> {
-        let pointer = self.config.xlen;
-        Some(tir::data_layout_spec(
-            tir::Endianness::Little,
-            self.abi().stack.align * 8,
-            &[
-                ("i1", 8, 8),
-                ("i8", 8, 8),
-                ("i16", 16, 16),
-                ("i32", 32, 32),
-                ("i64", 64, 64),
-                ("f32", 32, 32),
-                ("f64", 64, 64),
-                ("p", pointer, pointer),
-            ],
-        ))
-    }
-
-    fn target_env(&self) -> Option<tir::attributes::AttributeValue> {
-        // Lowercased TMDL feature names, which `--mattr` accepts alongside the
-        // march extension letters.
-        let features: Vec<String> = self
-            .config
-            .features
-            .iter()
-            .map(|feature| feature.name().to_ascii_lowercase())
-            .collect();
-        Some(tir::target_env_spec(
-            self.config.canonical_name(),
-            &features,
-        ))
-    }
-
-    fn isel_pass(&self, context: &tir::Context) -> tir::backend::isel::InstructionSelectPass {
-        create_isel_pass_for(context, &self.config.features, self.abi())
-            .with_data_layout(self.data_layout())
-    }
-
-    fn regalloc_target(&self) -> Box<dyn tir::backend::regalloc::TargetRegAlloc> {
-        Box::new(RiscvRegAlloc)
-    }
-
-    fn register_info(&self) -> tir::backend::regalloc::RegisterInfo {
-        use tir::backend::regalloc::TargetRegAlloc;
-        RiscvRegAlloc.register_info()
-    }
-
-    fn abis(&self) -> &'static [tir::backend::abi::AbiInfo] {
-        riscv_abis()
-    }
-
-    fn abi(&self) -> &'static tir::backend::abi::AbiInfo {
-        self.selected_abi
-    }
-
-    fn asm_parser(&self, _context: &tir::Context) -> tir::backend::AsmParser {
-        let (parsers, disabled) = get_instruction_parsers(&self.config.features);
-        tir::backend::AsmParser::new(parsers).with_disabled_mnemonics(disabled)
-    }
-
-    fn machine_model(&self, name: &str) -> Option<tir::backend::sched::MachineModel> {
-        crate::machine_model(name, &self.config.features)
-    }
-
-    fn machines(&self) -> Vec<&'static str> {
-        crate::machines(&self.config.features)
-    }
-
-    fn default_machine(&self) -> Option<&str> {
-        self.config.machine.as_deref()
-    }
-
-    fn isa_params(&self) -> Vec<(&'static str, i64)> {
-        crate::isa_params(&self.config.features)
-    }
-
-    fn register_widths(&self) -> Vec<(&'static str, u32)> {
-        crate::register_widths(&self.config.features)
-    }
-
-    fn register_name(&self, class: &str, index: u16, prefer_abi: bool) -> Option<String> {
-        crate::register_name(class, index, prefer_abi)
-    }
+tir::impl_target_machine! {
+    RiscvTarget,
+    dialect: RiscvDialect,
+    isa: |config: &TargetConfig| if config.xlen == 32 { "RV32I" } else { "RV64I" },
+    pointer_bits: |config: &TargetConfig| config.xlen,
+    regalloc: |_| RiscvRegAlloc,
+    abis: riscv_abis,
+    sources: MODEL_CHECK_SOURCES,
 
     fn counter_registers(&self) -> Vec<(&'static str, u16, tir::backend::PerfCounter)> {
         use tir::backend::PerfCounter;
@@ -1112,7 +946,7 @@ fn select_riscv(
 ) -> Result<Option<Box<dyn tir::backend::TargetMachine>>, String> {
     let owned = ["riscv", "rv32", "rv64"]
         .iter()
-        .any(|prefix| normalize(march).starts_with(prefix));
+        .any(|prefix| normalize_name(march).starts_with(prefix));
     if !owned {
         return Ok(None);
     }
@@ -1144,21 +978,9 @@ fn select_riscv(
 
 tir::register_target!(select_riscv, ["riscv32", "riscv64"]);
 
-fn riscv_abis() -> &'static [tir::backend::abi::AbiInfo] {
-    static ABIS: std::sync::OnceLock<Vec<tir::backend::abi::AbiInfo>> = std::sync::OnceLock::new();
-    ABIS.get_or_init(|| {
-        abis()
-            .iter()
-            .map(|abi| tir::backend::abi::AbiInfo {
-                indirect_result: Some((RegClass::GPR.id(), 10)),
-                ..*abi
-            })
-            .collect()
-    })
-}
-
-fn riscv_abi_by_name(name: &str) -> Option<&'static tir::backend::abi::AbiInfo> {
-    riscv_abis()
-        .iter()
-        .find(|abi| abi.name.eq_ignore_ascii_case(name))
-}
+tir::target_abis!(riscv_abis, riscv_abi_by_name, |abi| {
+    tir::backend::abi::AbiInfo {
+        indirect_result: Some((RegClass::GPR.id(), 10)),
+        ..*abi
+    }
+});

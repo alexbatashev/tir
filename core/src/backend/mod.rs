@@ -21,6 +21,7 @@ mod registers;
 pub mod sched;
 pub mod shuffle_order;
 pub mod target;
+mod target_boilerplate;
 mod verify;
 
 pub use operations::*;
@@ -28,6 +29,7 @@ pub use target::{
     ModelCheckTarget, TARGETS, TargetInfo, TargetMachine, select_target, select_target_with_abi,
     supported_targets,
 };
+pub use target_boilerplate::{apply_mattr, block_attr, normalize_name, string_attr};
 
 // Re-exported so the `register_target!` macro can reference linkme from the
 // backend crates without each of them depending on it directly.

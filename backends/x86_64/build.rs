@@ -31,6 +31,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         builder.build().compile()
     };
 
+    tmdl::emit_model_check_sources(
+        &inputs,
+        &std::path::Path::new(&out_dir).join("model_check_sources.rs"),
+    )?;
+
     compile(Action::EmitRust, "x86_64.rs")?;
     compile(Action::EmitOperationList, "x86_64_ops.rs")?;
 
