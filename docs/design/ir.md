@@ -536,8 +536,12 @@ framework, no view registry, no view base class.
 
 ### 7.2 The e-graph view
 
-The single optimizer substrate: one seeder, one vocabulary, one driver, two
-consumers (the mid-end canonicalizer and instruction selection).
+The single optimizer substrate: one vocabulary, one driver, two consumers (the
+mid-end canonicalizer and instruction selection), and a seeder each. Both read
+the gates and the chains off the same interfaces, but a value is a different
+term to each: what a peephole rewrites is an op's identity, and what a target
+rule matches is its `sem:` expansion, so neither seeder's graph is the
+other's.
 
 **Vocabulary.** `SemNode` (`core/src/sem`): `Kind::Ir` (op-identity terms),
 `Kind::Sym` (semantic terms: arithmetic, `If`, `Theta`, `LoadMemory`,
@@ -546,21 +550,24 @@ outside identity.
 
 **Seeding** walks a region's real ops through interfaces:
 
-- Pure ops seed as op identity ∪ their `sem:` expansion (both terms, one
-  class).
-- `Gamma` seeds each result as an `If`(predicate, per-arm result) term where
-  the result is speculatable; otherwise it anchors.
-- `Theta` seeds each carried *state* port as a `Theta(init, latch)`
-  projection, reading the alignment off the op's declared binding. A value
-  port the body carries unchanged is unioned with what the loop was entered
-  on; one the body changes is recorded for the hypothesis rounds below, which
-  is what keeps the port and the loop's result distinct terms.
+- A pure op seeds as one term: its op identity for the canonicalizer, its
+  `sem:` expansion for selection.
+- `Gamma` seeds each value result as an `If`(predicate, per-arm result) term,
+  one child per arm in the binding's order; arms that agree need no choice.
+  Selection unions the gate's own value into that class, so the cover may read
+  the gate as the register its regions leave it in.
+- `Theta` seeds each carried port off the op's declared binding — as
+  `Loop(init, next, exit, pred)` over a `Port` for the canonicalizer, as
+  `Theta(init, next)` for selection. A port the body carries unchanged is
+  unioned with what the loop was entered on; one the body changes is recorded
+  for the hypothesis rounds below, which is what keeps the port and the loop's
+  result distinct terms.
 - A head-controlled source loop is already a γ around a θ in the IR, so it
   seeds as the composition of the two terms above. No IR is rewritten to make
   this seeding possible.
 - Memory ops seed as `LoadMemory(addr, bytes, meta, state)` /
   `StoreMemory(addr, bytes, value, space, state)` over the actual dependency
-  edges, unioned with op identity. Identity *is* the state operand: loads
+  edges, and as nothing else. Identity *is* the state operand: loads
   agreeing on address and chain hash-cons; loads on different chains never
   meet.
 - Region arguments and unmodeled ops anchor.
@@ -633,7 +640,7 @@ and their single survivors:
 | `sccp` + `ConstantFacts` | a second engine for a fact the first one can state: constants are classes, reachability is a gate's own scope | the e-graph's scopes, hypothesis rounds included |
 | `dse` | same-chain overwrite is an extent question the placement facts answer; a slot with no reader is a dead definition | §6.5 + DCE on chains |
 | `scf_to_cfg` + `cfg_cleanup` | destruction lives inside emission and emits clean CFG once | destruction-at-emission |
-| three e-graph seeders (instcombine's, isel's `SemDagBuilder`, the sea view) | one program, one seeding | the §7.2 seeder |
+| the sea view's e-graph seeder | a seeding of an IR that no longer exists | the two §7.2 seeders, one per consumer vocabulary |
 | eager `Value::uses` in the green core | derived data in ground truth | `DefUse` view |
 | `IRBuilder` + ad-hoc Context mutators + per-pass port-growing helpers | five mutation surfaces | the tree-edit API |
 | PBQP in `core` with dead coherence machinery | generic math stranded behind the compiler | `tir-pbqp` utils crate (§9) |
