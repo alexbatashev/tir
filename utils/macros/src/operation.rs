@@ -89,7 +89,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     let printer = match binds_printer {
         Some(printer) => printer,
         None if custom_format => make_custom_printer(),
-        None => make_generic_printer(&dialect, &name, &operand_names, &regions, has_results),
+        None => make_generic_printer(&dialect, &name),
     };
 
     let region_accessors = make_region_accessors(&regions);
@@ -1513,91 +1513,16 @@ fn make_custom_parser() -> proc_macro2::TokenStream {
     }
 }
 
-fn make_generic_printer(
-    dialect: &str,
-    name: &str,
-    operands: &[String],
-    regions: &[Region],
-    has_results: bool,
-) -> proc_macro2::TokenStream {
+fn make_generic_printer(dialect: &str, name: &str) -> proc_macro2::TokenStream {
     let op_name = if dialect == "builtin" {
         name.to_string()
     } else {
         format!("{}.{}", dialect, name)
     };
 
-    let operand_printer = if !operands.is_empty() {
-        quote! {
-            let printed_operands = self.0.value_operands();
-            if !printed_operands.is_empty() {
-                fmt.write(" ")?;
-                tir::dependency::print_value_list(fmt, &printed_operands)?;
-            }
-        }
-    } else {
-        quote! {}
-    };
-
-    let result_suffix = if has_results {
-        quote! {
-            if let Some(result) = self.0.value_results().first() {
-                let context = self.0.context.upgrade();
-                let result_val = context.get_value(*result);
-                fmt.write(" : ")?;
-                context.print_type(result_val.ty(), fmt)?;
-            }
-        }
-    } else {
-        quote! {}
-    };
-
-    let regions = if regions.len() == 1 && !regions[0].variadic {
-        make_region_printer(&regions[0], 0)
-    } else {
-        quote! {}
-    };
-
     quote! {
         fn print<'a, 'b: 'a>(&'a self, fmt: &'a mut tir::IRFormatter<'b>) -> Result<(), std::fmt::Error> {
-            tir::dependency::print_result_prefix(fmt, &self.0)?;
-            fmt.write(#op_name)?;
-            #operand_printer
-            tir::dependency::print_dep_operands(fmt, &self.0)?;
-            // Print generic attribute dict if any
-            if !self.attributes().is_empty() {
-                fmt.write(" ")?;
-                fmt.write("{")?;
-                let mut first = true;
-                for attr in self.attributes() {
-                    if !first { fmt.write(", ")?; }
-                    first = false;
-                    let context = self.0.context.upgrade();
-                    fmt.write(context.resolve(attr.name))?;
-                    fmt.write(" = ")?;
-                    attr.value.print(fmt, &context)?;
-                }
-                fmt.write("}")?;
-            }
-
-            #result_suffix
-
-            if self.regions().len() == 0 {
-                fmt.write("\n")?;
-            }
-
-            #regions
-
-            Ok(())
-        }
-    }
-}
-
-fn make_region_printer(region: &Region, index: usize) -> proc_macro2::TokenStream {
-    let _ = region;
-    quote! {
-        {
-            let context = self.0.context.upgrade();
-            tir::region_format::print_op_region(fmt, &context, self, #index)?;
+            tir::region_format::print_generic(fmt, &self.0, #op_name)
         }
     }
 }

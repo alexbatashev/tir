@@ -145,6 +145,47 @@ fn open_brace(fmt: &IRFormatter) -> &'static str {
     if fmt.at_line_start() { "{" } else { " {" }
 }
 
+/// Print an op in the generic form — `%r | %s = dialect.op %a, %b | %c {attrs} : ty`
+/// followed by its region, if it holds one — which its handle decides in full.
+pub fn print_generic(
+    fmt: &mut IRFormatter,
+    op: &crate::OpHandle,
+    name: &str,
+) -> Result<(), std::fmt::Error> {
+    let context = op.context.upgrade();
+    crate::dependency::print_result_prefix(fmt, op)?;
+    fmt.write(name)?;
+    let operands = op.value_operands();
+    if !operands.is_empty() {
+        fmt.write(" ")?;
+        crate::dependency::print_value_list(fmt, &operands)?;
+    }
+    crate::dependency::print_dep_operands(fmt, op)?;
+    let attributes = op.attributes();
+    if !attributes.is_empty() {
+        fmt.write(" {")?;
+        for (index, attribute) in attributes.iter().enumerate() {
+            if index > 0 {
+                fmt.write(", ")?;
+            }
+            fmt.write(context.resolve(attribute.name))?;
+            fmt.write(" = ")?;
+            attribute.value.print(fmt, &context)?;
+        }
+        fmt.write("}")?;
+    }
+    let results = op.value_results();
+    if let Some(&result) = results.first() {
+        fmt.write(" : ")?;
+        context.print_type(context.get_value(result).ty(), fmt)?;
+    }
+    let regions = op.regions();
+    match regions.first() {
+        Some(&region) => print_region(fmt, &context, &context.get_region(region)),
+        None => fmt.write("\n"),
+    }
+}
+
 pub fn print_op_region(
     fmt: &mut IRFormatter,
     context: &Context,
