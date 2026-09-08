@@ -8,10 +8,10 @@
 
 use std::collections::HashMap;
 
-use crate::analysis::affine::{AffineView, Loop, body_block, body_ops, carried, nests_under};
+use crate::analysis::affine::{AffineView, Loop, body_ops, carried, nests_under};
 use crate::{Context, OpId, OperationRef, PassError, Rewriter, Theta, ValueId};
 
-use super::lower::{erase_unread, literal};
+use super::lower::erase_unread;
 
 /// The most iterations a loop is unrolled whole. A knob.
 pub const UNROLL_TRIP: i128 = 8;
@@ -35,13 +35,10 @@ fn worth_unrolling<'a>(context: &Context, view: &'a AffineView) -> Option<&'a Lo
     let trip = level.trip?;
     let ops = body_ops(context, level.op)?;
     let handle = context.get_op(level.op);
-    // An ordered body that opens a token scope leaves the loop through a
-    // `break`, which is not an iteration a copy can stand for.
-    if let Some(block) = body_block(context, level.op)
-        && context.get_block(block).arguments().len() != carried(context, &handle)?.args.len()
-    {
-        return None;
-    }
+    // The copies name the loop's ports and join the region it stands in, both
+    // of which only the unordered form has.
+    carried(context, &handle)?;
+    context.parent_nodes_region(level.op)?;
     ((1..=UNROLL_TRIP).contains(&trip)
         && level.lower.as_constant().is_some()
         && level.step.as_constant().is_some()
@@ -59,7 +56,6 @@ fn unroll(context: &Context, rewriter: &mut Rewriter, level: &Loop) -> Result<()
     );
     let handle = context.get_op(level.op);
     let target = OperationRef::new(handle.clone());
-    let region = *handle.regions().last().expect("a loop has a body");
     let theta = handle
         .clone()
         .as_interface::<dyn Theta>()
@@ -73,7 +69,9 @@ fn unroll(context: &Context, rewriter: &mut Rewriter, level: &Loop) -> Result<()
         inits.extend(handle.dep_operands());
         (arguments, inits)
     };
-    let parent = context.parent_nodes_region(level.op);
+    let parent = context
+        .parent_nodes_region(level.op)
+        .expect("an unrolled loop stands in an unordered region");
     let mut copies = Vec::new();
 
     for iteration in 0..trip {
@@ -86,30 +84,17 @@ fn unroll(context: &Context, rewriter: &mut Rewriter, level: &Loop) -> Result<()
         let counting = level.counter.iter().chain(&level.counter_aliases);
         for &counter in counting {
             let ty = context.get_value(counter).ty();
-            let value = match parent {
-                Some(region) => {
-                    let mut site = super::lower::Site::Region(region);
-                    super::lower::literal_at(context, &mut site, lower + iteration * step, ty)
-                }
-                None => literal(context, rewriter, &target, lower + iteration * step, ty)?,
-            };
+            let value = super::lower::literal_at(context, parent, lower + iteration * step, ty);
             bindings.insert(counter, value);
         }
-        incoming = match parent {
-            Some(region) => {
-                let (ops, leaving) = copy_body_nodes(context, region, &bindings, &target);
-                copies.extend(ops);
-                leaving
-            }
-            None => copy_body(context, rewriter, region, &bindings, &target)?,
-        };
+        let (ops, leaving) = copy_body_nodes(context, parent, &bindings, &target);
+        copies.extend(ops);
+        incoming = leaving;
     }
 
     for (&result, &value) in handle.results().iter().zip(&incoming) {
         context.replace_value_uses(result, value);
-        if let Some(region) = parent {
-            context.rename_region_results(region, result, value, &[]);
-        }
+        context.rename_region_results(parent, result, value, &[]);
     }
     rewriter.erase_op(&target)?;
     // Only now is it known which copies nothing reads: the last copy's latch
@@ -117,8 +102,8 @@ fn unroll(context: &Context, rewriter: &mut Rewriter, level: &Loop) -> Result<()
     erase_unread(context, rewriter, &copies)
 }
 
-/// [`copy_body`] for an unordered body: the copy joins the loop's own region,
-/// and the values its next iteration would take are what the copy hands on.
+/// One copy of the body, joining the region the loop stands in; the values its
+/// next iteration would take are what the copy hands on.
 fn copy_body_nodes(
     context: &Context,
     destination: crate::RegionId,
@@ -138,36 +123,4 @@ fn copy_body_nodes(
     let mut leaving = results[binding.continue_.clone()].to_vec();
     leaving.extend(results[values..values + deps].iter().copied());
     (ops, leaving)
-}
-
-/// One copy of the body, spelled where the loop stood, and the values its
-/// terminator hands the next copy.
-fn copy_body(
-    context: &Context,
-    rewriter: &mut Rewriter,
-    region: crate::RegionId,
-    bindings: &HashMap<ValueId, ValueId>,
-    target: &OperationRef,
-) -> Result<Vec<ValueId>, PassError> {
-    let copy = crate::clone_region_with_mapping(context, region, bindings);
-    let block = context.get_block(context.get_region(copy).block_ids()[0]);
-    let last = *block.op_ids().last().expect("a body is terminated");
-    let leaving = context.get_op(last).operands().to_vec();
-    rewriter.erase_op(&OperationRef::new(context.get_op(last)))?;
-    let destination = target
-        .op()
-        .parent_block()
-        .expect("the loop sits in a block");
-    let position = context
-        .get_block(destination)
-        .op_ids()
-        .iter()
-        .position(|&other| other == target.op().id)
-        .expect("the loop sits in the block holding it");
-    for (offset, op) in block.op_ids().into_iter().enumerate() {
-        block.remove_op(op);
-        context.get_block(destination).insert(position + offset, op);
-    }
-    rewriter.erase_block(block.id());
-    Ok(leaving)
 }

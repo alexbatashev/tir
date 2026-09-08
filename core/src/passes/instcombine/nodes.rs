@@ -308,7 +308,9 @@ impl Driver<'_> {
         let Some(&class) = self.value_class.get(&value) else {
             return Ok(false);
         };
-        if !self.context.is_used(value) && !named_by_results(self.context, region, value) {
+        if !self.context.is_used(value)
+            && !published(self.context, &self.context.nested_regions(region), value)
+        {
             return Ok(false);
         }
         let ty = self.context.get_value(value).ty();
@@ -540,7 +542,8 @@ fn drop_untouched_chains(context: &Context, region: RegionId) {
                 .dep_results()
                 .into_iter()
                 .filter(|&state| {
-                    !context.users_of(state).is_empty() || named_by_results(context, region, state)
+                    !context.users_of(state).is_empty()
+                        || published(context, &context.nested_regions(region), state)
                 })
                 .collect();
             if let [kept] = read[..] {
@@ -688,38 +691,12 @@ fn only_written(
     }) && !published(context, scope, address)
 }
 
-/// Whether the result list of `region` or of any region nested in it names
-/// `value`, which no use list records.
-fn named_by_results(context: &Context, region: RegionId, value: ValueId) -> bool {
-    context
-        .nested_regions(region)
-        .iter()
-        .any(|&nested| context.get_region(nested).results().contains(&value))
-}
-
 /// Erase every operation under `body` its region's results do not demand.
 /// Demand runs from the callable's results through operands and nested
 /// regions' results, dependencies included: what an effect leaves behind is
 /// what demands it.
 fn sweep(context: &Context, body: RegionId, rewriter: &mut Rewriter) -> Result<(), PassError> {
-    let defining = |values: Vec<ValueId>| {
-        values
-            .into_iter()
-            .filter_map(|value| context.get_value(value).defining_op())
-            .collect::<Vec<_>>()
-    };
-    let mut worklist = defining(context.get_region(body).results());
-    let mut demanded: HashSet<OpId> = HashSet::new();
-    while let Some(op) = worklist.pop() {
-        if !demanded.insert(op) {
-            continue;
-        }
-        let instance = context.get_op(op);
-        worklist.extend(defining(instance.operands().to_vec()));
-        for region in instance.regions() {
-            worklist.extend(defining(context.get_region(region).results()));
-        }
-    }
+    let demanded = crate::passes::demanded_ops(context, &[body]);
     sweep_region(context, body, &demanded, rewriter)
 }
 

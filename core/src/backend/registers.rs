@@ -184,26 +184,6 @@ pub struct RegPort {
     pub tied_to: Option<&'static str>,
 }
 
-impl RegPort {
-    pub const fn use_of(name: &'static str, class: RegClassId) -> Self {
-        RegPort {
-            name,
-            class: Some(class),
-            def: false,
-            tied_to: None,
-        }
-    }
-
-    pub const fn def_of(name: &'static str, class: RegClassId) -> Self {
-        RegPort {
-            name,
-            class: Some(class),
-            def: true,
-            tied_to: None,
-        }
-    }
-}
-
 /// Where one register slot of an instruction instance lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegSlot {

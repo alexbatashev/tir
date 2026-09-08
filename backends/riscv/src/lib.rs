@@ -570,14 +570,6 @@ fn gpr_ty(context: &tir::Context) -> tir::TypeId {
     tir::backend::RegClassType::new(context, RegClass::GPR.id())
 }
 
-pub fn create_isel_pass(context: &tir::Context) -> tir::backend::isel::InstructionSelectPass {
-    create_isel_pass_for(
-        context,
-        Feature::ALL,
-        riscv_abi_by_name("lp64d").expect("RISC-V must define lp64d"),
-    )
-}
-
 /// The C extension features. Compressed instructions never take part in
 /// instruction selection: they are strictly narrower forms of base
 /// instructions (tied operands, 3-bit register fields), so selecting them
@@ -930,13 +922,6 @@ impl tir::backend::regalloc::TargetRegAlloc for RiscvRegAlloc {
                 .build(),
         )])
     }
-}
-
-pub fn create_regalloc_stage() -> Vec<Box<dyn tir::Pass>> {
-    tir::backend::prealloc::regalloc_stage_for(
-        || Box::new(RiscvRegAlloc),
-        riscv_abi_by_name("lp64d").expect("RISC-V must define lp64d"),
-    )
 }
 
 /// The RISC-V target, selected via `--march`/`--mcpu`.

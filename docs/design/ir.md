@@ -61,8 +61,8 @@ Three rules are binding for everything below:
 The green core is the persistent ground truth: the `Context` and the entities
 it owns. "Green" means *immutable in place*: entities are edited only by
 building replacements and swapping them in through the tree-edit API, which
-stamps versions along the edited spine. Everything derived — use lists,
-dominance, e-graphs — lives outside the green core as red views (§7).
+stamps versions along the edited spine. Everything derived — use lists and
+e-graphs — lives outside the green core as red views (§7).
 
 ### 2.1 Entities and identity
 
@@ -143,7 +143,7 @@ spines, and maintain nothing but the green truth:
 | `insert_op_before` / `insert_op_after` | positional insertion in a block |
 | `set_op_operand(s)`, `set_op_attributes` | operand/attribute rewiring |
 | `replace_value_uses` (RAUW) | consults the `DefUse` view for use sites |
-| `append_block_argument`, `split_block`, `clone_op`, `clone_region`, `splice_region` | block/region surgery; block ids are stable across argument edits |
+| `append_block_argument`, `split_block`, `splice_region`, `clone::clone_op` | block/region surgery; block ids are stable across argument edits |
 | **port edit** | grow/shrink an op's results, its regions' arguments, and the corresponding yields *in one edit* |
 | `replace_region_contents(op, staged)` | the atomic commit: §2.5 |
 
@@ -291,8 +291,8 @@ Corollaries developers should internalize:
 - A frontend dialect may declare these bindings on its own ops and get the
   entire optimizer for free.
 - Multi-block regions and branch terminators do not occur in the middle-end
-  form. `mem2reg`-era dominance machinery does not exist here; nothing in
-  the mid-end computes a dominator tree (§8).
+  form. `mem2reg`-era dominance machinery does not exist here; nothing
+  computes a dominator tree (§8).
 
 ### 5.2 Arbitrary CFG: total restructuring
 
@@ -393,7 +393,7 @@ liveness and colouring never see one (`son-backend` B2).
 `restructure-nodes` draws the chains as it converts the CFG (§5.2), and
 `verify-deps` checks after every later pass that they are still whole rather
 than drawing them again. What it draws is **one chain per object**: one for
-every object `AliasFacts` can name at the accesses' addresses — a stack
+every object `object_base` can name at the accesses' addresses — a stack
 allocation, a global, a parameter — plus a *world* chain for the memory whose
 provenance it cannot read back. Each opens at an `state.entry_state` of its
 own and the return hands the caller the join of them all.
@@ -526,10 +526,10 @@ A red view is a derived structure over the green core:
 - Allocates **nothing** into the Context while being built or queried. (The
   historical "probe" hack — minting values to ask interface questions — is
   forbidden; views walk real ops.)
-- Read-only views (dominance, `DefUse`) answer queries. Mutating views
-  (the e-graph) change the program only through §2.5's atomic commit, or
-  discard silently. Between build and commit a view may diverge from the
-  green truth arbitrarily; mid-saturation an e-graph is not IR.
+- Read-only views (`DefUse`) answer queries. Mutating views (the e-graph)
+  change the program only through §2.5's atomic commit, or discard silently.
+  Between build and commit a view may diverge from the green truth
+  arbitrarily; mid-saturation an e-graph is not IR.
 - A pass that never asks for a view never pays for it.
 
 Views are ordinary structs with a build function. There is no view
@@ -607,8 +607,6 @@ view construction *is* value numbering; commit is the elimination.
 
 - **`DefUse`** — the only use/def index in the system, version-keyed. The
   green core does not maintain use lists; RAUW consults this view.
-- **Dominance** — machine-CFG analyses for the backend (regalloc,
-  liveness). The mid-end has no dominance consumer.
 - **Dependence** (backend) — per-block dependence graph over machine ops
   (register def/use plus memory constraints) feeding the scheduler.
 - **Affine** (`analysis::affine`) — iteration-space view over a maximal
@@ -641,6 +639,7 @@ and their single survivors:
 | `IRBuilder` + ad-hoc Context mutators + per-pass port-growing helpers | five mutation surfaces | the tree-edit API |
 | PBQP in `core` with dead coherence machinery | generic math stranded behind the compiler | `tir-pbqp` utils crate (§9) |
 | `DominatingEdgeFacts` | dominator-scoped facts on a CFG the mid-end no longer has | gate-context scoping in selection |
+| `DominatorTree` | the region tree *is* the dominance in the mid-end, and the backend's regalloc and liveness walk the machine CFG directly | the region tree; `analysis::regions` |
 | `scf.if`, `scf.switch_legacy`, `scf.for_legacy`, `scf.while`, `scf.condition`, `scf.break`, `scf.continue` | ops over ordered regions with terminator-bound yields, from before the region kind existed | `scf.switch`, `scf.loop`, `scf.for` over unordered regions (§5.1) |
 | `Conditional`, `LoopLike`, `GuardedLoop` / `EntryGuard`, `TokenScope` | interfaces a walker used to rediscover a structured op's alignment from blocks and terminators, plus a zero-trip guard stated structurally because no operation computed it | `Gamma`, `Theta`, `CountedLoop`, declared by the op and derived by the macro (§5.1) |
 | `!token` and the loop-scope arguments naming it | a control token existed so a `break` could say which loop it left; a `NonLocalExit` names its target by kind or label | `NonLocalExit` + `ExitScope` |

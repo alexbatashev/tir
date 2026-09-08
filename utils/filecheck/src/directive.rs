@@ -40,12 +40,6 @@ impl DirectiveKind {
                 .map(DirectiveKind::Count),
         }
     }
-
-    /// A positive directive is one that consumes input and advances the match
-    /// position (everything except `CHECK-NOT`).
-    pub fn is_positive(&self) -> bool {
-        !matches!(self, DirectiveKind::Not)
-    }
 }
 
 /// A single directive parsed from the check file.

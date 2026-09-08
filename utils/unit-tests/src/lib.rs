@@ -109,7 +109,6 @@ mod tools {
 #[cfg(test)]
 mod core {
     mod affine;
-    mod alias_facts;
     mod analysis;
     mod arith;
     mod backend;
@@ -118,7 +117,6 @@ mod core {
     mod context;
     mod dependence;
     mod dialects;
-    mod dominance;
     mod edits;
     mod encodings;
     mod fixtures;
@@ -130,6 +128,7 @@ mod core {
     mod layout;
     mod liveness;
     mod machine_ir;
+    mod objects;
     mod pass;
     mod regalloc;
     mod region;

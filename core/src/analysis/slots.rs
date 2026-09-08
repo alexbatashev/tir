@@ -125,7 +125,7 @@ fn store_value(context: &Context, store: OpId) -> ValueId {
 }
 
 /// The value a collected load defines.
-pub fn load_result(context: &Context, load: OpId) -> ValueId {
+fn load_result(context: &Context, load: OpId) -> ValueId {
     context
         .get_op(load)
         .as_interface::<dyn MemoryRead>()

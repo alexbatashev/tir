@@ -29,6 +29,8 @@ use super::strip_mine::strip_mine;
 /// A counted nest in the shape the rebuild can state again.
 pub(super) struct Nest {
     root: OpId,
+    /// The unordered region the nest stands in, which the rebuilt one joins.
+    region: RegionId,
     /// The bounds of each dimension, as values available where the nest stands.
     bounds: Vec<Bounds>,
     /// The ports each dimension's body reads its counter through.
@@ -139,6 +141,7 @@ impl Nest {
 
         Some(Self {
             root: view.root,
+            region: context.parent_nodes_region(view.root)?,
             hoist: hoistable(context, view)?,
             bounds,
             counters: view
@@ -221,13 +224,6 @@ fn ports(context: &Context, op: OpId, counter: Option<ValueId>) -> Option<Ports>
     let handle = context.get_op(op);
     let deps = handle.dep_results().len();
     let arguments = shape(context, &handle)?.args;
-    // An ordered body opening a token scope holds a `break` or a `continue`,
-    // and the copy would name a scope the rebuilt loop does not open.
-    if let Some(block) = crate::analysis::affine::body_block(context, op)
-        && context.get_block(block).arguments().len() != arguments.len()
-    {
-        return None;
-    }
     let counting = crate::analysis::affine::build::counter_ports(context, &handle);
     let mut states = Vec::new();
     let mut counters = Vec::new();
@@ -291,13 +287,6 @@ struct Counted {
     step: ValueId,
 }
 
-/// Where the next operation goes.
-pub(super) enum Site {
-    Before(OperationRef),
-    /// An unordered region, where position means nothing.
-    Region(RegionId),
-}
-
 pub(super) struct Lowering<'a> {
     context: &'a Context,
     nest: Nest,
@@ -337,22 +326,17 @@ impl<'a> Lowering<'a> {
         if let Some(d) = remainder {
             shape.tiles[d] = 1;
         }
-        let mut site = match self.context.parent_nodes_region(self.nest.root) {
-            Some(region) => Site::Region(region),
-            None => Site::Before(target.clone()),
-        };
-        self.spell_bounds(&mut site, &shape);
-        self.hoist(&mut site);
+        let site = self.nest.region;
+        self.spell_bounds(site, &shape);
+        self.hoist(site);
 
         let levels = levels(&shape);
         let states = self.nest.entry_states.clone();
-        let left = self.emit(rewriter, &levels, 0, &mut HashMap::new(), states, &mut site)?;
+        let left = self.emit(rewriter, &levels, 0, &mut HashMap::new(), states, site)?;
 
         for (&old, &new) in self.nest.exit_states.iter().zip(&left) {
             self.context.replace_value_uses(old, new);
-            if let Site::Region(region) = site {
-                self.context.rename_region_results(region, old, new, &[]);
-            }
+            self.context.rename_region_results(site, old, new, &[]);
         }
         rewriter.erase_op(&target)?;
         if let Some(d) = remainder {
@@ -368,21 +352,21 @@ impl<'a> Lowering<'a> {
 
     /// Move the levels' loop-invariant operations out ahead of the nest, so what
     /// the copied body names is still defined once the nest is gone.
-    fn hoist(&self, site: &mut Site) {
+    fn hoist(&self, site: RegionId) {
         for op in self.nest.hoist.clone() {
             if let Some(block) = self.context.parent_block(op) {
                 self.context.get_block(block).remove_op(op);
             } else if let Some(region) = self.context.parent_nodes_region(op) {
                 self.context.remove_from_region(region, op);
             }
-            self.place(site, op);
+            self.context.add(site, op);
         }
     }
 
     /// Name every bound where the rebuilt nest will stand, so no loop counts
     /// between values the erased nest defined, and the step each tile loop
     /// takes: a whole tile of the dimension's own steps.
-    fn spell_bounds(&mut self, site: &mut Site, shape: &Candidate) {
+    fn spell_bounds(&mut self, site: RegionId, shape: &Candidate) {
         for dimension in 0..self.nest.bounds.len() {
             let bounds = &self.nest.bounds[dimension];
             let (lower, upper, stride, ty) = (
@@ -403,7 +387,7 @@ impl<'a> Lowering<'a> {
         }
     }
 
-    fn spell(&self, site: &mut Site, bound: Bound, ty: TypeId) -> ValueId {
+    fn spell(&self, site: RegionId, bound: Bound, ty: TypeId) -> ValueId {
         match bound {
             Bound::Literal(value) => literal_at(self.context, site, value, ty),
             Bound::Value(value) => value,
@@ -419,7 +403,7 @@ impl<'a> Lowering<'a> {
         index: usize,
         bound: &mut HashMap<usize, ValueId>,
         states: Vec<ValueId>,
-        site: &mut Site,
+        site: RegionId,
     ) -> Result<Vec<ValueId>, PassError> {
         let Some(level) = levels.get(index) else {
             return self.emit_body(rewriter, bound, states, site);
@@ -470,13 +454,13 @@ impl<'a> Lowering<'a> {
         &self,
         dimension: usize,
         bound: &HashMap<usize, ValueId>,
-        site: &mut Site,
+        site: RegionId,
     ) -> Counted {
         let base = bound[&tile_base_key(dimension)];
         let step = self.tile_steps[&dimension];
         let ty = self.nest.bounds[dimension].counter_type;
         let upper = b::addi(self.context, base, step, ty).build();
-        self.place(site, upper.id());
+        self.context.add(site, upper.id());
         Counted {
             dimension,
             key: dimension,
@@ -498,7 +482,7 @@ impl<'a> Lowering<'a> {
         index: usize,
         bound: &mut HashMap<usize, ValueId>,
         states: Vec<ValueId>,
-        site: &mut Site,
+        site: RegionId,
         counted: Counted,
     ) -> Result<Vec<ValueId>, PassError> {
         let Counted {
@@ -532,21 +516,13 @@ impl<'a> Lowering<'a> {
             builder = builder.dep_operand(state).dep_result();
         }
         let loop_op = builder.build();
-        self.place(site, loop_op.id());
+        self.context.add(site, loop_op.id());
         if key == dimension {
             self.built.insert(dimension, loop_op.id());
         }
 
         let restored = bound.insert(key, counter.id());
-        let mut inner = Site::Region(body);
-        let left = self.emit(
-            rewriter,
-            levels,
-            index + 1,
-            bound,
-            dep_ports.clone(),
-            &mut inner,
-        )?;
+        let left = self.emit(rewriter, levels, index + 1, bound, dep_ports.clone(), body)?;
         match restored {
             Some(previous) => bound.insert(key, previous),
             None => bound.remove(&key),
@@ -605,18 +581,11 @@ impl<'a> Lowering<'a> {
         rewriter: &mut Rewriter,
         bound: &HashMap<usize, ValueId>,
         states: Vec<ValueId>,
-        site: &mut Site,
+        site: RegionId,
     ) -> Result<Vec<ValueId>, PassError> {
         let bindings = self.body_bindings(bound, &states);
-        let Site::Region(destination) = *site else {
-            unreachable!("a body is built inside the loop that runs it");
-        };
-        let (ops, results) = crate::clone::clone_nodes_ops_into(
-            self.context,
-            self.nest.body,
-            &bindings,
-            destination,
-        );
+        let (ops, results) =
+            crate::clone::clone_nodes_ops_into(self.context, self.nest.body, &bindings, site);
         let values = self
             .context
             .get_region(self.nest.body)
@@ -626,27 +595,6 @@ impl<'a> Lowering<'a> {
         // The copy's own comparison and latch count a loop that is gone.
         erase_unread(self.context, rewriter, &ops)?;
         Ok(left)
-    }
-
-    /// Put an operation where the site says, keeping the order calls arrive in.
-    fn place(&self, site: &mut Site, op: OpId) {
-        match site {
-            Site::Before(target) => {
-                let block = self.context.get_block(
-                    target
-                        .op()
-                        .parent_block()
-                        .expect("the nest sits in a block"),
-                );
-                let position = block
-                    .op_ids()
-                    .iter()
-                    .position(|&other| other == target.op().id)
-                    .expect("the nest sits in the block holding it");
-                block.insert(position, op);
-            }
-            Site::Region(region) => self.context.add(*region, op),
-        }
     }
 }
 
@@ -689,21 +637,10 @@ pub(super) fn erase_unread(
     Ok(())
 }
 
-/// A literal spelled at `site`.
-pub(super) fn literal_at(context: &Context, site: &mut Site, value: i128, ty: TypeId) -> ValueId {
+/// A literal spelled in `site`.
+pub(super) fn literal_at(context: &Context, site: RegionId, value: i128, ty: TypeId) -> ValueId {
     let op = b::constant(context, value as i64, ty).build();
-    match site {
-        Site::Before(target) => {
-            let block = context.get_block(target.op().parent_block().expect("in a block"));
-            let position = block
-                .op_ids()
-                .iter()
-                .position(|&other| other == target.op().id)
-                .expect("the target sits in its block");
-            block.insert(position, op.id());
-        }
-        Site::Region(region) => context.add(*region, op.id()),
-    }
+    context.add(site, op.id());
     op.result()
 }
 
@@ -711,19 +648,6 @@ pub(super) fn literal_at(context: &Context, site: &mut Site, value: i128, ty: Ty
 /// counter the body reads.
 fn tile_base_key(dimension: usize) -> usize {
     usize::MAX - dimension
-}
-
-/// A literal spelled ahead of `target`.
-pub(super) fn literal(
-    context: &Context,
-    rewriter: &mut Rewriter,
-    target: &OperationRef,
-    value: i128,
-    ty: TypeId,
-) -> Result<ValueId, PassError> {
-    let op = b::constant(context, value as i64, ty).build();
-    rewriter.insert_op_before(target, &op)?;
-    Ok(op.result())
 }
 
 /// The operations the levels above the innermost body hold, in the order they
