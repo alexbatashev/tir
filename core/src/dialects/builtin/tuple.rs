@@ -109,7 +109,6 @@ operation! {
     MakeTupleOp {
         name: "make_tuple",
         dialect: "builtin",
-        format: "custom",
         verifier: "true",
         operands: O {
             elements: "*AnyConstraint",
@@ -122,56 +121,6 @@ operation! {
 }
 
 impl crate::Speculatable for MakeTupleOp {}
-
-impl MakeTupleOp {
-    fn custom_print(&self, fmt: &mut IRFormatter) -> Result<(), std::fmt::Error> {
-        let context = self.0.context.upgrade();
-        fmt.write(format!("%{} = make_tuple", self.result().number()))?;
-        for (index, element) in self.operands().iter().enumerate() {
-            if index == 0 {
-                fmt.write(" ")?;
-            } else {
-                fmt.write(", ")?;
-            }
-            fmt.write(format!("%{}", element.number()))?;
-        }
-        fmt.write(" : ")?;
-        context.print_type(context.get_value(self.result()).ty(), fmt)?;
-        fmt.write("\n")
-    }
-
-    fn custom_parse(
-        parser: &mut crate::parse::text::Parser,
-        context: &Context,
-    ) -> Result<Box<dyn Operation>, (Span, Error)> {
-        let mut elements = vec![];
-        let mut next = parser.parse_value_ref();
-        while let Some(reference) = next {
-            elements.push(parser.resolve_value(context, reference));
-            if !parser.parse_token(",") {
-                break;
-            }
-            next = Some(
-                parser
-                    .parse_value_ref()
-                    .ok_or_else(|| (parser.span(), Error::ExpectedValueRef))?,
-            );
-        }
-        if !parser.parse_token(":") {
-            return Err((parser.span(), Error::ExpectedToken(":")));
-        }
-        let result_type = parser
-            .parse_type(context)?
-            .ok_or_else(|| (parser.span(), Error::ExpectedType))?;
-
-        Ok(Box::new(
-            MakeTupleOpBuilder::new(context)
-                .elements(elements)
-                .result_type(result_type)
-                .build(),
-        ))
-    }
-}
 
 impl tir::Verifiable for MakeTupleOp {
     fn verify_impl(&self, context: &Context) -> Result<(), Error> {

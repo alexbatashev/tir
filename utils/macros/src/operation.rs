@@ -76,7 +76,6 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         "a variadic result must be the only declared result"
     );
     let op_fn_name = op_fn_ident(&name);
-    let operand_names: Vec<String> = operands.iter().map(|o| o.name.clone()).collect();
 
     let BindsCode {
         interfaces: binds_interfaces,
@@ -101,7 +100,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         None => make_parser(
             &builder_name,
             &regions,
-            &operand_names,
+            &operands,
             &attributes,
             has_results,
             result_variadic,
@@ -1530,11 +1529,15 @@ fn make_generic_printer(dialect: &str, name: &str) -> proc_macro2::TokenStream {
 fn make_parser(
     builder_name: &Ident,
     regions: &[Region],
-    operands: &[String],
+    operands: &[ValueSpec],
     attributes: &[AttrSpec],
     has_results: bool,
     result_variadic: bool,
 ) -> proc_macro2::TokenStream {
+    assert!(
+        operands.iter().rev().skip(1).all(|operand| !operand.variadic),
+        "the generic syntax reads a variadic operand group only as the last one"
+    );
     let attr_spec_literals: Vec<_> = attributes
         .iter()
         .map(|attr| {
@@ -1560,17 +1563,31 @@ fn make_parser(
     let operand_parsers: Vec<_> = operands
         .iter()
         .enumerate()
-        .map(|(i, op_name)| {
-            let field = format_ident!("{}", op_name);
+        .map(|(i, operand)| {
+            let field = format_ident!("{}", operand.name);
             let comma = if i > 0 {
                 quote! { parser.parse_token(","); }
             } else {
                 quote! {}
             };
-            quote! {
-                #comma
-                if let Some(ref_name) = parser.parse_value_ref() {
-                    builder = builder.#field(parser.resolve_value(context, ref_name));
+            if operand.variadic {
+                quote! {
+                    #comma
+                    let mut group = vec![];
+                    while let Some(ref_name) = parser.parse_value_ref() {
+                        group.push(parser.resolve_value(context, ref_name));
+                        if !parser.parse_token(",") {
+                            break;
+                        }
+                    }
+                    builder = builder.#field(group);
+                }
+            } else {
+                quote! {
+                    #comma
+                    if let Some(ref_name) = parser.parse_value_ref() {
+                        builder = builder.#field(parser.resolve_value(context, ref_name));
+                    }
                 }
             }
         })

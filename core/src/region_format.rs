@@ -161,7 +161,14 @@ pub fn print_generic(
         crate::dependency::print_value_list(fmt, &operands)?;
     }
     crate::dependency::print_dep_operands(fmt, op)?;
-    let attributes = op.attributes();
+    // `operand_segment_sizes` is bookkeeping the operand groups already spell:
+    // the generic parser recomputes it from the groups it reads back.
+    let segments = context.sym("operand_segment_sizes");
+    let attributes: Vec<_> = op
+        .attributes()
+        .into_iter()
+        .filter(|attribute| Some(attribute.name) != segments)
+        .collect();
     if !attributes.is_empty() {
         fmt.write(" {")?;
         for (index, attribute) in attributes.iter().enumerate() {
