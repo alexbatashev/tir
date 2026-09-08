@@ -1,8 +1,23 @@
 //! What every backend must answer the same way, asked once per backend.
 
+use tir::backend::abi::{PassSeq, ValueKind};
+use tir::backend::liveness::PhysReg;
 use tir::backend::sched::InstrSchedClass;
 use tir::backend::{isel::prove_guarded_relaxations, InstrInfo, MemoryEffects};
 use tir::Context;
+
+/// The sequence `sequences` passes values of `kind` in.
+pub fn pass_seq(sequences: &[PassSeq], kind: ValueKind) -> &PassSeq {
+    sequences
+        .iter()
+        .find(|sequence| sequence.kind == kind)
+        .unwrap_or_else(|| panic!("the abi passes no {kind:?} values"))
+}
+
+/// The register numbers of `regs`, in order.
+pub fn numbers(regs: &[PhysReg]) -> Vec<u16> {
+    regs.iter().map(|register| register.1).collect()
+}
 
 /// The one per-opcode record `backend` describes `name` with.
 pub fn info(backend: &str, infos: &[&'static InstrInfo], name: &str) -> &'static InstrInfo {

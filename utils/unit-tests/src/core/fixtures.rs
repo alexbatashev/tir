@@ -1,9 +1,30 @@
 //! Fixtures shared by the core test modules.
 
 use tir::backend::regalloc::{RegClassId, RegClassInfo, RegisterInfo, RegisterView};
+use tir::backend::RegPort;
+use tir::builtin::ModuleOp;
 use tir::graph::{MutDag, NodeId};
+use tir::parse::ir::parse_ir;
 use tir::sem::{SemGraph, SymKind, SymPayload};
+use tir::{Context, OpId};
 use tir_adt::APInt;
+
+/// Parse `source` as a module into a fresh context holding the default dialects.
+pub fn parse(source: &str) -> (Context, ModuleOp) {
+    let context = Context::with_default_dialects();
+    let module = parse_ir::<ModuleOp>(&context, source).expect("the fixture parses");
+    (context, module)
+}
+
+/// The ops of `module`'s body block.
+pub fn module_ops(context: &Context, module: OpId) -> Vec<OpId> {
+    context
+        .get_region(context.get_op(module).regions()[0])
+        .iter(context.clone())
+        .next()
+        .expect("module body")
+        .op_ids()
+}
 
 /// A single eight-register class `R` over its own file, the shared
 /// register-class fixture for the regalloc, liveness and encoding tests.
@@ -23,6 +44,22 @@ pub static R_CLASSES: [RegClassInfo; 1] = [RegClassInfo {
 pub const fn r() -> RegClassId {
     RegClassId::new(&R_CLASSES[0])
 }
+
+/// `rd, rs`: one destination slot and one source slot, both of class `R`.
+pub static RD_RS_PORTS: [RegPort; 2] = [
+    RegPort {
+        name: "rd",
+        class: Some(r()),
+        def: true,
+        tied_to: None,
+    },
+    RegPort {
+        name: "rs",
+        class: Some(r()),
+        def: false,
+        tied_to: None,
+    },
+];
 
 pub fn register_info() -> RegisterInfo {
     RegisterInfo {

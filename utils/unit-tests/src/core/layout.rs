@@ -9,6 +9,8 @@ use tir::{
     scoped_dict, Context, DataLayout, Endianness, Operation, TargetEnv,
 };
 
+use super::fixtures;
+
 /// The layout of a module declaring `spec`.
 fn layout(context: &Context, spec: &str) -> DataLayout {
     let src = format!("module {{data_layout = {spec}}} {{\n  module_end\n}}");
@@ -134,12 +136,12 @@ fn entries_outside_the_predefined_set_stay_readable() {
 
 #[test]
 fn ir_entries_override_the_target_default_key_by_key() {
-    let context = Context::with_default_dialects();
     let default = tir::data_layout_spec(Endianness::Big, 128, &[("i32", 32, 32), ("p", 64, 64)]);
-    let src = r#"module {data_layout = {endianness = "little", types = {p = {size = 32, abi = 32}}}} {
+    let (context, module) = fixtures::parse(
+        r#"module {data_layout = {endianness = "little", types = {p = {size = 32, abi = 32}}}} {
   module_end
-}"#;
-    let module = parse_ir::<ModuleOp>(&context, src).expect("parse module");
+}"#,
+    );
 
     let layout = DataLayout::for_op_with_default(&context, module.id(), Some(&default))
         .expect("target default applies");
@@ -157,9 +159,8 @@ fn ir_entries_override_the_target_default_key_by_key() {
 
 #[test]
 fn the_target_default_applies_where_the_ir_declares_nothing() {
-    let context = Context::with_default_dialects();
     let default = tir::data_layout_spec(Endianness::Little, 64, &[("p", 64, 64)]);
-    let module = parse_ir::<ModuleOp>(&context, "module {\n  module_end\n}").expect("parse");
+    let (context, module) = fixtures::parse("module {\n  module_end\n}");
 
     let layout = DataLayout::for_op_with_default(&context, module.id(), Some(&default))
         .expect("target default applies");

@@ -4,18 +4,14 @@
 use tir::{
     builtin::{self, ops, ModuleOp},
     interp,
-    parse::ir::parse_ir,
     scf::{LoopOp, SwitchOp},
     Context, ExitTarget, NonLocalExit, OpId, Operation, RegionId, Terminator, ValueId,
 };
 
+use super::fixtures::{self, module_ops};
+
 fn function(context: &Context, module: &ModuleOp) -> OpId {
-    context
-        .get_region(context.get_op(module.id()).regions()[0])
-        .iter(context.clone())
-        .next()
-        .expect("module body")
-        .op_ids()[0]
+    module_ops(context, module.id())[0]
 }
 
 fn body_of(context: &Context, function: OpId) -> RegionId {
@@ -54,8 +50,7 @@ const LOOP: &str = r#"module {
 
 #[test]
 fn growing_a_loop_port_extends_every_aligned_range() {
-    let context = Context::with_default_dialects();
-    let module = parse_ir::<ModuleOp>(&context, LOOP).expect("parse");
+    let (context, module) = fixtures::parse(LOOP);
     let function = function(&context, &module);
     let body = body_of(&context, function);
     let loop_op = find::<LoopOp>(&context, body);
@@ -91,8 +86,7 @@ fn growing_a_loop_port_extends_every_aligned_range() {
 
 #[test]
 fn growing_a_loop_dependency_port_keeps_the_dependency_shape() {
-    let context = Context::with_default_dialects();
-    let module = parse_ir::<ModuleOp>(&context, LOOP).expect("parse");
+    let (context, module) = fixtures::parse(LOOP);
     let function = function(&context, &module);
     let body = body_of(&context, function);
     let loop_op = find::<LoopOp>(&context, body);
@@ -129,8 +123,7 @@ const SWITCH: &str = r#"module {
 
 #[test]
 fn growing_a_gamma_port_forwards_to_and_joins_every_arm() {
-    let context = Context::with_default_dialects();
-    let module = parse_ir::<ModuleOp>(&context, SWITCH).expect("parse");
+    let (context, module) = fixtures::parse(SWITCH);
     let function = function(&context, &module);
     let body = body_of(&context, function);
     let switch = find::<SwitchOp>(&context, body);
@@ -193,29 +186,28 @@ impl NonLocalExit for ExitOp {
 
 /// `LOOP` with a conditional in the body whose taken arm leaves through
 /// `test.exit`.
-fn loop_with_exit(context: &Context) -> (OpId, OpId) {
-    ExitOp::register_interfaces(context);
-    let module = parse_ir::<ModuleOp>(context, LOOP).expect("parse");
-    let function = function(context, &module);
-    let loop_op = find::<LoopOp>(context, body_of(context, function));
+fn loop_with_exit() -> (Context, OpId, OpId) {
+    let (context, module) = fixtures::parse(LOOP);
+    ExitOp::register_interfaces(&context);
+    let function = function(&context, &module);
+    let loop_op = find::<LoopOp>(&context, body_of(&context, function));
     let body = context.get_op(loop_op).regions()[0];
     let predicate = context.get_region(body).results()[0];
-    let exit = ExitOpBuilder::new(context).values(vec![]).build();
+    let exit = ExitOpBuilder::new(&context).values(vec![]).build();
     let arm = |ops: Vec<OpId>| context.create_nodes_region(vec![], 0, ops, vec![], 0).id();
-    let conditional = tir::scf::SwitchOpBuilder::new(context)
+    let conditional = tir::scf::SwitchOpBuilder::new(&context)
         .predicate(predicate)
         .inputs(vec![])
         .arms(vec![arm(vec![]), arm(vec![exit.id()])])
         .result_types(vec![])
         .build();
     context.add(body, conditional.id());
-    (loop_op, exit.id())
+    (context, loop_op, exit.id())
 }
 
 #[test]
 fn a_non_local_exit_leaving_the_loop_resolves_to_it() {
-    let context = Context::with_default_dialects();
-    let (loop_op, exit) = loop_with_exit(&context);
+    let (context, loop_op, exit) = loop_with_exit();
 
     assert_eq!(
         tir::analysis::exits::resolve_exit_target(&context, exit).ok(),
@@ -225,8 +217,7 @@ fn a_non_local_exit_leaving_the_loop_resolves_to_it() {
 
 #[test]
 fn growing_a_loop_port_feeds_the_exits_leaving_it() {
-    let context = Context::with_default_dialects();
-    let (loop_op, exit) = loop_with_exit(&context);
+    let (context, loop_op, exit) = loop_with_exit();
     let i32_ty = builtin::IntegerType::new(&context, 32);
     let init = context.get_op(loop_op).value_operands()[0];
 
@@ -253,8 +244,7 @@ const NESTED: &str = r#"module {
 
 #[test]
 fn add_auto_places_an_op_where_its_operands_meet() {
-    let context = Context::with_default_dialects();
-    let module = parse_ir::<ModuleOp>(&context, NESTED).expect("parse");
+    let (context, module) = fixtures::parse(NESTED);
     let function = function(&context, &module);
     let outer = body_of(&context, function);
     let inner = context.get_op(find::<LoopOp>(&context, outer)).regions()[0];
@@ -272,8 +262,7 @@ fn add_auto_places_an_op_where_its_operands_meet() {
 
 #[test]
 fn add_auto_pins_an_op_to_its_dependency() {
-    let context = Context::with_default_dialects();
-    let module = parse_ir::<ModuleOp>(&context, NESTED).expect("parse");
+    let (context, module) = fixtures::parse(NESTED);
     let function = function(&context, &module);
     let outer = body_of(&context, function);
     let loop_op = find::<LoopOp>(&context, outer);
@@ -306,8 +295,7 @@ const COUNTED: &str = r#"module {
 
 #[test]
 fn growing_a_counted_loop_port_lands_before_its_bounds() {
-    let context = Context::with_default_dialects();
-    let module = parse_ir::<ModuleOp>(&context, COUNTED).expect("parse");
+    let (context, module) = fixtures::parse(COUNTED);
     let function = function(&context, &module);
     let body = body_of(&context, function);
     let for_op = find::<tir::scf::ForOp>(&context, body);

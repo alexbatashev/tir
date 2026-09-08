@@ -1,10 +1,9 @@
 //! The generic views spec-05 gives functions, calls, globals and leaf ops:
 //! what a consumer reads without knowing the concrete op.
 
-use tir::{
-    builtin::ModuleOp, parse::ir::parse_ir, Apply, Callable, Context, Global, OpId, Operation,
-    Speculatable,
-};
+use tir::{Apply, Callable, Global, Operation, Speculatable};
+
+use super::fixtures::{self, module_ops};
 
 const MODULE: &str = r#"module {
   %counter = global @counter align 4 bytes [1, 0, 0, 0]
@@ -18,19 +17,9 @@ const MODULE: &str = r#"module {
   module_end
 }"#;
 
-fn module_ops(context: &Context, module: OpId) -> Vec<OpId> {
-    context
-        .get_region(context.get_op(module).regions()[0])
-        .iter(context.clone())
-        .next()
-        .expect("module body")
-        .op_ids()
-}
-
 #[test]
 fn a_function_and_a_declaration_are_callable() {
-    let context = Context::with_default_dialects();
-    let module = parse_ir::<ModuleOp>(&context, MODULE).expect("parse");
+    let (context, module) = fixtures::parse(MODULE);
     let ops = module_ops(&context, module.id());
     let i32_ty = tir::builtin::IntegerType::new(&context, 32);
 
@@ -53,8 +42,7 @@ fn a_function_and_a_declaration_are_callable() {
 
 #[test]
 fn a_call_applies_its_callee_to_a_range_of_operands() {
-    let context = Context::with_default_dialects();
-    let module = parse_ir::<ModuleOp>(&context, MODULE).expect("parse");
+    let (context, module) = fixtures::parse(MODULE);
     let ops = module_ops(&context, module.id());
     let body = context.get_op(ops[2]).regions()[0];
     let call = context.get_region(body).op_ids()[0];
@@ -69,8 +57,7 @@ fn a_call_applies_its_callee_to_a_range_of_operands() {
 
 #[test]
 fn a_global_publishes_its_address_and_initializer() {
-    let context = Context::with_default_dialects();
-    let module = parse_ir::<ModuleOp>(&context, MODULE).expect("parse");
+    let (context, module) = fixtures::parse(MODULE);
     let ops = module_ops(&context, module.id());
 
     let global = context
@@ -83,8 +70,7 @@ fn a_global_publishes_its_address_and_initializer() {
 
 #[test]
 fn arithmetic_is_speculatable_and_division_is_not() {
-    let context = Context::with_default_dialects();
-    let module = parse_ir::<ModuleOp>(&context, MODULE).expect("parse");
+    let (context, module) = fixtures::parse(MODULE);
     let ops = module_ops(&context, module.id());
     let body = context
         .get_region(context.get_op(ops[2]).regions()[0])
@@ -97,12 +83,8 @@ fn arithmetic_is_speculatable_and_division_is_not() {
 
 #[test]
 fn a_zero_filled_global_has_a_zero_image() {
-    let context = Context::with_default_dialects();
-    let module = parse_ir::<ModuleOp>(
-        &context,
-        "module {\n  %s = global private @s size 3 align 1\n  module_end\n}",
-    )
-    .expect("parse");
+    let (context, module) =
+        fixtures::parse("module {\n  %s = global private @s size 3 align 1\n  module_end\n}");
     let ops = module_ops(&context, module.id());
 
     let global = context

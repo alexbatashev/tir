@@ -5,6 +5,36 @@ use std::ffi::c_void;
 
 use tir_jit::Jit;
 
+/// Returns 1 when a < b, else 0: a local branch resolved as pc-relative block
+/// fixups, with no relocations.
+const BRANCH: &str = r#"
+    module {
+      func.func @lt(%0: !i64, %1: !i64) -> !i64 {
+        %2 = cmpi %0, %1 {predicate = "slt"} : !i1
+        cfg.cond_br %2, ^bb1, ^bb2
+      ^bb1:
+        %3 = constant {value = 1} : !i64
+        func.return %3
+      ^bb2:
+        %4 = constant {value = 0} : !i64
+        func.return %4
+      }
+      module_end
+    }
+"#;
+
+/// A call into a host symbol as the tail expression: nothing is live across it.
+const EXTERNAL_CALL: &str = r#"
+    module {
+      %fn_host_triple = func.declare @host_triple(!i64) -> !i64
+      func.func @via_host(%0: !i64) -> !i64 {
+        %1 = func.call %fn_host_triple(%0 : !i64) -> !i64
+        func.return %1
+      }
+      module_end
+    }
+"#;
+
 #[test]
 fn add_two_integers() {
     let ir = r#"
@@ -93,24 +123,9 @@ fn multiply_registers() {
 fn conditional_branch() {
     // Local branches resolve as pc-relative block fixups (no relocations):
     // returns 1 when a < b, else 0.
-    let ir = r#"
-        module {
-          func.func @lt(%0: !i64, %1: !i64) -> !i64 {
-            %2 = cmpi %0, %1 {predicate = "slt"} : !i1
-            cfg.cond_br %2, ^bb1, ^bb2
-          ^bb1:
-            %3 = constant {value = 1} : !i64
-            func.return %3
-          ^bb2:
-            %4 = constant {value = 0} : !i64
-            func.return %4
-          }
-          module_end
-        }
-    "#;
 
     let jit = Jit::host().expect("host target");
-    let module = jit.compile(ir).expect("compile");
+    let module = jit.compile(BRANCH).expect("compile");
     let lt: extern "C" fn(i64, i64) -> i64 = unsafe { module.get("lt") }.expect("lt symbol");
     assert_eq!(lt(3, 9), 1);
     assert_eq!(lt(20, 4), 0);
@@ -309,21 +324,9 @@ extern "C" fn host_triple(x: i64) -> i64 {
 
 #[test]
 fn external_host_call() {
-    // The call is the tail expression: nothing is live across it.
-    let ir = r#"
-        module {
-          %fn_host_triple = func.declare @host_triple(!i64) -> !i64
-          func.func @via_host(%0: !i64) -> !i64 {
-            %1 = func.call %fn_host_triple(%0 : !i64) -> !i64
-            func.return %1
-          }
-          module_end
-        }
-    "#;
-
     let mut jit = Jit::host().expect("host target");
     jit.define_symbol("host_triple", host_triple as *const c_void);
-    let module = jit.compile(ir).expect("compile");
+    let module = jit.compile(EXTERNAL_CALL).expect("compile");
     let f: extern "C" fn(i64) -> i64 = unsafe { module.get("via_host") }.expect("via_host symbol");
     // via_host(x) = host_triple(x) = 3x
     assert_eq!(f(5), 15);
@@ -364,39 +367,14 @@ fn value_live_across_host_call() {
 // generated code even when the host is x86-64.
 #[test]
 fn aarch64_cross_load() {
-    let branch = r#"
-        module {
-          func.func @lt(%0: !i64, %1: !i64) -> !i64 {
-            %2 = cmpi %0, %1 {predicate = "slt"} : !i1
-            cfg.cond_br %2, ^bb1, ^bb2
-          ^bb1:
-            %3 = constant {value = 1} : !i64
-            func.return %3
-          ^bb2:
-            %4 = constant {value = 0} : !i64
-            func.return %4
-          }
-          module_end
-        }
-    "#;
     let jit = Jit::new("arm64", None);
-    let module = jit.compile(branch).expect("cross-compile branch for arm64");
+    let module = jit.compile(BRANCH).expect("cross-compile branch for arm64");
     assert!(module.address("lt").is_some());
 
-    let external = r#"
-        module {
-          %fn_host_triple = func.declare @host_triple(!i64) -> !i64
-          func.func @via_host(%0: !i64) -> !i64 {
-            %1 = func.call %fn_host_triple(%0 : !i64) -> !i64
-            func.return %1
-          }
-          module_end
-        }
-    "#;
     let mut jit = Jit::new("arm64", None);
     jit.define_symbol("host_triple", host_triple as *const c_void);
     let module = jit
-        .compile(external)
+        .compile(EXTERNAL_CALL)
         .expect("cross-compile external call for arm64 (trampoline path)");
     assert!(module.address("via_host").is_some());
 }

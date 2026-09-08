@@ -3,20 +3,15 @@
 use tir::analysis::objects::{accessed_only, object_base};
 use tir::{
     analysis::{Base, Escape, EscapeFacts},
-    builtin, AnalysisManager, Context, MemoryWrite, OpId, Operation, ValueId,
+    AnalysisManager, Context, MemoryWrite, OpId, Operation, ValueId,
 };
 
+use super::fixtures::{self, module_ops};
+
 /// The first function of `source` and the locations its stores write, in order.
-fn stores(context: &Context, source: &str) -> (OpId, Vec<ValueId>) {
-    let module: builtin::ModuleOp =
-        tir::parse::ir::parse_ir(context, source).expect("the fixture parses");
-    let body = context
-        .get_region(context.get_op(module.id()).regions()[0])
-        .iter(context.clone())
-        .next()
-        .expect("module body");
-    let func = *body
-        .op_ids()
+fn stores(source: &str) -> (Context, OpId, Vec<ValueId>) {
+    let (context, module) = fixtures::parse(source);
+    let func = *module_ops(&context, module.id())
         .iter()
         .find(|&&op| context.get_op(op).is::<tir::func::FuncOp>())
         .expect("a function");
@@ -34,14 +29,12 @@ fn stores(context: &Context, source: &str) -> (OpId, Vec<ValueId>) {
                 .map(|write| write.write_location())
         })
         .collect();
-    (func, locations)
+    (context, func, locations)
 }
 
 #[test]
 fn escape_through_call_argument_and_store_to_memory() {
-    let context = Context::with_default_dialects();
-    let (func, locations) = stores(
-        &context,
+    let (context, func, locations) = stores(
         r#"module {
   %fn_keep = func.declare @keep(!ptr.p) -> !unit
   %fn_f = func.func @f(%pp: !ptr.p, %a: !i32) {
@@ -74,9 +67,7 @@ fn escape_through_call_argument_and_store_to_memory() {
 /// ordered function whose parameters are its entry block's arguments.
 #[test]
 fn object_base_reads_ordered_parameters_and_allocations() {
-    let context = Context::with_default_dialects();
-    let (_, locations) = stores(
-        &context,
+    let (context, _, locations) = stores(
         r#"module {
   %g = global @g size 4 align 4
   %fn_f = func.func @f(%p: !ptr.p, %q: !ptr.p, %a: !i32) noalias [0] {
@@ -115,9 +106,7 @@ fn object_base_reads_ordered_parameters_and_allocations() {
 /// in the function can reach; one handed to a call is not.
 #[test]
 fn accessed_only_sees_the_address_leave() {
-    let context = Context::with_default_dialects();
-    let (_, locations) = stores(
-        &context,
+    let (context, _, locations) = stores(
         r#"module {
   %fn_keep = func.declare @keep(!ptr.p) -> !unit
   %fn_f = func.func @f(%a: !i32) {

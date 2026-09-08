@@ -4,36 +4,25 @@
 
 use tir::{builtin::ModuleOp, parse::ir::parse_ir, verify_op_tree, Context, Operation};
 
-fn cir_context() -> Context {
-    let context = Context::with_default_dialects();
-    context.register_dialect::<fcc::cir::CirDialect>();
-    context
-}
+use super::support::{fcc_context, print_ir};
 
 fn verify(module: &str) -> Result<(), tir::Error> {
-    let context = cir_context();
+    let context = fcc_context();
     let module = parse_ir::<ModuleOp>(&context, module).expect("parse module");
     verify_op_tree(&context, module.id())
-}
-
-fn print(module: &ModuleOp) -> String {
-    let mut printed = String::new();
-    let mut fmt = tir::IRFormatter::new(&mut printed);
-    module.print(&mut fmt).expect("print module");
-    printed
 }
 
 /// Parse `module`, print it, and parse the printed form again: the two printings
 /// agree exactly when the op's syntax carries everything its structure holds.
 fn roundtrip(module: &str) -> String {
-    let context = cir_context();
+    let context = fcc_context();
     let parsed = parse_ir::<ModuleOp>(&context, module).expect("parse module");
     verify_op_tree(&context, parsed.id()).expect("verify module");
-    let printed = print(&parsed);
+    let printed = print_ir(&parsed);
 
-    let context = cir_context();
+    let context = fcc_context();
     let reparsed = parse_ir::<ModuleOp>(&context, &printed).expect("parse printed module");
-    assert_eq!(printed, print(&reparsed), "printing is not stable");
+    assert_eq!(printed, print_ir(&reparsed), "printing is not stable");
     printed
 }
 
@@ -284,7 +273,7 @@ fn find<T: Operation>(context: &Context, module: &ModuleOp) -> tir::OpId {
 
 #[test]
 fn a_break_leaves_the_innermost_loop_and_a_labeled_continue_its_label() {
-    let context = cir_context();
+    let context = fcc_context();
     let module = parse_ir::<ModuleOp>(&context, LABELED_LOOPS).expect("parse module");
     let resolve = |exit| tir::analysis::exits::resolve_exit_target(&context, exit);
 
@@ -300,7 +289,7 @@ fn a_break_leaves_the_innermost_loop_and_a_labeled_continue_its_label() {
 
 #[test]
 fn an_exit_with_no_loop_to_leave_is_an_error() {
-    let context = cir_context();
+    let context = fcc_context();
     let module = parse_ir::<ModuleOp>(
         &context,
         r#"module {
@@ -370,7 +359,7 @@ const LABELED_BREAK_OUT: &str = r#"module {
 
 #[test]
 fn flattening_resolves_a_labeled_break_to_the_loop_it_names() {
-    let context = cir_context();
+    let context = fcc_context();
     let module = parse_ir::<ModuleOp>(&context, LABELED_BREAK_OUT).expect("parse module");
     let mut pm = tir::PassManager::new();
     pm.nest::<tir::func::FuncOp>()

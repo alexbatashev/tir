@@ -13,7 +13,7 @@ use tir::backend::{
 };
 use tir::{BlockHandle, Context, OpId, Operation, ValueId};
 
-use super::fixtures::{machine_op, r};
+use super::fixtures::{machine_op, r, RD_RS_PORTS};
 
 /// The one-register flag file the test opcodes touch implicitly, standing for
 /// x86 `EFLAGS`.
@@ -41,21 +41,6 @@ static RD_ONLY: [RegPort; 1] = [RegPort {
     tied_to: None,
 }];
 
-static RD_RS: [RegPort; 2] = [
-    RegPort {
-        name: "rd",
-        class: Some(r()),
-        def: true,
-        tied_to: None,
-    },
-    RegPort {
-        name: "rs",
-        class: Some(r()),
-        def: false,
-        tied_to: None,
-    },
-];
-
 static WRITES_FLAGS: [ImplicitReg; 1] = [ImplicitReg {
     class: f(),
     index: 0,
@@ -69,8 +54,22 @@ static READS_FLAGS: [ImplicitReg; 1] = [ImplicitReg {
 }];
 
 machine_op!(DefOp, "dep", "def", &RD_ONLY, &[]);
-machine_op!(SetFlagsOp, "dep", "set_flags", rs, &RD_RS, &WRITES_FLAGS);
-machine_op!(ReadFlagsOp, "dep", "read_flags", rs, &RD_RS, &READS_FLAGS);
+machine_op!(
+    SetFlagsOp,
+    "dep",
+    "set_flags",
+    rs,
+    &RD_RS_PORTS,
+    &WRITES_FLAGS
+);
+machine_op!(
+    ReadFlagsOp,
+    "dep",
+    "read_flags",
+    rs,
+    &RD_RS_PORTS,
+    &READS_FLAGS
+);
 
 fn context() -> Context {
     let context = Context::with_default_dialects();
