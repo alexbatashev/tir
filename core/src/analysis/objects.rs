@@ -17,8 +17,7 @@ pub enum Effect {
 /// What `op` does to memory, or `None` where it names none. Both memory
 /// interfaces are asked before either answers: an operation declaring the two
 /// writes the extent it reads, and is no observer. An operation naming a state
-/// without declaring what it does to it changes it — a call, a copy, an export;
-/// a merge and a split only name the chains an effect crosses.
+/// without declaring what it does to it changes it — a call, a copy, an export.
 pub fn effect_of(op: &OpHandle) -> Option<Effect> {
     if op.has_interface::<dyn MemoryWrite>() || op.is::<MemcpyOp>() || op.is::<CallOp>() {
         return Some(Effect::Change);
@@ -26,7 +25,9 @@ pub fn effect_of(op: &OpHandle) -> Option<Effect> {
     if op.has_interface::<dyn MemoryRead>() {
         return Some(Effect::Read);
     }
-    if op.is::<JoinOp>() || op.is::<SplitOp>() {
+    // A merge and a split only name the chains an effect crosses, and a loop or
+    // a gate only carries them: the effect itself is inside.
+    if op.is::<JoinOp>() || op.is::<SplitOp>() || !op.regions().is_empty() {
         return None;
     }
     (!op.dep_operands().is_empty()).then_some(Effect::Change)
