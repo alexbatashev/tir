@@ -10,7 +10,7 @@ use tir_pdl::{
 };
 
 use super::{
-    AxNode, Axiom, ConstWidth, Guard_, ProofObligation, ValueGuard, WidthBinding, WidthExpr,
+    AxNode, Axiom, ConstWidth, Guard_, ProofObligation, Side, ValueGuard, WidthBinding, WidthExpr,
     contains_kind, holes_of, intern, references,
 };
 use crate::sem::{SymKind, op_kind};
@@ -188,12 +188,6 @@ pub(crate) fn axiom_from_rule(rule: &tir_pdl::Rule) -> Result<Axiom, String> {
         post_saturation: rule.post_saturation,
         materialize: rule.materializes(),
     })
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Side {
-    Lhs,
-    Rhs,
 }
 
 fn node(term: &Term, side: Side, scope: &Scope) -> Result<AxNode, String> {
