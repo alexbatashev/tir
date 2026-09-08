@@ -491,6 +491,17 @@ impl<'src> Parser<'src> {
         Some(&self.src[start + 1..start + 1 + len])
     }
 
+    /// Whether the cursor still sits on the line the last token ended on.
+    /// Trivia is already behind it, so a construct that belongs to an op's own
+    /// line asks this before reading on.
+    pub fn on_same_line(&self) -> bool {
+        !self.src[..self.position as usize]
+            .chars()
+            .rev()
+            .take_while(|c| c.is_whitespace())
+            .any(|c| c == '\n')
+    }
+
     pub fn pos(&self) -> u32 {
         self.position
     }
