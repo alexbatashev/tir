@@ -382,6 +382,51 @@ const X86_REG_NAMES: &[(&str, u32)] = &[
     ("r15", 15),
 ];
 
+/// Why `instr` cannot be verified against the model, as the report names it,
+/// or `None` when it can.
+fn unsupported_reason(spec: &IsaSpec, instr: &Instruction) -> Option<String> {
+    let riscv = spec.name.starts_with("riscv");
+    if riscv && instr.name == "vsetvli" {
+        return Some("vsetvli (RVV disabled in Sail configuration)".to_string());
+    }
+    if riscv && instr.width_bits == 16 {
+        return Some(format!(
+            "{} (compressed extension disabled in Sail configuration)",
+            instr.name
+        ));
+    }
+    if riscv && matches!(instr.name.as_str(), "envcall" | "envbreak" | "cenvbreak") {
+        return Some(format!(
+            "{} (terminating Sail trace omits architectural trap state)",
+            instr.name
+        ));
+    }
+    if !instr.supported {
+        return Some(instr.name.clone());
+    }
+    // Atomics (A extension) reference the reservation state, whose mapping onto
+    // Sail's reservation register is follow-up work (see module docs).
+    if instr.uses_reservation {
+        return Some(format!(
+            "{} (atomic; Sail reservation mapping is follow-up)",
+            instr.name
+        ));
+    }
+    if instr.flat_execute.is_none() {
+        return Some(format!("{} (no flat SMT behavior)", instr.name));
+    }
+    // Operands in register classes that have no correspondence to Sail state
+    // (e.g. the TMDL `pc` operand class).
+    instr
+        .operands
+        .iter()
+        .find_map(|(_, kind)| match kind {
+            OperandKind::Reg { class, .. } if !spec.class_is_mapped(class) => Some(class),
+            _ => None,
+        })
+        .map(|class| format!("{} (unmapped register class {})", instr.name, class))
+}
+
 pub fn verify_smt(sh: &Shell, isa: &str, args: impl Iterator<Item = String>) -> anyhow::Result<()> {
     let spec = ISA_SPECS.iter().find(|s| s.name == isa).ok_or_else(|| {
         anyhow!("unsupported ISA {isa}; available: riscv64, riscv32, armv8, x86_64")
@@ -421,58 +466,8 @@ pub fn verify_smt(sh: &Shell, isa: &str, args: impl Iterator<Item = String>) -> 
         if shard.is_some_and(|shard| !shard.contains(&instr.name)) {
             continue;
         }
-        if spec.name.starts_with("riscv") && instr.name == "vsetvli" {
-            report
-                .unsupported
-                .push("vsetvli (RVV disabled in Sail configuration)".to_string());
-            continue;
-        }
-        if spec.name.starts_with("riscv") && instr.width_bits == 16 {
-            report.unsupported.push(format!(
-                "{} (compressed extension disabled in Sail configuration)",
-                instr.name
-            ));
-            continue;
-        }
-        if spec.name.starts_with("riscv")
-            && matches!(instr.name.as_str(), "envcall" | "envbreak" | "cenvbreak")
-        {
-            report.unsupported.push(format!(
-                "{} (terminating Sail trace omits architectural trap state)",
-                instr.name
-            ));
-            continue;
-        }
-        if !instr.supported {
-            report.unsupported.push(instr.name.clone());
-            continue;
-        }
-        // Atomics (A extension) reference the reservation state, whose mapping
-        // onto Sail's reservation register is follow-up work (see module docs);
-        // skip them until that is enabled.
-        if instr.uses_reservation {
-            report.unsupported.push(format!(
-                "{} (atomic; Sail reservation mapping is follow-up)",
-                instr.name
-            ));
-            continue;
-        }
-        if instr.flat_execute.is_none() {
-            report
-                .unsupported
-                .push(format!("{} (no flat SMT behavior)", instr.name));
-            continue;
-        }
-        // Skip instructions with operands in register classes that have no
-        // correspondence to Sail state (e.g. the TMDL `pc` operand class).
-        if let Some(class) = instr.operands.iter().find_map(|(_, k)| match k {
-            OperandKind::Reg { class, .. } if !spec.class_is_mapped(class) => Some(class),
-            _ => None,
-        }) {
-            report.unsupported.push(format!(
-                "{} (unmapped register class {})",
-                instr.name, class
-            ));
+        if let Some(reason) = unsupported_reason(spec, instr) {
+            report.unsupported.push(reason);
             continue;
         }
         selected.push(instr);
