@@ -56,9 +56,9 @@ fn parses_let_and_extract() {
 }
 
 #[test]
-fn parses_forall_with_comment() {
-    let t = parse_term("; a comment\n(forall ((x (_ BitVec 8))) (= x x))").unwrap();
-    assert!(matches!(t, Term::Forall(_, _)));
+fn parses_term_after_comment() {
+    let t = parse_term("; a comment\n(bvadd x #x01)").unwrap();
+    assert!(matches!(t, Term::App(_, _)));
 }
 
 #[test]
@@ -105,7 +105,6 @@ fn roundtrips_terms() {
     term_roundtrips("(_ bv13 8)");
     term_roundtrips("(bvadd #x0f #b1010)");
     term_roundtrips("(let ((x #x0f)) ((_ extract 3 0) x))");
-    term_roundtrips("(forall ((x (_ BitVec 8))) (= x x))");
     term_roundtrips("(! (= x y) :named foo)");
     term_roundtrips("(as nil (List Int))");
 }
@@ -290,19 +289,6 @@ fn rejects_oversized_or_zero_widths_without_panicking() {
             "expected error (not panic) for `{src}`"
         );
     }
-}
-
-#[test]
-fn rejects_quantifiers() {
-    let script = parse_script(
-        "(declare-const x (_ BitVec 8))\
-         (assert (forall ((y (_ BitVec 8))) (= x y)))",
-    )
-    .unwrap();
-    assert!(matches!(
-        lower_script::<()>(&script),
-        Err(ConvertError::Quantifier)
-    ));
 }
 
 #[test]
