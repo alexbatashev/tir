@@ -4,10 +4,11 @@ use tir::attributes::AttributeValue;
 use tir::backend::regalloc::{RegClassId, RegClassInfo, RegisterInfo, RegisterView};
 use tir::backend::{RegPort, SymbolOp, SymbolOpBuilder};
 use tir::builtin::ModuleOp;
+use tir::func::FuncOp;
 use tir::graph::{MutDag, NodeId};
 use tir::parse::ir::parse_ir;
 use tir::sem::{SemGraph, SymKind, SymPayload};
-use tir::{BlockHandle, Context, OpId};
+use tir::{BlockHandle, Context, OpId, Operation, RegionId};
 use tir_adt::APInt;
 
 /// Parse `source` as a module into a fresh context holding the default dialects.
@@ -15,6 +16,18 @@ pub fn parse(source: &str) -> (Context, ModuleOp) {
     let context = Context::with_default_dialects();
     let module = parse_ir::<ModuleOp>(&context, source).expect("the fixture parses");
     (context, module)
+}
+
+/// Parse a `module { func.func @… }` source, handing back its one function and
+/// the body region a pass leaves its result in.
+pub fn parse_function(source: &str) -> (Context, ModuleOp, FuncOp, RegionId) {
+    let (context, module) = parse(source);
+    let func = module_ops(&context, module.id())
+        .into_iter()
+        .find_map(|op| context.get_op(op).as_op::<FuncOp>())
+        .expect("the module declares a function");
+    let body = context.get_op(func.id()).regions()[0];
+    (context, module, func, body)
 }
 
 /// The ops of `module`'s body block.
@@ -153,7 +166,7 @@ macro_rules! machine_op {
                 interfaces: [tir::backend::MachineInstruction],
             }
         }
-        machine_op!(@info $op, $name, $ports, $implicit);
+        $crate::core::fixtures::instr_info!($op, $name, $ports, $implicit);
     };
     ($op:ident, $dialect:tt, $name:tt, $ports:expr, $implicit:expr) => {
         tir::helpers::operation! {
@@ -164,9 +177,33 @@ macro_rules! machine_op {
                 interfaces: [tir::backend::MachineInstruction],
             }
         }
-        machine_op!(@info $op, $name, $ports, $implicit);
+        $crate::core::fixtures::instr_info!($op, $name, $ports, $implicit);
     };
-    (@info $op:ident, $name:tt, $ports:expr, $implicit:expr) => {
+}
+pub(crate) use machine_op;
+
+/// A selection marker: an instruction saying only what the isel assertions
+/// read, its mnemonic, over two untyped operands.
+macro_rules! marker_op {
+    ($op:ident, $name:tt) => {
+        tir::helpers::operation! {
+            $op {
+                name: $name,
+                dialect: "test",
+                operands: O { a: "?tir::Any", b: "?tir::Any", },
+                results: R { regs: "*tir::Any" },
+                interfaces: [tir::backend::MachineInstruction],
+            }
+        }
+        $crate::core::fixtures::instr_info!($op, $name, &[], &[]);
+    };
+}
+pub(crate) use marker_op;
+
+/// The `MachineInstruction` facts a test opcode reports: its mnemonic, the
+/// register slots `$ports`, and the registers `$implicit` its behavior touches.
+macro_rules! instr_info {
+    ($op:ident, $name:tt, $ports:expr, $implicit:expr) => {
         impl tir::backend::MachineInstruction for $op {
             fn info(&self) -> &'static tir::backend::InstrInfo {
                 static INFO: tir::backend::InstrInfo = tir::backend::InstrInfo {
@@ -186,4 +223,4 @@ macro_rules! machine_op {
         }
     };
 }
-pub(crate) use machine_op;
+pub(crate) use instr_info;
