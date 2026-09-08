@@ -5,9 +5,37 @@ use std::{
     io::{self, Read, Write},
 };
 
-use clap::ValueEnum;
+use clap::{Args, ValueEnum};
 use tir::backend::TargetMachine;
 use tir::{Context, builtin::ModuleOp};
+
+/// The target flags a code-generating tool takes besides `--march`, which is
+/// the tool's own: only a tool that can read the target from its input makes it
+/// optional. The display orders leave room for it in second place.
+#[derive(Args)]
+pub struct TargetArgs {
+    /// Target CPU
+    #[arg(long, display_order = 0)]
+    mcpu: Option<String>,
+    /// Target feature toggles (e.g. `+m,-zmmul`), applied on top of `--march`.
+    #[arg(long, display_order = 2)]
+    mattr: Option<String>,
+    /// Target calling convention.
+    #[arg(long, display_order = 3)]
+    mabi: Option<String>,
+}
+
+impl TargetArgs {
+    /// The target `march` names, as the rest of the flags configure it.
+    pub fn select(&self, march: &str) -> Result<Box<dyn TargetMachine>, String> {
+        tir::backend::select_target_with_abi(
+            march,
+            self.mcpu.as_deref(),
+            self.mattr.as_deref(),
+            self.mabi.as_deref(),
+        )
+    }
+}
 
 #[derive(Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 pub enum InputKind {

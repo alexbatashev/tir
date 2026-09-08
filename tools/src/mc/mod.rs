@@ -8,23 +8,16 @@ use tir::backend::binary::{ObjectEmission, render_ascii, write_elf};
 use tir::backend::pipeline::{Oracles, StopAfter, build_pipeline, lower_and_emit};
 use tir::{Context, IRFormatter, Operation};
 
-use crate::common::{InputKind, parse_module, parse_tir, read_input, resolve_kind};
+use crate::common::{InputKind, TargetArgs, parse_module, parse_tir, read_input, resolve_kind};
 
 #[derive(Args)]
 pub struct ToolArgs {
-    /// Target CPU
-    #[arg(long)]
-    mcpu: Option<String>,
+    #[command(flatten)]
+    target: TargetArgs,
     /// Target architecture. Defaults to the `arch` the input's `target_env`
     /// declares, which only TIR input can carry.
-    #[arg(long)]
+    #[arg(long, display_order = 1)]
     march: Option<String>,
-    /// Target feature toggles (e.g. `+m,-zmmul`), applied on top of `--march`.
-    #[arg(long)]
-    mattr: Option<String>,
-    /// Target calling convention.
-    #[arg(long)]
-    mabi: Option<String>,
     /// Optional stage after which pipeline is stopped
     #[arg(value_enum, long, conflicts_with = "filetype")]
     stage: Option<Stage>,
@@ -67,14 +60,7 @@ pub enum FileType {
 }
 
 pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
-    let select = |march: &str| {
-        tir::backend::select_target_with_abi(
-            march,
-            args.mcpu.as_deref(),
-            args.mattr.as_deref(),
-            args.mabi.as_deref(),
-        )
-    };
+    let select = |march: &str| args.target.select(march);
 
     let context = Context::with_default_dialects();
     let kind = resolve_kind(args.input.as_ref(), args.kind.unwrap_or_default());
