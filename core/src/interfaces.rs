@@ -70,18 +70,7 @@ pub trait Commutative {
 /// An arithmetic operation over integer values.
 pub trait IntegerArithmetic {}
 
-/// An operation of an ordered region that binds the region's results: the
-/// values it carries are what the region produces when control leaves through
-/// it. An unordered region names those values outright instead.
-pub trait RegionExit {
-    fn exit_values(&self) -> Vec<ValueId>;
-}
-
 pub trait Terminator {
-    fn is_terminator(&self) -> bool {
-        true
-    }
-
     fn successors(&self) -> Vec<BlockId> {
         Vec::new()
     }

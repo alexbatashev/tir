@@ -1,5 +1,4 @@
-use crate::parse::common::Span;
-use crate::{Context, Error, IRFormatter, Operation, dialect, operation};
+use crate::{Context, Error, dialect, operation};
 
 use crate as tir;
 
@@ -21,7 +20,6 @@ operation! {
     EntryStateOp {
         name: "entry_state",
         dialect: "state",
-        format: "custom",
         verifier: "true",
         interfaces: [crate::interp::Interp],
     }
@@ -31,18 +29,6 @@ impl EntryStateOp {
     /// The chain this op opens.
     pub fn result(&self) -> tir::ValueId {
         self.0.dep_results()[0]
-    }
-
-    fn custom_print(&self, fmt: &mut IRFormatter) -> Result<(), std::fmt::Error> {
-        tir::dependency::print_result_prefix(fmt, &self.0)?;
-        fmt.write("state.entry_state\n")
-    }
-
-    fn custom_parse(
-        _parser: &mut crate::parse::text::Parser,
-        context: &Context,
-    ) -> Result<Box<dyn Operation>, (Span, Error)> {
-        Ok(Box::new(EntryStateOpBuilder::new(context).build()))
     }
 }
 
@@ -60,7 +46,6 @@ operation! {
     JoinOp {
         name: "join",
         dialect: "state",
-        format: "custom",
         verifier: "true",
         interfaces: [crate::interp::Interp],
     }
@@ -70,24 +55,6 @@ impl JoinOp {
     /// The merged memory.
     pub fn result(&self) -> tir::ValueId {
         self.0.dep_results()[0]
-    }
-
-    fn custom_print(&self, fmt: &mut IRFormatter) -> Result<(), std::fmt::Error> {
-        tir::dependency::print_result_prefix(fmt, &self.0)?;
-        fmt.write("state.join")?;
-        tir::dependency::print_dep_operands(fmt, &self.0)?;
-        fmt.write("\n")
-    }
-
-    fn custom_parse(
-        parser: &mut crate::parse::text::Parser,
-        context: &Context,
-    ) -> Result<Box<dyn Operation>, (Span, Error)> {
-        let mut builder = JoinOpBuilder::new(context);
-        for state in tir::dependency::parse_dep_operands(parser, context)? {
-            builder = builder.dep_operand(state);
-        }
-        Ok(Box::new(builder.build()))
     }
 }
 
@@ -110,7 +77,6 @@ operation! {
     SplitOp {
         name: "split",
         dialect: "state",
-        format: "custom",
         verifier: "true",
         interfaces: [crate::interp::Interp],
     }
@@ -125,24 +91,6 @@ impl SplitOp {
     /// One state per chain crossing the split.
     pub fn states(&self) -> Vec<tir::ValueId> {
         self.0.dep_results().to_vec()
-    }
-
-    fn custom_print(&self, fmt: &mut IRFormatter) -> Result<(), std::fmt::Error> {
-        tir::dependency::print_result_prefix(fmt, &self.0)?;
-        fmt.write("state.split")?;
-        tir::dependency::print_dep_operands(fmt, &self.0)?;
-        fmt.write("\n")
-    }
-
-    fn custom_parse(
-        parser: &mut crate::parse::text::Parser,
-        context: &Context,
-    ) -> Result<Box<dyn Operation>, (Span, Error)> {
-        let mut builder = SplitOpBuilder::new(context);
-        for state in tir::dependency::parse_dep_operands(parser, context)? {
-            builder = builder.dep_operand(state);
-        }
-        Ok(Box::new(builder.build()))
     }
 }
 

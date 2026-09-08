@@ -57,7 +57,7 @@ pub use interfaces::{
     Apply, Binding, BranchGuard, BranchTerminator, Callable, Commutative, ConstantFold,
     ConstantLike, CountedLoop, ExitScope, ExitScopeKind, ExitTarget, Gamma, Global,
     IntegerArithmetic, MemoryRead, MemoryWrite, NonLocalExit, OpCost, PromotableAllocation, Pure,
-    RegionExit, SameOperandAndResultType, Speculatable, Symbol, Terminator, Theta, Visibility,
+    SameOperandAndResultType, Speculatable, Symbol, Terminator, Theta, Visibility,
 };
 pub use interp::{Interp, InterpError, Memory as InterpMemory, Value as InterpValue};
 pub use ir_formatter::IRFormatter;
