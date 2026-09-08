@@ -14,8 +14,14 @@ use tir_adt::APInt;
 /// Parse `source` as a module into a fresh context holding the default dialects.
 pub fn parse(source: &str) -> (Context, ModuleOp) {
     let context = Context::with_default_dialects();
-    let module = parse_ir::<ModuleOp>(&context, source).expect("the fixture parses");
+    let module = parse_in(&context, source);
     (context, module)
+}
+
+/// Parse `source` as a module into `context`, which the caller has already
+/// taught whatever dialects the source names.
+pub fn parse_in(context: &Context, source: &str) -> ModuleOp {
+    parse_ir::<ModuleOp>(context, source).expect("the fixture parses")
 }
 
 /// Parse a `module { func.func @… }` source, handing back its one function and
