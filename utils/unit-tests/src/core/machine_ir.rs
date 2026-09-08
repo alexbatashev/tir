@@ -12,7 +12,7 @@ use tir::backend::{
 };
 use tir::{Context, Operation, ValueId};
 
-use super::fixtures::{machine_op, r, r_high};
+use super::fixtures::{asm_symbol, machine_op, r, r_high};
 
 // `add rd, rs`: one destination slot and one source slot, both of class `R`,
 // plus the implicit flag register the behavior writes.
@@ -58,14 +58,7 @@ fn function(build: impl FnOnce(&Context, AddTestOpBuilder) -> AddTestOpBuilder) 
     AddTestOp::register_interfaces(&context);
     let add = build(&context, AddTestOpBuilder::new(&context)).build();
     let handle = add.get_handle();
-    let block = context.create_block(vec![]);
-    block.append(add.id());
-    let region = context.create_region();
-    region.add_block(block.id());
-    let symbol = SymbolOpBuilder::new(&context)
-        .body(region.id())
-        .attr("name", AttributeValue::Str("f".into()))
-        .build();
+    let (symbol, _) = asm_symbol(&context, &[add.id()]);
     Function {
         context,
         symbol,

@@ -1,12 +1,13 @@
 //! Fixtures shared by the core test modules.
 
+use tir::attributes::AttributeValue;
 use tir::backend::regalloc::{RegClassId, RegClassInfo, RegisterInfo, RegisterView};
-use tir::backend::RegPort;
+use tir::backend::{RegPort, SymbolOp, SymbolOpBuilder};
 use tir::builtin::ModuleOp;
 use tir::graph::{MutDag, NodeId};
 use tir::parse::ir::parse_ir;
 use tir::sem::{SemGraph, SymKind, SymPayload};
-use tir::{Context, OpId};
+use tir::{BlockHandle, Context, OpId};
 use tir_adt::APInt;
 
 /// Parse `source` as a module into a fresh context holding the default dialects.
@@ -80,6 +81,23 @@ pub static RD_RS_PORTS: [RegPort; 2] = [
         tied_to: None,
     },
 ];
+
+/// An `asm.symbol` named `f` whose body is one block holding `ops`, in that
+/// order. Machine instructions have no textual form, so the machine-IR tests
+/// build the function around them rather than parsing one.
+pub fn asm_symbol(context: &Context, ops: &[OpId]) -> (SymbolOp, BlockHandle) {
+    let block = context.create_block(vec![]);
+    for &op in ops {
+        block.append(op);
+    }
+    let region = context.create_region();
+    region.add_block(block.id());
+    let symbol = SymbolOpBuilder::new(context)
+        .body(region.id())
+        .attr("name", AttributeValue::Str("f".into()))
+        .build();
+    (symbol, block)
+}
 
 pub fn register_info() -> RegisterInfo {
     RegisterInfo {
