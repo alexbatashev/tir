@@ -5,13 +5,12 @@ use tir_adt::{APInt, FxHasher};
 use crate::{ClassId, Label};
 use std::hash::{Hash, Hasher};
 
-/// `op(children…)`, plus the two properties the engine branches on.
+/// `op(children…)`, plus the property the engine branches on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Term {
     pub op: String,
     pub children: Vec<ClassId>,
     pub commutative: bool,
-    pub unique: bool,
 }
 
 impl Term {
@@ -24,7 +23,6 @@ impl Term {
             op: op.to_string(),
             children: children.to_vec(),
             commutative: false,
-            unique: false,
         }
     }
 
@@ -32,14 +30,6 @@ impl Term {
     pub fn comm(op: &str, children: &[ClassId]) -> Self {
         Self {
             commutative: true,
-            ..Self::op(op, children)
-        }
-    }
-
-    /// A node that never hash-conses and never congruence-merges.
-    pub fn unique(op: &str, children: &[ClassId]) -> Self {
-        Self {
-            unique: true,
             ..Self::op(op, children)
         }
     }
@@ -98,10 +88,6 @@ impl Label for Term {
 
     fn commutative(&self) -> bool {
         self.commutative
-    }
-
-    fn is_unique(&self) -> bool {
-        self.unique
     }
 
     fn from_int(value: APInt) -> Option<Self> {

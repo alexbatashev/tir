@@ -1,3 +1,4 @@
+use proptest::prelude::*;
 use tir_relational::{ClassId as Id, Engine, Label as ENode};
 
 use super::test_lang::*;
@@ -831,4 +832,114 @@ fn sorted(g: &Engine<Math>, ids: impl IntoIterator<Item = Id>) -> Vec<Id> {
     ids.sort();
     ids.dedup();
     ids
+}
+
+/// The operator of a node, without its operands.
+fn op_name(node: &Math) -> String {
+    match node {
+        Math::Num(n) => format!("num{n}"),
+        Math::FNum(v) => format!("fnum{v:?}"),
+        Math::Sym(s) => format!("sym{s}"),
+        Math::Neg(_) => "neg".to_string(),
+        Math::Add(_) => "add".to_string(),
+        Math::Effect(kind, _) => format!("effect{kind}"),
+    }
+}
+
+/// Everything a caller can observe, for the scope round-trip test.
+fn state(g: &Engine<Math>) -> Vec<(u32, Vec<String>, Vec<Vec<u32>>)> {
+    g.class_ids()
+        .map(|class| {
+            (
+                class.0,
+                g.nodes(class).map(op_name).collect(),
+                g.rows(class)
+                    .map(|row| g.children(row).iter().map(|c| g.find(*c).0).collect())
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// A random program: entry `i` applies an operator to ids built by earlier entries.
+fn programs() -> impl Strategy<Value = Vec<(usize, Vec<usize>)>> {
+    prop::collection::vec((0usize..4, prop::collection::vec(0usize..12, 0..2)), 1..24)
+}
+
+fn build(g: &mut Engine<Math>, program: &[(usize, Vec<usize>)]) -> Vec<Id> {
+    let mut ids: Vec<Id> = Vec::new();
+    for (op, args) in program {
+        let arg = |slot: usize, ids: &[Id]| ids[args.get(slot).copied().unwrap_or(0) % ids.len()];
+        let made = match op {
+            _ if ids.is_empty() => Math::Num(0),
+            0 => Math::Num(args.len() as i64),
+            1 => Math::Neg([arg(0, &ids)]),
+            2 => Math::Add([arg(0, &ids), arg(1, &ids)]),
+            _ => Math::Effect(0, [arg(0, &ids)]),
+        };
+        ids.push(g.add(made));
+    }
+    ids
+}
+
+proptest! {
+    #[test]
+    fn rebuild_restores_the_functional_dependency(
+        program in programs(),
+        merges in prop::collection::vec((0usize..24, 0usize..24), 0..8),
+    ) {
+        let mut g: Engine<Math> = Engine::new();
+        let ids = build(&mut g, &program);
+        g.rebuild();
+        for (a, b) in merges {
+            g.union(ids[a % ids.len()], ids[b % ids.len()]);
+        }
+        g.rebuild();
+        // No two live rows share a label and canonical children in
+        // different classes.
+        let mut seen: std::collections::HashMap<(u32, Vec<u32>), u32> = Default::default();
+        for class in g.class_ids() {
+            for row in g.rows(class) {
+                if g.node(row).is_unique() {
+                    continue;
+                }
+                let key = (
+                    g.label(row).0,
+                    g.children(row).iter().map(|c| g.find(*c).0).collect(),
+                );
+                prop_assert_eq!(*seen.entry(key).or_insert(class.0), class.0);
+            }
+        }
+    }
+
+    #[test]
+    fn the_same_program_builds_the_same_ids(program in programs()) {
+        let mut one: Engine<Math> = Engine::new();
+        let mut two: Engine<Math> = Engine::new();
+        let a = build(&mut one, &program);
+        let b = build(&mut two, &program);
+        one.rebuild();
+        two.rebuild();
+        prop_assert_eq!(a, b);
+        prop_assert_eq!(state(&one), state(&two));
+    }
+
+    #[test]
+    fn a_scope_round_trip_restores_every_column(
+        program in programs(),
+        merges in prop::collection::vec((0usize..24, 0usize..24), 0..8),
+    ) {
+        let mut g: Engine<Math> = Engine::new();
+        let ids = build(&mut g, &program);
+        g.rebuild();
+        let before = state(&g);
+        g.push_context();
+        for (a, b) in merges {
+            g.union(ids[a % ids.len()], ids[b % ids.len()]);
+        }
+        g.add(Math::Neg([ids[0]]));
+        g.rebuild();
+        g.pop_context();
+        prop_assert_eq!(state(&g), before);
+    }
 }
