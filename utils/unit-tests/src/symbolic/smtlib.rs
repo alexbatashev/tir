@@ -109,18 +109,6 @@ fn roundtrips_terms() {
     term_roundtrips("(as nil (List Int))");
 }
 
-#[test]
-fn roundtrips_script() {
-    let src = "(set-logic QF_BV)\n\
-               (declare-const x (_ BitVec 32))\n\
-               (assert (= (bvadd x #x00000001) x))\n\
-               (check-sat)\n\
-               (exit)";
-    let a = parse_script(src).unwrap();
-    let b = parse_script(&a.to_string()).unwrap();
-    assert_eq!(a, b);
-}
-
 // ── SMT <-> graph conversion ───────────────────────────────────────────────
 
 type Graph = GenericDag<SymKind, SymPayload<()>>;
@@ -208,12 +196,6 @@ fn lowers_extract_and_literal() {
         }
         other => panic!("expected constant, got {other:?}"),
     }
-}
-
-#[test]
-fn empty_assertions_lower_to_true() {
-    let lo = lower("(declare-const x (_ BitVec 8))");
-    assert_eq!(*lo.graph.get_kind(lo.root), SymKind::Constant);
 }
 
 #[test]

@@ -355,36 +355,21 @@ fn random_formulas_match_reference() {
 // ----- integer-to-float conversion circuits -----
 
 mod fp {
-    use tir_adt::APInt;
-    use tir_graph::{Dag, GenericDag, MutDag, NodeId};
+    use tir_graph::Dag;
     use tir_symbolic::bitblast::{blast, SolveOutcome};
     use tir_symbolic::lang::{infer_widths, SymKind, SymPayload};
 
-    type G = GenericDag<SymKind, SymPayload<()>>;
-
-    fn con(g: &mut G, value: u64, width: u32) -> NodeId {
-        let n = g.add_node(SymKind::Constant);
-        g.set_leaf_data(n, SymPayload::Int(APInt::new(width, value)));
-        n
-    }
-
-    fn op(g: &mut G, kind: SymKind, children: &[NodeId]) -> NodeId {
-        let n = g.add_node(kind);
-        for &c in children {
-            g.add_edge(n, c);
-        }
-        n
-    }
+    use crate::symbolic::support::{con, op, sym, Graph as G};
 
     /// Whether `kind(value:vwidth, 11, 52)` provably equals the f64 bit pattern
     /// `expected`: the `Ne` root is unsatisfiable exactly when the two agree.
     fn converts_to(kind: SymKind, value: u64, vwidth: u32, expected: u64) -> bool {
         let mut g = G::new();
-        let v = con(&mut g, value, vwidth);
-        let e = con(&mut g, 11, 16);
-        let m = con(&mut g, 52, 16);
+        let v = con(&mut g, vwidth, value);
+        let e = con(&mut g, 16, 11);
+        let m = con(&mut g, 16, 52);
         let fp = op(&mut g, kind, &[v, e, m]);
-        let want = con(&mut g, expected, 64);
+        let want = con(&mut g, 64, expected);
         op(&mut g, SymKind::Ne, &[fp, want]);
         let widths = infer_widths(&g, |_| None);
         matches!(blast(&g, &widths).unwrap().solve(), SolveOutcome::Unsat)
@@ -438,21 +423,15 @@ mod fp {
         }
     }
 
-    fn sym(g: &mut G, id: u32) -> NodeId {
-        let n = g.add_node(SymKind::Symbol);
-        g.set_leaf_data(n, SymPayload::SymbolId(id));
-        n
-    }
-
     /// Whether `uitofp(x:32)` and `sitofp(x zero-extended to `ext`)` are provably
     /// equal over all 32-bit `x` — the x86 selection bridge, `false` if refutable.
     fn bridge_holds(ext: u64) -> bool {
         let mut g = G::new();
         let x = sym(&mut g, 0);
-        let e = con(&mut g, 11, 16);
-        let m = con(&mut g, 52, 16);
+        let e = con(&mut g, 16, 11);
+        let m = con(&mut g, 16, 52);
         let lhs = op(&mut g, SymKind::UIToFP, &[x, e, m]);
-        let width = con(&mut g, ext, 16);
+        let width = con(&mut g, 16, ext);
         let widened = op(&mut g, SymKind::ZExt, &[x, width]);
         let rhs = op(&mut g, SymKind::SIToFP, &[widened, e, m]);
         op(&mut g, SymKind::Ne, &[lhs, rhs]);
@@ -464,16 +443,19 @@ mod fp {
     }
 
     #[test]
-    fn unsigned_bridges_to_signed_via_zero_extend() {
+    fn the_unsigned_bridge_needs_a_widening_zero_extend() {
         assert!(bridge_holds(64), "uitofp(x) == sitofp(zext(x, 64))");
+        // Extending to 32 (a no-op) leaves the sign bit interpreted, so the
+        // signed reading disagrees for x >= 2^31 and the bridge must not prove.
+        assert!(!bridge_holds(32), "sitofp at 32 bits differs from uitofp");
     }
 
     fn converts_from(kind: SymKind, value: f64, width: u32, expected: u64) -> bool {
         let mut g = G::new();
-        let input = con(&mut g, value.to_bits(), 64);
-        let width_node = con(&mut g, width as u64, 7);
+        let input = con(&mut g, 64, value.to_bits());
+        let width_node = con(&mut g, 7, width as u64);
         let converted = op(&mut g, kind, &[input, width_node]);
-        let want = con(&mut g, expected, width);
+        let want = con(&mut g, width, expected);
         op(&mut g, SymKind::Ne, &[converted, want]);
         let widths = infer_widths(&g, |_| None);
         matches!(blast(&g, &widths).unwrap().solve(), SolveOutcome::Unsat)
@@ -496,12 +478,12 @@ mod fp {
     fn unsigned_32_bridges_to_signed_64_over_its_defined_domain() {
         let mut g = G::new();
         let input = sym(&mut g, 0);
-        let width_32 = con(&mut g, 32, 7);
+        let width_32 = con(&mut g, 7, 32);
         let unsigned = op(&mut g, SymKind::FPToUI, &[input, width_32]);
-        let width_64 = con(&mut g, 64, 7);
+        let width_64 = con(&mut g, 7, 64);
         let signed = op(&mut g, SymKind::FPToSI, &[input, width_64]);
-        let hi = con(&mut g, 31, 6);
-        let lo = con(&mut g, 0, 1);
+        let hi = con(&mut g, 6, 31);
+        let lo = con(&mut g, 1, 0);
         let low_signed = op(&mut g, SymKind::Extract, &[signed, hi, lo]);
         op(&mut g, SymKind::Ne, &[unsigned, low_signed]);
         let widths = infer_widths(&g, |id| match g.get_leaf_data(id) {
@@ -514,12 +496,5 @@ mod fp {
             blasted.solve_defined_equivalence(unsigned, low_signed),
             SolveOutcome::Unsat
         ));
-    }
-
-    #[test]
-    fn no_extend_is_unsound_for_high_bit_inputs() {
-        // Extending to 32 (a no-op) leaves the sign bit interpreted, so the
-        // signed reading disagrees for x >= 2^31 and the bridge must not prove.
-        assert!(!bridge_holds(32), "sitofp at 32 bits differs from uitofp");
     }
 }
