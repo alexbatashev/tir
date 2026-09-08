@@ -26,8 +26,8 @@ module {data_layout = #data_layout} {
 // CHECK-NOT: ptr.alloca
 // CHECK-NOT: ptr.store
 // CHECK-NOT: ptr.load
-// CHECK: %{{[0-9]+}}, %[[RESULT:[0-9]+]] | %[[OUT:[0-9]+]] = scf.for %{{[0-9]+}} = %[[LB]] to %[[UB]] step %[[STEP]] (%[[CARRIED:[0-9]+]] = %[[INIT]] | %{{[0-9]+}} = %{{[0-9]+}}) {
+// CHECK: %{{[0-9]+}}, %[[RESULT:[0-9]+]] = scf.for %{{[0-9]+}} = %[[LB]] to %[[UB]] step %[[STEP]] (%[[CARRIED:[0-9]+]] = %[[INIT]]) {
 // CHECK-NEXT: %[[NEXT:[0-9]+]] = ptr.ptradd %[[CARRIED]], %[[D]] : !ptr.p
-// CHECK-NEXT: -> %[[NEXT]] | %{{[0-9]+}}
+// CHECK-NEXT: -> %[[NEXT]]
 // CHECK-NEXT: }
-// CHECK-NEXT: -> %[[RESULT]] | %[[OUT]]
+// CHECK-NEXT: -> %[[RESULT]] | %{{[0-9]+}}

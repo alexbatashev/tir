@@ -1,10 +1,10 @@
 // RUN: tir opt --pass func.func(restructure-nodes) --print-affine %s -o /dev/null | filecheck %s
 
 // The same nest over pointer parameters. No two parameters are told apart, so
-// all three accesses are of one chain, and the pairs across objects are decided
-// by whether the byte ranges the two sides touch are disjoint — the predicate a
-// caller could be asked, and versioning could materialize. The same-object pair
-// is unchanged: it never goes through the ranges.
+// each write names every one of their chains and the pairs across objects are
+// formed, decided by whether the byte ranges the two sides touch are disjoint —
+// the predicate a caller could be asked, and versioning could materialize. The
+// same-object pair is unchanged: it never goes through the ranges.
 
 #data_layout = {types = {i32 = {abi = 32, size = 32}, i64 = {abi = 64, size = 64}, p = {abi = 64, size = 64}}}
 
@@ -52,9 +52,9 @@ module {data_layout = #data_layout} {
 }
 
 // CHECK: affine.view %{{[0-9]+}} {
-// CHECK: access 0 read %{{[0-9]+}} chain %[[S:[0-9]+]] base %[[A:[0-9]+]] offset 32*d0 + 4*d2 extent 4
-// CHECK-NEXT: access 1 read %{{[0-9]+}} chain %[[S]] base %[[B:[0-9]+]] offset 4*d1 + 32*d2 extent 4
-// CHECK-NEXT: access 2 read %{{[0-9]+}} chain %[[S]] base %[[C:[0-9]+]] offset 32*d0 + 4*d1 extent 4
+// CHECK: access 0 read %{{[0-9]+}} chain %{{[0-9]+}} base %[[A:[0-9]+]] offset 32*d0 + 4*d2 extent 4
+// CHECK-NEXT: access 1 read %{{[0-9]+}} chain %{{[0-9]+}} base %[[B:[0-9]+]] offset 4*d1 + 32*d2 extent 4
+// CHECK-NEXT: access 2 read %{{[0-9]+}} chain %[[S:[0-9]+]] base %[[C:[0-9]+]] offset 32*d0 + 4*d1 extent 4
 // CHECK-NEXT: access 3 write %{{[0-9]+}} chain %[[S]] base %[[C]] offset 32*d0 + 4*d1 extent 4
 // CHECK-NEXT: dep 0 3 conditional disjoint %[[A]][0, 255] %[[C]][0, 255]
 // CHECK-NEXT: dep 1 3 conditional disjoint %[[B]][0, 255] %[[C]][0, 255]

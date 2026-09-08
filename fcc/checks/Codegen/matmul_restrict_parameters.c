@@ -2,15 +2,14 @@
 // RUN: fcc compile --stage ir -o /tmp/fcc-matmul-restrict.tir %s
 // RUN: tir opt --pass func.func(promote-nodes,verify-deps,instcombine-nodes,affine) /tmp/fcc-matmul-restrict.tir | filecheck %s --check-prefix=IR
 
-// The same nest over `restrict` pointers. The λ's `noalias [0, 1, 2]` makes
-// the three parameters three objects, and with per-object chains the nest was
-// reordered exactly as the local-array kernel's: `k` out of the innermost
-// position so the read of `b` walks a row. Today the order stays `i, j, k` for
-// the same reason as there: `j` is stored to its slot in the `j` loop and
-// reloaded inside the `k` loop, promote-nodes does not forward the port across
-// the loop boundary, and the `c` and `b` subscripts are sums over a `ptr.load`
-// rather than over the counter. The affine view refuses the interchange. This
-// pins the reload and the unmoved order.
+// The same nest over `restrict` pointers. The frontend spills each parameter
+// into a slot it never assigns again, so the object a subscript is derived from
+// is read back through that one spill: the λ's `noalias [0, 1, 2]` then makes
+// the three parameters three objects, and `restructure-nodes` gives each a
+// chain of its own. No pair crosses two chains, every pair within one is a
+// distance the scheduler can read, and the nest is reordered exactly as the
+// local-array kernel's — `k` out of the innermost position so the read of `b`
+// walks a row rather than a column.
 
 void matmul_restrict_parameters(int *restrict a, int *restrict b,
                                 int *restrict c)
@@ -22,14 +21,13 @@ void matmul_restrict_parameters(int *restrict a, int *restrict b,
 }
 
 // IR-LABEL: func.func @matmul_restrict_parameters
-// IR: scf.for %[[I:[0-9]+]] = {{.*}}
-// IR: scf.for %[[J:[0-9]+]] = {{.*}}
-// IR: ptr.store %[[J]], %[[JSLOT:[0-9]+]] |
-// IR: scf.for %[[K:[0-9]+]] = {{.*}}
-// IR: %[[JL:[0-9]+]] | %{{[0-9]+}} = ptr.load %[[JSLOT]] |
+// IR: scf.for %[[I:[0-9]+]] = %{{[0-9]+}} to %{{[0-9]+}} step %{{[0-9]+}}
+// IR-NEXT: scf.for %[[K:[0-9]+]] = %{{[0-9]+}} to %{{[0-9]+}} step %{{[0-9]+}}
+// IR-NEXT: scf.for %[[J:[0-9]+]] = %{{[0-9]+}} to %{{[0-9]+}} step %{{[0-9]+}}
 // IR: %[[ROW:[0-9]+]] = shli %[[I]]
-// IR-NEXT: addi %[[ROW]], %[[JL]]
+// IR-NEXT: addi %[[ROW]], %[[J]]
 // IR: addi %[[ROW]], %[[K]]
-// IR: shli %[[K]]
+// IR: %[[BROW:[0-9]+]] = shli %[[K]]
+// IR-NEXT: addi %[[BROW]], %[[J]]
 
 // CHECK: matmul_restrict_parameters:

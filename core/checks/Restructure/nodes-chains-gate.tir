@@ -1,0 +1,48 @@
+// RUN: tir opt --pass restructure-nodes,verify-deps --verify %s | filecheck %s
+// RUN: tir interp %s -f f --args=1 | filecheck --check-prefix=ONE %s
+// RUN: tir opt --pass restructure-nodes %s | tir interp -f f --args=1 | filecheck --check-prefix=ONE %s
+// RUN: tir opt --pass restructure-nodes %s | tir interp -f f --args=0 | filecheck --check-prefix=ZERO %s
+// RUN: tir opt --pass restructure-nodes --shuffle-seed 5 %s | tir interp -f f --args=1 | filecheck --check-prefix=ONE %s
+// RUN: tir opt --pass restructure-nodes --shuffle-seed 13 %s | tir interp -f f --args=0 | filecheck --check-prefix=ZERO %s
+
+// One arm writes one slot and the other the other. Both chains cross the gate,
+// so each arm is entered on a dependency port per chain and produces one for
+// each: the arm that leaves a chain alone hands back the state it was entered
+// on.
+
+module {
+  %fn_f = func.func @f(%c: !i32) -> !i32 {
+    %a = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    %b = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    %zero = constant {value = 0} : !i32
+    %one = constant {value = 1} : !i32
+    %two = constant {value = 2} : !i32
+    ptr.store %zero, %a
+    ptr.store %zero, %b
+    %t = cmpi %c, %zero {predicate = "ne"} : !i1
+    cfg.cond_br %t, ^then, ^else
+  ^then:
+    ptr.store %one, %a
+    cfg.br ^join
+  ^else:
+    ptr.store %two, %b
+    cfg.br ^join
+  ^join:
+    %x = ptr.load %a : !i32
+    %y = ptr.load %b : !i32
+    %s = addi %x, %y : !i32
+    func.return %s
+  }
+  module_end
+}
+
+// CHECK: %{{[0-9]+}} = func.func @f(%[[C:[0-9]+]]: !i32) -> !i32 {
+// CHECK: scf.switch %{{[0-9]+}} args(| %{{[0-9]+}}, %{{[0-9]+}}) (| %[[EA:[0-9]+]], %[[EB:[0-9]+]]) {
+// CHECK: | %[[SB:[0-9]+]] = ptr.store %{{[0-9]+}}, %{{[0-9]+}} | %[[EB]]
+// CHECK-NEXT: -> | %[[EA]], %[[SB]]
+// CHECK: (| %[[TA:[0-9]+]], %[[TB:[0-9]+]]) {
+// CHECK: | %[[SA:[0-9]+]] = ptr.store %{{[0-9]+}}, %{{[0-9]+}} | %[[TA]]
+// CHECK-NEXT: -> | %[[SA]], %[[TB]]
+
+// ONE: i32 1
+// ZERO: i32 2

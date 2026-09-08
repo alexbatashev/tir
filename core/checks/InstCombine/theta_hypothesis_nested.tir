@@ -3,7 +3,8 @@
 // Nested loops, outermost first: the outer port is proved before the inner one
 // is read, so the constant it carries is a constant of the base graph by the
 // time the inner loop's own hypothesis asks what it is entered on. Both ports
-// are proved, and the sum after the nest is the two literals.
+// are proved, and the sum after the nest is the two literals folded into one:
+// neither loop holds memory, so both die once their reads fold.
 
 module {
   %fn_f = func.func @f(%0: !i64, %1: !i64, %2: !i64) -> !i32 {
@@ -23,7 +24,7 @@ module {
 }
 
 // CHECK-LABEL: %{{[0-9]+}} = func.func @f
-// CHECK: %[[SEVEN:[0-9]+]] = constant {value = 7} : !i32
 // CHECK-NOT: addi
+// CHECK-NOT: scf.for
 // CHECK: %[[SUM:[0-9]+]] = constant {value = 14} : !i32
 // CHECK-NEXT: -> %[[SUM]]

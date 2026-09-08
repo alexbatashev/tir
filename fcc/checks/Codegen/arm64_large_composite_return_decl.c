@@ -12,7 +12,8 @@ long first(long a, long b, long c) {
 
 // The declared callee returns its struct through a result address: the
 // caller allocates the temporary, passes it as the leading pointer argument,
-// and the field read is a load from that temporary chained on the call.
+// and the field read is a load from that temporary off the chain the call's
+// split hands back.
 
 // CHECK: %{{[0-9]+}} = func.declare @make_large(!ptr.p, !i64, !i64, !i64) -> !unit
 // CHECK: %[[TEMP:[0-9]+]] = ptr.alloca {size = 24, align = 8}
@@ -20,4 +21,4 @@ long first(long a, long b, long c) {
 // CHECK: %[[FIELD:[0-9]+]] = ptr.ptradd %[[BASE]]
 // CHECK: | %[[CALL:[0-9]+]] = func.call %{{[0-9]+}}(%[[TEMP]]
 // CHECK-SAME: ) result_address
-// CHECK: ptr.load %[[FIELD]] | %[[CALL]]
+// CHECK-NEXT: %{{[0-9]+}} | %{{[0-9]+}} = ptr.load %[[FIELD]] | %[[CALL]]

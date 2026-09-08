@@ -37,8 +37,7 @@ module {
 // CHECK-LABEL: %{{[0-9]+}} = func.func @cross
 // CHECK-NOT: ptr.
 // CHECK: %[[ZERO:[0-9]+]] = constant {value = 0} : !i32
-// CHECK: %[[LEFT:[0-9]+]], %[[RIGHT:[0-9]+]] | %{{[0-9]+}} = scf.switch %0 args(| %{{[0-9]+}}) (| %[[EA:[0-9]+]]) {
-// CHECK: -> %[[ZERO]], %{{[0-9]+}} | %[[EA]]
-// CHECK: (| %[[TA:[0-9]+]]) {
-// CHECK: -> %{{[0-9]+}}, %[[ZERO]] | %[[TA]]
+// CHECK: %[[LEFT:[0-9]+]], %[[RIGHT:[0-9]+]] = scf.switch %0 {
+// CHECK: -> %[[ZERO]], %{{[0-9]+}}
+// CHECK: -> %{{[0-9]+}}, %[[ZERO]]
 // CHECK: addi %[[LEFT]], %[[RIGHT]]

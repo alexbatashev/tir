@@ -42,10 +42,10 @@ module {
 
 // CHECK-LABEL: %{{[0-9]+}} = func.func @escape
 // CHECK-NOT: ptr.
-// CHECK: %[[RESULT:[0-9]+]] | %{{[0-9]+}} = scf.loop (%{{[0-9]+}} = %3 | %{{[0-9]+}} = %{{[0-9]+}}) {
+// CHECK: %[[RESULT:[0-9]+]] = scf.loop (%{{[0-9]+}} = %3) {
 // CHECK: scf.switch %1
 // CHECK: %[[GO:[0-9]+]] = constant {value = 1} : !i1
-// CHECK-NEXT: -> %[[GO]], %3 | %{{[0-9]+}}
+// CHECK-NEXT: -> %[[GO]], %3
 // CHECK: %[[STOP:[0-9]+]] = constant {value = 0} : !i1
-// CHECK-NEXT: -> %[[STOP]], %4 | %{{[0-9]+}}
+// CHECK-NEXT: -> %[[STOP]], %4
 // CHECK: -> %[[RESULT]] | %{{[0-9]+}}

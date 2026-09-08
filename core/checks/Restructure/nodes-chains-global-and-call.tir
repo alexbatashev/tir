@@ -1,0 +1,34 @@
+// RUN: tir opt --pass restructure-nodes,verify-deps --verify %s | filecheck %s
+
+// A private slot, a global and a call. The memory the function is entered with
+// is split into a chain per object, and the slot's address never leaves its own
+// accesses: nothing the outside can reach names it, no call is on its chain,
+// and the read of the slot observes the write to it directly. The global's
+// chain and the world's are one here — every effect that names either names
+// both, so nothing tells them apart — which is why the read of the global
+// observes the call.
+
+module {
+  %g = global @g size 4 align 4
+  %fn_h = func.declare @h() -> !unit
+  %fn_f = func.func @f(%v: !i32) -> !i32 {
+    %a = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    ptr.store %v, %a
+    ptr.store %v, %g
+    func.call %fn_h()
+    %x = ptr.load %a : !i32
+    %y = ptr.load %g : !i32
+    %s = addi %x, %y : !i32
+    func.return %s
+  }
+  module_end
+}
+
+// CHECK: %{{[0-9]+}} = func.func @f(%[[V:[0-9]+]]: !i32) -> !i32 {
+// CHECK: | %[[ENTRY:[0-9]+]] = state.entry_state
+// CHECK-NEXT: | %[[EA:[0-9]+]], %[[EG:[0-9]+]] = state.split | %[[ENTRY]]
+// CHECK-NEXT: | %[[SA:[0-9]+]] = ptr.store %[[V]], %[[A:[0-9]+]] | %[[EA]]
+// CHECK-NEXT: | %[[SG:[0-9]+]] = ptr.store %[[V]], %[[G:[0-9]+]] | %[[EG]]
+// CHECK-NEXT: | %[[C:[0-9]+]] = func.call %{{[0-9]+}}() | %[[SG]]
+// CHECK-NEXT: %{{[0-9]+}} | %[[RA:[0-9]+]] = ptr.load %[[A]] | %[[SA]] : !i32
+// CHECK-NEXT: %{{[0-9]+}} | %[[RG:[0-9]+]] = ptr.load %[[G]] | %[[C]] : !i32

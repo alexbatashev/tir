@@ -2,8 +2,8 @@
 
 // The oracle: every machine block is re-linearized by a seeded random
 // topological order of its dependence graph. The program is the same one, so
-// the memory order has to come out the same — the chain the mid-end drew is
-// what says which load reads the store and which one does not.
+// the memory order has to come out the same — the chains the mid-end drew are
+// what say which load reads the store and which one does not.
 
 module {
   %fn_f = func.func @f(%0: !ptr.p<!i32>, %1: !ptr.p<!i32>, %2: !i32) -> !i32 {

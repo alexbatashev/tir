@@ -31,13 +31,12 @@ use std::collections::HashMap;
 use tir_relational::{ClassId as Id, Engine};
 
 use crate::{
-    Context, MemoryWrite, OpId, ValueId,
+    Context, OpId, ValueId,
     attributes::{AttributeValue, Predicate},
     builtin::ops,
     utils::APInt,
 };
 
-use crate::analysis::alias_facts::Base;
 use crate::sem::node::cost;
 use crate::sem::{Prov, SemNode as Node, SymKind};
 use rules::{Ruleset, builtin_ruleset};
@@ -256,136 +255,4 @@ fn spell(literal: &APInt) -> i64 {
         1 => literal.to_u64() as i64,
         _ => literal.to_i64(),
     }
-}
-
-/// The object `address` is derived from through pointer arithmetic: a stack
-/// allocation, a global, or a parameter of the function, and nothing else.
-pub(super) fn object_base(context: &Context, address: ValueId) -> Option<Base> {
-    let mut current = address;
-    loop {
-        let Some(op) = context.get_value(current).defining_op() else {
-            let region = context.region_of_port(current)?;
-            let function = context.get_region(region).parent_op()?;
-            let function = context.get_op(function);
-            let function = function.as_op::<crate::func::FuncOp>()?;
-            let noalias = function.noalias_arguments().into_iter().any(|index| {
-                context
-                    .get_region(region)
-                    .ports()
-                    .get(index)
-                    .map(crate::Value::id)
-                    == Some(current)
-            });
-            return Some(Base::Param {
-                pointer: current,
-                noalias,
-            });
-        };
-        if !context.has_operation(op) {
-            return None;
-        }
-        let instance = context.get_op(op);
-        if instance.is::<crate::ptr::PtrAddOp>() {
-            current = instance.operands()[0];
-        } else if instance.has_interface::<dyn crate::PromotableAllocation>() {
-            return Some(Base::Alloca(current));
-        } else if instance.is::<crate::builtin::GlobalOp>() {
-            return Some(Base::Global(current));
-        } else {
-            return None;
-        }
-    }
-}
-
-/// Whether two accesses are of different memory: their objects are known to
-/// be distinct, or one is an allocation whose address never left the
-/// function's own accesses, which no pointer of unknown origin reaches.
-pub(super) fn distinct_objects(context: &Context, a: Option<Base>, b: Option<Base>) -> bool {
-    match (a, b) {
-        (Some(a), Some(b)) => a.distinct(b),
-        (Some(Base::Alloca(slot)), None) | (None, Some(Base::Alloca(slot))) => {
-            accessed_only(context, slot)
-        }
-        _ => false,
-    }
-}
-
-/// The state before the operation publishing `state`, where that operation
-/// leaves the object `address` names as it was: a read, a write of an object
-/// distinct from it, or a call, which reaches no allocation whose address
-/// never left the function's own accesses. An access of `address` reads the
-/// same memory on either state.
-pub(super) fn state_before_distinct_write(
-    context: &Context,
-    state: ValueId,
-    address: ValueId,
-) -> Option<ValueId> {
-    let op = context.get_value(state).defining_op()?;
-    let instance = context.get_op(op);
-    let base = object_base(context, address);
-    if let Some(read) = instance.clone().as_interface::<dyn crate::MemoryRead>()
-        && !instance.has_interface::<dyn MemoryWrite>()
-    {
-        return (read.state_result() == Some(state))
-            .then(|| read.state_operand())
-            .flatten();
-    }
-    if let Some(write) = instance.clone().as_interface::<dyn MemoryWrite>() {
-        if write.state_result() != Some(state) {
-            return None;
-        }
-        let other = object_base(context, write.write_location());
-        return distinct_objects(context, base, other)
-            .then(|| write.state_operand())
-            .flatten();
-    }
-    let Some(Base::Alloca(slot)) = base else {
-        return None;
-    };
-    let [taken] = instance.dep_operands()[..] else {
-        return None;
-    };
-    (instance.regions().is_empty()
-        && instance.dep_results().as_slice() == [state]
-        && !instance.has_interface::<dyn crate::MemoryRead>()
-        && accessed_only(context, slot))
-    .then_some(taken)
-}
-
-/// Whether every use of `address`, through pointer arithmetic, is as the
-/// location of a read or a write: the address itself never leaves the
-/// function's own accesses.
-fn accessed_only(context: &Context, address: ValueId) -> bool {
-    context.users_of(address).into_iter().all(|user| {
-        let instance = context.get_op(user);
-        if instance.is::<crate::ptr::PtrAddOp>() {
-            return instance.operands()[0] == address
-                && instance
-                    .results()
-                    .iter()
-                    .all(|&derived| accessed_only(context, derived));
-        }
-        let location = instance
-            .clone()
-            .as_interface::<dyn MemoryWrite>()
-            .map(|write| write.write_location())
-            .or_else(|| {
-                instance
-                    .clone()
-                    .as_interface::<dyn crate::MemoryRead>()
-                    .map(|read| read.read_location())
-            });
-        location == Some(address)
-            && instance
-                .operands()
-                .iter()
-                .filter(|&&v| v == address)
-                .count()
-                == 1
-    }) && !crate::region::defining_region(context, address).is_some_and(|region| {
-        context
-            .nested_regions(region)
-            .iter()
-            .any(|&r| context.get_region(r).results().contains(&address))
-    })
 }

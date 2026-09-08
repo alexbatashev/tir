@@ -4,7 +4,7 @@
 // a term the base fixpoint proves equal to a literal. A port is only
 // hypothesised about when its init class holds one, so the base graph has to
 // have saturated before the loops are read -- and then this port carries 7 like
-// any other.
+// any other, and the loop, holding no memory, dies with the reads it fed.
 
 module {
   %fn_f = func.func @f(%0: !i64, %1: !i64, %2: !i64) -> !i32 {
@@ -22,7 +22,6 @@ module {
 
 // CHECK-LABEL: %{{[0-9]+}} = func.func @f
 // CHECK: %[[SEVEN:[0-9]+]] = constant {value = 7} : !i32
-// CHECK: scf.for
 // CHECK-NOT: addi
-// CHECK: }
-// CHECK-NEXT: -> %[[SEVEN]] | %{{[0-9]+}}
+// CHECK-NOT: scf.for
+// CHECK: -> %[[SEVEN]]

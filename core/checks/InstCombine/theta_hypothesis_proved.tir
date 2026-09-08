@@ -22,7 +22,6 @@ module {
 
 // CHECK-LABEL: %{{[0-9]+}} = func.func @f
 // CHECK: %[[SEVEN:[0-9]+]] = constant {value = 7} : !i32
-// CHECK: scf.for
 // CHECK-NOT: addi
-// CHECK: }
-// CHECK-NEXT: -> %[[SEVEN]] | %{{[0-9]+}}
+// CHECK-NOT: scf.for
+// CHECK: -> %[[SEVEN]]

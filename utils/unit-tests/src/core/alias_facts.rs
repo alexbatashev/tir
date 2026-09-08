@@ -1,7 +1,8 @@
 //! Alias and escape facts over the pointers of one function.
 
+use tir::analysis::alias_facts::{accessed_only, object_base};
 use tir::{
-    analysis::{AliasFacts, AliasResult, Escape, EscapeFacts},
+    analysis::{AliasFacts, AliasResult, Base, Escape, EscapeFacts},
     builtin, AnalysisManager, Context, MemoryWrite, OpId, Operation, ValueId,
 };
 
@@ -141,4 +142,69 @@ fn escape_through_call_argument_and_store_to_memory() {
         facts.alias(unknown, Some(4), z, Some(4)),
         AliasResult::NoAlias
     );
+}
+
+/// The object a pointer names is read off the IR the converter sees: an
+/// ordered function whose parameters are its entry block's arguments.
+#[test]
+fn object_base_reads_ordered_parameters_and_allocations() {
+    let context = Context::with_default_dialects();
+    let (_, locations) = stores(
+        &context,
+        r#"module {
+  %g = global @g size 4 align 4
+  %fn_f = func.func @f(%p: !ptr.p, %q: !ptr.p, %a: !i32) noalias [0] {
+    %x = ptr.alloca {size = 4, align = 4} : !ptr.p
+    %0 = constant {value = 4} : !i64
+    %x4 = ptr.ptradd %x, %0 : !ptr.p
+    ptr.store %a, %p
+    ptr.store %a, %q
+    ptr.store %a, %g
+    ptr.store %a, %x4
+    func.return
+  }
+  module_end
+}"#,
+    );
+    let base = |index: usize| object_base(&context, locations[index]);
+    assert_eq!(
+        base(0),
+        Some(Base::Param {
+            pointer: locations[0],
+            noalias: true
+        })
+    );
+    assert_eq!(
+        base(1),
+        Some(Base::Param {
+            pointer: locations[1],
+            noalias: false
+        })
+    );
+    assert_eq!(base(2), Some(Base::Global(locations[2])));
+    assert!(matches!(base(3), Some(Base::Alloca(_))));
+}
+
+/// A slot whose address only ever names its own accesses is one nothing else
+/// in the function can reach; one handed to a call is not.
+#[test]
+fn accessed_only_sees_the_address_leave() {
+    let context = Context::with_default_dialects();
+    let (_, locations) = stores(
+        &context,
+        r#"module {
+  %fn_keep = func.declare @keep(!ptr.p) -> !unit
+  %fn_f = func.func @f(%a: !i32) {
+    %x = ptr.alloca {size = 4, align = 4} : !ptr.p
+    %y = ptr.alloca {size = 4, align = 4} : !ptr.p
+    ptr.store %a, %x
+    ptr.store %a, %y
+    func.call %fn_keep(%y : !ptr.p)
+    func.return
+  }
+  module_end
+}"#,
+    );
+    assert!(accessed_only(&context, locations[0]));
+    assert!(!accessed_only(&context, locations[1]));
 }

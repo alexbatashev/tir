@@ -2,7 +2,8 @@
 
 // A `+=` step counts like any other: the constant it adds becomes the loop's
 // step, and a bound read from a parameter's slot is read once before the loop,
-// off the same state as the initial counter.
+// off that slot's own chain — the counter's slot has a chain of its own, so
+// nothing orders the two reads against each other.
 
 int advance(int limit) {
     int value;
@@ -12,6 +13,10 @@ int advance(int limit) {
 }
 
 // CHECK: %[[ST:[0-9]+]] = constant {value = 2} : !i32
-// CHECK: %[[LB:[0-9]+]] | %{{[0-9]+}} = ptr.load %{{[0-9]+}} | %[[S:[0-9]+]] : !i32
-// CHECK-NEXT: %[[UB:[0-9]+]] | %{{[0-9]+}} = ptr.load %{{[0-9]+}} | %[[S]] : !i32
+// CHECK: | %[[E:[0-9]+]] = state.entry_state
+// CHECK-NEXT: | %[[PCHAIN:[0-9]+]], %[[CCHAIN:[0-9]+]], %{{[0-9]+}} = state.split | %[[E]]
+// CHECK-NEXT: | %[[PARAM:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[PSLOT:[0-9]+]] | %[[PCHAIN]]
+// CHECK-NEXT: | %[[INIT:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[CSLOT:[0-9]+]] | %[[CCHAIN]]
+// CHECK-NEXT: %[[LB:[0-9]+]] | %{{[0-9]+}} = ptr.load %[[CSLOT]] | %[[INIT]] : !i32
+// CHECK-NEXT: %[[UB:[0-9]+]] | %{{[0-9]+}} = ptr.load %[[PSLOT]] | %[[PARAM]] : !i32
 // CHECK: scf.for %{{[0-9]+}} = %[[LB]] to %[[UB]] step %[[ST]] (

@@ -31,7 +31,7 @@ use crate::sem::egraph::type_width;
 use crate::{
     ConstantLike, Context, Gamma, MemoryRead, MemoryWrite, NewOp, OpHandle, OpId, OperationRef,
     Pass, PassError, PassTarget, PromotableAllocation, RegionId, RegionKind, Rewriter,
-    Speculatable, TypeId, ValueId,
+    Speculatable, Theta, TypeId, ValueId,
 };
 
 #[derive(Default)]
@@ -78,6 +78,7 @@ impl Pass for InstCombineNodesPass {
         let body = context.get_op(root).regions()[0];
         driver.commit_nodes(body, &extraction, &mut HashMap::new())?;
         forget_write_only_slots(context, body);
+        drop_untouched_chains(context, body);
         let result = sweep(context, body, rewriter);
         tir_relational::report_saturation("instcombine-nodes");
         result
@@ -104,15 +105,13 @@ impl Driver<'_> {
             if instance.has_interface::<dyn ConstantLike>() {
                 continue;
             }
-            // A join of one state is that state: the reads it merged are gone.
             if instance.is::<crate::state::JoinOp>()
-                && let [first, rest @ ..] = instance.dep_operands().as_slice()
-                && rest.iter().all(|other| other == first)
+                && let Some(merged) = self.merged_state(&instance)
             {
                 for result in instance.dep_results() {
-                    self.context.replace_value_uses(result, *first);
+                    self.context.replace_value_uses(result, merged);
                     self.context
-                        .rename_region_results(region, result, *first, &[]);
+                        .rename_region_results(region, result, merged, &[]);
                 }
                 continue;
             }
@@ -166,11 +165,40 @@ impl Driver<'_> {
         Ok(())
     }
 
+    /// The one state a join names, where it names one: the state its inputs
+    /// all are — the reads it merged are gone — or the one chain among them
+    /// something changed, since a chain nothing changed is the memory the
+    /// region was entered with and merging it says nothing.
+    ///
+    /// Dropping an input is only the join's to do where the join is that
+    /// input's one reader: another reader would be left sharing the state with
+    /// whatever reads the join, which is a fork the discipline may forbid.
+    fn merged_state(&self, join: &OpHandle) -> Option<ValueId> {
+        let operands = join.dep_operands();
+        let (first, rest) = operands.split_first()?;
+        if rest.iter().all(|other| other == first) {
+            return Some(*first);
+        }
+        if !operands
+            .iter()
+            .all(|&state| self.context.users_of(state).as_slice() == [join.id])
+        {
+            return None;
+        }
+        let mut changed = operands
+            .iter()
+            .copied()
+            .filter(|&state| changed_chain(self.context, state));
+        let kept = changed.next();
+        changed.next().is_none().then(|| kept.unwrap_or(*first))
+    }
+
     /// A write nothing observes before the next write of its own extent is
     /// overwritten unread: its readers take the state it was handed, and the
-    /// sweep takes it. On the way to that next write the chain may pass writes
-    /// to other objects, which leave this one as it was, and reads nothing
-    /// demands, which the sweep takes too.
+    /// sweep takes it. Its chain holds every access that may name the object,
+    /// so the walk follows that chain alone: the names a split and a join give
+    /// it on the way are the same memory, and a read nothing demands is one
+    /// the sweep takes too.
     fn forward_dead_write(&self, op: OpId, scope: &[RegionId]) {
         let instance = self.context.get_op(op);
         let Some(write) = instance.clone().as_interface::<dyn MemoryWrite>() else {
@@ -182,7 +210,6 @@ impl Driver<'_> {
         let Some(extent) = self.extent(published) else {
             return;
         };
-        let base = super::object_base(self.context, write.write_location());
         let mut state = published;
         loop {
             if self.published(scope, state) {
@@ -197,11 +224,17 @@ impl Driver<'_> {
             let [reader] = readers[..] else {
                 return;
             };
-            let Some(next) = self
-                .context
-                .get_op(reader)
-                .as_interface::<dyn MemoryWrite>()
-            else {
+            let handle = self.context.get_op(reader);
+            // The write's own chain is the one it named first, so it is the
+            // first the split hands back; a merge names the memory the change
+            // taking it observes.
+            if handle.is::<crate::state::SplitOp>() && state == handle.dep_operands()[0]
+                || handle.is::<crate::state::JoinOp>()
+            {
+                state = handle.dep_results()[0];
+                continue;
+            }
+            let Some(next) = handle.as_interface::<dyn MemoryWrite>() else {
                 return;
             };
             let (Some(observed), Some(left)) = (next.state_operand(), next.state_result()) else {
@@ -210,14 +243,10 @@ impl Driver<'_> {
             if observed != state {
                 return;
             }
-            if self.extent(left) == Some(extent) {
-                break;
-            }
-            let other = super::object_base(self.context, next.write_location());
-            if !super::distinct_objects(self.context, base, other) {
+            if self.extent(left) != Some(extent) {
                 return;
             }
-            state = left;
+            break;
         }
         // The loop's first guard found no region result naming `published`,
         // so no result list here names it either.
@@ -428,6 +457,46 @@ impl Driver<'_> {
     }
 }
 
+/// Whether anything changed the memory `state` names since its chain opened.
+/// An entry state names the memory the region was entered with; a loop or a
+/// gate hands back what it was entered on wherever its regions leave that
+/// chain's port alone.
+fn changed_chain(context: &Context, state: ValueId) -> bool {
+    let Some(def) = context.get_value(state).defining_op() else {
+        return true;
+    };
+    let instance = context.get_op(def);
+    if instance.is::<crate::state::EntryStateOp>() {
+        return false;
+    }
+    // The chains a function opens are one entry state split, so a split of a
+    // memory nothing changed names one nothing changed either.
+    if instance.is::<crate::state::SplitOp>() {
+        return changed_chain(context, instance.dep_operands()[0]);
+    }
+    let Some(index) = instance.dep_results().iter().position(|&r| r == state) else {
+        return true;
+    };
+    let carries = |region: &RegionId| {
+        let handle = context.get_region(*region);
+        let ports = handle.dep_arguments();
+        let results = handle.dep_results();
+        let groups = results.len().checked_div(ports.len()).unwrap_or(0);
+        ports.get(index).is_some_and(|port| {
+            (groups == 1 || groups == 2)
+                && results.len() == groups * ports.len()
+                && (0..groups).all(|group| results[group * ports.len() + index] == port.id())
+        })
+    };
+    if instance.regions().is_empty() || !instance.regions().iter().all(carries) {
+        return true;
+    }
+    match instance.dep_operands().get(index) {
+        Some(&entered) => changed_chain(context, entered),
+        None => true,
+    }
+}
+
 /// Whether `region` can read `value`: it is defined in `region` or in one
 /// enclosing it, by an operation other than the one carrying `region`, whose
 /// results are what its regions produce.
@@ -448,6 +517,84 @@ fn visible(context: &Context, value: ValueId, region: RegionId) -> bool {
         current = carrier.and_then(|op| context.region_of_op(op));
     }
     false
+}
+
+/// A loop or a gate carrying a chain its body never names carries nothing: the
+/// port hands back the memory the operation was entered on, so the chain flows
+/// past the operation instead of through it and the port goes with it.
+///
+/// The converter carries a chain only where a body changes it. What leaves one
+/// behind is promotion: a slot whose value moves onto the value ports leaves
+/// its chain empty, and the ports it crossed are still there.
+fn drop_untouched_chains(context: &Context, region: RegionId) {
+    for op in context.get_region(region).op_ids() {
+        for sub in context.get_op(op).regions() {
+            drop_untouched_chains(context, sub);
+        }
+        let instance = context.get_op(op);
+        // A split names one memory per chain crossing it, so where one chain is
+        // left it names that memory and nothing else: its reader takes the
+        // state the split was handed.
+        if instance.is::<crate::state::SplitOp>() {
+            let read: Vec<ValueId> = instance
+                .dep_results()
+                .into_iter()
+                .filter(|&state| {
+                    !context.users_of(state).is_empty() || named_by_results(context, region, state)
+                })
+                .collect();
+            if let [kept] = read[..] {
+                let taken = instance.dep_operands()[0];
+                context.replace_value_uses(kept, taken);
+                context.rename_region_results(region, kept, taken, &[]);
+            }
+            continue;
+        }
+        if !(instance.has_interface::<dyn Theta>() || instance.has_interface::<dyn Gamma>()) {
+            continue;
+        }
+        // Highest index first, so the ports that stay keep their positions.
+        for index in (0..instance.dep_operands().len()).rev() {
+            if !carries_nothing(context, op, index) {
+                continue;
+            }
+            let handle = context.get_op(op);
+            let entered = handle.dep_operands()[index];
+            let published = handle.dep_results()[index];
+            context.replace_value_uses(published, entered);
+            context.rename_region_results(region, published, entered, &[]);
+            context.drop_dep_port(op, index);
+        }
+    }
+}
+
+/// Whether the chain `op` carries at `index` is one nothing under it names:
+/// every region hands the port straight back, and nothing else reads it.
+fn carries_nothing(context: &Context, op: OpId, index: usize) -> bool {
+    let handle = context.get_op(op);
+    if handle.dep_results().len() != handle.dep_operands().len() {
+        return false;
+    }
+    handle.regions().iter().all(|&region| {
+        let handle = context.get_region(region);
+        let ports = handle.dep_arguments();
+        let results = handle.dep_results();
+        let Some(port) = ports.get(index).map(crate::Value::id) else {
+            return false;
+        };
+        let groups = results.len().checked_div(ports.len()).unwrap_or(0);
+        let named = context
+            .nested_regions(region)
+            .iter()
+            .flat_map(|&nested| context.get_region(nested).results())
+            .filter(|&named| named == port)
+            .count();
+        (groups == 1 || groups == 2)
+            && results.len() == groups * ports.len()
+            && (0..groups).all(|group| results[group * ports.len() + index] == port)
+            && named == groups
+            && context.users_of(port).is_empty()
+    })
 }
 
 /// A slot whose address reaches only writes is a memory nothing observes: each

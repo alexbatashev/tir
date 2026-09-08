@@ -33,11 +33,11 @@ module {
 
 // CHECK-LABEL: %{{[0-9]+}} = func.func @sum
 // CHECK-NOT: ptr.
-// CHECK: %[[RESULT:[0-9]+]] | %{{[0-9]+}} = scf.loop (%[[HEAD:[0-9]+]] = %1 | %{{[0-9]+}} = %{{[0-9]+}}) {
-// CHECK-NEXT: %[[COND:[0-9]+]], %[[LATCH:[0-9]+]] | %[[DEP:[0-9]+]] = scf.switch %0 args(| %{{[0-9]+}}) (| %{{[0-9]+}}) {
-// CHECK: -> %{{[0-9]+}}, %[[HEAD]] | %{{[0-9]+}}
+// CHECK: %[[RESULT:[0-9]+]] = scf.loop (%[[HEAD:[0-9]+]] = %1) {
+// CHECK-NEXT: %[[COND:[0-9]+]], %[[LATCH:[0-9]+]] = scf.switch %0 {
+// CHECK: -> %{{[0-9]+}}, %[[HEAD]]
 // CHECK: %[[NEXT:[0-9]+]] = addi %[[HEAD]], %[[HEAD]] : !i32
-// CHECK: -> %{{[0-9]+}}, %[[NEXT]] | %{{[0-9]+}}
-// CHECK: -> %[[COND]], %[[LATCH]], %[[LATCH]] | %[[DEP]], %[[DEP]]
+// CHECK: -> %{{[0-9]+}}, %[[NEXT]]
+// CHECK: -> %[[COND]], %[[LATCH]], %[[LATCH]]
 // CHECK-NEXT: }
 // CHECK-NEXT: -> %[[RESULT]] | %{{[0-9]+}}

@@ -1,7 +1,8 @@
 // RUN: tir opt --pass func.func(restructure-nodes,affine) --verify %s | filecheck %s
 
-// Two pointer parameters are one chain and two objects, so the pair between them
-// is decided by a range predicate, not by a distance. That predicate is
+// Two pointer parameters are two objects nothing tells apart, and nothing here
+// ever names one without the other, so they are one chain: the pair between
+// them is formed and decided by a range predicate, not by a distance. That predicate is
 // versioning's input, not this pass's: until something has made it hold, the
 // nest is left as it stands.
 

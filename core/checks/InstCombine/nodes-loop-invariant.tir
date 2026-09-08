@@ -5,8 +5,9 @@
 
 // A slot holds 7 before the loop and is written back as `7 + 0` each
 // iteration. The hypothesis that the port is the constant it was entered on
-// survives the body, so every read of the port and the loop's result are 7,
-// and the loop keeps only its counter.
+// survives the body, so every read of the port and the loop's result are 7.
+// With the slot out of memory the loop carries nothing and computes nothing
+// anyone reads, so it goes too and the return is a constant.
 
 module {
   %fn_f = func.func @f(%n: !i32) -> !i32 {
@@ -32,8 +33,8 @@ module {
 }
 
 // CHECK: func.func @f
-// CHECK: scf.loop
 // CHECK-NOT: ptr.
+// CHECK-NOT: scf.
 // CHECK: %[[FOURTEEN:[0-9]+]] = constant {value = 14} : !i32
 // CHECK-NEXT: -> %[[FOURTEEN]] | %{{[0-9]+}}
 

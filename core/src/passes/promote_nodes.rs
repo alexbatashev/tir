@@ -10,7 +10,16 @@
 //! and the gate joins them. Region membership decides nothing: two accesses in
 //! one region are ordered by the chain alone, and insertion order is never read.
 //!
-//! What stays a slot: an escaping address, a partial access, disagreeing
+//! The walk runs twice: once probing, which grows no port and rewrites
+//! nothing, and again for real once the probe has shown that every state the
+//! growth reads holds one value for the slot. What the probe refuses stays a
+//! slot, since a port there would carry no value: two chains a merge brings
+//! together holding different values for it — the seam an inlined body leaves,
+//! where the callee's accesses of the caller's slot sit on a chain of the
+//! callee's own — and a loop whose body writes the slot that nothing wrote it
+//! before.
+//!
+//! What else stays a slot: an escaping address, a partial access, disagreeing
 //! types, and an access off the chain, which nothing can order.
 
 use std::collections::{HashMap, HashSet};
@@ -68,6 +77,8 @@ impl Pass for PromoteNodesPass {
                 grown: HashSet::new(),
                 kept: false,
                 substituted: HashMap::new(),
+                probing: false,
+                refused: false,
             };
             promoter.promote(&state, rewriter)?;
         }
@@ -109,51 +120,98 @@ fn promotable(
         .iter()
         .flat_map(|&store| enclosing_ops(context, store, body))
         .collect();
-    writers
+    let entered: Vec<ValueId> = state
+        .stores
         .iter()
-        .all(|&op| {
-            context
-                .get_op(op)
-                .dep_operands()
-                .iter()
-                .all(|&dep| written_before(context, slot, dep, &writers))
-        })
+        .flat_map(|&store| entered_states(context, store))
+        .collect();
+    let mut written = HashMap::new();
+    entered
+        .into_iter()
+        .all(|state| written_before(context, slot, state, &writers, &mut written))
         .then_some(ty)
 }
 
-/// Whether every use of the slot's `address`, through pointer arithmetic, is
-/// as the location of one of its collected accesses: a comparison or an
-/// address kept as a value would go on naming a slot that is a value now.
-fn address_only_accessed(context: &Context, address: ValueId, state: &SlotState) -> bool {
-    context.users_of(address).into_iter().all(|user| {
-        let instance = context.get_op(user);
-        if instance.is::<crate::ptr::PtrAddOp>() {
-            return instance
-                .results()
+/// The memory each loop and gate `store` sits under was entered on, along the
+/// chain the store is on: where that chain crosses a region boundary, the port
+/// it enters on names one operand of the loop or gate carrying it, and the walk
+/// carries on from there in the enclosing region. Empty for a store the body
+/// holds directly, which no port has to be entered on.
+fn entered_states(context: &Context, store: OpId) -> Vec<ValueId> {
+    let mut states = Vec::new();
+    let Some(&first) = context.get_op(store).dep_operands().first() else {
+        return states;
+    };
+    let mut current = first;
+    loop {
+        let Some(def) = context.get_value(current).defining_op() else {
+            let Some(region) = context.region_of_port(current) else {
+                return states;
+            };
+            let handle = context.get_region(region);
+            let ports: Vec<ValueId> = handle
+                .dep_arguments()
                 .iter()
-                .all(|&derived| address_only_accessed(context, derived, state));
-        }
-        state.loads.contains(&user) || state.stores.contains(&user)
-    })
-}
-
-/// The loops and gates between `op` and `body`, innermost first.
-fn enclosing_ops(context: &Context, op: OpId, body: RegionId) -> Vec<OpId> {
-    let mut ops = Vec::new();
-    let mut region = context.parent_nodes_region(op);
-    while let Some(current) = region.filter(|&current| current != body) {
-        let Some(owner) = context.get_region(current).parent_op() else {
-            break;
+                .map(crate::Value::id)
+                .collect();
+            let Some(owner) = handle.parent_op() else {
+                return states;
+            };
+            let Some(&entered) = context
+                .get_op(owner)
+                .dep_operands()
+                .get(dep_index(&ports, current))
+            else {
+                return states;
+            };
+            states.push(entered);
+            current = entered;
+            continue;
         };
-        ops.push(owner);
-        region = context.parent_nodes_region(owner);
+        let instance = context.get_op(def);
+        let next = if instance.regions().is_empty() {
+            instance.dep_operands().first().copied()
+        } else {
+            instance
+                .dep_operands()
+                .get(dep_index(&instance.dep_results(), current))
+                .copied()
+        };
+        match next {
+            Some(next) => current = next,
+            None => return states,
+        }
     }
-    ops
 }
 
 /// Whether every path the chain took to `dep` wrote `slot`: a write, a loop or
 /// gate that writes it, or the port of one, counts; the entry state does not.
-fn written_before(context: &Context, slot: ValueId, dep: ValueId, writers: &[OpId]) -> bool {
+fn written_before(
+    context: &Context,
+    slot: ValueId,
+    dep: ValueId,
+    writers: &[OpId],
+    memo: &mut HashMap<ValueId, bool>,
+) -> bool {
+    if let Some(&known) = memo.get(&dep) {
+        return known;
+    }
+    // A merge reaches every state above it, so the walk is over a DAG and has
+    // to remember its answers; a cycle answers that nothing wrote the slot,
+    // which keeps it memory.
+    memo.insert(dep, false);
+    let found = wrote_the_slot(context, slot, dep, writers, memo);
+    memo.insert(dep, found);
+    found
+}
+
+fn wrote_the_slot(
+    context: &Context,
+    slot: ValueId,
+    dep: ValueId,
+    writers: &[OpId],
+    memo: &mut HashMap<ValueId, bool>,
+) -> bool {
     let Some(def) = context.get_value(dep).defining_op() else {
         let Some(owner) = context
             .region_of_port(dep)
@@ -173,7 +231,7 @@ fn written_before(context: &Context, slot: ValueId, dep: ValueId, writers: &[OpI
             .collect();
         let operands = context.get_op(owner).dep_operands();
         return match operands.get(dep_index(&ports, dep)) {
-            Some(&entered) => written_before(context, slot, entered, writers),
+            Some(&entered) => written_before(context, slot, entered, writers, memo),
             None => false,
         };
     };
@@ -189,11 +247,52 @@ fn written_before(context: &Context, slot: ValueId, dep: ValueId, writers: &[OpI
     if instance.is::<crate::state::EntryStateOp>() {
         return false;
     }
+    // A merge of several memories holds what any of them wrote: the chains
+    // saying nothing about the slot leave it as the one that did.
+    if instance.is::<crate::state::JoinOp>() {
+        return instance
+            .dep_operands()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .any(|state| written_before(context, slot, state, writers, memo));
+    }
     if instance.regions().is_empty() {
-        return written_before(context, slot, instance.dep_operands()[0], writers);
+        return written_before(context, slot, instance.dep_operands()[0], writers, memo);
     }
     let index = dep_index(&instance.dep_results(), dep);
-    written_before(context, slot, instance.dep_operands()[index], writers)
+    written_before(context, slot, instance.dep_operands()[index], writers, memo)
+}
+
+/// The loops and gates between `op` and `body`, innermost first.
+fn enclosing_ops(context: &Context, op: OpId, body: RegionId) -> Vec<OpId> {
+    let mut ops = Vec::new();
+    let mut region = context.parent_nodes_region(op);
+    while let Some(current) = region.filter(|&current| current != body) {
+        let Some(owner) = context.get_region(current).parent_op() else {
+            break;
+        };
+        ops.push(owner);
+        region = context.parent_nodes_region(owner);
+    }
+    ops
+}
+
+/// Whether every use of the slot's `address`, through pointer arithmetic, is
+/// as the location of one of its collected accesses: a comparison or an
+/// address kept as a value would go on naming a slot that is a value now.
+fn address_only_accessed(context: &Context, address: ValueId, state: &SlotState) -> bool {
+    context.users_of(address).into_iter().all(|user| {
+        let instance = context.get_op(user);
+        if instance.is::<crate::ptr::PtrAddOp>() {
+            return instance
+                .results()
+                .iter()
+                .all(|&derived| address_only_accessed(context, derived, state));
+        }
+        state.loads.contains(&user) || state.stores.contains(&user)
+    })
 }
 
 /// Whether `op` accesses `slot` at the slot's own address and observes a
@@ -231,11 +330,31 @@ fn crosses_declared_bindings(context: &Context, op: OpId, body: RegionId) -> boo
 }
 
 /// The slot's value at one point of the chain.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Reach {
     Value(ValueId),
+    /// The value growing the port a loop or a gate carries at this index will
+    /// put here. It is a value of its own, so it is the same answer as itself
+    /// and a different one from every value already in the IR.
+    Written(OpId, usize),
     /// Nothing wrote the slot on the way here.
     Undefined,
+    /// Two memories merged here left the slot holding different values, so no
+    /// one value stands at this point.
+    Unknown,
+}
+
+impl Reach {
+    /// The slot's value in the memory two states merge into: a chain saying
+    /// nothing about the slot leaves it as the other found it, and two chains
+    /// with different values for it merge into no value at all.
+    fn merge(self, other: Reach) -> Reach {
+        match (self, other) {
+            (Reach::Undefined, found) | (found, Reach::Undefined) => found,
+            (a, b) if a == b => a,
+            _ => Reach::Unknown,
+        }
+    }
 }
 
 struct Promoter<'a> {
@@ -250,16 +369,37 @@ struct Promoter<'a> {
     kept: bool,
     /// What this sweep has already handed each retired value on to.
     substituted: HashMap<ValueId, ValueId>,
+    /// Whether this walk is only asking whether the growth would stand: it
+    /// grows no port and rewrites nothing, and records what a grown port would
+    /// carry instead.
+    probing: bool,
+    /// Set where a state the growth reads holds no one value for the slot.
+    refused: bool,
 }
 
 impl Promoter<'_> {
     fn promote(&mut self, state: &SlotState, rewriter: &mut Rewriter) -> Result<(), PassError> {
+        // A read the chain cannot answer, and a port the growth would have no
+        // value to enter, keep the slot memory: the write either would go with
+        // the promotion or was never there.
+        if self.refuses(state) {
+            return Ok(());
+        }
         let context = self.context;
+        let reached: Vec<Reach> = state
+            .loads
+            .iter()
+            .map(|&load| self.reach(context.get_op(load).dep_operands()[0]))
+            .collect();
+        // A read the chain cannot answer keeps the slot memory: a write it may
+        // have observed would go with the promotion.
+        if reached.contains(&Reach::Unknown) {
+            return Ok(());
+        }
         let mut dead = state.stores.clone();
-        for &load in &state.loads {
+        for (&load, &found) in state.loads.iter().zip(&reached) {
             let instance = context.get_op(load);
-            let observed = instance.dep_operands()[0];
-            match self.reach(observed) {
+            match found {
                 Reach::Value(value) => {
                     let read = instance
                         .clone()
@@ -271,7 +411,7 @@ impl Promoter<'_> {
                     self.substituted.insert(read, value);
                     dead.push(load);
                 }
-                Reach::Undefined => self.kept = true,
+                _ => self.kept = true,
             }
         }
         for &op in &dead {
@@ -331,6 +471,13 @@ impl Promoter<'_> {
                     Reach::Value(written)
                 } else if instance.is::<crate::state::EntryStateOp>() {
                     Reach::Undefined
+                } else if instance.is::<crate::state::JoinOp>() {
+                    instance
+                        .dep_operands()
+                        .iter()
+                        .fold(Reach::Undefined, |found, &state| {
+                            found.merge(self.reach(state))
+                        })
                 } else if instance.regions().is_empty() {
                     self.reach(instance.dep_operands()[0])
                 } else {
@@ -399,7 +546,7 @@ impl Promoter<'_> {
         let entered = op.dep_operands()[index];
         // Spelling the init may grow an enclosing loop, whose latch walks back
         // into this one and grows it on the way: mark it grown only after.
-        let init = self.held(entered);
+        let init = self.reach(entered);
         if !self.grown.insert((op.id, index)) {
             return;
         }
@@ -410,6 +557,18 @@ impl Promoter<'_> {
             dep_results[dep_results.len() / 2 + index],
         );
         let port_dep = region.dep_arguments()[index].id();
+        if self.probing {
+            let grown = Reach::Written(op.id, index);
+            self.reach.insert(port_dep, grown);
+            self.reach.insert(op.dep_results()[index], grown);
+            self.demand(init);
+            let carried = self.reach(continue_dep);
+            let left = self.reach(exit_dep);
+            self.demand(carried);
+            self.demand(left);
+            return;
+        }
+        let init = self.value_of(init);
         let mut exit = None;
         let result = context.grow_port(op.id, self.ty, Some(init), |_, port| {
             let port = port.expect("a loop port is entered on a value");
@@ -449,6 +608,16 @@ impl Promoter<'_> {
             return;
         }
         let context = self.context;
+        if self.probing {
+            self.reach
+                .insert(op.dep_results()[index], Reach::Written(op.id, index));
+            for arm in op.regions() {
+                let left = context.get_region(arm).dep_results()[index];
+                let found = self.reach(left);
+                self.demand(found);
+            }
+            return;
+        }
         let result = context.grow_port(op.id, self.ty, None, |arm, _| {
             let left = context.get_region(arm).dep_results()[index];
             Some(self.held(left))
@@ -457,13 +626,52 @@ impl Promoter<'_> {
             .insert(op.dep_results()[index], Reach::Value(result));
     }
 
-    /// The value the slot holds at `dep`, which [`promotable`] proved a write
+    /// The value the slot holds at `dep`, which the probing walk proved a write
     /// put there.
     fn held(&mut self, dep: ValueId) -> ValueId {
-        match self.reach(dep) {
+        let found = self.reach(dep);
+        self.value_of(found)
+    }
+
+    fn value_of(&self, found: Reach) -> ValueId {
+        match found {
             Reach::Value(value) => value,
-            Reach::Undefined => unreachable!("a port is entered on a written slot"),
+            _ => unreachable!("a port is entered on a written slot"),
         }
+    }
+
+    /// Record that the growth reads a state which has to hold one value for the
+    /// slot; where it does not, the slot stays memory.
+    fn demand(&mut self, found: Reach) {
+        if !matches!(found, Reach::Value(_) | Reach::Written(..)) {
+            self.refused = true;
+        }
+    }
+
+    /// Whether the chain answers every state the growth would read. The walk is
+    /// the growth's own, with the ports it would grow recorded rather than
+    /// grown, so what it proves is what the growth then does.
+    fn refuses(&self, state: &SlotState) -> bool {
+        let mut probe = Promoter {
+            context: self.context,
+            slot: self.slot,
+            ty: self.ty,
+            reach: HashMap::new(),
+            grown: HashSet::new(),
+            kept: false,
+            substituted: HashMap::new(),
+            probing: true,
+            refused: false,
+        };
+        for &load in &state.loads {
+            let Some(&observed) = self.context.get_op(load).dep_operands().first() else {
+                return true;
+            };
+            if probe.reach(observed) == Reach::Unknown {
+                return true;
+            }
+        }
+        probe.refused
     }
 
     /// The value a write to the slot leaves it holding.

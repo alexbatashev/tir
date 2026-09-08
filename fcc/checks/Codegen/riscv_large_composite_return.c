@@ -17,9 +17,9 @@ struct Large forward_large(long a, long b, long c) {
 }
 
 // A struct too large for registers is returned through a result address: the
-// callee copies into its leading pointer parameter and ends on that copy; the
-// forwarding caller passes a temporary and copies it into its own result
-// address after the call.
+// callee copies into its leading pointer parameter and ends on a state that
+// joins that copy's chain; the forwarding caller passes a temporary and copies
+// it into its own result address after the call.
 
 // CHECK-LABEL: %{{[0-9]+}} = func.func @make_large(
 // CHECK-SAME: %[[MAKE_DEST:[0-9]+]]: !ptr.p, %{{[0-9]+}}: !i64, %{{[0-9]+}}: !i64, %{{[0-9]+}}: !i64) result_address {

@@ -25,9 +25,9 @@ module {
 
 // CHECK-LABEL: %{{[0-9]+}} = func.func @forward
 // CHECK-NOT: ptr.
-// CHECK: scf.switch %0 args(| %{{[0-9]+}}) (| %[[EA:[0-9]+]]) {
-// CHECK-NEXT: -> %1 | %[[EA]]
+// CHECK: scf.switch %0 {
+// CHECK-NEXT: -> %1
 // CHECK-NEXT: }
-// CHECK-NEXT: (| %[[TA:[0-9]+]]) {
+// CHECK-NEXT: {
 // CHECK-NEXT: %[[SUM:[0-9]+]] = addi %1, %1
-// CHECK-NEXT: -> %[[SUM]] | %[[TA]]
+// CHECK-NEXT: -> %[[SUM]]

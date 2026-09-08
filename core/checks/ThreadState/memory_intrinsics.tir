@@ -1,7 +1,7 @@
 // RUN: tir opt --pass restructure-nodes --verify %s | filecheck %s
 
-// The intrinsics name whole ranges of unknown memory, so they thread the
-// conservative chain in the order they are written.
+// The intrinsics name whole ranges of unknown memory, so they are one object:
+// both writes sit on one chain and stay ordered as they are written.
 
 module {
   %fn_c = func.func @c(%0: !ptr.p, %1: !ptr.p, %2: !i8, %3: !i64) {

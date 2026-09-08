@@ -107,10 +107,10 @@ pub struct Cfg {
     /// The variable an original value became, for the values read outside the
     /// node defining them.
     pub value_var: BTreeMap<ValueId, VarId>,
-    /// The variable carrying memory order from node to node, when the graph
-    /// constructed it; it is bound at the region's entry to the memory the
-    /// region is entered with.
-    pub chain: Option<VarId>,
+    /// The variables carrying memory order from node to node, one per chain,
+    /// when the graph constructed it; each is bound at the region's entry to
+    /// the memory that chain is entered with.
+    pub chains: Vec<VarId>,
 }
 
 impl Cfg {
@@ -257,7 +257,7 @@ impl Cfg {
                 entry: 0,
                 sink: 0,
                 value_var: BTreeMap::new(),
-                chain: None,
+                chains: Vec::new(),
             },
             node_of_block: BTreeMap::new(),
             arg_var: BTreeMap::new(),
@@ -268,7 +268,7 @@ impl Cfg {
         builder.add_preheader(blocks[0]);
         builder.unify_sinks()?;
         if thread {
-            builder.thread_memory()?;
+            builder.thread_memory(region)?;
         }
         builder.create_value_vars();
         Ok(builder.cfg)
@@ -389,32 +389,56 @@ impl Builder<'_> {
         self.cfg.entry = preheader;
     }
 
-    /// One dependency chain through every block, as one variable: each block
-    /// is entered on a dependency argument standing for it, threads its
-    /// effects off that, and the memory the block leaves is the variable's
-    /// next value, the way any result read past its node is. The exit exports
-    /// the chain to the caller; where several exits were merged, the merged
-    /// one reads the variable as it stands there.
-    fn thread_memory(&mut self) -> Result<(), PassError> {
-        let chain = self.cfg.add_var(TypeId::DEPENDENCY);
+    /// One dependency chain per object, each as a variable of its own: every
+    /// block is entered on a dependency argument standing for each chain,
+    /// threads its effects off those, and the memory a chain leaves the block
+    /// with is the variable's next value, the way any result read past its
+    /// node is. The exit exports every chain to the caller; where several
+    /// exits were merged, the merged one reads the variables as they stand
+    /// there.
+    fn thread_memory(&mut self, region: RegionId) -> Result<(), PassError> {
+        let plan = super::deps::plan(self.context, region);
+        let chains: Vec<VarId> = (0..plan.chains())
+            .map(|_| self.cfg.add_var(TypeId::DEPENDENCY))
+            .collect();
         for (block, node) in self.node_of_block.clone() {
-            let entry = self.context.append_dep_block_argument(block).id();
-            self.arg_var.insert(entry, chain);
-            let leaving = super::deps::thread_block(self.context, block, entry)?;
-            if let Term::Sink { op, .. } = &self.cfg.nodes[node].term {
-                self.context.append_dep_operand(*op, leaving);
-            }
-            if leaving != entry {
-                self.cfg.value_var.insert(leaving, chain);
+            // A block is entered on the chains its own effects name; the one
+            // control leaves the region from names every chain, since the exit
+            // hands them all back.
+            let leaves = matches!(self.cfg.nodes[node].term, Term::Sink { args: None, .. });
+            let carried: Vec<usize> = match leaves {
+                true => (0..chains.len()).collect(),
+                false => plan
+                    .carried(&self.context.get_block(block).op_ids())
+                    .into_iter()
+                    .collect(),
+            };
+            let entries: BTreeMap<usize, ValueId> = carried
+                .iter()
+                .map(|&index| {
+                    let entry = self.context.append_dep_block_argument(block).id();
+                    self.arg_var.insert(entry, chains[index]);
+                    (index, entry)
+                })
+                .collect();
+            let leaving = super::deps::thread_block(self.context, block, &entries, &plan)?;
+            for &index in &carried {
+                let left = leaving[&index];
+                if let Term::Sink { op, .. } = &self.cfg.nodes[node].term {
+                    self.context.append_dep_operand(*op, left);
+                }
+                if left != entries[&index] {
+                    self.cfg.value_var.insert(left, chains[index]);
+                }
             }
         }
         if let Term::Sink {
             args: Some(args), ..
         } = &mut self.cfg.nodes[self.cfg.sink].term
         {
-            args.push(chain);
+            args.extend(chains.iter().copied());
         }
-        self.cfg.chain = Some(chain);
+        self.cfg.chains = chains;
         Ok(())
     }
 

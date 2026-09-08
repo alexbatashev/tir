@@ -24,8 +24,8 @@ module {
 
 // CHECK-LABEL: %{{[0-9]+}} = func.func @twice
 // CHECK-NOT: ptr.
-// CHECK: %[[RESULT:[0-9]+]] | %{{[0-9]+}} = scf.loop (%[[HEAD:[0-9]+]] = %1 | %[[DEP:[0-9]+]] = %{{[0-9]+}}) {
+// CHECK: %[[RESULT:[0-9]+]] = scf.loop (%[[HEAD:[0-9]+]] = %1) {
 // CHECK-NEXT: %[[NEXT:[0-9]+]] = addi %[[HEAD]], %[[HEAD]] : !i32
-// CHECK-NEXT: -> %0, %[[NEXT]], %[[NEXT]] | %[[DEP]], %[[DEP]]
+// CHECK-NEXT: -> %0, %[[NEXT]], %[[NEXT]]
 // CHECK-NEXT: }
 // CHECK-NEXT: -> %[[RESULT]] | %{{[0-9]+}}

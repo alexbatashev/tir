@@ -18,4 +18,4 @@ module {
 // CHECK-LABEL: %{{[0-9]+}} = func.func @f
 // CHECK: %[[SLOT:[0-9]+]] = ptr.alloca
 // CHECK: | %[[STORED:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[SLOT]] | %{{[0-9]+}}
-// CHECK: | %{{[0-9]+}} = func.call %{{[0-9]+}}(%[[SLOT]] {{.*}} | %[[STORED]]
+// CHECK-NEXT: %{{[0-9]+}} | %{{[0-9]+}} = func.call %{{[0-9]+}}(%[[SLOT]] {{.*}} | %[[STORED]]

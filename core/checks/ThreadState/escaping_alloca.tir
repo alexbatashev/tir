@@ -1,8 +1,8 @@
 // RUN: tir opt --pass restructure-nodes --verify %s | filecheck %s
 
 // The slot's address reaches a call, so its contents may be observed from
-// anywhere: it opens no chain of its own and its accesses join the conservative
-// chain rooted at the entry state.
+// anywhere: its chain is the world chain, so the store, the call and the load
+// run in that order on it.
 
 module {
   %fn_sink = func.declare @sink(!ptr.p<!i32>) -> !unit
@@ -16,9 +16,9 @@ module {
   module_end
 }
 // CHECK-LABEL: %{{[0-9]+}} = func.func @f
-// CHECK-NEXT: %{{[0-9]+}} = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+// CHECK-NEXT: %[[SLOT:[0-9]+]] = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
 // CHECK-NEXT: | %[[ENTRY:[0-9]+]] = state.entry_state
-// CHECK-NEXT: | %[[S1:[0-9]+]] = ptr.store %{{[0-9]+}}, %{{[0-9]+}} | %[[ENTRY]]
-// CHECK-NEXT: | %[[S2:[0-9]+]] = func.call %{{[0-9]+}}(%{{[0-9]+}} : !ptr.p<!i32>) | %[[S1]]
-// CHECK-NEXT: %{{[0-9]+}} | %[[S3:[0-9]+]] = ptr.load %{{[0-9]+}} | %[[S2]] : !i32
-// CHECK-NEXT: -> %{{[0-9]+}} | %[[S3]]
+// CHECK-NEXT: | %[[S1:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[SLOT]] | %[[ENTRY]]
+// CHECK-NEXT: | %[[S2:[0-9]+]] = func.call %{{[0-9]+}}(%[[SLOT]] : !ptr.p<!i32>) | %[[S1]]
+// CHECK-NEXT: %[[VAL:[0-9]+]] | %[[S3:[0-9]+]] = ptr.load %[[SLOT]] | %[[S2]] : !i32
+// CHECK-NEXT: -> %[[VAL]] | %[[S3]]

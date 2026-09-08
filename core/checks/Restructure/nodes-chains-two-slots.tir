@@ -1,0 +1,39 @@
+// RUN: tir opt --pass restructure-nodes,verify-deps --verify %s | filecheck %s
+// RUN: tir interp %s | filecheck --check-prefix=VALUE %s
+// RUN: tir opt --pass restructure-nodes %s | tir interp | filecheck --check-prefix=VALUE %s
+// RUN: tir opt --pass restructure-nodes --shuffle-seed 1 %s | tir interp | filecheck --check-prefix=VALUE %s
+// RUN: tir opt --pass restructure-nodes --shuffle-seed 7 %s | tir interp | filecheck --check-prefix=VALUE %s
+
+// Two allocations are two objects, so they are two chains: the memory the
+// function is entered with is split into them, the read of one observes the
+// write to it and no edge runs between the two pairs. The exit hands the
+// caller the chains merged.
+
+module {
+  %fn_main = func.func @main() -> !i32 {
+    %a = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    %b = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+    %one = constant {value = 1} : !i32
+    %two = constant {value = 2} : !i32
+    ptr.store %one, %a
+    ptr.store %two, %b
+    %x = ptr.load %a : !i32
+    %y = ptr.load %b : !i32
+    %sum = addi %x, %y : !i32
+    func.return %sum
+  }
+  module_end
+}
+
+// CHECK: %{{[0-9]+}} = func.func @main() -> !i32 {
+// CHECK: | %[[ENTRY:[0-9]+]] = state.entry_state
+// CHECK-NEXT: | %[[EA:[0-9]+]], %[[EB:[0-9]+]] = state.split | %[[ENTRY]]
+// CHECK-NEXT: | %[[SA:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[A:[0-9]+]] | %[[EA]]
+// CHECK-NEXT: | %[[SB:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[B:[0-9]+]] | %[[EB]]
+// CHECK-NEXT: %[[X:[0-9]+]] | %[[RA:[0-9]+]] = ptr.load %[[A]] | %[[SA]] : !i32
+// CHECK-NEXT: %[[Y:[0-9]+]] | %[[RB:[0-9]+]] = ptr.load %[[B]] | %[[SB]] : !i32
+// CHECK-NEXT: %[[SUM:[0-9]+]] = addi %[[X]], %[[Y]] : !i32
+// CHECK-NEXT: | %[[OUT:[0-9]+]] = state.join | %[[RA]], %[[RB]]
+// CHECK-NEXT: -> %[[SUM]] | %[[OUT]]
+
+// VALUE: i32 3
