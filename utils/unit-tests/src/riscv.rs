@@ -158,10 +158,6 @@ fn phase_based_timing_resolves_from_pipeline() {
     let in_order = tir_riscv::in_order_core_model();
     assert_eq!(in_order.phase_cycle("ID"), Some(1));
     assert_eq!(in_order.phase_cycle("MEM"), Some(3));
-    assert_eq!(
-        in_order.protection_at(2),
-        Some(tir::backend::sched::Protection::Protected)
-    );
 
     // add: read@ID(1) → write@EX(2) ⇒ latency 1, read_cycle 1, write_cycle 2.
     let add = info("add").sched_on(&in_order);

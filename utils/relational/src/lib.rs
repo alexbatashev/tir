@@ -84,12 +84,3 @@ impl LabelId {
     }
 }
 
-/// One relation of the database: an operator family at a fixed arity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RelId(pub u32);
-
-impl RelId {
-    pub fn index(self) -> usize {
-        self.0 as usize
-    }
-}
