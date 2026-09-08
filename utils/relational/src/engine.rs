@@ -5,7 +5,8 @@ use tir_adt::FxHasher;
 
 use crate::column::{Column, Fact, Join};
 use crate::label::{FxHashMap, Labels};
-use crate::{ClassId, ColumnId, Label, LabelId, RowId, UnionFind};
+use crate::unionfind::UnionFind;
+use crate::{ClassId, ColumnId, Label, LabelId, RowId};
 
 /// Empty link in an intrusive list.
 const NONE: u32 = u32::MAX;
@@ -264,7 +265,7 @@ impl<L: Label> Engine<L> {
         self.stats
     }
 
-    pub fn in_scope(&self) -> bool {
+    fn in_scope(&self) -> bool {
         !self.scopes.is_empty()
     }
 
@@ -276,7 +277,7 @@ impl<L: Label> Engine<L> {
     }
 
     /// The class a row belongs to, possibly non-canonical.
-    pub fn owner(&self, row: RowId) -> ClassId {
+    pub(crate) fn owner(&self, row: RowId) -> ClassId {
         self.row_class[row.index()]
     }
 
@@ -320,7 +321,7 @@ impl<L: Label> Engine<L> {
         self.rows(id).map(|row| &self.node[row.index()])
     }
 
-    pub fn class_len(&self, id: ClassId) -> usize {
+    fn class_len(&self, id: ClassId) -> usize {
         let root = self.find(id);
         match self.viewed_members(root) {
             [] => self.class_len[root.index()] as usize,

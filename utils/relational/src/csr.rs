@@ -35,14 +35,6 @@ impl Csr {
         }
         &self.data[self.offsets[key] as usize..self.offsets[key + 1] as usize]
     }
-
-    pub fn keys(&self) -> usize {
-        self.offsets.len().saturating_sub(1)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
 }
 
 #[cfg(test)]
@@ -61,7 +53,6 @@ mod tests {
     #[test]
     fn empty_build_has_no_data() {
         let csr = Csr::build(0, Vec::new());
-        assert!(csr.is_empty());
         assert_eq!(csr.get(0), &[]);
     }
 }
