@@ -6,33 +6,16 @@ use tir::backend::binary::{
     DecodeShape, DecodeSpec, EncodeField, EncodeShape, EncodeSpec, FieldRun, FixupTarget, Guard,
     PatchField,
 };
-use tir::backend::{RegAssignment, RegClassType, RegPort};
+use tir::backend::{RegAssignment, RegClassType};
 use tir::{Context, NewOp, Operation};
 
-use super::fixtures::{machine_op, r};
+use super::fixtures::{machine_op, r, RD_RS_PORTS};
 
 fn phys(index: u16) -> AttributeValue {
     AttributeValue::Register(RegisterAttr::Physical { class: r(), index })
 }
 
-// The instruction the encoder is exercised on: a register slot `rd` it writes,
-// a register slot `rs` it reads, and an immediate.
-static PORTS: [RegPort; 2] = [
-    RegPort {
-        name: "rd",
-        class: Some(r()),
-        def: true,
-        tied_to: None,
-    },
-    RegPort {
-        name: "rs",
-        class: Some(r()),
-        def: false,
-        tied_to: None,
-    },
-];
-
-machine_op!(TestInstOp, "test", "inst", &PORTS, &[]);
+machine_op!(TestInstOp, "test", "inst", &RD_RS_PORTS, &[]);
 
 /// The op with its `rd` slot naming a physical register directly.
 fn op_with(attrs: Vec<(&str, AttributeValue)>) -> (Context, tir::OpHandle) {

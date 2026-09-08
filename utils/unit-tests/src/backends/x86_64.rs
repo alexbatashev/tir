@@ -1,6 +1,9 @@
 //! Unit tests for the `tir-x86_64` backend's public API.
 
+use tir::backend::abi::ValueKind;
 use tir_x86_64::{Feature, TargetConfig};
+
+use super::support::{numbers, pass_seq};
 
 #[test]
 fn x86_64_target_enables_required_features() {
@@ -16,26 +19,7 @@ fn x86_64_target_enables_required_features() {
 fn generated_abi_matches_sysv_register_convention() {
     let target = tir::backend::select_target("x86_64", None, None).unwrap();
     let abi = target.abi();
-    let int_args = abi
-        .args
-        .iter()
-        .find(|sequence| sequence.kind == tir::backend::abi::ValueKind::Int)
-        .unwrap();
-    let int_rets = abi
-        .rets
-        .iter()
-        .find(|sequence| sequence.kind == tir::backend::abi::ValueKind::Int)
-        .unwrap();
-    let float_args = abi
-        .args
-        .iter()
-        .find(|sequence| sequence.kind == tir::backend::abi::ValueKind::Float)
-        .unwrap();
-    let float_rets = abi
-        .rets
-        .iter()
-        .find(|sequence| sequence.kind == tir::backend::abi::ValueKind::Float)
-        .unwrap();
+    let int_args = pass_seq(abi.args, ValueKind::Int);
 
     assert_eq!(abi.name, "sysv");
     assert_eq!(abi.sp, (int_args.regs[0].0, 4));
@@ -44,43 +28,15 @@ fn generated_abi_matches_sysv_register_convention() {
     assert_eq!(abi.stack.align, 16);
     assert_eq!(abi.stack.slot_size, 8);
     assert_eq!(abi.stack.save_style, tir::backend::abi::SaveStyle::PushPop);
+    assert_eq!(numbers(int_args.regs), vec![7, 6, 2, 1, 8, 9]);
+    assert_eq!(numbers(pass_seq(abi.rets, ValueKind::Int).regs), vec![0, 2]);
     assert_eq!(
-        int_args
-            .regs
-            .iter()
-            .map(|register| register.1)
-            .collect::<Vec<_>>(),
-        vec![7, 6, 2, 1, 8, 9]
-    );
-    assert_eq!(
-        int_rets
-            .regs
-            .iter()
-            .map(|register| register.1)
-            .collect::<Vec<_>>(),
-        vec![0, 2]
-    );
-    assert_eq!(
-        float_args
-            .regs
-            .iter()
-            .map(|register| register.1)
-            .collect::<Vec<_>>(),
+        numbers(pass_seq(abi.args, ValueKind::Float).regs),
         (0..=7).collect::<Vec<_>>()
     );
     assert_eq!(
-        float_rets
-            .regs
-            .iter()
-            .map(|register| register.1)
-            .collect::<Vec<_>>(),
+        numbers(pass_seq(abi.rets, ValueKind::Float).regs),
         vec![0, 1]
     );
-    assert_eq!(
-        abi.callee_saved
-            .iter()
-            .map(|register| register.1)
-            .collect::<Vec<_>>(),
-        vec![3, 5, 12, 13, 14, 15]
-    );
+    assert_eq!(numbers(abi.callee_saved), vec![3, 5, 12, 13, 14, 15]);
 }
