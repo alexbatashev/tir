@@ -1535,7 +1535,11 @@ fn make_parser(
     result_variadic: bool,
 ) -> proc_macro2::TokenStream {
     assert!(
-        operands.iter().rev().skip(1).all(|operand| !operand.variadic),
+        operands
+            .iter()
+            .rev()
+            .skip(1)
+            .all(|operand| !operand.variadic),
         "the generic syntax reads a variadic operand group only as the last one"
     );
     let attr_spec_literals: Vec<_> = attributes
