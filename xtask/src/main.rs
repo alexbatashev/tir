@@ -301,4 +301,3 @@ fn haskell_smoke(sh: &Shell) -> anyhow::Result<()> {
     cmd!(sh, "{bin}").run()?;
     Ok(())
 }
-

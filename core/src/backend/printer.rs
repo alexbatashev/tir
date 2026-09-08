@@ -181,17 +181,19 @@ impl AsmPrinter {
             out.push_str(&kind);
             match kind.as_str() {
                 "byte" | "half" | "word" | "dword" | "space" => {
-                    let value = as_int_attr(op.attr("value")).ok_or(AsmPrintError::UnsupportedOp {
-                        op: LiteralOp::name(),
-                    })?;
+                    let value =
+                        as_int_attr(op.attr("value")).ok_or(AsmPrintError::UnsupportedOp {
+                            op: LiteralOp::name(),
+                        })?;
                     out.push(' ');
                     out.push_str(&value.to_string());
                     out.push('\n');
                 }
                 _ => {
-                    let value = as_string_attr(op.attr("value")).ok_or(AsmPrintError::UnsupportedOp {
-                        op: LiteralOp::name(),
-                    })?;
+                    let value =
+                        as_string_attr(op.attr("value")).ok_or(AsmPrintError::UnsupportedOp {
+                            op: LiteralOp::name(),
+                        })?;
                     out.push_str(" \"");
                     out.push_str(&escape_asm_string(&value));
                     out.push_str("\"\n");

@@ -83,4 +83,3 @@ impl LabelId {
         self.0 as usize
     }
 }
-

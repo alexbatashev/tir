@@ -194,8 +194,7 @@ fn run_compile_action(
                     write!(out, "{tok}").unwrap();
                 }
             } else {
-                let tokens: Vec<Token> =
-                    preprocessed.into_iter().map(|(tok, _)| tok).collect();
+                let tokens: Vec<Token> = preprocessed.into_iter().map(|(tok, _)| tok).collect();
                 writeln!(out, "{tokens:#?}").unwrap();
             }
         }

@@ -240,7 +240,10 @@ pub(crate) fn place_arguments(
 
 /// The attribute an argument group is carried in: a bare member list, or a
 /// dictionary naming the alignment its source type demanded.
-pub(crate) fn encode_argument_group(members: Vec<AttributeValue>, alignment: u64) -> AttributeValue {
+pub(crate) fn encode_argument_group(
+    members: Vec<AttributeValue>,
+    alignment: u64,
+) -> AttributeValue {
     if alignment == 1 {
         return AttributeValue::Array(members.into());
     }
@@ -358,8 +361,9 @@ pub(crate) fn next_argument_register(
     kind: ValueKind,
     next_slot: &mut HashMap<ValueKind, usize>,
 ) -> Option<crate::backend::liveness::PhysReg> {
-    let same_file =
-        |class: crate::backend::regalloc::RegClassId, register: PhysReg| register.0.file() == class.file();
+    let same_file = |class: crate::backend::regalloc::RegClassId, register: PhysReg| {
+        register.0.file() == class.file()
+    };
     for sequence in argument_sequences(abi, kind) {
         let slot = next_slot.entry(sequence.kind).or_insert(0);
         let register = match class {

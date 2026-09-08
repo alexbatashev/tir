@@ -403,11 +403,7 @@ pub(super) fn preprocess_opts(
 }
 
 /// [`parse_source`] driven by the options the driver was invoked with.
-pub(super) fn parse_source_opts(
-    opts: &DriverOptions,
-    name: &str,
-    source: &str,
-) -> crate::ast::Ast {
+pub(super) fn parse_source_opts(opts: &DriverOptions, name: &str, source: &str) -> crate::ast::Ast {
     parse_source(
         name,
         source,
