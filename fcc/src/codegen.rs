@@ -1649,55 +1649,26 @@ impl FnCodegen<'_> {
         source_ty: QualType,
     ) -> ValueId {
         let ty = lower_type(self.context, self.typed, source_ty);
+        let signed = || self.typed.integer_is_signed(source_ty).unwrap();
+        macro_rules! bin {
+            ($op:path) => {
+                self.emit($op(self.context, lhs, rhs, ty).build()).result()
+            };
+        }
         match kind {
-            AstKind::Add | AstKind::AddAssign => self
-                .emit(b::addi(self.context, lhs, rhs, ty).build())
-                .result(),
-            AstKind::Sub | AstKind::SubAssign => self
-                .emit(b::subi(self.context, lhs, rhs, ty).build())
-                .result(),
-            AstKind::Mul | AstKind::MulAssign => self
-                .emit(b::muli(self.context, lhs, rhs, ty).build())
-                .result(),
-            AstKind::Div | AstKind::DivAssign
-                if self.typed.integer_is_signed(source_ty).unwrap() =>
-            {
-                self.emit(b::divsi(self.context, lhs, rhs, ty).build())
-                    .result()
-            }
-            AstKind::Div | AstKind::DivAssign => self
-                .emit(b::divui(self.context, lhs, rhs, ty).build())
-                .result(),
-            AstKind::Mod | AstKind::ModAssign
-                if self.typed.integer_is_signed(source_ty).unwrap() =>
-            {
-                self.emit(b::remsi(self.context, lhs, rhs, ty).build())
-                    .result()
-            }
-            AstKind::Mod | AstKind::ModAssign => self
-                .emit(b::remui(self.context, lhs, rhs, ty).build())
-                .result(),
-            AstKind::BitAnd | AstKind::AndAssign => self
-                .emit(b::andi(self.context, lhs, rhs, ty).build())
-                .result(),
-            AstKind::BitXor | AstKind::XorAssign => self
-                .emit(b::xori(self.context, lhs, rhs, ty).build())
-                .result(),
-            AstKind::BitOr | AstKind::OrAssign => self
-                .emit(b::ori(self.context, lhs, rhs, ty).build())
-                .result(),
-            AstKind::Shl | AstKind::ShlAssign => self
-                .emit(b::shli(self.context, lhs, rhs, ty).build())
-                .result(),
-            AstKind::Shr | AstKind::ShrAssign
-                if self.typed.integer_is_signed(source_ty).unwrap() =>
-            {
-                self.emit(b::shrsi(self.context, lhs, rhs, ty).build())
-                    .result()
-            }
-            AstKind::Shr | AstKind::ShrAssign => self
-                .emit(b::shrui(self.context, lhs, rhs, ty).build())
-                .result(),
+            AstKind::Add | AstKind::AddAssign => bin!(b::addi),
+            AstKind::Sub | AstKind::SubAssign => bin!(b::subi),
+            AstKind::Mul | AstKind::MulAssign => bin!(b::muli),
+            AstKind::Div | AstKind::DivAssign if signed() => bin!(b::divsi),
+            AstKind::Div | AstKind::DivAssign => bin!(b::divui),
+            AstKind::Mod | AstKind::ModAssign if signed() => bin!(b::remsi),
+            AstKind::Mod | AstKind::ModAssign => bin!(b::remui),
+            AstKind::BitAnd | AstKind::AndAssign => bin!(b::andi),
+            AstKind::BitXor | AstKind::XorAssign => bin!(b::xori),
+            AstKind::BitOr | AstKind::OrAssign => bin!(b::ori),
+            AstKind::Shl | AstKind::ShlAssign => bin!(b::shli),
+            AstKind::Shr | AstKind::ShrAssign if signed() => bin!(b::shrsi),
+            AstKind::Shr | AstKind::ShrAssign => bin!(b::shrui),
             _ => unreachable!(),
         }
     }
@@ -1799,19 +1770,16 @@ impl FnCodegen<'_> {
 
     fn lower_double_binary(&mut self, kind: AstKind, lhs: ValueId, rhs: ValueId) -> ValueId {
         let ty = FloatType::f64(self.context);
+        macro_rules! bin {
+            ($op:path) => {
+                self.emit($op(self.context, lhs, rhs, ty).build()).result()
+            };
+        }
         match kind {
-            AstKind::Add | AstKind::AddAssign => self
-                .emit(b::addf(self.context, lhs, rhs, ty).build())
-                .result(),
-            AstKind::Sub | AstKind::SubAssign => self
-                .emit(b::subf(self.context, lhs, rhs, ty).build())
-                .result(),
-            AstKind::Mul | AstKind::MulAssign => self
-                .emit(b::mulf(self.context, lhs, rhs, ty).build())
-                .result(),
-            AstKind::Div | AstKind::DivAssign => self
-                .emit(b::divf(self.context, lhs, rhs, ty).build())
-                .result(),
+            AstKind::Add | AstKind::AddAssign => bin!(b::addf),
+            AstKind::Sub | AstKind::SubAssign => bin!(b::subf),
+            AstKind::Mul | AstKind::MulAssign => bin!(b::mulf),
+            AstKind::Div | AstKind::DivAssign => bin!(b::divf),
             _ => unreachable!(),
         }
     }
