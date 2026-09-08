@@ -6,7 +6,10 @@
 //! state it takes and split back out of the state it leaves. Reads fork off a
 //! change without ordering one another; the next change, or whatever leaves the
 //! block, takes `state.join` of what the fork left, so a read never trails the
-//! write that overtakes it.
+//! write that overtakes it. A change's result is split only where something
+//! names one of its chains on its own: a run of changes crossing the same
+//! chains would split and join the same set at every step, which orders
+//! nothing the first join did not.
 //!
 //! Two accesses whose objects [`Base::distinct`] tells apart share no chain and
 //! therefore no edge: independence is a property of the graph, not something a
@@ -62,20 +65,17 @@ impl Plan {
 /// world where anything reaches memory the analysis cannot read back.
 pub fn plan(context: &Context, region: RegionId) -> Plan {
     let ops = crate::analysis::regions::region_ops(context, region);
-    let mut objects = BTreeSet::new();
-    let mut world = false;
-    for &op in &ops {
-        let handle = context.get_op(op);
-        if !touches_memory(&handle) {
-            continue;
-        }
-        match accessed_object(&handle).and_then(|address| object_base(context, address)) {
-            Some(base) => {
-                objects.insert(base);
-            }
-            None => world = true,
-        }
-    }
+    let effects: Vec<(OpId, Option<Base>)> = ops
+        .iter()
+        .map(|&op| (op, context.get_op(op)))
+        .filter(|(_, handle)| touches_memory(handle))
+        .map(|(op, handle)| {
+            let base = accessed_object(&handle).and_then(|address| object_base(context, address));
+            (op, base)
+        })
+        .collect();
+    let objects: BTreeSet<Base> = effects.iter().filter_map(|&(_, base)| base).collect();
+    let world = effects.iter().any(|(_, base)| base.is_none());
     let keys: Vec<ChainKey> = objects
         .into_iter()
         .map(ChainKey::Object)
@@ -89,15 +89,10 @@ pub fn plan(context: &Context, region: RegionId) -> Plan {
             ChainKey::World => false,
         })
         .collect();
-    let mut touched = BTreeMap::new();
-    for &op in &ops {
-        let handle = context.get_op(op);
-        if !touches_memory(&handle) {
-            continue;
-        }
-        let base = accessed_object(&handle).and_then(|address| object_base(context, address));
-        touched.insert(op, touched_chains(&keys, &private, base));
-    }
+    let touched: BTreeMap<OpId, Vec<usize>> = effects
+        .into_iter()
+        .map(|(op, base)| (op, touched_chains(&keys, &private, base)))
+        .collect();
     let (keys, mut touched) = merge_indistinguishable(keys, touched);
     for &op in &ops {
         let handle = context.get_op(op);
@@ -267,6 +262,7 @@ pub fn thread_block(
                 )
             })
             .collect(),
+        shared: None,
     };
     for &op in body {
         let handle = context.get_op(op);
@@ -328,6 +324,12 @@ pub fn thread_block(
         .collect()
 }
 
+/// Whether two effects cross the same chains, however each orders them: a
+/// state standing for a set of chains answers either.
+fn same_chains(held: &[usize], wanted: &[usize]) -> bool {
+    held.len() == wanted.len() && wanted.iter().all(|chain| held.contains(chain))
+}
+
 enum Effect {
     None,
     Read,
@@ -367,21 +369,64 @@ struct ChainState {
     reads: Vec<ValueId>,
 }
 
+/// One state left by a change that crossed several chains, standing for all of
+/// them until something names one on its own.
+struct Shared {
+    chains: Vec<usize>,
+    published: ValueId,
+    after: OpId,
+}
+
 struct Chains<'a> {
     context: &'a Context,
     states: BTreeMap<usize, ChainState>,
+    shared: Option<Shared>,
 }
 
 impl Chains<'_> {
     fn state(&mut self, chain: usize) -> Result<&mut ChainState, PassError> {
+        self.name_shared()?;
         self.states
             .get_mut(&chain)
             .ok_or_else(|| unsupported("an effect on a chain its region does not carry"))
     }
 
+    /// Name each chain a shared state stands for again, which is what a
+    /// `state.split` is for. Called where a chain is wanted on its own, so a
+    /// state no effect ever takes apart is never split.
+    fn name_shared(&mut self) -> Result<(), PassError> {
+        let Some(shared) = self.shared.take() else {
+            return Ok(());
+        };
+        let mut split = SplitOpBuilder::new(self.context).dep_operand(shared.published);
+        for _ in &shared.chains {
+            split = split.dep_result();
+        }
+        let split = split.build();
+        self.insert(split.id(), shared.after, 1);
+        for (&chain, &state) in shared.chains.iter().zip(&split.states()) {
+            self.state(chain)?.written = state;
+        }
+        Ok(())
+    }
+
     /// The memory each of `chains` stands at once the reads forked off it are
     /// closed, joined into one state where the effect crosses several.
+    ///
+    /// A state left by a change that crossed exactly these chains already
+    /// stands for their memory: splitting it into names this effect would only
+    /// join back says nothing, so the effect takes it as it is.
+    ///
+    /// Two changes cross the same chains only where their objects reach each
+    /// other — the same object, two parameters, or two effects on memory of
+    /// unknown provenance — so a reader that follows the state back to one
+    /// chain of the pair still meets every access that may alias either.
     fn settle(&mut self, chains: &[usize], before: OpId) -> Result<ValueId, PassError> {
+        if let Some(shared) = &self.shared
+            && same_chains(&shared.chains, chains)
+        {
+            return Ok(shared.published);
+        }
         let mut settled = Vec::with_capacity(chains.len());
         for &chain in chains {
             settled.push(self.close_fork(chain, before)?);
@@ -419,8 +464,9 @@ impl Chains<'_> {
         join.result()
     }
 
-    /// Name each touched chain again after the change that left `published`:
-    /// one `state.split` result per chain, in the order the join took them.
+    /// The memory the change that left `published` stands for: its own chain
+    /// where it crossed one, all the chains it crossed otherwise, held until
+    /// something names one of them on its own ([`Self::name_shared`]).
     fn split(
         &mut self,
         chains: &[usize],
@@ -431,15 +477,11 @@ impl Chains<'_> {
             self.state(one)?.written = published;
             return Ok(());
         }
-        let mut split = SplitOpBuilder::new(self.context).dep_operand(published);
-        for _ in chains {
-            split = split.dep_result();
-        }
-        let split = split.build();
-        self.insert(split.id(), after, 1);
-        for (&chain, &state) in chains.iter().zip(&split.states()) {
-            self.state(chain)?.written = state;
-        }
+        self.shared = Some(Shared {
+            chains: chains.to_vec(),
+            published,
+            after,
+        });
         Ok(())
     }
 
