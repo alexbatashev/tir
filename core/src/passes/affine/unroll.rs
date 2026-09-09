@@ -34,11 +34,8 @@ fn worth_unrolling<'a>(context: &Context, view: &'a AffineView) -> Option<&'a Lo
     let level = view.loops.last()?;
     let trip = level.trip?;
     let ops = body_ops(context, level.op)?;
-    let handle = context.get_op(level.op);
-    // The copies name the loop's ports and join the region it stands in, both
-    // of which only the unordered form has.
-    let body = *handle.regions().last()?;
-    context.get_region(body).is_nodes().then_some(())?;
+    // The copies join the region the loop stands in, which an unordered region
+    // alone has.
     context.parent_nodes_region(level.op)?;
     ((1..=UNROLL_TRIP).contains(&trip)
         && level.lower.as_constant().is_some()
@@ -57,19 +54,9 @@ fn unroll(context: &Context, rewriter: &mut Rewriter, level: &Loop) -> Result<()
     );
     let handle = context.get_op(level.op);
     let target = OperationRef::new(handle.clone());
-    let theta = handle
-        .clone()
-        .as_interface::<dyn Theta>()
-        .expect("a counted loop is a theta");
-    let (arguments, mut incoming) = {
-        let binding = theta.carried();
-        let body = context.get_region(theta.body());
-        let arguments: Vec<ValueId> = body.ports()[binding.ports]
-            .iter()
-            .map(crate::Value::id)
-            .collect();
-        (arguments, handle.operands()[binding.operands].to_vec())
-    };
+    let sides = crate::binding::carried(context, &handle);
+    let arguments: Vec<ValueId> = sides.iter().map(|side| side.port).collect();
+    let mut incoming: Vec<ValueId> = sides.iter().map(|side| side.init).collect();
     let parent = context
         .parent_nodes_region(level.op)
         .expect("an unrolled loop stands in an unordered region");
@@ -117,7 +104,7 @@ fn copy_body_nodes(
         .as_interface::<dyn Theta>()
         .expect("an unordered loop declares a theta");
     let body = theta.body();
-    let binding = theta.carried();
+    let binding = theta.binding();
     let (ops, results) = crate::clone::clone_nodes_ops_into(context, body, bindings, destination);
     (ops, results[binding.continue_].to_vec())
 }
