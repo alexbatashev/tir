@@ -196,23 +196,23 @@ fn strip_mining_an_unordered_loop_keeps_its_sum() {
     %5 = constant {value = 4} : !i64
     %20 = constant {value = 60} : !i64
     %21 = constant {value = 0} : !i8
-    | %22 = state.entry_state
-    | %23 = ptr.memset %1, %21, %20 | %22
-    %6 | %24 = scf.for %7 = %2 to %n step %4 (| %25 = %23) {
+    %22 = state.entry_state
+    %23 = ptr.memset %1, %21, %20 state(%22)
+    %6, %24 = scf.for %7 = %2 to %n step %4 (%25 = %23) {
       %8 = extsi %7 : !i64
       %9 = muli %8, %5 : !i64
       %10 = ptr.ptradd %1, %9 : !ptr.p
-      | %26 = ptr.store %7, %10 | %25
-      -> | %26
+      %26 = ptr.store %7, %10 state(%25)
+      -> %26
     }
     %12 = constant {value = 52} : !i64
     %13 = ptr.ptradd %1, %12 : !ptr.p
-    %14 | %27 = ptr.load %13 | %24 : !i32
+    %14, %27 = ptr.load %13 state(%24) : !i32
     %15 = constant {value = 8} : !i64
     %16 = ptr.ptradd %1, %15 : !ptr.p
-    %17 | %28 = ptr.load %16 | %27 : !i32
+    %17, %28 = ptr.load %16 state(%27) : !i32
     %18 = addi %14, %17 : !i32
-    -> %18 | %28
+    -> %18, %28
   }
   module_end
 }"#,

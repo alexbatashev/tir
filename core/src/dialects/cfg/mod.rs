@@ -62,14 +62,11 @@ impl BranchOp {
         parser: &mut tir::parse::text::Parser,
         context: &Context,
     ) -> Result<Box<dyn Operation>, (tir::parse::Span, Error)> {
-        let (dest, dest_args, deps) = parse_successor(parser, context)?;
+        let (dest, dest_args) = parse_successor(parser, context)?;
         let op = BranchOpBuilder::new(context)
             .dest_args(dest_args)
             .dest(dest)
             .build();
-        for dep in deps {
-            context.append_dep_operand(op.id(), dep);
-        }
         Ok(Box::new(op))
     }
 }
@@ -122,30 +119,19 @@ impl CondBranchOp {
     }
 
     /// The values forwarded to the true successor's block arguments, the
-    /// dependencies among them last.
+    /// states among them last.
     pub fn true_args(&self) -> Vec<ValueId> {
-        let mut args = self.value_operands()[self.args_range(1)].to_vec();
-        args.extend(&self.dep_operands()[..self.true_deps()]);
-        args
+        self.operands()[self.args_range(1)].to_vec()
     }
 
     /// The values forwarded to the false successor's block arguments, the
-    /// dependencies among them last.
+    /// states among them last.
     pub fn false_args(&self) -> Vec<ValueId> {
-        let mut args = self.value_operands()[self.args_range(2)].to_vec();
-        args.extend(&self.dep_operands()[self.true_deps()..]);
-        args
+        self.operands()[self.args_range(2)].to_vec()
     }
 
-    /// The dependencies are the true successor's first, as many as it is
-    /// entered on, then the false successor's.
-    fn true_deps(&self) -> usize {
-        let context = self.0.context.upgrade();
-        context.get_block(self.true_dest()).dep_arguments().len()
-    }
-
-    // Value operand layout is [condition, true_args.., false_args..], one
-    // declared operand group each.
+    // Operand layout is [condition, true_args.., false_args..], one declared
+    // operand group each.
     fn args_range(&self, group: usize) -> std::ops::Range<usize> {
         tir::binding::operand_segments(&self.0, 3)[group].clone()
     }
@@ -165,9 +151,9 @@ impl CondBranchOp {
     ) -> Result<Box<dyn Operation>, (tir::parse::Span, Error)> {
         let condition = parse_value_id(parser, context)?;
         expect_token(parser, ",")?;
-        let (true_dest, true_args, true_deps) = parse_successor(parser, context)?;
+        let (true_dest, true_args) = parse_successor(parser, context)?;
         expect_token(parser, ",")?;
-        let (false_dest, false_args, false_deps) = parse_successor(parser, context)?;
+        let (false_dest, false_args) = parse_successor(parser, context)?;
 
         let op = CondBranchOpBuilder::new(context)
             .condition(condition)
@@ -176,9 +162,6 @@ impl CondBranchOp {
             .true_dest(true_dest)
             .false_dest(false_dest)
             .build();
-        for dep in true_deps.into_iter().chain(false_deps) {
-            context.append_dep_operand(op.id(), dep);
-        }
         Ok(Box::new(op))
     }
 }
@@ -192,29 +175,23 @@ fn print_successor(
     args: &[ValueId],
 ) -> Result<(), std::fmt::Error> {
     fmt.write(format!("^bb{}", fmt.region_block_number(block)))?;
-    let deps = context.get_block(block).dep_arguments().len();
-    let (args, dep_args) = args.split_at(args.len() - deps);
-    if args.is_empty() && dep_args.is_empty() {
+    if args.is_empty() {
         return Ok(());
     }
     fmt.write("(")?;
-    if !args.is_empty() {
-        tir::dependency::print_value_list(fmt, args)?;
-        fmt.write(" : ")?;
-        for (i, arg) in args.iter().enumerate() {
-            if i > 0 {
-                fmt.write(", ")?;
-            }
-            context.print_type(context.get_value(*arg).ty(), fmt)?;
+    tir::region_format::print_value_list(fmt, args)?;
+    fmt.write(" : ")?;
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            fmt.write(", ")?;
         }
+        context.print_type(context.get_value(*arg).ty(), fmt)?;
     }
-    tir::dependency::print_dep_list(fmt, dep_args, !args.is_empty())?;
     fmt.write(")")
 }
 
-/// A parsed successor: its label, the values it is entered on and, after a
-/// `|`, the dependencies.
-type Successor = (BlockId, Vec<ValueId>, Vec<ValueId>);
+/// A parsed successor: its label and the values it is entered on.
+type Successor = (BlockId, Vec<ValueId>);
 
 fn parse_successor(
     parser: &mut tir::parse::text::Parser,
@@ -228,7 +205,6 @@ fn parse_successor(
 
     let mut args = vec![];
     let mut arg_types = vec![];
-    let mut deps = vec![];
     if parser.parse_token("(") {
         if parser.peek_char() == Some('%') {
             loop {
@@ -247,12 +223,11 @@ fn parse_successor(
                 break;
             }
         }
-        deps = tir::dependency::parse_dep_operands(parser, context)?;
         expect_token(parser, ")")?;
     }
 
-    let block = parser.resolve_region_block_label(context, &label, &arg_types, deps.len())?;
-    Ok((block, args, deps))
+    let block = parser.resolve_region_block_label(context, &label, &arg_types)?;
+    Ok((block, args))
 }
 
 fn parse_value_id(

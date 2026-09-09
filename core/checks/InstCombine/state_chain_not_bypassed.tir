@@ -14,27 +14,27 @@ module {
     %0 = constant {value = 0} : !i32
     %1 = constant {value = 0} : !i32
     %2 = cmpi %0, %1 {predicate = "ne"} : !i1
-    | %3 = state.entry_state
-    | %4 = scf.switch %2 args(| %3) (| %5) {
-      -> | %5
+    %3 = state.entry_state
+    %4 = scf.switch %2 args(%3) (%5) {
+      -> %5
     }
-    (| %6) {
-      | %7 = func.call %fn_p() | %6
-      -> | %7
+    (%6) {
+      %7 = func.call %fn_p() state(%6)
+      -> %7
     }
-    | %8 = scf.switch %2 args(| %4) (| %9) {
-      -> | %9
+    %8 = scf.switch %2 args(%4) (%9) {
+      -> %9
     }
-    (| %10) {
-      | %11 = func.call %fn_p() | %10
-      -> | %11
+    (%10) {
+      %11 = func.call %fn_p() state(%10)
+      -> %11
     }
-    -> | %8
+    -> %8
   }
   module_end
 }
 
 // CHECK-LABEL: %{{[0-9]+}} = func.func @f
-// CHECK: | %[[FIRST:[0-9]+]] = scf.switch
-// CHECK: | %[[SECOND:[0-9]+]] = scf.switch %{{[0-9]+}} args(| %[[FIRST]])
-// CHECK: -> | %[[SECOND]]
+// CHECK: %[[FIRST:[0-9]+]] = scf.switch
+// CHECK: %[[SECOND:[0-9]+]] = scf.switch %{{[0-9]+}} args(%[[FIRST]])
+// CHECK: -> %[[SECOND]]

@@ -381,7 +381,7 @@ impl Builder<'_> {
     fn thread_memory(&mut self, region: RegionId) -> Result<(), PassError> {
         let plan = super::deps::plan(self.context, region);
         let chains: Vec<VarId> = (0..plan.chains())
-            .map(|_| self.cfg.add_var(TypeId::DEPENDENCY))
+            .map(|_| self.cfg.add_var(TypeId::STATE))
             .collect();
         for (block, node) in self.node_of_block.clone() {
             // A block is entered on the chains its own effects name; the one
@@ -398,7 +398,10 @@ impl Builder<'_> {
             let entries: BTreeMap<usize, ValueId> = carried
                 .iter()
                 .map(|&index| {
-                    let entry = self.context.append_dep_block_argument(block).id();
+                    let entry = self
+                        .context
+                        .append_block_argument(block, TypeId::STATE)
+                        .id();
                     self.arg_var.insert(entry, chains[index]);
                     (index, entry)
                 })
@@ -407,7 +410,7 @@ impl Builder<'_> {
             for &index in &carried {
                 let left = leaving[&index];
                 if let Term::Sink { op, .. } = &self.cfg.nodes[node].term {
-                    self.context.append_dep_operand(*op, left);
+                    self.context.append_operand(*op, left);
                 }
                 if left != entries[&index] {
                     self.cfg.value_var.insert(left, chains[index]);

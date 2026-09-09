@@ -23,8 +23,8 @@ pub fn print_block_label(
 ) -> Result<(), std::fmt::Error> {
     fmt.write(format!("^bb{index}"))?;
 
-    let (args, deps) = (block.value_arguments(), block.dep_arguments());
-    if !args.is_empty() || !deps.is_empty() {
+    let args = block.arguments();
+    if !args.is_empty() {
         fmt.write("(")?;
         for (i, arg) in args.iter().enumerate() {
             if i > 0 {
@@ -33,8 +33,6 @@ pub fn print_block_label(
             fmt.write(format!("%{}: ", arg.id().number()))?;
             context.print_type(arg.ty(), fmt)?;
         }
-        let deps: Vec<_> = deps.iter().map(crate::Value::id).collect();
-        crate::dependency::print_dep_list(fmt, &deps, !args.is_empty())?;
         fmt.write(")")?;
     }
 
@@ -93,27 +91,19 @@ fn print_nodes_region(
     context: &Context,
     region: &RegionHandle,
 ) -> Result<(), std::fmt::Error> {
-    print_nodes_region_with(
-        fmt,
-        context,
-        region,
-        &[],
-        &region.value_results(),
-        &region.dep_results(),
-    )
+    print_nodes_region_with(fmt, context, region, &[], &region.results())
 }
 
 /// [`print_region`] for an unordered region whose owner spells part of it
 /// itself: `hidden` operations are left out and the `->` line names `results`
-/// and `dep_results` in place of the region's own. A counted loop prints this
-/// way, its parser putting the pinned comparison and increment back.
+/// in place of the region's own. A counted loop prints this way, its parser
+/// putting the pinned comparison and increment back.
 pub fn print_nodes_region_with(
     fmt: &mut IRFormatter,
     context: &Context,
     region: &RegionHandle,
     hidden: &[crate::OpId],
     results: &[crate::ValueId],
-    dep_results: &[crate::ValueId],
 ) -> Result<(), std::fmt::Error> {
     let ops = match fmt.shuffle() {
         Some(rng) => crate::region::shuffled_topological_order(context, region.id(), rng),
@@ -130,9 +120,8 @@ pub fn print_nodes_region_with(
     fmt.write("->")?;
     if !results.is_empty() {
         fmt.write(" ")?;
-        crate::dependency::print_value_list(fmt, results)?;
+        print_value_group(fmt, context, results)?;
     }
-    crate::dependency::print_dep_list(fmt, dep_results, true)?;
     fmt.writeln("")?;
     fmt.pop();
     fmt.writeln("}")?;
@@ -145,7 +134,62 @@ fn open_brace(fmt: &IRFormatter) -> &'static str {
     if fmt.at_line_start() { "{" } else { " {" }
 }
 
-/// Print an op in the generic form — `%r | %s = dialect.op %a, %b | %c {attrs} : ty`
+/// Print `%a, %b`.
+pub fn print_value_list(
+    fmt: &mut IRFormatter<'_>,
+    values: &[crate::ValueId],
+) -> Result<(), std::fmt::Error> {
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            fmt.write(", ")?;
+        }
+        fmt.write(format!("%{}", value.number()))?;
+    }
+    Ok(())
+}
+
+/// Print `%a, %b, %c, %d`: the values of `ids` that are not states, then
+/// the states. A region's `->` line is spelled this way; the op reading it
+/// puts the states back where its binding wants them.
+pub fn print_value_group(
+    fmt: &mut IRFormatter<'_>,
+    context: &Context,
+    ids: &[crate::ValueId],
+) -> Result<(), std::fmt::Error> {
+    let mut ordered = context.values_among(ids);
+    ordered.extend(context.states_among(ids));
+    print_value_list(fmt, &ordered)
+}
+
+/// Print `%a, %b = ` for an op that produces anything, and nothing for one
+/// that does not.
+pub fn print_result_prefix(
+    fmt: &mut IRFormatter<'_>,
+    op: &crate::OpHandle,
+) -> Result<(), std::fmt::Error> {
+    let results = op.results();
+    if results.is_empty() {
+        return Ok(());
+    }
+    print_value_list(fmt, &results)?;
+    fmt.write(" = ")
+}
+
+/// Print ` state(%c, %d)` for an op observing any state, and nothing otherwise.
+pub fn print_state_operands(
+    fmt: &mut IRFormatter<'_>,
+    op: &crate::OpHandle,
+) -> Result<(), std::fmt::Error> {
+    let states = op.state_operands();
+    if states.is_empty() {
+        return Ok(());
+    }
+    fmt.write(" state(")?;
+    print_value_list(fmt, &states)?;
+    fmt.write(")")
+}
+
+/// Print an op in the generic form — `%r, %s = dialect.op %a, %b state(%c) {attrs} : ty`
 /// followed by its region, if it holds one — which its handle decides in full.
 pub fn print_generic(
     fmt: &mut IRFormatter,
@@ -153,14 +197,14 @@ pub fn print_generic(
     name: &str,
 ) -> Result<(), std::fmt::Error> {
     let context = op.context.upgrade();
-    crate::dependency::print_result_prefix(fmt, op)?;
+    print_result_prefix(fmt, op)?;
     fmt.write(name)?;
     let operands = op.value_operands();
     if !operands.is_empty() {
         fmt.write(" ")?;
-        crate::dependency::print_value_list(fmt, &operands)?;
+        print_value_list(fmt, &operands)?;
     }
-    crate::dependency::print_dep_operands(fmt, op)?;
+    print_state_operands(fmt, op)?;
     // `operand_segment_sizes` is bookkeeping the operand groups already spell:
     // the generic parser recomputes it from the groups it reads back.
     let segments = context.sym("operand_segment_sizes");
