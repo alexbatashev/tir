@@ -61,6 +61,7 @@ mod layout;
 pub mod memstats;
 mod operand;
 mod operation;
+mod overlay;
 mod pass;
 pub mod passes;
 mod print;
@@ -70,6 +71,7 @@ pub(crate) mod run;
 pub mod schema;
 mod scoped_attr;
 pub mod sem;
+mod store;
 pub mod symbol_table;
 mod target_env;
 mod ty;
@@ -83,7 +85,7 @@ pub mod parse;
 
 pub use analysis::{Analysis, AnalysisManager};
 pub use block::{Block, BlockHandle, BlockId};
-pub use context::{Context, ContextIterator, ContextRef, GetFromContext, Parent, StagedRegion};
+pub use context::{Context, ContextIterator, GetFromContext, Parent, StagedRegion};
 pub use diagnostics::{print_error_range, print_parse_error};
 pub use dialect::{Dialect, OperationParser};
 pub use error::Error;
@@ -104,8 +106,9 @@ pub use operation::{
     RegionIds, ValueIds, Verifiable, downcast_op_interface, erase_op_interface,
     op_interface_converter, verify_op_tree, verify_opdef_attributes, verify_opdef_operands,
 };
+pub use overlay::{Frozen, OverlayCensus};
 pub use pass::{
-    OperationRef, PASSES, Pass, PassError, PassInfo, PassManager, PassTarget, Rewriter, build_pass,
+    OperationRef, PASSES, Pass, PassError, PassInfo, PassManager, PassTarget, build_pass,
     parse_pipeline, registered_passes, report_pass_timing,
 };
 pub use print::print_ir;

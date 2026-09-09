@@ -103,6 +103,20 @@ impl<T> Hive<T> {
         handle
     }
 
+    /// Spends the next handle without storing anything: the slot is dead from
+    /// the start, so the handles after it stay where they would have been.
+    pub fn skip(&mut self) {
+        if self
+            .chunks
+            .last()
+            .is_none_or(|chunk| chunk.bump as usize == Self::N)
+        {
+            self.chunks.push(Chunk::new(Self::N));
+        }
+        let chunk = self.chunks.last_mut().expect("a chunk was just ensured");
+        chunk.bump += 1;
+    }
+
     /// Takes the value back out. The slot stays spent, so `handle` names
     /// nothing from here on.
     ///
@@ -132,6 +146,15 @@ impl<T> Hive<T> {
             return None;
         }
         Some(unsafe { chunk.slots[offset as usize].assume_init_mut() })
+    }
+
+    /// The handle the next insert will return. Handles are bump-allocated
+    /// and never reused, so this is also how many slots were ever handed out.
+    pub fn next_handle(&self) -> u32 {
+        match self.chunks.last() {
+            Some(chunk) => ((self.chunks.len() - 1) << Self::K) as u32 + chunk.bump,
+            None => 0,
+        }
     }
 
     /// Live handles in ascending order.

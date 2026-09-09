@@ -1,7 +1,4 @@
-use crate::{
-    BlockId, Context, ContextIterator, GetFromContext, OpId, Terminator, Value, ValueId,
-    context::ContextRef,
-};
+use crate::{BlockId, Context, ContextIterator, GetFromContext, OpId, Terminator, Value, ValueId};
 
 id_newtype!(RegionId);
 
@@ -11,7 +8,7 @@ id_newtype!(RegionId);
 /// and hand control on through terminators. An unordered region is a dependence
 /// graph: nothing but the def-use edges between its operations says what runs
 /// before what, so `ops` is insertion order and is never read as meaning.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RegionBody {
     Blocks(Vec<BlockId>),
     Nodes {
@@ -28,7 +25,7 @@ pub enum RegionBody {
 /// A region's storage record, living densely in the context's region slab and
 /// edited in place through [`Context`] under its write lock. Reads go through
 /// [`RegionHandle`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Region {
     body: RegionBody,
     parent_op: OpId,
@@ -115,7 +112,7 @@ impl Region {
 /// with the region as it stands now; see [`crate::OpHandle`].
 #[derive(Clone)]
 pub struct RegionHandle {
-    pub context: ContextRef,
+    pub context: Context,
     pub(crate) generation: u32,
     pub id: RegionId,
 }
@@ -129,7 +126,7 @@ impl std::fmt::Debug for RegionHandle {
 impl RegionHandle {
     /// The owning context, after checking this handle still names its own region.
     fn context(&self) -> Context {
-        let context = self.context.upgrade();
+        let context = self.context.clone();
         debug_assert_eq!(
             context.region_generation(self.id),
             self.generation,
@@ -142,7 +139,7 @@ impl RegionHandle {
     /// Whether this handle still names the region it was minted for; see
     /// [`crate::OpHandle::is_live`].
     pub fn is_live(&self) -> bool {
-        self.context.upgrade().region_generation(self.id) == self.generation
+        self.context.region_generation(self.id) == self.generation
     }
 
     pub fn id(&self) -> RegionId {

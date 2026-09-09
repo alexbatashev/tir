@@ -1,4 +1,4 @@
-//! PassManager, Rewriter and pass-driven analysis invalidation.
+//! PassManager and pass-driven analysis invalidation.
 
 use std::collections::HashMap;
 
@@ -6,7 +6,6 @@ use tir::{
     builtin::{ops, AddIOp, IntegerType},
     func::FuncOp,
     AnalysisManager, Context, Operation, OperationRef, Pass, PassError, PassManager, PassTarget,
-    Rewriter,
 };
 
 use super::fixtures;
@@ -26,14 +25,13 @@ impl Pass for AddToSubPass {
         &mut self,
         op: &OperationRef,
         context: &Context,
-        rewriter: &mut Rewriter,
         _analyses: &AnalysisManager,
     ) -> Result<(), PassError> {
         let add = op.as_op::<AddIOp>().expect("target guarantees AddIOp");
         let operands = add.operands();
         let result_ty = context.get_value(add.result()).ty();
         let new_op = ops::subi(context, operands[0], operands[1], result_ty).build();
-        rewriter.replace_op(op, &new_op)
+        context.replace_op(op, &new_op)
     }
 }
 
@@ -53,11 +51,38 @@ impl Pass for BreakIRPass {
     fn run(
         &mut self,
         op: &OperationRef,
-        _context: &Context,
-        rewriter: &mut Rewriter,
+        context: &Context,
         _analyses: &AnalysisManager,
     ) -> Result<(), PassError> {
-        rewriter.erase_op(op)
+        context.erase_op(op)
+    }
+}
+
+/// Replaces the addi with a subi, then erases the subi. The root the
+/// pipeline holds is replaced by an op that no longer exists.
+struct ReplaceThenErasePass;
+
+impl Pass for ReplaceThenErasePass {
+    fn name(&self) -> &'static str {
+        "replace-then-erase"
+    }
+
+    fn target(&self) -> PassTarget {
+        PassTarget::operation::<AddIOp>()
+    }
+
+    fn run(
+        &mut self,
+        op: &OperationRef,
+        context: &Context,
+        _analyses: &AnalysisManager,
+    ) -> Result<(), PassError> {
+        let add = op.as_op::<AddIOp>().expect("target guarantees AddIOp");
+        let operands = add.operands();
+        let result_ty = context.get_value(add.result()).ty();
+        let new_op = ops::subi(context, operands[0], operands[1], result_ty).build();
+        context.replace_op(op, &new_op)?;
+        context.erase_op(&OperationRef::new(context.get_op(new_op.id())))
     }
 }
 
@@ -73,7 +98,6 @@ impl Pass for ReadOnlyPass {
         &mut self,
         _op: &OperationRef,
         _context: &Context,
-        _rewriter: &mut Rewriter,
         _analyses: &AnalysisManager,
     ) -> Result<(), PassError> {
         Ok(())
@@ -96,7 +120,6 @@ impl Pass for TouchPass {
         &mut self,
         op: &OperationRef,
         _context: &Context,
-        _rewriter: &mut Rewriter,
         _analyses: &AnalysisManager,
     ) -> Result<(), PassError> {
         let func = op.as_op::<FuncOp>().expect("target guarantees FuncOp");
@@ -146,9 +169,8 @@ fn splitting_a_block_moves_its_tail_into_a_new_block() {
     let block = context.create_block(vec![]);
     let head = block.append_op(ops::addi(&context, value.id(), value.id(), i32).build());
     let tail = block.append_op(ops::subi(&context, value.id(), value.id(), i32).build());
-    let mut rewriter = Rewriter::new(context.clone());
 
-    let split = rewriter.split_block(block.id(), 1);
+    let split = context.split_block(block.id(), 1);
 
     assert_eq!(context.get_block(block.id()).op_ids(), vec![head.id()]);
     assert_eq!(split.op_ids(), vec![tail.id()]);
@@ -162,9 +184,8 @@ fn splicing_a_region_moves_its_blocks() {
     let destination = context.create_region();
     let moved = context.create_block(vec![]);
     source.add_block(moved.id());
-    let mut rewriter = Rewriter::new(context.clone());
 
-    rewriter.splice_region(source.id(), destination.id());
+    context.splice_region(source.id(), destination.id());
 
     assert_eq!(source.iter(context.clone()).count(), 0);
     let blocks: Vec<_> = destination
@@ -246,6 +267,22 @@ fn an_analysis_is_rebuilt_after_a_pass_mutates() {
 }
 
 #[test]
+fn a_root_whose_replacement_was_erased_ends_the_pipeline_without_a_root() {
+    let (context, func) = parse_func(
+        r#"func.func @demo(%0: !i32) -> !i32 {
+  %1 = addi %0, %0 : !i32
+  func.return %0
+}"#,
+    );
+    let add_id = func.body().op_ids()[0];
+    let mut pm = PassManager::new();
+    pm.add_pass(ReplaceThenErasePass);
+    pm.run(&context, context.get_op(add_id))
+        .expect("erasing the replaced root is a valid rewrite");
+    assert_eq!(func.body().op_ids().len(), 1);
+}
+
+#[test]
 fn nested_pass_manager_rewrites_ops() {
     let (context, module, func, _) = fixtures::parse_function(
         r#"module {
@@ -302,8 +339,7 @@ fn erasing_an_op_drops_its_operand_uses() {
     let argument = body.arguments()[0].id();
     assert!(context.is_used(argument));
 
-    let mut rewriter = Rewriter::new(context.clone());
-    rewriter.erase_op(&neg_ref).expect("erase should succeed");
+    context.erase_op(&neg_ref).expect("erase should succeed");
 
     assert!(
         !context.is_used(argument),
@@ -441,7 +477,6 @@ impl Pass for CountingPass {
         &mut self,
         op: &OperationRef,
         _context: &Context,
-        _rewriter: &mut Rewriter,
         _analyses: &AnalysisManager,
     ) -> Result<(), PassError> {
         let run = self.runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
