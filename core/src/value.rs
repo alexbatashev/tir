@@ -9,7 +9,7 @@ pub use tir_symbolic::sem::ValueId;
 /// [`OpId`] rather than an `Option<OpId>`: a value no operation defines is a
 /// block or region argument, which [`OpId::ARGUMENT`] says in the same four
 /// bytes the id would need anyway.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Value {
     id: ValueId,
     ty: TypeId,
@@ -42,6 +42,14 @@ impl Value {
     /// argument.
     pub fn defining_op(&self) -> Option<OpId> {
         (self.defining_op != OpId::ARGUMENT).then_some(self.defining_op)
+    }
+
+    /// Move the value's ids by `shift`.
+    pub(crate) fn shift(&mut self, shift: &crate::overlay::Shift) {
+        self.id = shift.value(self.id);
+        if self.defining_op != OpId::ARGUMENT {
+            self.defining_op = shift.op(self.defining_op);
+        }
     }
 
     pub(crate) fn set_defining_op(&mut self, op: OpId) {

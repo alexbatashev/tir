@@ -3,7 +3,7 @@ use std::{
     collections::HashMap,
     hash::{DefaultHasher, Hasher},
     sync::{
-        Arc,
+        Arc, RwLock, RwLockReadGuard, RwLockWriteGuard,
         atomic::{AtomicU32, Ordering},
     },
 };
@@ -11,7 +11,7 @@ use std::{
 use std::cell::{Ref, RefCell, RefMut};
 use tir_adt::{Interner, Sym};
 
-use crate::overlay::{Delta, EditBatch, Frozen, commit_epoch};
+use crate::overlay::{Delta, EditBatch, Frozen, commit_epoch, conflict};
 use crate::run::AttrRunId;
 use crate::store::{ERASED, Store};
 
@@ -106,6 +106,16 @@ struct Registry {
     segment_sizes: Sym,
 }
 
+/// What a second overlay over one base is opened from; see
+/// [`Context::snapshot`].
+#[derive(Clone)]
+pub(crate) struct Snapshot {
+    registry: Arc<RwLock<Registry>>,
+    base: Frozen,
+    versions: Arc<Vec<u32>>,
+    epoch: u32,
+}
+
 /// The base and the edits over it. One thread owns a context, so the
 /// edits need no lock; the base is shared read-only and needs none.
 struct Overlay {
@@ -184,11 +194,14 @@ impl Overlay {
 }
 
 struct Inner {
-    registry: RefCell<Registry>,
+    /// Shared by every context over one base: a worker's overlay interns
+    /// into the same tables the module was built with.
+    registry: Arc<RwLock<Registry>>,
     overlay: RefCell<Overlay>,
     /// Structural version per op as of the last commit; the overlay's
-    /// revisions add to it. See [`Context::op_version`].
-    versions: RefCell<Vec<u32>>,
+    /// revisions add to it. See [`Context::op_version`]. Shared with the
+    /// overlays opened over the same base, which only read it.
+    versions: RefCell<Arc<Vec<u32>>>,
     /// Which overlay this is: bumped by every commit and discard, so a handle
     /// to an entity of a dropped overlay reads as stale.
     epoch: AtomicU32,
@@ -223,7 +236,7 @@ impl Context {
         let base = Frozen::empty();
         let delta = Delta::new(base.0.frontier());
         let context = Context(std::rc::Rc::new(Inner {
-            registry: RefCell::new(Registry {
+            registry: Arc::new(RwLock::new(Registry {
                 dialects: HashMap::new(),
                 reg_classes: HashMap::new(),
                 op_interface_converters: HashMap::new(),
@@ -233,9 +246,9 @@ impl Context {
                 op_names: Vec::new(),
                 op_name_ids: HashMap::new(),
                 segment_sizes,
-            }),
+            })),
             overlay: RefCell::new(Overlay { base, delta }),
-            versions: RefCell::new(Vec::new()),
+            versions: RefCell::new(Arc::new(Vec::new())),
             epoch: AtomicU32::new(0),
         }));
         crate::builtin::StateType::new(&context);
@@ -257,12 +270,12 @@ impl Context {
         context
     }
 
-    fn registry(&self) -> Ref<'_, Registry> {
-        self.0.registry.borrow()
+    fn registry(&self) -> RwLockReadGuard<'_, Registry> {
+        self.0.registry.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn registry_mut(&self) -> RefMut<'_, Registry> {
-        self.0.registry.borrow_mut()
+    fn registry_mut(&self) -> RwLockWriteGuard<'_, Registry> {
+        self.0.registry.write().unwrap_or_else(|e| e.into_inner())
     }
 
     fn view(&self) -> Ref<'_, Overlay> {
@@ -373,8 +386,10 @@ impl Context {
     /// Take the overlay's edits as an owned batch, leaving an empty overlay
     /// over the same base. The batch names no handle of this context. Ids
     /// created afterwards would repeat the batch's, so a commit follows.
-    fn finish(&self) -> EditBatch {
+    pub(crate) fn finish(&self) -> EditBatch {
         let mut view = self.view_mut();
+        let (base, delta) = view.parts();
+        delta.fold_swaps(base);
         let frontier = view.base().frontier();
         let delta = std::mem::replace(&mut view.delta, Delta::new(frontier));
         EditBatch::new(self.epoch(), view.base.identity(), delta)
@@ -383,22 +398,38 @@ impl Context {
     /// Apply every edit made since the last commit to the base. No reader of
     /// the base ([`Context::frozen`]) may be alive. Ids do not move.
     pub fn commit(&self) {
+        let batch = self.finish();
+        self.commit_batches(vec![batch])
+            .expect("one overlay's edits never conflict with themselves");
+    }
+
+    /// Apply `batches`, each finished over the base this context reads, in
+    /// the order given; see [`crate::overlay::commit_epoch`]. Two batches
+    /// writing one base entity are refused before anything changes, naming
+    /// the entity. The overlay must hold no edit of its own.
+    pub(crate) fn commit_batches(&self, batches: Vec<EditBatch>) -> Result<(), String> {
+        if let Some(conflict) = conflict(&batches) {
+            return Err(conflict);
+        }
         let mut view = self.view_mut();
+        assert!(
+            view.delta.is_empty(),
+            "batches commit over an overlay holding no edit of its own"
+        );
         assert_eq!(
             Arc::strong_count(&view.base.0),
             1,
             "commit while a reader still holds the base"
         );
-        let frontier = view.base().frontier();
-        let delta = std::mem::replace(&mut view.delta, Delta::new(frontier));
-        let batch = EditBatch::new(self.epoch(), view.base.identity(), delta);
         let base = std::mem::replace(&mut view.base, Frozen::empty());
-        let (base, revisions) = commit_epoch(base, vec![batch]);
-        view.delta = Delta::new(base.0.frontier());
-        view.base = base;
+        let committed = commit_epoch(base, batches);
+        view.delta = Delta::new(committed.base.0.frontier());
+        view.delta.replaced_ops.extend(committed.replaced_ops);
+        view.base = committed.base;
         drop(view);
-        self.fold_revisions(&revisions);
+        self.fold_revisions(&committed.revisions);
         self.0.epoch.store(self.epoch() + 1, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Drop every edit made since the last commit. Every version the overlay
@@ -406,26 +437,97 @@ impl Context {
     /// dropped state is reused.
     pub fn discard(&self) {
         let batch = self.finish();
-        let past: Vec<u32> = batch
+        let past: Vec<(u32, u32)> = batch
             .revision()
             .iter()
-            .map(|bump| if *bump == 0 { 0 } else { bump + 1 })
+            .map(|(op, bump)| (*op, bump + 1))
             .collect();
-        self.fold_revisions(&[past]);
+        self.fold_revisions(&past);
         self.0.epoch.store(self.epoch() + 1, Ordering::Relaxed);
     }
 
-    fn fold_revisions(&self, revisions: &[Vec<u32>]) {
-        let mut versions = self.0.versions.borrow_mut();
-        for revision in revisions {
-            if revision.len() > versions.len() {
-                versions.resize(revision.len(), 0);
+    /// What another overlay over the base this context reads needs: the
+    /// tables, the base and the committed versions. `Send`, so the overlay can
+    /// be opened on another thread. Every edit must be committed first.
+    pub(crate) fn snapshot(&self) -> Snapshot {
+        let view = self.view();
+        assert!(
+            view.delta.is_empty(),
+            "a snapshot is taken of a committed base"
+        );
+        Snapshot {
+            registry: self.0.registry.clone(),
+            base: view.base.clone(),
+            versions: self.0.versions.borrow().clone(),
+            epoch: self.epoch(),
+        }
+    }
+
+    /// A fresh overlay over `snapshot`'s base, sharing its tables. Ids it
+    /// mints start where any other overlay over that base starts; a commit
+    /// moves them past what earlier batches added.
+    pub(crate) fn open(snapshot: Snapshot) -> Self {
+        let delta = Delta::new(snapshot.base.0.frontier());
+        Context(std::rc::Rc::new(Inner {
+            registry: snapshot.registry,
+            overlay: RefCell::new(Overlay {
+                base: snapshot.base,
+                delta,
+            }),
+            versions: RefCell::new(snapshot.versions),
+            epoch: AtomicU32::new(snapshot.epoch),
+        }))
+    }
+
+    /// A copy of this overlay to try an edit in: same base, same tables, the
+    /// pending edits duplicated. Ids minted in the fork continue from this
+    /// overlay's, so [`Context::adopt`] hands them back unchanged.
+    pub(crate) fn fork(&self) -> Self {
+        let view = self.view();
+        Context(std::rc::Rc::new(Inner {
+            registry: self.0.registry.clone(),
+            overlay: RefCell::new(Overlay {
+                base: view.base.clone(),
+                delta: view.delta.clone(),
+            }),
+            versions: RefCell::new(self.0.versions.borrow().clone()),
+            epoch: AtomicU32::new(self.epoch()),
+        }))
+    }
+
+    /// Take the edits of `fork`, a [`Context::fork`] of this overlay, as this
+    /// overlay's own. Handles into `fork` die with it; its ids stay valid
+    /// here.
+    pub(crate) fn adopt(&self, fork: Context) {
+        let delta = {
+            let mut forked = fork.view_mut();
+            let frontier = forked.base().frontier();
+            std::mem::replace(&mut forked.delta, Delta::new(frontier))
+        };
+        let mut view = self.view_mut();
+        assert_eq!(
+            fork.view().base.identity(),
+            view.base.identity(),
+            "a fork is adopted by the overlay it was forked from"
+        );
+        drop(fork);
+        view.delta = delta;
+    }
+
+    fn fold_revisions(&self, revisions: &[(u32, u32)]) {
+        if revisions.is_empty() {
+            return;
+        }
+        let mut shared = self.0.versions.borrow_mut();
+        let versions = Arc::make_mut(&mut shared);
+        for (op, bump) in revisions {
+            let idx = *op as usize;
+            if idx >= versions.len() {
+                versions.resize(idx + 1, 0);
             }
-            for (version, bump) in versions.iter_mut().zip(revision) {
-                *version = version
-                    .checked_add(*bump)
-                    .expect("a version counter wrapped");
-            }
+            versions[idx] = versions[idx]
+                .checked_add(*bump)
+                .expect("a version counter wrapped");
         }
     }
 

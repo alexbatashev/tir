@@ -16,7 +16,7 @@ use crate::{
     PassTarget, RegionId, Terminator, ValueId, func::FuncOp,
 };
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct DeadCodeEliminationPass;
 
 impl DeadCodeEliminationPass {

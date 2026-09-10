@@ -8,7 +8,7 @@ id_newtype!(BlockId);
 /// A basic block's storage record, living densely in the context's block slab
 /// and edited in place through [`Context`] under its write lock. Reads go
 /// through [`BlockHandle`]; nothing outside the context lock holds one of these.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Block {
     arguments: Vec<Value>,
     operations: Vec<OpId>,
@@ -36,6 +36,17 @@ impl Block {
         self.arguments.capacity() * std::mem::size_of::<Value>()
             + self.operations.capacity() * std::mem::size_of::<OpId>()
             + self.attributes.capacity() * std::mem::size_of::<NamedAttribute>()
+    }
+
+    /// Move every id the block holds by `shift`.
+    pub(crate) fn shift(&mut self, shift: &crate::overlay::Shift) {
+        for argument in &mut self.arguments {
+            argument.shift(shift);
+        }
+        for op in &mut self.operations {
+            *op = shift.op(*op);
+        }
+        shift.attrs(&mut self.attributes);
     }
 
     pub(crate) fn operations(&self) -> &[OpId] {

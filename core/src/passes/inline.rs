@@ -50,6 +50,7 @@ impl std::str::FromStr for InlineBudget {
 /// instcombine from 70 ms to 2.3 s. The largest function in CoreMark is 354 ops, which stays eligible.
 const MAX_CALLER_OPS: u32 = 400;
 
+#[derive(Clone)]
 pub struct InlinePass {
     budget: InlineBudget,
 }

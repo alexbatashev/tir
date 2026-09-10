@@ -8,6 +8,7 @@ use crate::{
     ValueId,
 };
 
+#[derive(Clone)]
 pub struct LowerMemoryIntrinsicsPass;
 
 impl LowerMemoryIntrinsicsPass {

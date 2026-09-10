@@ -6,7 +6,7 @@ use crate::analysis::AnalysisManager;
 use crate::symbol_table::format_symbol;
 use crate::{Context, OperationRef, Pass, PassError, PassTarget, SymbolTable, builtin::ModuleOp};
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct CheckUniqueSymbolsPass;
 
 impl CheckUniqueSymbolsPass {

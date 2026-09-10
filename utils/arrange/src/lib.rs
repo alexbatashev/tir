@@ -91,48 +91,58 @@ pub const BUDGET: usize = 1 << 20;
 /// none — an empty domain, constraints nothing satisfies, or a search space
 /// past [`BUDGET`].
 pub fn solve(problem: &Problem) -> Option<Placement> {
+    solve_ranked(problem, 1).into_iter().next()
+}
+
+/// The `count` admissible placements of least cost, cheapest first, with a
+/// tie standing in enumeration order. Empty where [`solve`] answers `None`.
+pub fn solve_ranked(problem: &Problem, count: usize) -> Vec<Placement> {
     let domains: Vec<&[SlotId]> = problem
         .work
         .iter()
         .map(|item| slots_of(problem, item.id))
         .collect();
-    if domains.iter().any(|slots| slots.is_empty()) {
-        return None;
+    if count == 0 || domains.iter().any(|slots| slots.is_empty()) {
+        return Vec::new();
     }
     if domains
         .iter()
         .try_fold(1usize, |total, slots| total.checked_mul(slots.len()))
         .is_none_or(|total| total > BUDGET)
     {
-        return None;
+        return Vec::new();
     }
 
     let mut placement = Vec::with_capacity(domains.len());
-    let mut best: Option<(i64, Placement)> = None;
-    search(problem, &domains, &mut placement, &mut best);
-    best.map(|(_, placement)| placement)
+    let mut best = Vec::with_capacity(count + 1);
+    search(problem, &domains, &mut placement, &mut best, count);
+    best.into_iter().map(|(_, placement)| placement).collect()
 }
 
-/// Extend `placement` by one item, in domain order, keeping the first placement
-/// of least cost. The prefix checks prune a branch as soon as an edge it already
-/// violates is decided.
+/// Extend `placement` by one item, in domain order, keeping the `count`
+/// placements of least cost, the first reached ahead on a tie. The prefix
+/// checks prune a branch as soon as an edge it already violates is decided.
 fn search(
     problem: &Problem,
     domains: &[&[SlotId]],
     placement: &mut Placement,
-    best: &mut Option<(i64, Placement)>,
+    best: &mut Vec<(i64, Placement)>,
+    count: usize,
 ) {
     let Some(&slots) = domains.get(placement.len()) else {
         let cost = (problem.cost)(placement);
-        if best.as_ref().is_none_or(|(lowest, _)| cost < *lowest) {
-            *best = Some((cost, placement.clone()));
+        if best.len() == count && best[count - 1].0 <= cost {
+            return;
         }
+        let at = best.partition_point(|(held, _)| *held <= cost);
+        best.insert(at, (cost, placement.clone()));
+        best.truncate(count);
         return;
     };
     for &slot in slots {
         placement.push(slot);
         if admissible(problem, placement) {
-            search(problem, domains, placement, best);
+            search(problem, domains, placement, best, count);
         }
         placement.pop();
     }
@@ -206,6 +216,18 @@ mod tests {
             solve(&problem(vec![vec![3, 1, 2], vec![7, 5]], flat)),
             Some(vec![3, 7])
         );
+    }
+
+    #[test]
+    fn ranked_placements_come_cheapest_first_with_ties_in_enumeration_order() {
+        let ranked = solve_ranked(
+            &problem(
+                vec![vec![0, 1, 2, 3]],
+                Box::new(|placement| (placement[0] as i64) / 2),
+            ),
+            3,
+        );
+        assert_eq!(ranked, vec![vec![0], vec![1], vec![2]]);
     }
 
     #[test]

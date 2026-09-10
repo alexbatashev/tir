@@ -3,6 +3,7 @@ pub use tir_adt::{APFloat, APInt, RawBits};
 /// splitmix64, so one seed gives one sequence on every host. The oracles that
 /// re-linearize a block share it: a divergence has to reproduce from its seed
 /// alone.
+#[derive(Clone)]
 pub struct Rng(u64);
 
 impl Rng {

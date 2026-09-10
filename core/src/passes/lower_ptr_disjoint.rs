@@ -13,7 +13,7 @@ use crate::func::FuncOp;
 use crate::ptr::{CmpOpBuilder, DisjointOp, ops as p};
 use crate::{Context, OperationRef, Pass, PassError, PassTarget, ValueId};
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct LowerPtrDisjointPass;
 
 impl LowerPtrDisjointPass {

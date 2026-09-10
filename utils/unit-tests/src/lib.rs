@@ -131,4 +131,5 @@ mod core {
     mod regalloc;
     mod region;
     mod sem;
+    mod variants;
 }

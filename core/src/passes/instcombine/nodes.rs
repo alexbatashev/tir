@@ -36,7 +36,7 @@ use crate::{
     TypeId, ValueId,
 };
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct InstCombineNodesPass;
 
 impl InstCombineNodesPass {

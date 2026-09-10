@@ -20,7 +20,7 @@ use crate::{
     PassTarget, RegionId, RegionKind, Theta, TypeId, ValueId,
 };
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct PromoteNodesPass;
 
 impl PromoteNodesPass {

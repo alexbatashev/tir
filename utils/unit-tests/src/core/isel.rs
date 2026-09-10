@@ -64,7 +64,7 @@ fn run_pass(
     let mut pm = PassManager::new();
     let functions = pm.nest::<FuncOp>();
     functions.add_pass(tir::passes::RestructureNodesPass::new());
-    functions.add_pass(pass);
+    functions.add_boxed_pass(Box::new(pass));
     pm.run(context, context.get_op(module.id()))
 }
 

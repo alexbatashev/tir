@@ -61,6 +61,12 @@ impl Span {
     }
 }
 
+impl<T> Arena<T> {
+    fn shrink_to_fit(&mut self) {
+        self.items.shrink_to_fit();
+    }
+}
+
 /// The smallest class holding `len` items.
 fn class_for(len: usize) -> u32 {
     len.next_power_of_two().trailing_zeros()
@@ -71,6 +77,7 @@ fn class_for(len: usize) -> u32 {
 /// A freed span is not reused until [`Arena::recycle`] says the caller is done
 /// with the ids it handed out, so an id held across a free cannot start
 /// answering for a stranger mid-pass.
+#[derive(Clone)]
 struct Arena<T> {
     items: Vec<T>,
     /// Spans free for reuse, by size class.
@@ -213,10 +220,14 @@ impl EntryId {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Runs(Arena<Entry>);
 
 impl Runs {
+    pub(crate) fn shrink_to_fit(&mut self) {
+        self.0.shrink_to_fit();
+    }
+
     /// A run of `len` empty entries owned by `owner`.
     fn reserve(&mut self, owner: OpId, len: usize) -> RunId {
         RunId(self.0.alloc(len, Entry::new(0, owner)))
@@ -287,10 +298,14 @@ impl AttrRunId {
 /// Attributes get the same treatment as ports: a span of one arena, so reading
 /// one is a single index and an op with attributes costs no heap block of its
 /// own.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct AttrRuns(Arena<Attr>);
 
 impl AttrRuns {
+    pub(crate) fn shrink_to_fit(&mut self) {
+        self.0.shrink_to_fit();
+    }
+
     /// Store `attributes` as one run. An empty list gets no span at all.
     pub(crate) fn alloc(&mut self, attributes: Vec<Attr>) -> AttrRunId {
         let run = AttrRunId(self.0.alloc(attributes.len(), filler()));
