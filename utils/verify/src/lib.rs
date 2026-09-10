@@ -10,7 +10,7 @@ use isla_lib::config::ISAConfig;
 use isla_lib::error::ExecError;
 use isla_lib::executor::{self, LocalFrame, StopConditions, TaskId, TaskState};
 use isla_lib::init::{initialize_architecture, Initialized};
-use isla_lib::ir::{AssertionMode, Def, IRTypeInfo, Loc, Name, Symtab, Val};
+use isla_lib::ir::{AssertionMode, Def, IRTypeInfo, Instr, Loc, Name, Symtab, Val};
 use isla_lib::ir_lexer::new_ir_lexer;
 use isla_lib::ir_parser;
 use isla_lib::memory::Memory;
@@ -21,6 +21,7 @@ use isla_lib::zencode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod constants;
 mod smt_format;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -72,6 +73,7 @@ pub struct Verifier {
     threads: usize,
     timeout_seconds: u64,
     simplify: bool,
+    cache_fingerprint: u64,
 }
 
 impl Verifier {
@@ -84,19 +86,81 @@ impl Verifier {
         timeout_seconds: u64,
         simplify: bool,
     ) -> anyhow::Result<Self> {
-        let source = std::fs::read_to_string(snapshot)
+        let config_source = std::fs::read_to_string(config)?;
+        let configuration: constants::Config = toml::from_str(&config_source)?;
+        let mut source = std::fs::read_to_string(snapshot)
             .with_context(|| format!("reading Sail snapshot {}", snapshot.display()))?;
+        if let Some(wrapper) = &configuration.execution_wrapper {
+            let path = config
+                .parent()
+                .context("Isla config has no parent directory")?
+                .join(wrapper);
+            source.push('\n');
+            source.push_str(&std::fs::read_to_string(path)?);
+        }
         let source: &'static str = Box::leak(source.into_boxed_str());
         let mut symtab = Symtab::new();
         let definitions = ir_parser::IrParser::new()
             .parse(&mut symtab, new_ir_lexer(source))
             .map_err(|error| anyhow!("Sail IR parse error: {error}"))?;
         let definitions: &'static mut [Def<Name, B129>] = Box::leak(definitions.into_boxed_slice());
+        for name in &configuration.linearize {
+            let function = symtab
+                .get(&zencode::encode(name))
+                .with_context(|| format!("unknown Sail function {name}"))?;
+            let signature = definitions.iter().find_map(|definition| match definition {
+                Def::Val(name, _, result) if *name == function => Some(result.clone()),
+                _ => None,
+            });
+            if let Some(result) = signature {
+                for definition in definitions.iter_mut() {
+                    if let Def::Fn(name, _, body) = definition {
+                        if *name == function {
+                            *body = isla_lib::ir::linearize::linearize(
+                                body.to_vec(),
+                                &result,
+                                &mut symtab,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if configuration.execution_wrapper.is_some() {
+            let footprint = symtab
+                .get(&zencode::encode(function))
+                .context("unknown Sail footprint")?;
+            let execute = symtab
+                .get(&zencode::encode("execute"))
+                .context("unknown Sail execute function")?;
+            let wrapper = symtab
+                .get(&zencode::encode("tir_verify_execute"))
+                .context("unknown Sail execution wrapper")?;
+            for definition in definitions.iter_mut() {
+                if let Def::Fn(name, _, body) = definition {
+                    if *name == footprint {
+                        for instruction in body {
+                            if let Instr::Call(_, _, target, _, _) = instruction {
+                                if *target == execute {
+                                    *target = wrapper;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let type_info = IRTypeInfo::new(definitions);
         let mut hasher = Sha256::new();
         let mut isa_config = ISAConfig::from_file(&mut hasher, config, None, &symtab, &type_info)
             .map_err(|error| anyhow!("Isla config error: {error}"))?;
+        hasher.input(b"tir-sail-traces-v2\0");
+        hasher.input(source.as_bytes());
+        hasher.input(function.as_bytes());
+        hasher.input([u8::from(simplify)]);
         for assignment in initial_registers {
+            hasher.input([0]);
+            hasher.input(assignment.as_bytes());
             let (location, value) = value_parser::AssignParser::new()
                 .parse(&symtab, &type_info, new_ir_lexer(assignment))
                 .map_err(|_| anyhow!("invalid Isla initial register assignment {assignment}"))?;
@@ -110,6 +174,7 @@ impl Verifier {
                 .ok_or_else(|| anyhow!("unknown Isla register in {assignment}"))?;
             isa_config.default_registers.insert(register, value);
         }
+        configuration.apply(definitions, &symtab, &type_info)?;
         let architecture = initialize_architecture(
             definitions,
             symtab,
@@ -123,13 +188,21 @@ impl Verifier {
             .symtab
             .get(&zencode::encode(function))
             .ok_or_else(|| anyhow!("unknown Isla footprint function {function}"))?;
+        let digest = hasher.result();
+        let cache_fingerprint = u64::from_le_bytes(digest[..8].try_into().unwrap());
         Ok(Self {
             architecture,
             function,
             threads: threads.max(1),
             timeout_seconds,
             simplify,
+            cache_fingerprint,
         })
+    }
+
+    /// Identifies the model, configuration and trace normalization used by this verifier.
+    pub fn cache_fingerprint(&self) -> u64 {
+        self.cache_fingerprint
     }
 
     pub fn execute(
@@ -193,7 +266,11 @@ impl Verifier {
         while let Some(result) = queue.pop() {
             let (task_id, mut events) = match result {
                 Ok(result) => result,
-                Err((task_id, _error)) => {
+                Err((task_id, error)) => {
+                    eprintln!(
+                        "Sail execution failed for {:#x}: {error}",
+                        task_words[&task_id]
+                    );
                     failed.insert(task_words[&task_id]);
                     continue;
                 }
@@ -226,7 +303,7 @@ fn batch_collector<'ir>(
     _thread_id: usize,
     task_id: TaskId,
     result: Result<(executor::Run<B129>, LocalFrame<'ir, B129>), (ExecError, executor::Backtrace)>,
-    _shared: &isla_lib::ir::SharedState<'ir, B129>,
+    shared: &isla_lib::ir::SharedState<'ir, B129>,
     solver: Solver<B129>,
     queue: &BatchQueue,
 ) {
@@ -242,7 +319,12 @@ fn batch_collector<'ir>(
             queue.push(Err((task_id, "execution path suspended".to_string())));
         }
         Err((error, backtrace)) => {
-            queue.push(Err((task_id, format!("{error}; backtrace: {backtrace:?}"))));
+            let backtrace = backtrace
+                .iter()
+                .map(|(name, pc)| format!("{}:{pc}", zencode::decode(shared.symtab.to_str(*name))))
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            queue.push(Err((task_id, format!("{error}; backtrace: {backtrace}"))));
         }
     }
 }

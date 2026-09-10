@@ -1,3 +1,5 @@
+execution_wrapper = "verify-smt-riscv32.ir"
+
 # This is a config for Sail RISC-V in 32-bit mode
 
 pc = "PC"
@@ -43,11 +45,22 @@ base = "0x80310000"
 top = "0x80410000"
 stride = "0x10"
 
+[constants]
+plat_have_clint = false
+plat_have_sig = false
+sys_pmp_count = "0 : %i64"
+sys_pmp_usable_count = "0 : %i64"
+
+[constants.plat_misaligned_access.load_store]
+constructor = "Some<Emisaligned_exception%>"
+value = "AlignmentException"
+
 [registers.defaults]
 satp = "0x00000000"
 # RV32 (MXL=1) with I and M enabled; C is disabled in this Sail snapshot.
 misa = "{ bits = 0x40001100 }"
-mstatus = "{ bits = 0x00000000 }"
+mstatus = "{ bits = 0x0000000000000000 }"
+mtvec = "{ bits = 0x00000000 }"
 # No delegation: machine mode handles all traps (there is no S-mode in the
 # verified model), and a symbolic medeleg would otherwise taint every trap path.
 medeleg = "{ bits = 0x0000000000000000 }"

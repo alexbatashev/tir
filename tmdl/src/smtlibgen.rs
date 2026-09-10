@@ -33,6 +33,7 @@ pub struct InstructionMetadata {
     pub operands: Vec<OperandMetadata>,
     pub supported: bool,
     pub write_classes: Vec<String>,
+    pub fixed_register_writes: Vec<(String, u32)>,
     pub uses_reservation: bool,
     pub pc_source_operands: Vec<usize>,
     pub memory_accesses: Vec<MemoryAccessMetadata>,
@@ -54,6 +55,7 @@ pub struct RegisterClassMetadata {
     pub index_width: u16,
     pub value_width: u16,
     pub storage_width: u16,
+    pub indices: Vec<u16>,
     pub zero_index: Option<u16>,
     pub bit_offset: u16,
 }
@@ -118,6 +120,7 @@ pub struct EncodingShapeMetadata {
 /// Register-file layout of one (non-PC) register class, resolved against the
 /// target ISA's parameters.
 struct ClassInfo {
+    indices: Vec<u16>,
     idx_width: u16,
     val_width: u16,
     /// Encoding index of a hardwired-zero register (RISC-V `x0`, AArch64
@@ -247,14 +250,8 @@ pub fn generate_smtlib<'a>(
         .flat_map(|f| f.register_classes())
         .map(|rc| (rc.name.to_lowercase(), class_param("WIDTH", rc, xlen)))
         .collect();
-    // A class draws its physical storage from its `base` (inheritance shares the
-    // file with identical indices; a narrower base is a sub-register view, e.g.
-    // x86 `eax` in `rax`) or an explicit `file` alias. A `file` alias folds into
-    // the file's storage only as a strictly narrower sub-view sharing the index
-    // width (x86 `ah` -> `GPR`, 8-bit in a 4-indexed 64-bit file). Same-width
-    // groupings (RISC-V `VRM2` over `VR`), narrower-indexed aliases (compressed
-    // 3-bit -> 5-bit) and wider ones (`FPR64` over `FPR32`) keep their own
-    // storage, preserving the pre-existing per-file arrays.
+    // Same-index aliases share storage. Register groups need multiple physical
+    // slots, so folding them into a single-register view would lose lanes.
     let base_of: HashMap<String, String> = files
         .iter()
         .flat_map(|f| f.register_classes())
@@ -264,8 +261,9 @@ pub fn generate_smtlib<'a>(
                 return Some((child, b.to_lowercase()));
             }
             let file = rc.file.as_ref()?.to_lowercase();
-            let compatible = enc_len_of.get(&child) == enc_len_of.get(&file)
-                && width_of.get(&child) < width_of.get(&file);
+            let compatible = class_param("GROUP_SIZE", rc, 1) == 1
+                && enc_len_of.get(&child) == enc_len_of.get(&file)
+                && width_of.get(&child) <= width_of.get(&file);
             compatible.then_some((child, file))
         })
         .collect();
@@ -303,9 +301,24 @@ pub fn generate_smtlib<'a>(
                 .unwrap_or(0);
             idx_width = (16 - max_idx.leading_zeros() as u16).max(1);
         }
+        let mut indices: BTreeSet<u16> = rc
+            .register_indices()
+            .into_iter()
+            .map(|(_, index)| index)
+            .collect();
+        let mut parent = rc.base.as_ref();
+        while let Some(name) = parent {
+            let Some(ast::Item::RegisterClass(base)) = item_cache.get(name.as_str()).copied()
+            else {
+                break;
+            };
+            indices.extend(base.register_indices().into_iter().map(|(_, index)| index));
+            parent = base.base.as_ref();
+        }
         classes.insert(
             name.clone(),
             ClassInfo {
+                indices: indices.into_iter().collect(),
                 idx_width,
                 val_width: crate::semgen::eval_class_param(rc, "WIDTH", &isa_params)
                     .unwrap_or(xlen as i64) as u16,
@@ -399,6 +412,7 @@ fn register_class_metadata(ctx: &SmtCtx<'_>) -> Vec<RegisterClassMetadata> {
             index_width: info.idx_width,
             value_width: info.val_width,
             storage_width: ctx.classes[&info.storage].val_width,
+            indices: info.indices.clone(),
             zero_index: info.zero_index,
             bit_offset: info.bit_offset,
         })
@@ -718,6 +732,9 @@ fn build_instructions<'a>(
             write_classes: behavior
                 .as_ref()
                 .map_or_else(Vec::new, |behavior| behavior.write_classes.clone()),
+            fixed_register_writes: behavior
+                .as_ref()
+                .map_or_else(Vec::new, |behavior| behavior.fixed_register_writes.clone()),
             uses_reservation: behavior
                 .as_ref()
                 .is_some_and(|behavior| behavior.uses_reservation),
@@ -1220,51 +1237,80 @@ fn build_shape_encoding<'a>(
 
 /// Sort of an emitted SMT expression. Mirrors the width/signedness tracking of
 /// the sem-expr interpreter (`tir_symbolic::lang::execute`), which evaluates behaviors
-/// over `APInt`s of varying width: every value is a bitvector of the
-/// interpreter's width, except comparisons which stay `Bool` until they cross
-/// back into arithmetic.
-#[derive(Clone, Copy, PartialEq)]
-enum SmtSort {
-    Bool,
-    Bv { width: u32, signed: bool },
-}
-
+/// over `APInt`s of varying width. Floating-point values keep their domain
+/// until an explicit bitcast; lane iterators bind map/reduce arguments.
 #[derive(Clone)]
-struct SmtVal {
-    expr: String,
-    sort: SmtSort,
+enum SmtVal {
+    Bool(String),
+    Bits {
+        expr: String,
+        width: u32,
+        signed: bool,
+    },
+    Float {
+        bits: String,
+        width: u32,
+    },
+    Lanes(Vec<SmtVal>),
 }
 
 impl SmtVal {
     fn bv(expr: String, width: u32, signed: bool) -> Self {
-        SmtVal {
+        Self::Bits {
             expr,
-            sort: SmtSort::Bv { width, signed },
+            width,
+            signed,
         }
     }
 
     fn boolean(expr: String) -> Self {
-        SmtVal {
-            expr,
-            sort: SmtSort::Bool,
-        }
+        Self::Bool(expr)
     }
 
-    /// Comparison results materialize as width-1 integers, matching the
-    /// interpreter's `APInt::new(1, ...)`.
     fn as_bv(&self) -> (String, u32, bool) {
-        match &self.sort {
-            SmtSort::Bool => (format!("(ite {} (_ bv1 1) (_ bv0 1))", self.expr), 1, false),
-            SmtSort::Bv { width, signed } => (self.expr.clone(), *width, *signed),
+        match self {
+            Self::Bool(expr) => (format!("(ite {expr} (_ bv1 1) (_ bv0 1))"), 1, false),
+            Self::Bits {
+                expr,
+                width,
+                signed,
+            } => (expr.clone(), *width, *signed),
+            Self::Float { bits, width } => (bits.clone(), *width, false),
+            Self::Lanes(_) => unreachable!("an iterator is not a scalar"),
         }
     }
 
     fn as_bool(&self) -> String {
-        match &self.sort {
-            SmtSort::Bool => self.expr.clone(),
-            SmtSort::Bv { width, .. } => {
-                format!("(distinct {} (_ bv0 {}))", self.expr, width)
-            }
+        match self {
+            Self::Bool(expr) => expr.clone(),
+            Self::Bits { expr, width, .. } => format!("(distinct {expr} (_ bv0 {width}))"),
+            Self::Float { .. } => format!("(not (fp.isZero {}))", self.as_fp()),
+            Self::Lanes(_) => unreachable!("an iterator is not a condition"),
+        }
+    }
+
+    fn as_fp(&self) -> String {
+        let (bits, width, _) = self.as_bv();
+        let (exponent, precision) = match width {
+            16 => (5, 11),
+            32 => (8, 24),
+            64 => (11, 53),
+            _ => unreachable!("invalid binary float width"),
+        };
+        format!("((_ to_fp {exponent} {precision}) {bits})")
+    }
+
+    fn float(expression: String, width: u32) -> Self {
+        Self::Float {
+            bits: format!("(fp.to_ieee_bv {expression})"),
+            width,
+        }
+    }
+
+    fn into_lanes(self) -> Option<Vec<Self>> {
+        match self {
+            Self::Lanes(lanes) => Some(lanes),
+            _ => None,
         }
     }
 }
@@ -1686,7 +1732,14 @@ fn emit_sem_expr(
     node: NodeId,
     resolver: &SmtSymbolResolver<'_>,
 ) -> Option<SmtVal> {
-    crate::semgen::emit(graph, node, &mut SmtTerm { resolver })
+    crate::semgen::emit(
+        graph,
+        node,
+        &mut SmtTerm {
+            resolver,
+            args: Vec::new(),
+        },
+    )
 }
 
 /// SMT-LIB's spelling of the shared term vocabulary. Comparisons stay `Bool`
@@ -1694,6 +1747,7 @@ fn emit_sem_expr(
 /// integers.
 struct SmtTerm<'a, 'b> {
     resolver: &'a SmtSymbolResolver<'b>,
+    args: Vec<SmtVal>,
 }
 
 impl crate::semgen::TermBackend for SmtTerm<'_, '_> {
@@ -1726,12 +1780,41 @@ impl crate::semgen::TermBackend for SmtTerm<'_, '_> {
         rhs: SmtVal,
         signed: bool,
     ) -> SmtVal {
+        if matches!(lhs, SmtVal::Float { .. }) {
+            let operation = match smt_name(kind) {
+                "bvadd" => "fp.add",
+                "bvsub" => "fp.sub",
+                "bvmul" => "fp.mul",
+                "bvsdiv" => "fp.div",
+                _ => unreachable!("invalid floating-point binary operation"),
+            };
+            return SmtVal::float(
+                format!("({operation} RNE {} {})", lhs.as_fp(), rhs.as_fp()),
+                lhs.as_bv().1,
+            );
+        }
         let (a, width, _) = lhs.as_bv();
         let (b, _, _) = rhs.as_bv();
         SmtVal::bv(format!("({} {} {})", smt_name(kind), a, b), width, signed)
     }
 
     fn compare(&mut self, kind: tir_symbolic::lang::SymKind, lhs: SmtVal, rhs: SmtVal) -> SmtVal {
+        if matches!(lhs, SmtVal::Float { .. }) {
+            let operation = match smt_name(kind) {
+                "=" | "distinct" => "fp.eq",
+                "bvslt" => "fp.lt",
+                "bvsle" => "fp.leq",
+                "bvsgt" => "fp.gt",
+                "bvsge" => "fp.geq",
+                _ => unreachable!("invalid floating-point comparison"),
+            };
+            let comparison = format!("({operation} {} {})", lhs.as_fp(), rhs.as_fp());
+            return SmtVal::boolean(if smt_name(kind) == "distinct" {
+                format!("(not {comparison})")
+            } else {
+                comparison
+            });
+        }
         SmtVal::boolean(format!(
             "({} {} {})",
             smt_name(kind),
@@ -1771,6 +1854,9 @@ impl crate::semgen::TermBackend for SmtTerm<'_, '_> {
     }
 
     fn widen(&mut self, value: SmtVal, target: u32, signed: bool) -> SmtVal {
+        if matches!(value, SmtVal::Float { .. }) && target == value.as_bv().1 {
+            return value;
+        }
         let (expr, width, _) = value.as_bv();
         SmtVal::bv(
             widen_smt(&expr, width, signed, target),
@@ -1788,6 +1874,17 @@ impl crate::semgen::TermBackend for SmtTerm<'_, '_> {
     }
 
     fn ite(&mut self, condition: SmtVal, then: SmtVal, otherwise: SmtVal, signed: bool) -> SmtVal {
+        if matches!(then, SmtVal::Float { .. }) {
+            return SmtVal::Float {
+                bits: format!(
+                    "(ite {} {} {})",
+                    condition.as_bool(),
+                    then.as_bv().0,
+                    otherwise.as_bv().0
+                ),
+                width: then.as_bv().1,
+            };
+        }
         let (t, width, _) = then.as_bv();
         SmtVal::bv(
             format!(
@@ -1799,6 +1896,11 @@ impl crate::semgen::TermBackend for SmtTerm<'_, '_> {
             width,
             signed,
         )
+    }
+
+    fn bitcast(&mut self, value: SmtVal) -> SmtVal {
+        let (bits, width, signed) = value.as_bv();
+        SmtVal::bv(bits, width, signed)
     }
 
     fn as_bool(&mut self, value: SmtVal) -> SmtVal {
@@ -1836,6 +1938,84 @@ impl crate::semgen::TermBackend for SmtTerm<'_, '_> {
             ))
         };
         match graph.get_node(node) {
+            SymKind::AsFloat => {
+                let (bits, width, _) = emit(self, child_node(0)?)?.as_bv();
+                matches!(width, 16 | 32 | 64).then_some(SmtVal::Float { bits, width })
+            }
+            SymKind::Split => {
+                let value = emit(self, child_node(0)?)?;
+                let count = const_child(1)? as u32;
+                let width = if graph.children(node).count() == 3 {
+                    const_child(2)? as u32
+                } else {
+                    value.as_bv().1.checked_div(count)?
+                };
+                let value = self.fit(value, (count * width).max(1));
+                Some(SmtVal::Lanes(
+                    (0..count)
+                        .map(|lane| self.slice(value.clone(), (lane + 1) * width - 1, lane * width))
+                        .collect(),
+                ))
+            }
+            SymKind::Zip => {
+                let parts = graph
+                    .children(node)
+                    .map(|child| emit(self, child)?.into_lanes())
+                    .collect::<Option<Vec<_>>>()?;
+                let count = parts.first()?.len();
+                Some(SmtVal::Lanes(
+                    (0..count)
+                        .map(|lane| {
+                            SmtVal::Lanes(parts.iter().map(|part| part[lane].clone()).collect())
+                        })
+                        .collect(),
+                ))
+            }
+            SymKind::Map => {
+                let lanes = emit(self, child_node(0)?)?.into_lanes()?;
+                let body = child_node(1)?;
+                let values = lanes
+                    .into_iter()
+                    .map(|lane| {
+                        self.args.push(lane);
+                        let result = emit(self, body);
+                        self.args.pop();
+                        result
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(SmtVal::Lanes(values))
+            }
+            SymKind::Reduce => {
+                let mut lanes = emit(self, child_node(0)?)?.into_lanes()?.into_iter();
+                let mut result = lanes.next()?;
+                for lane in lanes {
+                    self.args.push(SmtVal::Lanes(vec![result, lane]));
+                    let next = emit(self, child_node(1)?);
+                    self.args.pop();
+                    result = next?;
+                }
+                Some(result)
+            }
+            SymKind::Arg => {
+                let tir_symbolic::lang::SymPayload::Int(index) = graph.get_leaf_data(node)? else {
+                    return None;
+                };
+                match self.args.last()? {
+                    SmtVal::Lanes(parts) => parts.get(index.to_u64() as usize).cloned(),
+                    value => Some(value.clone()),
+                }
+            }
+            SymKind::IterConcat => {
+                let mut lanes = Vec::new();
+                for child in graph.children(node) {
+                    lanes.extend(emit(self, child)?.into_lanes()?);
+                }
+                let mut lanes = lanes.into_iter().rev();
+                let first = lanes
+                    .next()
+                    .unwrap_or_else(|| SmtVal::bv("(_ bv0 1)".into(), 1, false));
+                Some(lanes.fold(first, |high, low| self.concat(high, low)))
+            }
             SymKind::Clamp => {
                 let input = emit(self, child_node(0)?)?;
                 let (_, _, signed) = input.as_bv();
@@ -1873,7 +2053,7 @@ impl crate::semgen::TermBackend for SmtTerm<'_, '_> {
                 Some(SmtVal::boolean(self.resolver.state.sc_success(&addr)))
             }
             // Stores and fences are effect statements, handled by the behavior
-            // emitter; floats, iterators and the rest have no bit-vector model.
+            // emitter; remaining operations have no SMT model.
             _ => None,
         }
     }
@@ -1989,6 +2169,7 @@ struct BehaviorEmitter<'a, S> {
     failed: std::cell::Cell<bool>,
     writes_pc: std::cell::Cell<bool>,
     write_classes: std::cell::RefCell<BTreeSet<String>>,
+    fixed_register_writes: std::cell::RefCell<BTreeSet<(String, u32)>>,
     pc_value_roots: std::cell::RefCell<Vec<NodeId>>,
 }
 
@@ -2166,6 +2347,9 @@ impl<S: SmtState> sem_expr_state::BehaviorEmitter for BehaviorEmitter<'_, S> {
         // `PSTATE::n`).
         if let sem_expr_state::Destination::FixedRegister { class, index, .. } = destination {
             let class = class.to_lowercase();
+            self.fixed_register_writes
+                .borrow_mut()
+                .insert((class.clone(), *index));
             self.write_classes.borrow_mut().insert(class.clone());
             return commit(state.write_register(
                 ctx,
@@ -2351,6 +2535,7 @@ struct BehaviorMetadata {
     body: String,
     writes_pc: bool,
     write_classes: Vec<String>,
+    fixed_register_writes: Vec<(String, u32)>,
     pc_source_names: BTreeSet<String>,
     memory_accesses: Vec<MemoryAccessMetadata>,
     uses_reservation: bool,
@@ -2492,6 +2677,7 @@ fn build_smt_behavior<'a>(
         failed: Default::default(),
         writes_pc: Default::default(),
         write_classes: Default::default(),
+        fixed_register_writes: Default::default(),
         pc_value_roots: Default::default(),
     };
     let body = sem_expr_state::fold_behavior(&behavior_graph, &emitter.entry.clone(), &emitter);
@@ -2509,6 +2695,7 @@ fn build_smt_behavior<'a>(
         failed: Default::default(),
         writes_pc: Default::default(),
         write_classes: Default::default(),
+        fixed_register_writes: Default::default(),
         pc_value_roots: Default::default(),
     };
     let flat_state =
@@ -2538,6 +2725,7 @@ fn build_smt_behavior<'a>(
             body,
             writes_pc: emitter.writes_pc.get(),
             write_classes: emitter.write_classes.into_inner().into_iter().collect(),
+            fixed_register_writes: emitter.fixed_register_writes.into_inner().into_iter().collect(),
             pc_source_names: behavior_graph
                 .variable_symbols
                 .iter()
