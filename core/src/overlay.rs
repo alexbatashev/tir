@@ -8,9 +8,10 @@
 //! the base list, minus the slots of edited or erased base ops, and the
 //! delta's own list.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::attributes::{AttributeValue, NamedAttribute};
 use crate::run::NO_ENTRY;
 use crate::store::{Frontier, Parent, Store, slab_get};
 use crate::{Block, BlockId, OpId, OpInstance, Region, RegionId, Use, Value, ValueId};
@@ -32,6 +33,7 @@ impl Frozen {
 }
 
 /// The edits an overlay holds against its base.
+#[derive(Clone)]
 pub(crate) struct Delta {
     pub store: Store,
     pub frontier: Frontier,
@@ -43,6 +45,9 @@ pub(crate) struct Delta {
     /// Always one hop: a target is resolved when it is recorded.
     replaced: Vec<u32>,
     replaced_count: usize,
+    /// The ids set in the tables above, so finishing reads what was touched
+    /// and not the width of the module.
+    touched: Touched,
     /// Value → the replaced values whose surviving base uses it owns now.
     sources: HashMap<ValueId, Vec<ValueId>>,
     /// Version bumps this overlay made, by op id.
@@ -52,6 +57,20 @@ pub(crate) struct Delta {
     /// Erased op → the op that took its place, so a pipeline can follow its
     /// root across a replacement.
     pub replaced_ops: HashMap<OpId, OpId>,
+    /// `(block, old, new)`: a base block copied only to put `new` where `old`
+    /// stood; see [`Delta::fold_swaps`].
+    swaps: Vec<(BlockId, OpId, OpId)>,
+}
+
+/// Which entries of the delta's dense per-id tables were ever set.
+#[derive(Clone, Default)]
+struct Touched {
+    erased_ops: Vec<u32>,
+    erased_values: Vec<u32>,
+    erased_blocks: Vec<u32>,
+    erased_regions: Vec<u32>,
+    replaced: Vec<u32>,
+    revised: Vec<u32>,
 }
 
 /// What an overlay counted when it was measured.
@@ -80,10 +99,44 @@ impl Delta {
             erased_regions: Vec::new(),
             replaced: Vec::new(),
             replaced_count: 0,
+            touched: Touched::default(),
             sources: HashMap::new(),
             revision: Vec::new(),
             dirty: Vec::new(),
             replaced_ops: HashMap::new(),
+            swaps: Vec::new(),
+        }
+    }
+
+    /// Drop the copy of a base block the overlay holds only because a
+    /// replaced op stood in it, keeping the swap as a record instead. Two
+    /// tasks replacing sibling callables of one module then write nothing in
+    /// common: each swap names its own op, and commit applies them in turn.
+    pub(crate) fn fold_swaps(&mut self, base: &Store) {
+        let mut replaced: Vec<(OpId, OpId)> =
+            self.replaced_ops.iter().map(|(o, n)| (*o, *n)).collect();
+        replaced.sort_unstable();
+        for (old, new) in replaced {
+            let Some(Parent::Block(block)) = base.op_parent(old) else {
+                continue;
+            };
+            if !self.store.shadows_block(block) {
+                continue;
+            }
+            let (Some(copy), Some(original)) = (self.store.block(block), base.block(block)) else {
+                continue;
+            };
+            let mut swapped = original.clone();
+            for op in swapped.operations_mut() {
+                if *op == old {
+                    *op = new;
+                }
+            }
+            if *copy != swapped || self.store.block_parent(block) != base.block_parent(block) {
+                continue;
+            }
+            self.store.unshadow_block(block);
+            self.swaps.push((block, old, new));
         }
     }
 
@@ -126,9 +179,12 @@ impl Delta {
         flags.get(idx).copied().unwrap_or(false)
     }
 
-    fn set_flag(flags: &mut Vec<bool>, idx: usize) {
+    fn set_flag(flags: &mut Vec<bool>, touched: &mut Vec<u32>, idx: usize) {
         if idx >= flags.len() {
             flags.resize(idx + 1, false);
+        }
+        if !flags[idx] {
+            touched.push(idx as u32);
         }
         flags[idx] = true;
     }
@@ -343,15 +399,14 @@ impl Delta {
         self.revision.get(op.index()).copied().unwrap_or(0)
     }
 
-    pub(crate) fn take_revisions(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.revision)
-    }
-
     pub(crate) fn bump(&mut self, op: OpId) {
         if op.index() >= self.revision.len() {
             self.revision.resize(op.index() + 1, 0);
         }
         let slot = &mut self.revision[op.index()];
+        if *slot == 0 {
+            self.touched.revised.push(op.index() as u32);
+        }
         *slot = slot.checked_add(1).expect("a revision counter wrapped");
     }
 
@@ -490,7 +545,11 @@ impl Delta {
             self.store.erase_op(id);
         }
         if !self.store.owns_op(id) {
-            Self::set_flag(&mut self.erased_ops, id.index());
+            Self::set_flag(
+                &mut self.erased_ops,
+                &mut self.touched.erased_ops,
+                id.index(),
+            );
         }
     }
 
@@ -499,7 +558,11 @@ impl Delta {
             self.store.erase_value(id);
         }
         if !self.store.owns_value(id) {
-            Self::set_flag(&mut self.erased_values, id.index());
+            Self::set_flag(
+                &mut self.erased_values,
+                &mut self.touched.erased_values,
+                id.index(),
+            );
         }
     }
 
@@ -508,7 +571,11 @@ impl Delta {
             self.store.erase_block(id);
         }
         if !self.store.owns_block(id) {
-            Self::set_flag(&mut self.erased_blocks, id.index());
+            Self::set_flag(
+                &mut self.erased_blocks,
+                &mut self.touched.erased_blocks,
+                id.index(),
+            );
         }
     }
 
@@ -517,7 +584,11 @@ impl Delta {
             self.store.erase_region(id);
         }
         if !self.store.owns_region(id) {
-            Self::set_flag(&mut self.erased_regions, id.index());
+            Self::set_flag(
+                &mut self.erased_regions,
+                &mut self.touched.erased_regions,
+                id.index(),
+            );
         }
     }
 
@@ -554,6 +625,7 @@ impl Delta {
             }
             self.replaced[old.index()] = new.number();
             self.replaced_count += 1;
+            self.touched.replaced.push(old.number());
             moved.push(old);
         }
         if !moved.is_empty() {
@@ -564,110 +636,363 @@ impl Delta {
 }
 
 /// An overlay's edits, owned outright: no reference to the base it was built
-/// over survives, only the identity a commit checks.
+/// over survives, only the identity a commit checks. The dense per-id tables
+/// the overlay read through are folded to what they name, so a batch held
+/// until commit costs what it edited, not the width of the module.
 pub(crate) struct EditBatch {
     epoch: u32,
     base: usize,
-    delta: Delta,
-    revision: Vec<u32>,
+    frontier: Frontier,
+    store: Store,
+    erased_ops: Vec<u32>,
+    erased_values: Vec<u32>,
+    erased_blocks: Vec<u32>,
+    erased_regions: Vec<u32>,
+    /// `(base value, replacement)`.
+    replaced: Vec<(u32, u32)>,
+    /// `(op, bump)` for every op whose version the overlay advanced.
+    revision: Vec<(u32, u32)>,
+    replaced_ops: Vec<(OpId, OpId)>,
+    swaps: Vec<(BlockId, OpId, OpId)>,
+}
+
+fn sorted(mut ids: Vec<u32>) -> Vec<u32> {
+    ids.sort_unstable();
+    ids
 }
 
 impl EditBatch {
-    pub(crate) fn new(epoch: u32, base: usize, mut delta: Delta) -> Self {
-        let revision = delta.take_revisions();
+    pub(crate) fn new(epoch: u32, base: usize, delta: Delta) -> Self {
+        let mut replaced_ops: Vec<(OpId, OpId)> = delta.replaced_ops.into_iter().collect();
+        replaced_ops.sort_unstable();
+        let mut store = delta.store;
+        store.compact();
+        let touched = delta.touched;
         EditBatch {
             epoch,
             base,
-            delta,
-            revision,
+            frontier: delta.frontier,
+            store,
+            erased_ops: sorted(touched.erased_ops),
+            erased_values: sorted(touched.erased_values),
+            erased_blocks: sorted(touched.erased_blocks),
+            erased_regions: sorted(touched.erased_regions),
+            replaced: sorted(touched.replaced)
+                .into_iter()
+                .map(|idx| (idx, delta.replaced[idx as usize]))
+                .collect(),
+            revision: sorted(touched.revised)
+                .into_iter()
+                .map(|idx| (idx, delta.revision[idx as usize]))
+                .collect(),
+            replaced_ops,
+            swaps: delta.swaps,
         }
     }
 
-    pub(crate) fn revision(&self) -> &[u32] {
+    pub(crate) fn revision(&self) -> &[(u32, u32)] {
         &self.revision
+    }
+
+    /// Bytes the batch holds while it waits for commit.
+    pub(crate) fn bytes(&self) -> usize {
+        self.store.bytes()
+            + self.store.tables_bytes()
+            + (self.erased_ops.capacity()
+                + self.erased_values.capacity()
+                + self.erased_blocks.capacity()
+                + self.erased_regions.capacity())
+                * size_of::<u32>()
+            + (self.replaced.capacity() + self.revision.capacity()) * size_of::<(u32, u32)>()
+            + self.replaced_ops.capacity() * size_of::<(OpId, OpId)>()
+            + self.swaps.capacity() * size_of::<(BlockId, OpId, OpId)>()
+    }
+
+    /// The base ids this batch writes: the entities it copied, erased or
+    /// replaced. Two batches of one commit may not share any.
+    fn write_set(&self) -> WriteSet {
+        let mut set = WriteSet::default();
+        set.ops.extend(
+            self.store
+                .shadowed_ops()
+                .into_iter()
+                .map(|(id, _)| id.raw()),
+        );
+        set.ops.extend(self.erased_ops.iter().copied());
+        set.values.extend(
+            self.store
+                .shadowed_values()
+                .into_iter()
+                .map(|(id, _)| id.number()),
+        );
+        set.values.extend(self.erased_values.iter().copied());
+        set.values.extend(self.replaced.iter().map(|(old, _)| *old));
+        set.blocks.extend(
+            self.store
+                .shadowed_blocks()
+                .into_iter()
+                .map(|(id, _)| id.number()),
+        );
+        set.blocks.extend(self.erased_blocks.iter().copied());
+        set.regions.extend(
+            self.store
+                .shadowed_regions()
+                .into_iter()
+                .map(|(id, _)| id.number()),
+        );
+        set.regions.extend(self.erased_regions.iter().copied());
+        set
     }
 }
 
-/// Apply `batches` to `base`, which no reader may still hold, and hand back
-/// the next epoch's base with each batch's revision. Ids never move: an entity
-/// an overlay created keeps the id it was given. Every batch must have been
-/// finished over `base` as it stands, so today exactly one can be.
-pub(crate) fn commit_epoch(base: Frozen, batches: Vec<EditBatch>) -> (Frozen, Vec<Vec<u32>>) {
+#[derive(Default)]
+struct WriteSet {
+    ops: HashSet<u32>,
+    values: HashSet<u32>,
+    blocks: HashSet<u32>,
+    regions: HashSet<u32>,
+}
+
+impl WriteSet {
+    /// Add `other`, or name the first id both hold.
+    fn merge(&mut self, other: WriteSet) -> Result<(), String> {
+        let kinds: [(&mut HashSet<u32>, HashSet<u32>, &str); 4] = [
+            (&mut self.ops, other.ops, "op"),
+            (&mut self.values, other.values, "value"),
+            (&mut self.blocks, other.blocks, "block"),
+            (&mut self.regions, other.regions, "region"),
+        ];
+        for (held, incoming, kind) in kinds {
+            if let Some(id) = incoming.iter().filter(|id| held.contains(*id)).min() {
+                return Err(format!("{kind} {id}"));
+            }
+            held.extend(incoming);
+        }
+        Ok(())
+    }
+}
+
+/// The first base entity two of `batches` both write, if any.
+pub(crate) fn conflict(batches: &[EditBatch]) -> Option<String> {
+    let mut written = WriteSet::default();
+    for (index, batch) in batches.iter().enumerate() {
+        if let Err(entity) = written.merge(batch.write_set()) {
+            return Some(format!(
+                "batch {index} edits {entity}, which an earlier batch of the same epoch edits too"
+            ));
+        }
+    }
+    None
+}
+
+/// Where a batch's local ids land: each kind moves up by however many ids the
+/// batches committed before it added. Base ids and sentinels do not move.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Shift {
+    frontier: Frontier,
+    counts: Frontier,
+    by: Frontier,
+}
+
+impl Shift {
+    fn is_none(&self) -> bool {
+        self.by == Frontier::default()
+    }
+
+    fn raw(raw: u32, frontier: u32, count: u32, by: u32) -> u32 {
+        if raw >= frontier && raw - frontier < count {
+            raw + by
+        } else {
+            raw
+        }
+    }
+
+    pub(crate) fn op(&self, id: OpId) -> OpId {
+        OpId::new(Self::raw(
+            id.raw(),
+            self.frontier.ops,
+            self.counts.ops,
+            self.by.ops,
+        ))
+    }
+
+    pub(crate) fn value(&self, id: ValueId) -> ValueId {
+        ValueId::from_number(Self::raw(
+            id.number(),
+            self.frontier.values,
+            self.counts.values,
+            self.by.values,
+        ))
+    }
+
+    pub(crate) fn block(&self, id: BlockId) -> BlockId {
+        BlockId::new(Self::raw(
+            id.raw(),
+            self.frontier.blocks,
+            self.counts.blocks,
+            self.by.blocks,
+        ))
+    }
+
+    pub(crate) fn region(&self, id: RegionId) -> RegionId {
+        RegionId::new(Self::raw(
+            id.raw(),
+            self.frontier.regions,
+            self.counts.regions,
+            self.by.regions,
+        ))
+    }
+
+    fn parent(&self, parent: Option<Parent>) -> Option<Parent> {
+        parent.map(|parent| match parent {
+            Parent::Block(block) => Parent::Block(self.block(block)),
+            Parent::Region(region) => Parent::Region(self.region(region)),
+        })
+    }
+
+    pub(crate) fn attrs(&self, attrs: &mut [NamedAttribute]) {
+        if self.is_none() {
+            return;
+        }
+        for attr in attrs {
+            self.attr(&mut attr.value);
+        }
+    }
+
+    fn attr(&self, value: &mut AttributeValue) {
+        match value {
+            AttributeValue::Value(id) => *id = self.value(*id),
+            AttributeValue::Block(id) => *id = self.block(*id),
+            AttributeValue::Array(items) => {
+                for item in items.iter_mut() {
+                    self.attr(item);
+                }
+            }
+            AttributeValue::Dict(dict) => {
+                for item in dict.values_mut() {
+                    self.attr(item);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// What a commit hands back: the next epoch's base, the version bumps of
+/// every batch with their ids as committed, and the op replacements a
+/// pipeline follows its roots through.
+pub(crate) struct Committed {
+    pub base: Frozen,
+    pub revisions: Vec<(u32, u32)>,
+    pub replaced_ops: Vec<(OpId, OpId)>,
+}
+
+/// Apply `batches` to `base`, which no reader may still hold, in the order
+/// given. Every batch was finished over `base` as it stands; the first keeps
+/// the ids it minted and each later one moves up past what the earlier ones
+/// added, which is the numbering one overlay running them in turn would have
+/// given. Check [`conflict`] first: this applies without looking.
+pub(crate) fn commit_epoch(base: Frozen, batches: Vec<EditBatch>) -> Committed {
     let identity = base.identity();
     let mut store = Arc::try_unwrap(base.0)
         .unwrap_or_else(|_| panic!("commit while a reader still holds the base"));
+    let frontier = store.frontier();
     let mut revisions = Vec::new();
+    let mut replaced_ops = Vec::new();
     for batch in batches {
         assert_eq!(
             batch.base, identity,
             "a batch commits to the base it edited"
         );
         assert_eq!(
-            batch.delta.frontier,
-            store.frontier(),
+            batch.frontier, frontier,
             "a batch commits to the base as it stood when the overlay opened"
         );
-        apply(&mut store, batch.delta, batch.epoch);
-        revisions.push(batch.revision);
+        let now = store.frontier();
+        let shift = Shift {
+            frontier,
+            counts: Frontier {
+                ops: batch.store.local_ops().len() as u32,
+                values: batch.store.local_values().len() as u32,
+                blocks: batch.store.local_blocks().len() as u32,
+                regions: batch.store.local_regions().len() as u32,
+            },
+            by: Frontier {
+                ops: now.ops - frontier.ops,
+                values: now.values - frontier.values,
+                blocks: now.blocks - frontier.blocks,
+                regions: now.regions - frontier.regions,
+            },
+        };
+        revisions.extend(
+            batch
+                .revision
+                .iter()
+                .map(|(op, bump)| (shift.op(OpId::new(*op)).raw(), *bump)),
+        );
+        replaced_ops.extend(
+            batch
+                .replaced_ops
+                .iter()
+                .map(|(old, new)| (shift.op(*old), shift.op(*new))),
+        );
+        apply(&mut store, batch, &shift);
     }
     store.recycle();
-    (Frozen(Arc::new(store)), revisions)
+    Committed {
+        base: Frozen(Arc::new(store)),
+        revisions,
+        replaced_ops,
+    }
 }
 
-fn apply(base: &mut Store, delta: Delta, epoch: u32) {
-    for (idx, erased) in delta.erased_ops.iter().enumerate() {
-        if *erased {
-            let id = OpId::new(idx as u32);
-            base.unlink_operands(id);
-            base.erase_op(id);
-        }
+fn apply(base: &mut Store, batch: EditBatch, shift: &Shift) {
+    for idx in &batch.erased_ops {
+        let id = OpId::new(*idx);
+        base.unlink_operands(id);
+        base.erase_op(id);
     }
-    for (idx, erased) in delta.erased_values.iter().enumerate() {
-        if *erased {
-            base.erase_value(ValueId::from_number(idx as u32));
-        }
+    for idx in &batch.erased_values {
+        base.erase_value(ValueId::from_number(*idx));
     }
-    for (idx, erased) in delta.erased_blocks.iter().enumerate() {
-        if *erased {
-            base.erase_block(BlockId::new(idx as u32));
-        }
+    for idx in &batch.erased_blocks {
+        base.erase_block(BlockId::new(*idx));
     }
-    for (idx, erased) in delta.erased_regions.iter().enumerate() {
-        if *erased {
-            base.erase_region(RegionId::new(idx as u32));
-        }
+    for idx in &batch.erased_regions {
+        base.erase_region(RegionId::new(*idx));
     }
 
     // Base slots move to their replacement while the base lists hold nothing
     // but surviving base slots: a slot the overlay recorded naming a replaced
     // value again is meant to.
-    for (idx, target) in delta.replaced.iter().enumerate() {
-        if *target != NO_ENTRY {
-            base.move_uses(
-                ValueId::from_number(idx as u32),
-                ValueId::from_number(*target),
-            );
-        }
+    for (old, target) in &batch.replaced {
+        base.move_uses(
+            ValueId::from_number(*old),
+            shift.value(ValueId::from_number(*target)),
+        );
     }
 
-    let store = &delta.store;
+    let store = &batch.store;
     for (id, _) in store.shadowed_ops() {
-        write_op(base, store, id);
+        write_op(base, store, id, id, shift);
     }
     for (id, _) in store.shadowed_values() {
-        *base.value_mut(id).expect("shadowed value is live") =
-            store.value(id).expect("shadow").clone();
-        base.set_value_block(id, store.value_block(id));
-        base.set_value_region(id, store.value_region(id));
+        let mut value = store.value(id).expect("shadow").clone();
+        value.shift(shift);
+        *base.value_mut(id).expect("shadowed value is live") = value;
+        base.set_value_block(id, store.value_block(id).map(|b| shift.block(b)));
+        base.set_value_region(id, store.value_region(id).map(|r| shift.region(r)));
     }
     for (id, _) in store.shadowed_blocks() {
-        *base.block_mut(id).expect("shadowed block is live") =
-            store.block(id).expect("shadow").clone();
-        base.set_block_parent(id, store.block_parent(id));
+        let mut block = store.block(id).expect("shadow").clone();
+        block.shift(shift);
+        *base.block_mut(id).expect("shadowed block is live") = block;
+        base.set_block_parent(id, store.block_parent(id).map(|r| shift.region(r)));
     }
     for (id, _) in store.shadowed_regions() {
-        *base.region_mut(id).expect("shadowed region is live") =
-            store.region(id).expect("shadow").clone();
+        let mut region = store.region(id).expect("shadow").clone();
+        region.shift(shift);
+        *base.region_mut(id).expect("shadowed region is live") = region;
     }
 
     for id in store.local_values() {
@@ -675,29 +1000,35 @@ fn apply(base: &mut Store, delta: Delta, epoch: u32) {
             base.skip_value();
             continue;
         };
-        let got = base.insert_value(|_| value.clone());
-        assert_eq!(got, id, "a committed value keeps its id");
-        base.set_value_block(id, store.value_block(id));
-        base.set_value_region(id, store.value_region(id));
+        let mut value = value.clone();
+        value.shift(shift);
+        let got = base.insert_value(|_| value);
+        assert_eq!(got, shift.value(id), "a committed value keeps its id");
+        base.set_value_block(got, store.value_block(id).map(|b| shift.block(b)));
+        base.set_value_region(got, store.value_region(id).map(|r| shift.region(r)));
     }
     for id in store.local_blocks() {
         let Some(block) = store.block(id) else {
             base.skip_block();
             continue;
         };
-        let got = base.insert_block(block.clone());
-        assert_eq!(got, id, "a committed block keeps its id");
-        base.set_block_parent(id, store.block_parent(id));
-        base.stamp_block(id, epoch);
+        let mut block = block.clone();
+        block.shift(shift);
+        let got = base.insert_block(block);
+        assert_eq!(got, shift.block(id), "a committed block keeps its id");
+        base.set_block_parent(got, store.block_parent(id).map(|r| shift.region(r)));
+        base.stamp_block(got, batch.epoch);
     }
     for id in store.local_regions() {
         let Some(region) = store.region(id) else {
             base.skip_region();
             continue;
         };
-        let got = base.insert_region(region.clone());
-        assert_eq!(got, id, "a committed region keeps its id");
-        base.stamp_region(id, epoch);
+        let mut region = region.clone();
+        region.shift(shift);
+        let got = base.insert_region(region);
+        assert_eq!(got, shift.region(id), "a committed region keeps its id");
+        base.stamp_region(got, batch.epoch);
     }
     for id in store.local_ops() {
         let Some(instance) = store.op(id) else {
@@ -705,6 +1036,7 @@ fn apply(base: &mut Store, delta: Delta, epoch: u32) {
             continue;
         };
         let mut blank = instance.clone();
+        blank.id = shift.op(id);
         blank.run = crate::run::RunId::NONE;
         blank.attrs = crate::run::AttrRunId::NONE;
         blank.attr_count = 0;
@@ -712,16 +1044,35 @@ fn apply(base: &mut Store, delta: Delta, epoch: u32) {
         blank.result_count = 0;
         blank.region_count = 0;
         let got = base.insert_op(|_| blank);
-        assert_eq!(got, id, "a committed op keeps its id");
-        write_op(base, store, id);
-        base.stamp_op(id, epoch);
+        assert_eq!(got, shift.op(id), "a committed op keeps its id");
+        write_op(base, store, id, got, shift);
+        base.stamp_op(got, batch.epoch);
+    }
+    for (block, old, new) in &batch.swaps {
+        let block = base.block_mut(*block).expect("a swapped block is live");
+        for op in block.operations_mut() {
+            if *op == *old {
+                *op = shift.op(*new);
+            }
+        }
     }
 }
 
-/// Give the base op `id` the ports, attributes and parent its delta copy has.
-fn write_op(base: &mut Store, store: &Store, id: OpId) {
-    let (operands, results, regions) = store.ports(id);
-    base.set_ports(id, &operands, &results, &regions);
-    base.set_op_attrs(id, store.op_attrs(id).to_vec());
-    base.set_op_parent(id, store.op_parent(id));
+/// Give the base op `into` the ports, attributes and parent the delta copy
+/// `from` has, with every id moved by `shift`.
+fn write_op(base: &mut Store, store: &Store, from: OpId, into: OpId, shift: &Shift) {
+    let (mut operands, mut results, mut regions) = store.ports(from);
+    if !shift.is_none() {
+        for raw in operands.iter_mut().chain(results.iter_mut()) {
+            *raw = shift.value(ValueId::from_number(*raw)).number();
+        }
+        for raw in regions.iter_mut() {
+            *raw = shift.region(RegionId::new(*raw)).raw();
+        }
+    }
+    base.set_ports(into, &operands, &results, &regions);
+    let mut attrs = store.op_attrs(from).to_vec();
+    shift.attrs(&mut attrs);
+    base.set_op_attrs(into, attrs);
+    base.set_op_parent(into, shift.parent(store.op_parent(from)));
 }

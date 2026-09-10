@@ -226,14 +226,18 @@ pub fn lower_function_and_return(
     Ok(false)
 }
 
+#[derive(Clone)]
 pub struct OpLoweringPass {
     name: &'static str,
-    lowerings: Vec<OpLowering>,
+    lowerings: std::sync::Arc<Vec<OpLowering>>,
 }
 
 impl OpLoweringPass {
     pub fn new(name: &'static str, lowerings: Vec<OpLowering>) -> Self {
-        Self { name, lowerings }
+        Self {
+            name,
+            lowerings: std::sync::Arc::new(lowerings),
+        }
     }
 }
 
@@ -252,7 +256,7 @@ impl Pass for OpLoweringPass {
         context: &Context,
         _analyses: &AnalysisManager,
     ) -> Result<(), PassError> {
-        for lowering in &self.lowerings {
+        for lowering in self.lowerings.iter() {
             if lowering(context, op)? {
                 return Ok(());
             }

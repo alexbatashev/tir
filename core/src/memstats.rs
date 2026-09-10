@@ -155,6 +155,27 @@ pub fn analysis_census(pass: &'static str, entries: usize) {
     eprintln!("tir-mem: analyses after={pass} entries={entries}");
 }
 
+/// One epoch of callable tasks, measured after every task finished and
+/// before its batches commit: what the base holds, the largest overlay any
+/// task held while it ran, and the bytes the finished batches retain until
+/// the commit takes them.
+pub fn epoch_census(
+    nest: &str,
+    tasks: usize,
+    base_bytes: usize,
+    active_overlay_peak_bytes: usize,
+    retained_batch_bytes: usize,
+) {
+    if !enabled() {
+        return;
+    }
+    eprintln!(
+        "tir-mem: epoch nest={nest} tasks={tasks} batches_retained={tasks} base_bytes={base_bytes} \
+         active_overlay_peak_bytes={active_overlay_peak_bytes} \
+         retained_batch_bytes={retained_batch_bytes}"
+    );
+}
+
 /// Node and class counts of a view, plus the bytes its columns hold. An estimate
 /// for ranking, not an allocator total.
 pub fn egraph_census<L: ENode>(label: &str, egraph: &Engine<L>) {

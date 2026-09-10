@@ -414,14 +414,14 @@ fn permutations(depth: usize) -> Vec<Vec<usize>> {
     all
 }
 
-/// The schedule of least modelled cost, or the identity where the arranger
-/// cannot decide.
-pub(super) fn schedule(view: &AffineView, line: i64) -> Candidate {
+/// Up to `count` schedules of least modelled cost, cheapest first, or the
+/// identity alone where the arranger cannot decide.
+pub(super) fn schedule(view: &AffineView, line: i64, count: usize) -> Vec<Candidate> {
     let constraints = constraints(view);
     let locality = locality(view, line);
     let candidates = candidates(view, &constraints);
     if candidates.is_empty() {
-        return Candidate::identity(view.depth());
+        return vec![Candidate::identity(view.depth())];
     }
     let scored: Vec<i64> = candidates.iter().map(|c| locality.cost(c)).collect();
     let cost: CostFn = Box::new(move |placement: &Placement| scored[placement[0]]);
@@ -435,8 +435,18 @@ pub(super) fn schedule(view: &AffineView, line: i64) -> Candidate {
         capacity: Vec::new(),
         cost,
     };
-    match tir_arrange::solve(&problem) {
-        Some(placement) => candidates[placement[0]].clone(),
-        None => Candidate::identity(view.depth()),
+    let ranked = tir_arrange::solve_ranked(&problem, count);
+    if ranked.is_empty() {
+        return vec![Candidate::identity(view.depth())];
     }
+    ranked
+        .into_iter()
+        .map(|placement| candidates[placement[0]].clone())
+        .collect()
+}
+
+/// What the model charges a nest as it stands: the cost of running it in
+/// the order it is written. What a rebuilt nest is scored by.
+pub(super) fn standing_cost(view: &AffineView, line: i64) -> i64 {
+    locality(view, line).cost(&Candidate::identity(view.depth()))
 }

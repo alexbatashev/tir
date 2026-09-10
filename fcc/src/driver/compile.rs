@@ -45,6 +45,7 @@ pub(super) fn lower_to_ir(
     options: LangOptions,
     march: Option<&str>,
     mabi: Option<&str>,
+    jobs: usize,
 ) -> tir::builtin::ModuleOp {
     let fail = |error: String| -> ! {
         eprintln!("fcc: error: {error}; pass --march explicitly");
@@ -74,42 +75,46 @@ pub(super) fn lower_to_ir(
         context,
         &module,
         "struct lowering",
-        false,
+        None,
         crate::passes::LowerCirStructsPass::new(),
     );
     run_pass(
         context,
         &module,
         "loop raising",
-        true,
+        Some(jobs),
         crate::passes::RaiseLoopsPass::new(),
     );
     run_pass(
         context,
         &module,
         "restructuring",
-        true,
+        Some(jobs),
         tir::passes::RestructureNodesPass::new(),
     );
     describe_target(context, &module, machine.as_ref())
 }
 
-/// Run one pass over `module`, nested under every function when `per_function`,
-/// and exit with `label` on failure.
+/// Run one pass over `module`, nested under every function with `jobs`
+/// running at once when given, and exit with `label` on failure.
 fn run_pass(
     context: &tir::Context,
     module: &tir::builtin::ModuleOp,
     label: &str,
-    per_function: bool,
-    pass: impl tir::Pass + 'static,
+    jobs: Option<usize>,
+    pass: impl tir::Pass + Clone + 'static,
 ) {
     use tir::Operation;
 
     let mut pm = tir::PassManager::new();
-    if per_function {
-        pm.nest::<tir::func::FuncOp>().add_pass(pass);
-    } else {
-        pm.add_pass(pass);
+    match jobs {
+        Some(jobs) => {
+            pm.set_workers(jobs);
+            pm.nest::<tir::func::FuncOp>().add_pass(pass);
+        }
+        None => {
+            pm.add_pass(pass);
+        }
     }
     pm.run(context, context.get_op(module.id()))
         .unwrap_or_else(|e| {
@@ -187,6 +192,7 @@ pub(super) fn emit_machine_code(
         opts.lang_options,
         Some(march),
         opts.mabi.as_deref(),
+        opts.jobs,
     );
 
     let mut pm = mid_end(opts);
@@ -457,5 +463,6 @@ pub(super) fn mid_end(opts: &DriverOptions) -> tir::PassManager {
         // level inherits.
         add_instcombine(pm.nest::<tir::func::FuncOp>());
     }
+    pm.set_workers(opts.jobs);
     pm
 }

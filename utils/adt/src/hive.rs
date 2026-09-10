@@ -21,6 +21,32 @@ impl<T> Chunk<T> {
         }
     }
 
+    /// Move the slots into a box of `len`, keeping the values handed out.
+    fn resize(&mut self, len: usize) {
+        let mut slots = Vec::with_capacity(len);
+        slots.resize_with(len, MaybeUninit::uninit);
+        let mut slots = slots.into_boxed_slice();
+        for offset in 0..self.bump {
+            if self.is_occupied(offset) {
+                slots[offset as usize] =
+                    MaybeUninit::new(unsafe { self.slots[offset as usize].assume_init_read() });
+            }
+        }
+        self.slots = slots;
+    }
+
+    fn shrink(&mut self) {
+        if self.slots.len() > self.bump as usize {
+            self.resize(self.bump as usize);
+        }
+    }
+
+    fn grow(&mut self, len: usize) {
+        if self.slots.len() < len {
+            self.resize(len);
+        }
+    }
+
     fn is_occupied(&self, offset: u32) -> bool {
         let offset = offset as usize;
         self.occupied[offset / 64] >> (offset % 64) & 1 == 1
@@ -48,6 +74,32 @@ pub struct Hive<T> {
     /// Slots come off the top of the last chunk; earlier chunks are full.
     chunks: Vec<Chunk<T>>,
     len: u32,
+}
+
+impl<T: Clone> Clone for Hive<T> {
+    fn clone(&self) -> Self {
+        let chunks = self
+            .chunks
+            .iter()
+            .map(|chunk| {
+                let mut copy = Chunk::new(chunk.slots.len());
+                copy.bump = chunk.bump;
+                for offset in 0..chunk.bump {
+                    if chunk.is_occupied(offset) {
+                        copy.slots[offset as usize] = MaybeUninit::new(unsafe {
+                            chunk.slots[offset as usize].assume_init_ref().clone()
+                        });
+                        copy.set_occupied(offset, true);
+                    }
+                }
+                copy
+            })
+            .collect();
+        Self {
+            chunks,
+            len: self.len,
+        }
+    }
 }
 
 impl<T> Hive<T> {
@@ -94,6 +146,7 @@ impl<T> Hive<T> {
         }
         let index = self.chunks.len() - 1;
         let chunk = &mut self.chunks[index];
+        chunk.grow(Self::N);
         let offset = chunk.bump;
         chunk.bump += 1;
         let handle = Self::join(index, offset);
@@ -115,6 +168,15 @@ impl<T> Hive<T> {
         }
         let chunk = self.chunks.last_mut().expect("a chunk was just ensured");
         chunk.bump += 1;
+    }
+
+    /// Give back the slots past the last one handed out. A hive that will
+    /// not grow again then holds what it stores, not a whole chunk per kind;
+    /// the next insert grows the chunk back.
+    pub fn shrink_to_fit(&mut self) {
+        if let Some(chunk) = self.chunks.last_mut() {
+            chunk.shrink();
+        }
     }
 
     /// Takes the value back out. The slot stays spent, so `handle` names
@@ -186,7 +248,10 @@ impl<T> Hive<T> {
 
     /// Bytes the chunks hold, whether or not their slots are live.
     pub fn bytes(&self) -> usize {
-        self.chunk_count() * (Self::N * size_of::<T>() + Self::N / 8)
+        self.chunks
+            .iter()
+            .map(|chunk| chunk.slots.len() * size_of::<T>() + chunk.occupied.len() * 8)
+            .sum()
     }
 }
 

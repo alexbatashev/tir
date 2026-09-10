@@ -27,6 +27,7 @@ pub enum GccError {
     UnrecognizedOption(String),
     MissingArgument(String),
     InvalidStandard(String),
+    InvalidJobs(String),
 }
 
 impl fmt::Display for GccError {
@@ -37,6 +38,7 @@ impl fmt::Display for GccError {
             }
             GccError::MissingArgument(opt) => write!(f, "missing argument to '{opt}'"),
             GccError::InvalidStandard(msg) => write!(f, "{msg}"),
+            GccError::InvalidJobs(value) => write!(f, "invalid job count '{value}'"),
         }
     }
 }
@@ -67,6 +69,7 @@ where
     let mut libs = Vec::new();
     let mut dry_run = false;
     let mut opt_level = OptLevel::O0;
+    let mut jobs = 1;
     let mut warned = HashSet::new();
 
     let mut i = 0;
@@ -84,6 +87,12 @@ where
             libs.push(value);
         } else if let Some(value) = separated(&args, &mut i, "-L")? {
             lib_dirs.push(PathBuf::from(value));
+        } else if let Some(value) = separated(&args, &mut i, "-j")? {
+            jobs = value
+                .parse()
+                .ok()
+                .filter(|jobs| *jobs > 0)
+                .ok_or(GccError::InvalidJobs(value))?;
         } else if arg == "-c" {
             stop = StopPhase::Object;
         } else if arg == "-S" {
@@ -142,6 +151,7 @@ where
         pipeline: None,
         opt_level,
         shuffle_machine_order: false,
+        jobs,
         dry_run,
     })
 }

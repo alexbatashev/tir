@@ -856,6 +856,7 @@ fn rename_within(context: &Context, op: OpId, renames: &[(ValueId, ValueId)]) {
 }
 
 /// `destructure`: a callable's unordered body becomes `cfg` blocks.
+#[derive(Clone)]
 pub struct DestructurePass;
 
 impl DestructurePass {

@@ -58,7 +58,7 @@ pub fn verify_deps(context: &Context, function: &OpHandle) -> Result<(), crate::
 
 /// [`verify_deps`] as a pass: the unordered pipeline's stand-in for
 /// `thread-state`, which constructs nothing there and checks instead.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct VerifyDepsPass;
 
 impl VerifyDepsPass {

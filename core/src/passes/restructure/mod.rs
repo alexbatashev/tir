@@ -34,6 +34,7 @@ use crate::{Context, OperationRef, Pass, PassError, PassTarget};
 /// unordered is left alone; any ordered one is converted, a single block
 /// included. Memory order is constructed where the function touches memory
 /// and carries no dependencies yet.
+#[derive(Clone)]
 pub struct RestructureNodesPass;
 
 impl RestructureNodesPass {

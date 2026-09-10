@@ -94,6 +94,8 @@ pub struct DriverOptions {
     /// The `shuffle-machine-order` oracle (see
     /// [`tir::backend::pipeline::Oracles`]).
     pub shuffle_machine_order: bool,
+    /// Functions the mid-end optimises at once; see [`tir::PassManager::set_workers`].
+    pub jobs: usize,
     pub dry_run: bool,
 }
 

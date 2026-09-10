@@ -19,15 +19,6 @@ pub struct PassInfo {
 #[distributed_slice]
 pub static PASSES: [PassInfo];
 
-/// Construct a registered pass from the name and argument list a pipeline
-/// spelled, or `None` if no pass owns that name.
-pub fn build_pass(name: &str, args: &str) -> Option<Result<Box<dyn Pass>, String>> {
-    PASSES
-        .iter()
-        .find(|p| p.name == name)
-        .map(|p| (p.ctor)(args))
-}
-
 /// Names of all registered passes, for help text and diagnostics.
 pub fn registered_passes() -> Vec<&'static str> {
     let mut names: Vec<_> = PASSES.iter().map(|p| p.name).collect();
@@ -195,9 +186,17 @@ impl PipelineParser<'_> {
             }
             return self.parse_nested(pm.nest_parsed(name));
         }
-        let pass = build_pass(&name, args.as_deref().unwrap_or_default())
-            .ok_or_else(|| format!("unknown pass '{name}'"))??;
-        pm.add_boxed_pass(pass);
+        let info = PASSES
+            .iter()
+            .find(|p| p.name == name)
+            .ok_or_else(|| format!("unknown pass '{name}'"))?;
+        let args = args.unwrap_or_default();
+        let pass = (info.ctor)(&args)?;
+        let ctor = info.ctor;
+        pm.add_replicable(
+            pass,
+            Box::new(move || (ctor)(&args).expect("the arguments built the pass once")),
+        );
         Ok(())
     }
 
@@ -228,6 +227,8 @@ pub enum PassError {
         pass: &'static str,
         error: crate::Error,
     },
+    /// Two callables' tasks of one epoch wrote the same base entity.
+    OverlappingEdits(String),
 }
 
 impl std::fmt::Display for PassError {
@@ -251,6 +252,9 @@ impl std::fmt::Display for PassError {
             PassError::RewriteFailed(op) => write!(f, "failed to rewrite op {op:?}"),
             PassError::InvalidIR { pass, error } => {
                 write!(f, "pass '{pass}' produced invalid IR: {error:?}")
+            }
+            PassError::OverlappingEdits(conflict) => {
+                write!(f, "function tasks of one epoch overlap: {conflict}")
             }
         }
     }
@@ -646,8 +650,16 @@ fn ir_verification_enabled() -> bool {
     })
 }
 
+/// Builds another instance of a pass, for a worker of its own.
+type Replicator = Box<dyn Fn() -> Box<dyn Pass> + Send>;
+
 enum PassNode {
-    Pass(Box<dyn Pass>),
+    Pass {
+        pass: Box<dyn Pass>,
+        /// `None` for a pass added boxed: its nest then runs its callables
+        /// one at a time.
+        replicator: Option<Replicator>,
+    },
     Nested {
         op_name: String,
         manager: PassManager,
@@ -658,22 +670,93 @@ enum PassNode {
     },
 }
 
+/// Whether the pipeline may commit: the top level owns the base, a callable's
+/// task shares the overlay of the task and commits nothing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Exclusive,
+    Shared,
+}
+
 pub struct PassManager {
     passes: Vec<PassNode>,
+    workers: usize,
 }
 
 impl PassManager {
     pub fn new() -> Self {
-        Self { passes: vec![] }
+        Self {
+            passes: vec![],
+            workers: 1,
+        }
     }
 
-    pub fn add_pass<P: Pass + 'static>(&mut self, pass: P) -> &mut Self {
-        self.add_boxed_pass(Box::new(pass))
+    /// How many callables a nested pipeline runs at once. Every count reads
+    /// the same epoch and commits in callable order, so the result is the
+    /// same; what changes is wall time and the memory held while tasks run.
+    pub fn set_workers(&mut self, workers: usize) {
+        self.workers = workers.max(1);
+        for node in &mut self.passes {
+            if let PassNode::Nested { manager, .. } | PassNode::Fixpoint { manager, .. } = node {
+                manager.set_workers(workers);
+            }
+        }
     }
 
+    /// Add `pass`. It is `Clone` so a nest holding it can hand each worker a
+    /// copy; a pass that cannot be cloned goes through
+    /// [`PassManager::add_boxed_pass`].
+    pub fn add_pass<P: Pass + Clone + 'static>(&mut self, pass: P) -> &mut Self {
+        let template = pass.clone();
+        self.add_replicable(Box::new(pass), Box::new(move || Box::new(template.clone())))
+    }
+
+    /// Add a pass that has no copy: the nest holding it runs its callables one
+    /// at a time, each still in an overlay of its own.
     pub fn add_boxed_pass(&mut self, pass: Box<dyn Pass>) -> &mut Self {
-        self.passes.push(PassNode::Pass(pass));
+        self.passes.push(PassNode::Pass {
+            pass,
+            replicator: None,
+        });
         self
+    }
+
+    fn add_replicable(&mut self, pass: Box<dyn Pass>, replicator: Replicator) -> &mut Self {
+        self.passes.push(PassNode::Pass {
+            pass,
+            replicator: Some(replicator),
+        });
+        self
+    }
+
+    /// Another instance of this pipeline, or `None` when a pass in it has no
+    /// copy.
+    fn replica(&self) -> Option<PassManager> {
+        let passes = self
+            .passes
+            .iter()
+            .map(|node| match node {
+                PassNode::Pass { replicator, .. } => {
+                    let replicator = replicator.as_ref()?;
+                    Some(PassNode::Pass {
+                        pass: replicator(),
+                        replicator: None,
+                    })
+                }
+                PassNode::Nested { op_name, manager } => Some(PassNode::Nested {
+                    op_name: op_name.clone(),
+                    manager: manager.replica()?,
+                }),
+                PassNode::Fixpoint { cap, manager } => Some(PassNode::Fixpoint {
+                    cap: *cap,
+                    manager: manager.replica()?,
+                }),
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(PassManager {
+            passes,
+            workers: self.workers,
+        })
     }
 
     /// Nest a sub-pipeline under every operation of type `T`.
@@ -688,7 +771,7 @@ impl PassManager {
     pub fn fixpoint(&mut self, cap: u8) -> &mut PassManager {
         self.passes.push(PassNode::Fixpoint {
             cap,
-            manager: PassManager::new(),
+            manager: self.child(),
         });
         match self.passes.last_mut() {
             Some(PassNode::Fixpoint { manager, .. }) => manager,
@@ -699,11 +782,19 @@ impl PassManager {
     fn nest_parsed(&mut self, op_name: impl Into<String>) -> &mut PassManager {
         self.passes.push(PassNode::Nested {
             op_name: op_name.into(),
-            manager: PassManager::new(),
+            manager: self.child(),
         });
         match self.passes.last_mut() {
             Some(PassNode::Nested { manager, .. }) => manager,
             _ => unreachable!("nested pass manager entry just added"),
+        }
+    }
+
+    /// An empty pipeline nested in this one, running with its workers.
+    fn child(&self) -> PassManager {
+        PassManager {
+            passes: vec![],
+            workers: self.workers,
         }
     }
 
@@ -725,24 +816,25 @@ impl PassManager {
         root: OperationRef,
         analyses: &AnalysisManager,
     ) -> Result<OperationRef, PassError> {
-        self.run_with(context, root, analyses, true)
+        self.run_with(context, root, analyses, Mode::Exclusive)
     }
 
-    /// [`PassManager::run_on_op_ref`] inside a caller's overlay when `commit`
-    /// is off: a nested pipeline's edits stay pending with the enclosing one's.
+    /// [`PassManager::run_on_op_ref`] inside a task's overlay when `mode` is
+    /// shared: a nested pipeline's edits stay pending with the enclosing one's.
     fn run_with(
         &mut self,
         context: &Context,
         mut root: OperationRef,
         analyses: &AnalysisManager,
-        commit: bool,
+        mode: Mode,
     ) -> Result<OperationRef, PassError> {
+        let workers = self.workers;
         for entry in &mut self.passes {
-            Self::run_entry(entry, context, &root, analyses)?;
+            Self::run_entry(entry, context, &root, analyses, mode, workers)?;
             if let Some(current) = refreshed(context, &root) {
                 root = current;
             }
-            if commit {
+            if mode == Mode::Exclusive {
                 Self::commit(context)?;
             }
         }
@@ -757,6 +849,10 @@ impl PassManager {
             return Ok(());
         }
         context.commit();
+        Self::verify_committed(context)
+    }
+
+    fn verify_committed(context: &Context) -> Result<(), PassError> {
         if ir_verification_enabled() {
             context
                 .verify_use_lists()
@@ -773,9 +869,11 @@ impl PassManager {
         context: &Context,
         root: &OperationRef,
         analyses: &AnalysisManager,
+        mode: Mode,
+        workers: usize,
     ) -> Result<(), PassError> {
         match entry {
-            PassNode::Pass(pass) => {
+            PassNode::Pass { pass, .. } => {
                 let scope = crate::memstats::pass_scope(pass.name());
                 let started = timing::enabled().then(std::time::Instant::now);
                 let version_before = context.op_version(root.op.id);
@@ -825,18 +923,34 @@ impl PassManager {
                 Ok(())
             }
             PassNode::Nested { op_name, manager } => {
+                if mode == Mode::Shared {
+                    return PassManager::walk_ops(context, root, &mut |op_ref| {
+                        if matches_op_name(op_ref.op(), op_name) {
+                            manager.run_with(context, op_ref.clone(), analyses, Mode::Shared)?;
+                        }
+                        Ok(())
+                    });
+                }
+                let mut targets = Vec::new();
                 PassManager::walk_ops(context, root, &mut |op_ref| {
                     if matches_op_name(op_ref.op(), op_name) {
-                        manager.run_with(context, op_ref.clone(), analyses, false)?;
+                        targets.push(op_ref.op().id);
                     }
                     Ok(())
-                })
+                })?;
+                Self::commit(context)?;
+                let done = tasks::run(context, manager, &targets, workers)?;
+                tasks::report(op_name, context, &done);
+                context
+                    .commit_batches(done.into_iter().map(|d| d.batch).collect())
+                    .map_err(PassError::OverlappingEdits)?;
+                Self::verify_committed(context)
             }
             PassNode::Fixpoint { cap, manager } => {
                 let mut current = root.clone();
                 for _ in 0..*cap {
                     let version_before = context.op_version(current.op.id);
-                    current = manager.run_with(context, current, analyses, false)?;
+                    current = manager.run_with(context, current, analyses, mode)?;
                     if context.op_version(current.op.id) == version_before {
                         break;
                     }
@@ -906,6 +1020,103 @@ impl Default for PassManager {
 /// to the pass total is the time spent outside passes (frontend, emission).
 pub fn report_pass_timing(wall: std::time::Duration) {
     timing::summary(wall);
+}
+
+/// One epoch's callable tasks: every target gets an overlay of its own over
+/// the committed base, at most `workers` run at once, and the finished
+/// batches come back in target order for the commit.
+mod tasks {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{AnalysisManager, Mode, OperationRef, PassError, PassManager};
+    use crate::context::Snapshot;
+    use crate::overlay::EditBatch;
+    use crate::{Context, OpId};
+
+    /// A finished task: its batch and how large its overlay grew.
+    pub(super) struct Done {
+        pub batch: EditBatch,
+        pub overlay_bytes: usize,
+    }
+
+    pub(super) fn run(
+        context: &Context,
+        manager: &mut PassManager,
+        targets: &[OpId],
+        workers: usize,
+    ) -> Result<Vec<Done>, PassError> {
+        let snapshot = context.snapshot();
+        let workers = workers.min(targets.len()).max(1);
+        let replicas: Option<Vec<PassManager>> = (1..workers).map(|_| manager.replica()).collect();
+        let mut results: Vec<Option<Result<Done, PassError>>> =
+            (0..targets.len()).map(|_| None).collect();
+        match replicas {
+            Some(replicas) if !replicas.is_empty() => {
+                let next = AtomicUsize::new(0);
+                let slots = Mutex::new(std::mem::take(&mut results));
+                let worker = |manager: &mut PassManager| {
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(&target) = targets.get(index) else {
+                            return;
+                        };
+                        let done = one(&snapshot, manager, target);
+                        slots.lock().unwrap()[index] = Some(done);
+                    }
+                };
+                std::thread::scope(|scope| {
+                    for mut replica in replicas {
+                        let worker = &worker;
+                        scope.spawn(move || worker(&mut replica));
+                    }
+                    worker(manager);
+                });
+                results = slots.into_inner().unwrap();
+            }
+            _ => {
+                for (slot, &target) in results.iter_mut().zip(targets) {
+                    *slot = Some(one(&snapshot, manager, target));
+                }
+            }
+        }
+        drop(snapshot);
+        results
+            .into_iter()
+            .map(|done| done.expect("every target ran"))
+            .collect()
+    }
+
+    fn one(
+        snapshot: &Snapshot,
+        manager: &mut PassManager,
+        target: OpId,
+    ) -> Result<Done, PassError> {
+        let context = Context::open(snapshot.clone());
+        let root = OperationRef::new(context.get_op(target));
+        manager.run_with(&context, root, &AnalysisManager::new(), Mode::Shared)?;
+        let overlay_bytes = context.overlay_census().bytes;
+        Ok(Done {
+            batch: context.finish(),
+            overlay_bytes,
+        })
+    }
+
+    /// The epoch's memory, at the moment every task is done and nothing is
+    /// committed: the base, the largest overlay any task held, and what the
+    /// batches hold while they wait.
+    pub(super) fn report(op_name: &str, context: &Context, done: &[Done]) {
+        if !crate::memstats::enabled() {
+            return;
+        }
+        crate::memstats::epoch_census(
+            op_name,
+            done.len(),
+            context.slab_census().slab_bytes,
+            done.iter().map(|d| d.overlay_bytes).max().unwrap_or(0),
+            done.iter().map(|d| d.batch.bytes()).sum(),
+        );
+    }
 }
 
 pub(crate) mod timing {

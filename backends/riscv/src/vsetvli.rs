@@ -115,7 +115,7 @@ struct ConfigState {
     vtypei: i64,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct InsertVsetvliPass;
 
 impl InsertVsetvliPass {

@@ -15,6 +15,7 @@ use tir::{AnalysisManager, Context, OperationRef, Pass, PassError, PassTarget, u
 
 use crate::backend::{ASSIGNMENT_ATTR, Dependences, RegAssignment, SymbolOp, symbol_body_blocks};
 
+#[derive(Clone)]
 pub struct ShuffleMachineOrderPass {
     rng: Rng,
 }

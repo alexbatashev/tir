@@ -122,8 +122,24 @@ Consequences developers rely on:
   snapshot. A handle records the epoch its entity was created in; one to an
   erased entity, or to an entity of a discarded overlay, panics rather than
   answering, and one to a committed entity keeps working.
-- The pass manager commits after every top-level pipeline entry. Passes of
-  a nested pipeline and the rounds of a fixpoint share one overlay.
+- The pass manager commits after every top-level pipeline entry. A nested
+  pipeline (`func.func(...)`) opens one **epoch**: the pending overlay is
+  committed, every matching callable runs the nested pipeline in an overlay
+  of its own over that frozen base, and the finished batches commit in
+  callable order. This holds at every worker count
+  (`PassManager::set_workers`, `fcc -j`): a task reads the epoch, never
+  another task's edits, so the objects are the same bytes at `-j1` and
+  `-j8`. Two tasks writing one base entity are refused before either
+  commits. Passes inside a task, and the rounds of a fixpoint, share the
+  task's overlay.
+- Ids a task mints start at the base frontier like any overlay's; commit
+  moves each later batch's ids past what the earlier batches added, which
+  is the numbering one overlay running the tasks in turn would have given.
+- A candidate edit is tried in a **fork** of the overlay (`variants::choose`):
+  each candidate is built and scored in its own fork, the cheapest fork is
+  adopted, the rest are dropped without touching the base. A tie keeps the
+  lower index. The affine scheduler builds the arranger's cheapest few
+  schedules this way and keeps the nest the model charges least once built.
 - The green core stores the def-use chain (intrusive use lists threaded
   through the operand runs) and nothing else derived. Blocks do not store
   successor or predecessor lists.

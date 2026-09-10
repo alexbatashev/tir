@@ -21,7 +21,7 @@ use crate::{
     Symbol, ValueId,
 };
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct MaterializeSymbolAddressesPass;
 
 impl MaterializeSymbolAddressesPass {

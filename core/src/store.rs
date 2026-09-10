@@ -62,13 +62,16 @@ pub(crate) struct Frontier {
 
 /// One id kind's addressing in a delta store: the ids it created sit at
 /// `id - frontier`, and the base ids it shadows go through a table.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Kind {
     frontier: u32,
     /// Handle of each entity this delta created, by `id - frontier`.
     local: Vec<u32>,
     /// Handle of the copy held for a base id, by that id.
     shadow: Vec<u32>,
+    /// `(base id, handle)` ascending, once [`Kind::compact`] folded the table
+    /// above: a finished delta is read, never shadowed into again.
+    sparse: Vec<(u32, u32)>,
 }
 
 impl Kind {
@@ -77,18 +80,35 @@ impl Kind {
             frontier,
             local: Vec::new(),
             shadow: Vec::new(),
+            sparse: Vec::new(),
         }
     }
 
     fn handle(&self, raw: u32) -> Option<u32> {
         if raw >= self.frontier {
             self.local.get((raw - self.frontier) as usize).copied()
-        } else {
+        } else if self.sparse.is_empty() {
             self.shadow
                 .get(raw as usize)
                 .copied()
                 .filter(|h| *h != NO_HANDLE)
+        } else {
+            self.sparse
+                .binary_search_by_key(&raw, |(id, _)| *id)
+                .ok()
+                .map(|at| self.sparse[at].1)
         }
+    }
+
+    fn compact(&mut self) {
+        self.sparse = self.shadowed();
+        self.shadow = Vec::new();
+        self.local.shrink_to_fit();
+    }
+
+    fn bytes(&self) -> usize {
+        (self.local.capacity() + self.shadow.capacity()) * size_of::<u32>()
+            + self.sparse.capacity() * size_of::<(u32, u32)>()
     }
 
     fn owns(&self, raw: u32) -> bool {
@@ -100,6 +120,10 @@ impl Kind {
     }
 
     fn record_shadow(&mut self, raw: u32, handle: u32) {
+        assert!(
+            self.sparse.is_empty(),
+            "a finished delta shadows nothing more"
+        );
         if raw as usize >= self.shadow.len() {
             self.shadow.resize(raw as usize + 1, NO_HANDLE);
         }
@@ -118,6 +142,9 @@ impl Kind {
     }
 
     fn shadowed(&self) -> Vec<(u32, u32)> {
+        if !self.sparse.is_empty() {
+            return self.sparse.clone();
+        }
         self.shadow
             .iter()
             .enumerate()
@@ -134,6 +161,7 @@ impl Kind {
     }
 }
 
+#[derive(Clone)]
 struct DeltaTables {
     ops: Kind,
     values: Kind,
@@ -141,6 +169,7 @@ struct DeltaTables {
     regions: Kind,
 }
 
+#[derive(Clone)]
 pub(crate) struct Store {
     /// Present for a delta store; a base store addresses an id by its number.
     delta: Option<DeltaTables>,
@@ -1057,6 +1086,53 @@ impl Store {
     pub(crate) fn recycle(&mut self) {
         self.runs.recycle();
         self.attr_runs.recycle();
+    }
+
+    /// Hold only what a finished delta is read for at commit: the entities,
+    /// their runs, and which base ids they stand for. The use-list heads and
+    /// the per-id tables go; a hive keeps its values and gives back its
+    /// chunk's spare slots.
+    pub(crate) fn compact(&mut self) {
+        let tables = self.tables();
+        tables.ops.compact();
+        tables.values.compact();
+        tables.blocks.compact();
+        tables.regions.compact();
+        self.first_use = Vec::new();
+        self.ops.shrink_to_fit();
+        self.values.shrink_to_fit();
+        self.blocks.shrink_to_fit();
+        self.regions.shrink_to_fit();
+        self.runs.shrink_to_fit();
+        self.attr_runs.shrink_to_fit();
+        for slab in [
+            &mut self.op_epoch,
+            &mut self.block_epoch,
+            &mut self.region_epoch,
+        ] {
+            slab.shrink_to_fit();
+        }
+        self.op_parent.shrink_to_fit();
+        self.block_parent.shrink_to_fit();
+        self.value_block.shrink_to_fit();
+        self.value_region.shrink_to_fit();
+    }
+
+    /// Bytes the id tables, use-list heads and reverse indices hold.
+    pub(crate) fn tables_bytes(&self) -> usize {
+        let kinds = self.delta.as_ref().map_or(0, |d| {
+            d.ops.bytes() + d.values.bytes() + d.blocks.bytes() + d.regions.bytes()
+        });
+        kinds
+            + self.first_use.capacity() * size_of::<u32>()
+            + (self.op_epoch.capacity()
+                + self.block_epoch.capacity()
+                + self.region_epoch.capacity())
+                * size_of::<u32>()
+            + self.op_parent.capacity() * size_of::<Option<Parent>>()
+            + self.block_parent.capacity() * size_of::<Option<RegionId>>()
+            + self.value_block.capacity() * size_of::<Option<BlockId>>()
+            + self.value_region.capacity() * size_of::<Option<RegionId>>()
     }
 
     /// Bytes the store holds beyond its entity hives: the `Vec`s blocks and

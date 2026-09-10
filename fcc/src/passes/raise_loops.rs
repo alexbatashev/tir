@@ -23,7 +23,7 @@ use tir::{
 
 use crate::cir;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct RaiseLoopsPass;
 
 impl RaiseLoopsPass {

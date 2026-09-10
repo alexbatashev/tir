@@ -77,6 +77,7 @@ mod target_env;
 mod ty;
 pub mod utils;
 mod value;
+pub mod variants;
 
 pub mod helpers {
     pub use tir_macros::{TirType, dialect, operation};
@@ -108,8 +109,8 @@ pub use operation::{
 };
 pub use overlay::{Frozen, OverlayCensus};
 pub use pass::{
-    OperationRef, PASSES, Pass, PassError, PassInfo, PassManager, PassTarget, build_pass,
-    parse_pipeline, registered_passes, report_pass_timing,
+    OperationRef, PASSES, Pass, PassError, PassInfo, PassManager, PassTarget, parse_pipeline,
+    registered_passes, report_pass_timing,
 };
 pub use print::print_ir;
 pub use region::{Region, RegionBody, RegionHandle, RegionId, RegionKind};

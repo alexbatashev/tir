@@ -76,6 +76,33 @@ impl Region {
         }
     }
 
+    /// Move every id the region holds by `shift`.
+    pub(crate) fn shift(&mut self, shift: &crate::overlay::Shift) {
+        self.parent_op = shift.op(self.parent_op);
+        match &mut self.body {
+            RegionBody::Blocks(blocks) => {
+                for block in blocks {
+                    *block = shift.block(*block);
+                }
+            }
+            RegionBody::Nodes {
+                ports,
+                ops,
+                results,
+            } => {
+                for port in ports {
+                    port.shift(shift);
+                }
+                for op in ops {
+                    *op = shift.op(*op);
+                }
+                for result in results {
+                    *result = shift.value(*result);
+                }
+            }
+        }
+    }
+
     pub(crate) fn set_parent_op(&mut self, op: OpId) {
         self.parent_op = op;
     }
