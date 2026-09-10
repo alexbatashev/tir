@@ -211,6 +211,7 @@ fn run_compile_action(
                 opts.lang_options,
                 opts.march.as_deref(),
                 opts.mabi.as_deref(),
+                opts.jobs,
             );
             // An optimizing level runs its mid-end here; -O0 prints the
             // conversion itself, which is what the backend will be handed.

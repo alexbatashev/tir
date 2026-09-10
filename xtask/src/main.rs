@@ -1,6 +1,7 @@
 mod fcc_bench;
 mod fcc_fuzz;
 mod fcc_torture;
+mod gate;
 pub mod utils;
 mod verify_smt;
 
@@ -45,6 +46,11 @@ enum Task {
     /// slowest cases, and fail on a >10 % time or >2 % peak regression against
     /// the baseline
     FccBench(fcc_bench::Options),
+    /// The pinned gate: fcc-bench against the baseline at -j1, then every
+    /// case again at -j8 with identical objects and peak RSS within 1.5x of
+    /// the pinned sequential peaks, CoreMark timed at both, and a generated
+    /// many-function unit held to the same contract
+    Gate(gate::Options),
     /// Generate random UB-free C programs, compile them under different pass
     /// pipelines and reference compilers, run the binaries and compare
     /// observable behavior
@@ -73,6 +79,7 @@ fn main() -> anyhow::Result<()> {
             fcc_torture::run(&sh, &project_root(), bless, fcc.as_deref())
         }
         Task::FccBench(options) => fcc_bench::run(&sh, &project_root(), options),
+        Task::Gate(options) => gate::run(&sh, &project_root(), options),
         Task::FccFuzz(options) => fcc_fuzz::run(&sh, &project_root(), &options),
         Task::CapiSmoke => capi_smoke(&sh),
         Task::PythonSmoke => python_smoke(&sh),

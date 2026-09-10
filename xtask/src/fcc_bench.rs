@@ -80,13 +80,13 @@ pub struct Sample {
 }
 
 #[derive(Clone, Copy)]
-enum Level {
+pub(crate) enum Level {
     O0,
     O2,
 }
 
 impl Level {
-    fn flag(self) -> &'static str {
+    pub(crate) fn flag(self) -> &'static str {
         match self {
             Level::O0 => "-O0",
             Level::O2 => "-O2",
@@ -107,7 +107,7 @@ impl Level {
         }
     }
 
-    fn fcc_peak_kb(self, sample: &Sample) -> u64 {
+    pub(crate) fn fcc_peak_kb(self, sample: &Sample) -> u64 {
         match self {
             Level::O0 => sample.fcc_o0_peak_kb,
             Level::O2 => sample.fcc_o2_peak_kb,
@@ -118,6 +118,10 @@ impl Level {
 #[derive(Default, Serialize, Deserialize)]
 pub struct Results {
     pub samples: Vec<Sample>,
+    /// The many-function workload's sequential peak, recorded before
+    /// parallel execution existed; `xtask gate` holds `-j8` to 1.5x of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub many_functions_o2_peak_kb: Option<u64>,
 }
 
 /// Times fcc and gcc at both `-O0` and `-O2` on every passing torture execute
@@ -128,7 +132,19 @@ pub struct Results {
 /// baseline. There is no per-case timeout: a hung compiler is the job's
 /// timeout to catch, and a poll loop would quantise the samples.
 pub fn run(sh: &Shell, root: &Path, options: Options) -> anyhow::Result<()> {
-    let fcc = match options.fcc {
+    let fcc = built_fcc(sh, root, options.fcc)?;
+    let cases = cases(sh, root)?;
+    let results = measure(&fcc, &cases)?;
+    judge(
+        &results,
+        options.baseline.as_deref(),
+        options.output.as_deref(),
+    )
+}
+
+/// The compiler to time: `fcc` as given, or a release build of this tree.
+pub(crate) fn built_fcc(sh: &Shell, root: &Path, fcc: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    let fcc = match fcc {
         Some(fcc) => fcc,
         None => {
             cmd!(sh, "cargo build --release -p fcc --bin fcc").run()?;
@@ -137,7 +153,12 @@ pub fn run(sh: &Shell, root: &Path, options: Options) -> anyhow::Result<()> {
     };
     // Coremark units compile from their checkout, so a relative path must not
     // be resolved against that directory.
-    let fcc = fcc.canonicalize()?;
+    Ok(fcc.canonicalize()?)
+}
+
+/// Every pinned case: the passing torture execute cases, then the coremark
+/// units.
+pub(crate) fn cases(sh: &Shell, root: &Path) -> anyhow::Result<Vec<Case>> {
     let mut cases = execute_corpus(sh, root)?
         .into_iter()
         .map(|file| Case {
@@ -154,14 +175,18 @@ pub fn run(sh: &Shell, root: &Path, options: Options) -> anyhow::Result<()> {
         cwd: Some(coremark.clone()),
         flags: COREMARK_FLAGS.iter().map(|flag| flag.to_string()).collect(),
     }));
+    Ok(cases)
+}
 
+/// Time every case at both levels with one worker.
+pub(crate) fn measure(fcc: &Path, cases: &[Case]) -> anyhow::Result<Results> {
     let mut results = Results::default();
     let mut failed = Vec::new();
     for (index, case) in cases.iter().enumerate() {
         let times = (
-            time_fcc(&fcc, "-O0", case),
+            time_fcc(fcc, "-O0", case),
             time_compile(Path::new("gcc"), &["-O0"], case),
-            time_fcc(&fcc, "-O2", case),
+            time_fcc(fcc, "-O2", case),
             time_compile(Path::new("gcc"), &["-O2"], case),
         );
         match times {
@@ -185,16 +210,25 @@ pub fn run(sh: &Shell, root: &Path, options: Options) -> anyhow::Result<()> {
             println!("fcc bench progress: {}/{} cases", index + 1, cases.len());
         }
     }
-
-    print!("{}", report(&results));
     if !failed.is_empty() {
         anyhow::bail!("fcc bench: failed to compile {}", failed.join(", "));
     }
+    Ok(results)
+}
+
+/// Print the report, compare against `baseline` when given, and write the
+/// samples to `output` when asked.
+pub(crate) fn judge(
+    results: &Results,
+    baseline: Option<&Path>,
+    output: Option<&Path>,
+) -> anyhow::Result<()> {
+    print!("{}", report(results));
     let mut peak_failures = Vec::new();
-    if let Some(baseline) = &options.baseline {
+    if let Some(baseline) = baseline {
         let baseline: Results = serde_json::from_str(&fs::read_to_string(baseline)?)?;
         for level in [Level::O0, Level::O2] {
-            let (before, after) = shared_sums(level, &baseline, &results);
+            let (before, after) = shared_sums(level, &baseline, results);
             println!(
                 "fcc {} sum vs baseline over shared cases: {:.1} s -> {:.1} s ({:+.1} %)",
                 level.flag(),
@@ -208,12 +242,12 @@ pub fn run(sh: &Shell, root: &Path, options: Options) -> anyhow::Result<()> {
                     level.flag()
                 );
             }
-            peak_failures.extend(check_peaks(level, &baseline, &results).err());
+            peak_failures.extend(check_peaks(level, &baseline, results).err());
         }
     }
     // Written before any comparison verdict, so a failing run is diagnosable.
-    if let Some(output) = &options.output {
-        fs::write(output, serde_json::to_string_pretty(&results)?)?;
+    if let Some(output) = output {
+        fs::write(output, serde_json::to_string_pretty(results)?)?;
     }
     if let Some(failure) = peak_failures.into_iter().next() {
         return Err(failure);
@@ -221,20 +255,33 @@ pub fn run(sh: &Shell, root: &Path, options: Options) -> anyhow::Result<()> {
     Ok(())
 }
 
-struct Case {
-    label: String,
-    file: PathBuf,
-    cwd: Option<PathBuf>,
-    flags: Vec<String>,
+pub(crate) struct Case {
+    pub label: String,
+    pub file: PathBuf,
+    pub cwd: Option<PathBuf>,
+    pub flags: Vec<String>,
 }
 
-fn compile_command(compiler: &Path, extra: &[&str], case: &Case) -> Command {
+impl Case {
+    pub(crate) fn is_coremark(&self) -> bool {
+        self.label.starts_with("coremark/")
+    }
+}
+
+/// `compiler -c` on `case` with `extra` flags, writing the object to `output`.
+pub(crate) fn compile_command(
+    compiler: &Path,
+    extra: &[&str],
+    case: &Case,
+    output: &Path,
+) -> Command {
     let mut command = Command::new(compiler);
     command
         .arg("-std=gnu17")
         .args(extra)
         .args(&case.flags)
-        .args(["-c", "-o", "/dev/null"])
+        .args(["-c", "-o"])
+        .arg(output)
         .arg(&case.file)
         .stdout(Stdio::null());
     if let Some(cwd) = &case.cwd {
@@ -244,7 +291,7 @@ fn compile_command(compiler: &Path, extra: &[&str], case: &Case) -> Command {
 }
 
 fn time_compile(compiler: &Path, extra: &[&str], case: &Case) -> Option<f64> {
-    let mut command = compile_command(compiler, extra, case);
+    let mut command = compile_command(compiler, extra, case, Path::new("/dev/null"));
     command.stderr(Stdio::null());
     let started = Instant::now();
     let success = command.status().is_ok_and(|status| status.success());
@@ -257,16 +304,38 @@ fn time_compile(compiler: &Path, extra: &[&str], case: &Case) -> Option<f64> {
 /// through the environment because `--mem-report` is a flag of fcc's own CLI,
 /// and the bench drives the gcc-compatible one.
 fn time_fcc(fcc: &Path, level: &str, case: &Case) -> Option<(f64, u64)> {
-    let mut command = compile_command(fcc, &[level], case);
+    let (ms, peak_kb, _) = time_fcc_to(fcc, &[level], case, Path::new("/dev/null"))?;
+    Some((ms, peak_kb))
+}
+
+/// [`time_fcc`] with the object written to `output`, handing back fcc's
+/// stderr too, which carries the memory report.
+pub(crate) fn time_fcc_to(
+    fcc: &Path,
+    flags: &[&str],
+    case: &Case,
+    output: &Path,
+) -> Option<(f64, u64, String)> {
+    let mut command = compile_command(fcc, flags, case, output);
     command.env("TIR_MEM_STATS", "1").stderr(Stdio::piped());
     let started = Instant::now();
-    let output = command.output().ok()?;
+    let run = command.output().ok()?;
     let ms = started.elapsed().as_secs_f64() * 1e3;
-    if !output.status.success() {
+    if !run.status.success() {
         return None;
     }
-    let peak_kb = parse_peak_kb(&String::from_utf8_lossy(&output.stderr))?;
-    Some((ms, peak_kb))
+    let stderr = String::from_utf8_lossy(&run.stderr).into_owned();
+    let peak_kb = parse_peak_kb(&stderr)?;
+    Some((ms, peak_kb, stderr))
+}
+
+/// The per-case peaks at `level`, by label.
+pub(crate) fn peaks_by_label(level: Level, results: &Results) -> HashMap<&str, u64> {
+    results
+        .samples
+        .iter()
+        .map(|sample| (sample.path.as_str(), level.fcc_peak_kb(sample)))
+        .collect()
 }
 
 /// A run prints one summary per pass manager it drives, and `VmHWM` only ever
@@ -513,6 +582,7 @@ mod tests {
 
     fn results_owned(cases: impl IntoIterator<Item = (String, u64)>) -> Results {
         Results {
+            many_functions_o2_peak_kb: None,
             samples: cases
                 .into_iter()
                 .map(|(path, peak)| Sample {

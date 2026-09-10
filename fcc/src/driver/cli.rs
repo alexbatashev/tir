@@ -62,6 +62,10 @@ pub struct CompileArgs {
     /// Report memory statistics on stderr, as `TIR_MEM_STATS=1` does.
     #[arg(long = "mem-report")]
     mem_report: bool,
+    /// How many functions the mid-end optimises at once. Every count produces
+    /// the same object.
+    #[arg(short = 'j', long = "jobs", value_name = "N", default_value_t = 1)]
+    jobs: usize,
     /// Optimisation level: 0 (no mid-end round), 1, 2 or 3.
     #[arg(
         short = 'O',
@@ -162,6 +166,7 @@ pub(super) fn lower(args: CompileArgs) -> DriverOptions {
             _ => OptLevel::O3,
         },
         shuffle_machine_order: args.shuffle_machine_order,
+        jobs: args.jobs,
         dry_run: false,
     }
 }

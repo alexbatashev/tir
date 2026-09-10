@@ -23,6 +23,7 @@ struct StructLayout {
     fields: Vec<StructFieldLayout>,
 }
 
+#[derive(Clone)]
 pub struct LowerCirStructsPass;
 
 impl LowerCirStructsPass {
