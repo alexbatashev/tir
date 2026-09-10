@@ -1,3 +1,5 @@
+linearize = ["bool_to_bits"]
+
 # isla config for the Sail x86 model (translated from the ACL2 X86ISA model)
 # used by `cargo xtask verify x86_64`. The published snapshot includes the
 # footprint wrapper that puts the model in the application view and 64-bit mode;

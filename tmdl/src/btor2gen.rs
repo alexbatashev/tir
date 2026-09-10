@@ -264,6 +264,10 @@ impl crate::semgen::TermBackend for Btor2Term<'_, '_> {
         self.b.ite(condition, then, otherwise, signed)
     }
 
+    fn bitcast(&mut self, value: Bv) -> Bv {
+        value
+    }
+
     fn as_bool(&mut self, value: Bv) -> Bv {
         self.b.as_bool(value)
     }

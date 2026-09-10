@@ -14,6 +14,10 @@
 //!      GPRs or PC. `unsat` proves agreement for ALL
 //!      2^XLEN values of every register; `sat` yields a counterexample.
 //!
+//! Undefined Sail values are internal choices. The query searches for an
+//! architectural input whose TMDL result no choice can reproduce. Register
+//! and memory inputs remain outside that quantifier.
+//!
 //! Modeling assumptions, reported with the results:
 //!   - machine mode, no traps: paths that touch unmapped architectural state
 //!     (CSRs, mcause, ...) are excluded and counted;
@@ -51,7 +55,7 @@
 //!     TMDL behavior writes them; the ALU ops deliberately leave flags
 //!     unmodeled, so their flag writes are ignored.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -143,18 +147,18 @@ pub struct IsaSpec {
     requires_pc_write: bool,
     /// Optional local snapshot path, bypassing the download.
     local_snapshot: Option<&'static str>,
-    /// Sub-register view classes that alias the GPR file (x86
-    /// `gpr8`/`gpr16`/`gpr32`/`gpr8h`), treated as mapped like `gpr`.
-    gpr_view_classes: &'static [&'static str],
 }
 
 impl IsaSpec {
     /// TMDL register classes the driver can relate to Sail state. The x86
     /// sub-register views (`gpr8`/`gpr16`/`gpr32`/`gpr8h`) alias the GPR file
     /// and are named by the same Sail registers, so they map like `gpr`.
-    fn class_is_mapped(&self, class: &str) -> bool {
+    fn class_is_mapped(&self, model: &FlatModel, class: &str) -> bool {
         class == "gpr"
-            || self.gpr_view_classes.contains(&class)
+            || model
+                .classes
+                .get(class)
+                .is_some_and(|info| info.storage == "gpr")
             || self.extra_regs.iter().any(|(_, c, _, _)| *c == class)
     }
 
@@ -232,7 +236,6 @@ const ISA_SPECS: &[IsaSpec] = &[
         canonical_addrs: false,
         requires_pc_write: false,
         local_snapshot: None,
-        gpr_view_classes: &[],
     },
     IsaSpec {
         name: "riscv32",
@@ -265,7 +268,6 @@ const ISA_SPECS: &[IsaSpec] = &[
         canonical_addrs: false,
         requires_pc_write: false,
         local_snapshot: None,
-        gpr_view_classes: &[],
     },
     IsaSpec {
         name: "armv8",
@@ -306,7 +308,6 @@ const ISA_SPECS: &[IsaSpec] = &[
         canonical_addrs: false,
         requires_pc_write: false,
         local_snapshot: None,
-        gpr_view_classes: &[],
     },
     IsaSpec {
         name: "x86_64",
@@ -315,7 +316,7 @@ const ISA_SPECS: &[IsaSpec] = &[
         defs_dir: "backends/x86_64/defs",
         snapshot: "x86.ir",
         snapshot_repo: "frontiers-labs/isla-snapshots",
-        snapshot_ref: "master",
+        snapshot_ref: "3c4f457ea9ac2702dae9203414cbdad498be602d",
         config: "verify-smt-x86_64.toml",
         xlen: 64,
         // x86 GPRs are named individually; see reg_names.
@@ -351,15 +352,18 @@ const ISA_SPECS: &[IsaSpec] = &[
         trap_cause: None,
         initial_registers: &[],
         reg_names: X86_REG_NAMES,
-        // rflags bit layout: cf=0, zf=6, sf=7, of=11 (Intel SDM). TMDL EFLAGS
+        // rflags bit layout: cf=0, pf=2, zf=6, sf=7, of=11 (Intel SDM). TMDL EFLAGS
         // slots cf=0, pf=1, zf=2, sf=3, of=4 (declaration order).
-        flag_reg: Some(("rflags", "eflags", &[(0, 0), (2, 6), (3, 7), (4, 11)])),
+        flag_reg: Some((
+            "rflags",
+            "eflags",
+            &[(0, 0), (1, 2), (2, 6), (3, 7), (4, 11)],
+        )),
         simplify: false,
         align_pc: false,
         canonical_addrs: true,
         requires_pc_write: true,
         local_snapshot: None,
-        gpr_view_classes: &["gpr8", "gpr16", "gpr32", "gpr8h"],
     },
 ];
 
@@ -385,7 +389,7 @@ const X86_REG_NAMES: &[(&str, u32)] = &[
 
 /// Why `instr` cannot be verified against the model, as the report names it,
 /// or `None` when it can.
-fn unsupported_reason(spec: &IsaSpec, instr: &Instruction) -> Option<String> {
+fn unsupported_reason(spec: &IsaSpec, model: &FlatModel, instr: &Instruction) -> Option<String> {
     let riscv = spec.name.starts_with("riscv");
     if riscv && instr.name == "vsetvli" {
         return Some("vsetvli (RVV disabled in Sail configuration)".to_string());
@@ -422,7 +426,7 @@ fn unsupported_reason(spec: &IsaSpec, instr: &Instruction) -> Option<String> {
         .operands
         .iter()
         .find_map(|(_, kind)| match kind {
-            OperandKind::Reg { class, .. } if !spec.class_is_mapped(class) => Some(class),
+            OperandKind::Reg { class, .. } if !spec.class_is_mapped(model, class) => Some(class),
             _ => None,
         })
         .map(|class| format!("{} (unmapped register class {})", instr.name, class))
@@ -467,7 +471,7 @@ pub fn verify_smt(sh: &Shell, isa: &str, args: impl Iterator<Item = String>) -> 
         if shard.is_some_and(|shard| !shard.contains(&instr.name)) {
             continue;
         }
-        if let Some(reason) = unsupported_reason(spec, instr) {
+        if let Some(reason) = unsupported_reason(spec, &inventory.flat, instr) {
             report.unsupported.push(reason);
             continue;
         }
@@ -485,7 +489,7 @@ pub fn verify_smt(sh: &Shell, isa: &str, args: impl Iterator<Item = String>) -> 
     // What an encoding owes its decoder, whichever shape it took: the word the
     // instruction encodes to reads back as that instruction.
     for instr in &selected {
-        match prove_roundtrip(&tools, &out_dir, &smt_path, instr)? {
+        match prove_roundtrip(&tools, spec, &out_dir, &smt_path, instr)? {
             true => report.roundtrip_proved.push(instr.name.clone()),
             false => report.roundtrip_open.push(instr.name.clone()),
         }
@@ -550,8 +554,6 @@ fn parse_shard(mut args: impl Iterator<Item = String>) -> anyhow::Result<Option<
 }
 
 struct Tools {
-    snapshot: PathBuf,
-    isla_config: PathBuf,
     bitwuzla: Option<PathBuf>,
     z3: PathBuf,
     verifier: tir_verify::Verifier,
@@ -603,8 +605,6 @@ impl Tools {
                     .map(|_| PathBuf::from("bitwuzla"))
             });
         Ok(Tools {
-            snapshot,
-            isla_config,
             bitwuzla,
             z3: std::env::var("TIR_Z3")
                 .unwrap_or_else(|_| "z3".to_string())
@@ -689,6 +689,7 @@ struct Instruction {
     operands: Vec<(String, OperandKind)>,
     supported: bool,
     write_classes: Vec<String>,
+    fixed_register_writes: Vec<(String, u32)>,
     uses_reservation: bool,
     pc_source_operands: Vec<usize>,
     memory_accesses: Vec<MemoryAccessMetadata>,
@@ -833,6 +834,7 @@ fn parse_inventory(json: &str) -> anyhow::Result<Inventory> {
                 operands,
                 supported: raw.supported,
                 write_classes: raw.write_classes,
+                fixed_register_writes: raw.fixed_register_writes,
                 uses_reservation: raw.uses_reservation,
                 pc_source_operands: raw.pc_source_operands,
                 memory_accesses: raw.memory_accesses,
@@ -970,7 +972,26 @@ fn operand_cases(spec: &IsaSpec, instr: &Instruction) -> Vec<Vec<u64>> {
     cases
 }
 
-fn operand_case_is_valid(spec: &IsaSpec, instr: &Instruction, case: &[u64]) -> bool {
+fn operand_case_is_valid(
+    spec: &IsaSpec,
+    model: &FlatModel,
+    instr: &Instruction,
+    case: &[u64],
+) -> bool {
+    if !instr
+        .operands
+        .iter()
+        .zip(case)
+        .all(|((_, kind), value)| match kind {
+            OperandKind::Reg { class, .. } => model.classes[class]
+                .indices
+                .iter()
+                .any(|index| u64::from(*index) == *value),
+            _ => true,
+        })
+    {
+        return false;
+    }
     let value = |index: usize| case[index];
     match (spec.name, instr.name.as_str()) {
         ("armv8", "loaddoublewordpreindex" | "loaddoublewordpostindex") => value(0) != value(1),
@@ -1335,28 +1356,12 @@ fn signed_fit(guard: &tmdl::shapes::Predicate, operand: &str, bits: u32) -> bool
 // Isla library execution (cached per instruction word)
 // ---------------------------------------------------------------------------
 
-/// Traces depend on the Sail snapshot and isla config; fingerprint both so a
-/// swap invalidates the cache.
-fn cache_fingerprint(tools: &Tools) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::fs::read(&tools.isla_config)
-        .unwrap_or_default()
-        .hash(&mut hasher);
-    tools.snapshot.hash(&mut hasher);
-    std::fs::metadata(&tools.snapshot)
-        .map(|m| m.len())
-        .unwrap_or(0)
-        .hash(&mut hasher);
-    hasher.finish()
-}
-
 fn sail_traces(
     tools: &Tools,
     out_dir: &Path,
     words: &[(u128, u32)],
 ) -> anyhow::Result<HashMap<u128, Option<Vec<Vec<tir_verify::TraceEvent>>>>> {
-    let fingerprint = cache_fingerprint(tools);
+    let fingerprint = tools.verifier.cache_fingerprint();
     let cache_path = |word| {
         out_dir
             .join("cache")
@@ -1432,12 +1437,10 @@ fn map_register(spec: &IsaSpec, name: &str) -> Option<MappedReg> {
 /// Whether a memory event's kind is a plain data access. Old-interface
 /// models (RISC-V) use enum atoms (`|Read_plain|`); new-interface models
 /// (ARM) embed the whole request struct, whose `access_kind` must be an
-/// explicit access of plain variety and normal (non-acquire/release)
-/// strength.
+/// explicit access of plain variety. Acquire/release strength changes ordering,
+/// which a single-instruction state comparison does not model.
 fn is_plain_access(kind: &tir_verify::TraceValue) -> bool {
-    kind.smt.trim_matches('|').ends_with("_plain")
-        || (kind.smt.contains("|AV_plain|")
-            && (!kind.smt.contains("|strength|") || kind.smt.contains("|AS_normal|")))
+    kind.smt.trim_matches('|').ends_with("_plain") || kind.smt.contains("|AV_plain|")
 }
 
 /// Whether the value mentions any isla symbolic variable (`vN`). Struct
@@ -1472,6 +1475,7 @@ struct TraceInfo {
     mem_writes: Vec<MemAccess>,
     /// Verbatim `(declare-const v Sort)` lines.
     declares: Vec<String>,
+    inputs: std::collections::HashSet<String>,
     /// Ordered `define-const` bindings, replayed as a `let` chain.
     defines: Vec<(String, String)>,
     asserts: Vec<String>,
@@ -1490,6 +1494,15 @@ struct TraceInfo {
 fn exclude(info: &mut TraceInfo, reason: String) {
     if info.excluded.is_none() {
         info.excluded = Some(reason);
+    }
+}
+
+fn register_value(spec: &IsaSpec, name: &str, value: &tir_verify::TraceValue) -> String {
+    let value = &unwrap_bits_struct(value).smt;
+    if spec.name == "riscv32" && name == "mstatus" {
+        format!("((_ extract 31 0) {value})")
+    } else {
+        value.clone()
     }
 }
 
@@ -1550,7 +1563,7 @@ fn analyze_register_read(
         Some(reg) => {
             let concrete = value.smt.starts_with('#');
             if !info.writes.contains_key(&reg) && (concrete || !defined_vars.contains(&value.smt)) {
-                info.reads.push((reg, value.smt.clone()));
+                info.reads.push((reg, register_value(spec, name, value)));
             }
         }
         None if value.symbolic => {
@@ -1603,8 +1616,7 @@ fn analyze_register_write(
     match map_register(spec, name) {
         Some(MappedReg::X(n)) if Some(n) == spec.zero_reg => {}
         Some(reg) => {
-            info.writes
-                .insert(reg, unwrap_bits_struct(value).smt.clone());
+            info.writes.insert(reg, register_value(spec, name, value));
         }
         None => exclude(
             info,
@@ -1614,6 +1626,7 @@ fn analyze_register_write(
 }
 
 fn analyze_memory_access(
+    spec: &IsaSpec,
     info: &mut TraceInfo,
     is_read: bool,
     kind: &tir_verify::TraceValue,
@@ -1631,7 +1644,11 @@ fn analyze_memory_access(
     }
     let access = MemAccess {
         value: value.smt.clone(),
-        address: address.smt.clone(),
+        address: if spec.xlen == 32 {
+            format!("((_ extract 31 0) {})", address.smt)
+        } else {
+            address.smt.clone()
+        },
         bytes,
     };
     if is_read {
@@ -1645,6 +1662,16 @@ fn analyze_memory_access(
     }
 }
 
+fn symbolic_variables(expression: &str) -> impl Iterator<Item = &str> {
+    expression
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| {
+            word.strip_prefix('v').is_some_and(|digits| {
+                !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+            })
+        })
+}
+
 fn analyze_trace(spec: &IsaSpec, events: &[tir_verify::TraceEvent]) -> TraceInfo {
     let mut info = TraceInfo::default();
     // Variables bound by `define-const`: reads returning them are read-backs
@@ -1653,6 +1680,15 @@ fn analyze_trace(spec: &IsaSpec, events: &[tir_verify::TraceEvent]) -> TraceInfo
     let mut defined_vars = std::collections::HashSet::new();
 
     for event in events {
+        let input = match event {
+            tir_verify::TraceEvent::ReadRegister { value, .. }
+            | tir_verify::TraceEvent::ReadMemory { value, .. } => Some(value),
+            _ => None,
+        };
+        if let Some(input) = input {
+            info.inputs
+                .extend(symbolic_variables(&input.smt).map(str::to_owned));
+        }
         match event {
             tir_verify::TraceEvent::ReadRegister {
                 name,
@@ -1694,13 +1730,28 @@ fn analyze_trace(spec: &IsaSpec, events: &[tir_verify::TraceEvent]) -> TraceInfo
                 address,
                 value,
                 bytes,
-            } => analyze_memory_access(&mut info, true, kind, address, value, *bytes),
+            } => analyze_memory_access(spec, &mut info, true, kind, address, value, *bytes),
             tir_verify::TraceEvent::WriteMemory {
                 kind,
                 address,
                 value,
                 bytes,
-            } => analyze_memory_access(&mut info, false, kind, address, value, *bytes),
+            } => analyze_memory_access(spec, &mut info, false, kind, address, value, *bytes),
+        }
+    }
+    let definitions: HashMap<_, _> = info
+        .defines
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    let mut pending: Vec<_> = info.inputs.iter().cloned().collect();
+    while let Some(name) = pending.pop() {
+        if let Some(expression) = definitions.get(name.as_str()) {
+            for dependency in symbolic_variables(expression) {
+                if info.inputs.insert(dependency.to_owned()) {
+                    pending.push(dependency.to_owned());
+                }
+            }
         }
     }
     // A completing x86 instruction always advances the PC; a path that never
@@ -1961,6 +2012,13 @@ fn build_query(
         if instr.write_classes.iter().any(|written| written == class) {
             let idx_w = model.classes[class].index_width;
             for (slot, _) in bit_map {
+                if !instr
+                    .fixed_register_writes
+                    .iter()
+                    .any(|(written, index)| written == class && u64::from(*index) == *slot)
+                {
+                    continue;
+                }
                 let sail = trace.flag_writes.get(slot).cloned().unwrap_or_else(|| {
                     flat_read_register(model, class, "st0", &format!("(_ bv{slot} {idx_w})"))
                 });
@@ -2078,8 +2136,12 @@ fn build_query(
         asserts.join(" ")
     };
     let with_defines = |mut body: String| {
+        let mut needed: HashSet<String> = symbolic_variables(&body).map(str::to_owned).collect();
         for (var, expr) in trace.defines.iter().rev() {
-            body = format!("(let (({} {}))\n{})", var, expr, body);
+            if needed.remove(var) {
+                needed.extend(symbolic_variables(expr).map(str::to_owned));
+                body = format!("(let (({} {}))\n{})", var, expr, body);
+            }
         }
         body
     };
@@ -2100,10 +2162,36 @@ fn build_query(
         q.push_str("(check-sat)\n(pop)\n");
     }
     let cause_constraint = modeled.as_deref().unwrap_or("true");
-    let body = with_defines(format!(
-        "(and {path} {cause_constraint} (not (and {})))",
+    let reachable = with_defines(format!("(and {path} {cause_constraint})"));
+    let agrees = with_defines(format!(
+        "(and {path} {cause_constraint} {})",
         final_eq.join("\n  ")
     ));
+    let compared = with_defines(format!("(and {})", final_eq.join(" ")));
+    let used: HashSet<_> = symbolic_variables(&compared).collect();
+    let choices = trace
+        .declares
+        .iter()
+        .filter_map(|declaration| {
+            let binding = declaration
+                .strip_prefix("(declare-const ")?
+                .strip_suffix(')')?;
+            let (name, _) = binding.split_once(' ')?;
+            (used.contains(name) && !trace.inputs.contains(name)).then(|| format!("({binding})"))
+        })
+        .collect::<Vec<_>>();
+    let body = if choices.is_empty() {
+        with_defines(format!(
+            "(and {path} {cause_constraint} (not (and {})))",
+            final_eq.join("\n  ")
+        ))
+    } else {
+        q = q.replacen("(set-logic QF_AUFBV)", "(set-logic AUFBV)", 1);
+        format!(
+            "(and {reachable} (not (exists ({}) {agrees})))",
+            choices.join(" ")
+        )
+    };
     let _ = writeln!(q, "(assert {})", body);
     q.push_str("(check-sat)\n");
 
@@ -2252,7 +2340,7 @@ fn verify_instruction(
     };
     let cases = operand_cases(spec, instr)
         .into_iter()
-        .filter(|case| operand_case_is_valid(spec, instr, case))
+        .filter(|case| operand_case_is_valid(spec, model, instr, case))
         .collect::<Vec<_>>();
     // A shape the sampled cases never reach is a shape nothing verifies, so
     // each one that comes up empty gets a case built to satisfy its guard.
@@ -2270,7 +2358,7 @@ fn verify_instruction(
         let Some(case) = case_reaching(instr, shape, base) else {
             continue;
         };
-        if operand_case_is_valid(spec, instr, &case) {
+        if operand_case_is_valid(spec, model, instr, &case) {
             cases.push(case);
         }
     }
@@ -2461,6 +2549,7 @@ fn run_z3(tools: &Tools, path: &Path) -> anyhow::Result<std::process::Output> {
 /// answer is an operand tuple whose word decodes to something else.
 fn prove_roundtrip(
     tools: &Tools,
+    spec: &IsaSpec,
     out_dir: &Path,
     model: &Path,
     instr: &Instruction,
@@ -2470,7 +2559,7 @@ fn prove_roundtrip(
     for (name, kind) in &instr.operands {
         let width = match kind {
             OperandKind::Reg { idx_width, .. } => *idx_width,
-            _ => 64,
+            _ => spec.xlen,
         };
         let _ = writeln!(query, "(declare-const rt_{name} (_ BitVec {width}))");
         args.push(format!("rt_{name}"));
@@ -2596,12 +2685,12 @@ mod tests {
           "register_classes": [{
             "name": "gpr", "storage": "gpr", "index_width": 5,
             "value_width": 64, "storage_width": 64, "zero_index": 0,
-            "bit_offset": 0
+            "bit_offset": 0, "indices": [0, 1, 2, 3, 4, 5]
           }],
           "instructions": [{
             "name": "load", "writes_pc": false, "width_bits": 32,
             "operands": [OPERANDS],
-            "supported": true, "write_classes": ["gpr"],
+            "supported": true, "write_classes": ["gpr"], "fixed_register_writes": [],
             "uses_reservation": false, "pc_source_operands": [],
             "memory_accesses": [{"kind": "load", "bytes": 4, "address": "(read_gpr st rd)", "flat_address": "(select st0_gpr rd)"}],
             "trap_kinds": ["misaligned_load"],
@@ -2670,6 +2759,7 @@ mod tests {
                         index_width: 3,
                         value_width: 1,
                         storage_width: 1,
+                        indices: (0..5).collect(),
                         zero_index: None,
                         bit_offset: 0,
                     },
@@ -2682,6 +2772,7 @@ mod tests {
                         index_width: 4,
                         value_width: 64,
                         storage_width: 64,
+                        indices: (0..16).collect(),
                         zero_index: None,
                         bit_offset: 0,
                     },
@@ -2696,6 +2787,7 @@ mod tests {
             operands: vec![],
             supported: true,
             write_classes: vec!["eflags".into()],
+            fixed_register_writes: vec![("eflags".into(), 0)],
             uses_reservation: false,
             pc_source_operands: vec![],
             memory_accesses: vec![],

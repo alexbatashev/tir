@@ -57,6 +57,7 @@ pub(crate) trait TermBackend {
         signed: bool,
     ) -> Self::Val;
     fn as_bool(&mut self, value: Self::Val) -> Self::Val;
+    fn bitcast(&mut self, value: Self::Val) -> Self::Val;
     /// A term outside the shared vocabulary (memory, atomics, clamping):
     /// `emit` yields the backend's spelling of an operand.
     fn special<G: ValueDag>(
@@ -170,7 +171,10 @@ pub(crate) fn emit<B: TermBackend>(
             }
             Some(b.widen(x, target, kind == SymKind::SExt))
         }
-        SymKind::Bitcast => emit(graph, child_node(0)?, b),
+        SymKind::Bitcast => {
+            let value = emit(graph, child_node(0)?, b)?;
+            Some(b.bitcast(value))
+        }
         SymKind::Extract => emit_extract(graph, node, b),
         SymKind::Log2Ceil => {
             let (v, w) = eval_const(graph, node)?;

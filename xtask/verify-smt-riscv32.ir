@@ -1,0 +1,19 @@
+val ztir_verify_execute : (%union zinstruction) -> %union zExecutionResult
+
+fn ztir_verify_execute(zinstruction) {
+  zresult : %union zExecutionResult;
+  zresult = zexecute(zinstruction);
+  jump zresult is zTrap goto 13;
+  zprivilege : %enum zPrivilege;
+  zprivilege = zresult as zTrap.ztuplez3z5enumz0zzPrivilege_z5structz0zzsync_exception_z5bv320;
+  zexception : %struct zsync_exception;
+  zexception = zresult as zTrap.ztuplez3z5enumz0zzPrivilege_z5structz0zzsync_exception_z5bv321;
+  zpc : %bv32;
+  zpc = zresult as zTrap.ztuplez3z5enumz0zzPrivilege_z5structz0zzsync_exception_z5bv322;
+  ztarget : %bv32;
+  ztarget = zexception_handler(zprivilege, zexception, zpc);
+  zunit : %unit;
+  zunit = zset_next_pc(ztarget);
+  return = zresult;
+  end;
+}
