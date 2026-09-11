@@ -120,7 +120,10 @@ fn check(
             .with_context(|| reference_path.display().to_string())?,
     )
     .with_context(|| reference_path.display().to_string())?;
-    anyhow::ensure!(reference.schema_version == 1, "unsupported report schema version");
+    anyhow::ensure!(
+        reference.schema_version == 1,
+        "unsupported report schema version"
+    );
     anyhow::ensure!(
         reference.profile == manifest.reference.profile,
         "reference profile mismatch"
@@ -159,7 +162,9 @@ fn check(
             results.push((*reference_result).clone());
             continue;
         }
-        let comparison = case.expectation.compare(reference_result.observation.as_ref());
+        let comparison = case
+            .expectation
+            .compare(reference_result.observation.as_ref());
         let mut result = (*reference_result).clone();
         result.stage = case.stage;
         match comparison {
@@ -190,7 +195,10 @@ fn check(
     }
     fs::write(output_path, serde_json::to_vec_pretty(&checked)?)?;
     anyhow::ensure!(
-        checked.results.iter().all(|result| result.status == Status::Pass),
+        checked
+            .results
+            .iter()
+            .all(|result| result.status == Status::Pass),
         "floating-point comparison failed; report written to {}",
         output_path.display()
     );
@@ -327,7 +335,10 @@ fn run_reference_case(
     compile.push(copied_source.display().to_string());
     compile.extend(["-o".into(), output_path.display().to_string()]);
     if matches!(case.probe, Probe::Execute)
-        && case.target_requirements.iter().any(|requirement| requirement == "libm")
+        && case
+            .target_requirements
+            .iter()
+            .any(|requirement| requirement == "libm")
     {
         compile.push("-lm".into());
     }
@@ -341,10 +352,16 @@ fn run_reference_case(
             String::from_utf8_lossy(&compiled.stderr)
         );
         let observation = Observation::Diagnostic { message };
-        let expectation = case.reference_expectation.as_ref().unwrap_or(&case.expectation);
+        let expectation = case
+            .reference_expectation
+            .as_ref()
+            .unwrap_or(&case.expectation);
         let comparison = expectation.compare(Some(&observation));
         let (status, detail) = if compiled.status.success() {
-            (Status::Fail, "expected compilation to fail with a diagnostic".into())
+            (
+                Status::Fail,
+                "expected compilation to fail with a diagnostic".into(),
+            )
         } else {
             match comparison {
                 Ok(()) => (
@@ -439,7 +456,10 @@ fn run_reference_case(
                     });
                 }
             };
-            let expectation = case.reference_expectation.as_ref().unwrap_or(&case.expectation);
+            let expectation = case
+                .reference_expectation
+                .as_ref()
+                .unwrap_or(&case.expectation);
             let (status, detail) = match expectation.compare(Some(&observation)) {
                 Ok(()) => (
                     Status::Pass,
@@ -479,7 +499,10 @@ fn run_reference_case(
                     .map(str::to_string)
                     .collect(),
             };
-            let expectation = case.reference_expectation.as_ref().unwrap_or(&case.expectation);
+            let expectation = case
+                .reference_expectation
+                .as_ref()
+                .unwrap_or(&case.expectation);
             let (status, detail) = match expectation.compare(Some(&observation)) {
                 Ok(()) => (
                     Status::Pass,
@@ -515,11 +538,13 @@ fn run_reference_case(
 }
 
 fn read_manifest(path: &Path) -> anyhow::Result<Manifest> {
-    let manifest: Manifest = toml::from_str(
-        &fs::read_to_string(path).with_context(|| path.display().to_string())?,
-    )
-    .with_context(|| path.display().to_string())?;
-    anyhow::ensure!(manifest.schema_version == 1, "unsupported manifest schema version");
+    let manifest: Manifest =
+        toml::from_str(&fs::read_to_string(path).with_context(|| path.display().to_string())?)
+            .with_context(|| path.display().to_string())?;
+    anyhow::ensure!(
+        manifest.schema_version == 1,
+        "unsupported manifest schema version"
+    );
     let ids = manifest
         .cases
         .iter()
@@ -531,7 +556,9 @@ fn read_manifest(path: &Path) -> anyhow::Result<Manifest> {
 
 fn resolve_executable(path: &Path) -> anyhow::Result<PathBuf> {
     if path.components().count() > 1 {
-        return path.canonicalize().with_context(|| path.display().to_string());
+        return path
+            .canonicalize()
+            .with_context(|| path.display().to_string());
     }
     let search = std::env::var_os("PATH").context("PATH is not set")?;
     std::env::split_paths(&search)
@@ -544,7 +571,11 @@ fn resolve_executable(path: &Path) -> anyhow::Result<PathBuf> {
 
 fn stdout(argv: &[String]) -> anyhow::Result<String> {
     let output = command_output(argv)?;
-    anyhow::ensure!(output.status.success(), "{}", process_failure(&argv[0], &output));
+    anyhow::ensure!(
+        output.status.success(),
+        "{}",
+        process_failure(&argv[0], &output)
+    );
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
@@ -576,8 +607,12 @@ fn timestamp() -> anyhow::Result<u64> {
 
 fn report(path: &Path) -> anyhow::Result<()> {
     let contents = fs::read_to_string(path).with_context(|| path.display().to_string())?;
-    let report: Report = serde_json::from_str(&contents).with_context(|| path.display().to_string())?;
-    anyhow::ensure!(report.schema_version == 1, "unsupported report schema version");
+    let report: Report =
+        serde_json::from_str(&contents).with_context(|| path.display().to_string())?;
+    anyhow::ensure!(
+        report.schema_version == 1,
+        "unsupported report schema version"
+    );
 
     let count = |status| {
         report
@@ -592,7 +627,13 @@ fn report(path: &Path) -> anyhow::Result<()> {
     let missing = count(Status::MissingInfrastructure);
     println!(
         "profile={} target={} library={} pass={} fail={} unsupported={} missing_infrastructure={}",
-        report.profile, report.host.target, report.host.library, passed, failed, unsupported, missing
+        report.profile,
+        report.host.target,
+        report.host.library,
+        passed,
+        failed,
+        unsupported,
+        missing
     );
     for result in report
         .results

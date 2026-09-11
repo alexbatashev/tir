@@ -1,7 +1,11 @@
 use std::fs;
 use std::process::Command;
 
-fn check_fixture(expectation: &str, observation: &str, reference_status: &str) -> (bool, serde_json::Value) {
+fn check_fixture(
+    expectation: &str,
+    observation: &str,
+    reference_status: &str,
+) -> (bool, serde_json::Value) {
     let directory = tempfile::tempdir().unwrap();
     let manifest = directory.path().join("cases.toml");
     let reference = directory.path().join("reference.json");
@@ -236,10 +240,7 @@ fn check_preserves_an_unsupported_capability() {
     );
 
     assert!(!success);
-    assert_eq!(
-        report["results"][0]["status"],
-        "unsupported_capability"
-    );
+    assert_eq!(report["results"][0]["status"], "unsupported_capability");
     assert_eq!(report["results"][0]["detail"], "fixture");
 }
 
@@ -252,10 +253,7 @@ fn check_preserves_missing_infrastructure() {
     );
 
     assert!(!success);
-    assert_eq!(
-        report["results"][0]["status"],
-        "missing_infrastructure"
-    );
+    assert_eq!(report["results"][0]["status"], "missing_infrastructure");
     assert_eq!(report["results"][0]["detail"], "fixture");
 }
 
@@ -568,10 +566,17 @@ fn reference_records_underflow_for_minimum_subnormal_scaling() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let report: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
-    assert_eq!(report["results"][0]["observation"]["bits"], "0x0000000000000000");
+    assert_eq!(
+        report["results"][0]["observation"]["bits"],
+        "0x0000000000000000"
+    );
     assert_eq!(
         report["results"][0]["observation"]["flags"],
         serde_json::json!(["underflow", "inexact"])
@@ -596,11 +601,21 @@ fn reference_records_directed_halfway_rounding() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let report: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
-    assert_eq!(report["results"][0]["observation"]["bits"], "0x3ff0000000000001");
-    assert_eq!(report["results"][0]["observation"]["flags"], serde_json::json!(["inexact"]));
+    assert_eq!(
+        report["results"][0]["observation"]["bits"],
+        "0x3ff0000000000001"
+    );
+    assert_eq!(
+        report["results"][0]["observation"]["flags"],
+        serde_json::json!(["inexact"])
+    );
 }
 
 #[test]
@@ -621,10 +636,17 @@ fn reference_records_observable_dead_arithmetic() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let report: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
-    assert_eq!(report["results"][0]["observation"]["flags"], serde_json::json!([]));
+    assert_eq!(
+        report["results"][0]["observation"]["flags"],
+        serde_json::json!([])
+    );
     assert_eq!(report["results"][0]["observation"]["errno"], 123);
     assert_eq!(report["results"][0]["status"], "pass");
 }
@@ -647,12 +669,22 @@ fn reference_records_negative_sqrt_reporting() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let report: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
-    assert_eq!(report["results"][0]["observation"]["flags"], serde_json::json!(["invalid"]));
+    assert_eq!(
+        report["results"][0]["observation"]["flags"],
+        serde_json::json!(["invalid"])
+    );
     assert_eq!(report["results"][0]["observation"]["errno"], 33);
-    assert_eq!(report["results"][0]["observation"]["result_bits"], "0xfff8000000000000");
+    assert_eq!(
+        report["results"][0]["observation"]["result_bits"],
+        "0xfff8000000000000"
+    );
 }
 
 #[test]
@@ -673,7 +705,11 @@ fn reference_records_disabled_builtin_recognition() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let report: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
     assert!(report["results"][0]["observation"]["instructions"]
@@ -701,7 +737,11 @@ fn reference_accepts_the_expected_declaration_diagnostic() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let report: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
     assert_eq!(report["results"][0]["status"], "pass");
@@ -729,7 +769,11 @@ fn reference_records_reserved_cases_as_unsupported() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let report: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
     assert_eq!(report["results"][0]["status"], "unsupported_capability");
