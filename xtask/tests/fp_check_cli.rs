@@ -9,13 +9,7 @@ fn check_fixture(
     reference_status: &str,
     stage: &str,
 ) -> (bool, serde_json::Value) {
-    check_fixture_with_compiler(
-        expectation,
-        observation,
-        reference_status,
-        stage,
-        "15.2.0",
-    )
+    check_fixture_with_compiler(expectation, observation, reference_status, stage, "15.2.0")
 }
 
 fn check_fixture_with_compiler(

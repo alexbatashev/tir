@@ -22,7 +22,8 @@ and does not replace the pinned profile.
 Use `--case ID` to run one case. The runner passes every compiler and runtime
 argument directly to a process. It does not use a shell. Each probe runs in an
 isolated temporary directory. A failed compiler or probe keeps that directory
-and writes its path to `artifacts`.
+and writes its path to `artifacts`. Setup failures still write a report, marking
+every selected case as `missing_infrastructure`, before returning nonzero.
 
 The reference report records the compiler version and executable path, target,
 C library, source SHA-256 digest, commands, exit status, observation, and
@@ -47,16 +48,21 @@ command fail. The command writes the report before returning a comparison
 failure. Step 1 implements only the `reference` checker. It reports selected
 post-reference TIR cases as unsupported until their owning stages add a TIR
 observation path. Pass `--case ID` to reproduce one selected case.
+Before comparing observations, the checker verifies the recorded compiler,
+source digest, stage, host identity, and command provenance against the selected
+manifest and current source.
 
 Manifest expectations use these kinds:
 
 - `exact_bits` records result bits and exception flags.
 - `permitted_set` records every allowed result.
+- `correlated_results` records outputs that must come from one evaluation and
+  therefore must match together.
 - `numerical_bound` records the metric, domain, limit, zero and subnormal
   conventions, and exceptional-value behavior.
 - `code_shape` records required and forbidden instruction text.
-- `effects` records result bits when relevant, flags, errno, ordered events,
-  and trap delivery.
+- `effects` records scalar or complete vector result bits when relevant, flags,
+  errno, ordered events, and trap delivery.
 - `diagnostic` records required diagnostic text.
 
 Every report result has one status. `pass` and `fail` are comparison outcomes.

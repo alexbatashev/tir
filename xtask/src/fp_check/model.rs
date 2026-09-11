@@ -261,9 +261,7 @@ impl Expectation {
                 }
             }
             (
-                Self::CorrelatedResults {
-                    results: expected,
-                },
+                Self::CorrelatedResults { results: expected },
                 Observation::CorrelatedResults { results: observed },
             ) => {
                 if observed == expected {
