@@ -74,6 +74,8 @@ pub enum Expectation {
     },
     Effects {
         #[serde(default)]
+        result_bits: Option<String>,
+        #[serde(default)]
         flags: Vec<String>,
         errno: Option<i32>,
         #[serde(default)]
@@ -159,6 +161,8 @@ pub enum Observation {
         instructions: Vec<String>,
     },
     Effects {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result_bits: Option<String>,
         flags: Vec<String>,
         errno: Option<i32>,
         events: Vec<String>,
@@ -238,18 +242,25 @@ impl Expectation {
             }
             (
                 Self::Effects {
+                    result_bits: expected_bits,
                     flags: expected_flags,
                     errno: expected_errno,
                     events: expected_events,
                     trapped: expected_trap,
                 },
                 Observation::Effects {
+                    result_bits,
                     flags,
                     errno,
                     events,
                     trapped,
                 },
             ) => {
+                if result_bits != expected_bits {
+                    return Err(format!(
+                        "expected result bits {expected_bits:?}, observed {result_bits:?}"
+                    ));
+                }
                 compare_flags(expected_flags, flags)?;
                 if errno != expected_errno {
                     return Err(format!(
