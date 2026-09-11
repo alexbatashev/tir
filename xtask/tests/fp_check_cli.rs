@@ -657,6 +657,16 @@ fn reference_rejects_a_missing_compiler() {
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("/definitely/missing/gcc"));
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
+    assert!(!report["results"].as_array().unwrap().is_empty());
+    assert!(report["results"].as_array().unwrap().iter().all(|result| {
+        result["status"] == "missing_infrastructure"
+            && result["detail"]
+                .as_str()
+                .unwrap()
+                .contains("/definitely/missing/gcc")
+    }));
 }
 
 #[test]
