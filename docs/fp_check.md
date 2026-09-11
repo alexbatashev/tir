@@ -25,10 +25,12 @@ isolated temporary directory. A failed compiler or probe keeps that directory
 and writes its path to `artifacts`. Setup failures still write a report, marking
 every selected case as `missing_infrastructure`, before returning nonzero.
 
-The reference report records the compiler version and executable path, target,
-C library, source SHA-256 digest, commands, exit status, observation, and
-status. GCC-specific expectations use `reference_expectation`. The independent
-`expectation` remains unchanged when GCC behavior differs.
+The reference report records the manifest and source SHA-256 digests, compiler
+version and executable path, target, C library, commands, exit status,
+observation, and status. The manifest digest binds evidence to case arguments,
+inputs, expectations, and stage ownership. GCC-specific expectations use
+`reference_expectation`. The independent `expectation` remains unchanged when
+GCC behavior differs.
 
 ## Check a stage
 

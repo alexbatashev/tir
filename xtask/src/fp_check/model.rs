@@ -119,6 +119,8 @@ pub enum Expectation {
 #[serde(deny_unknown_fields)]
 pub struct Report {
     pub schema_version: u32,
+    #[serde(default)]
+    pub manifest_digest: String,
     pub profile: String,
     pub generated_at_unix_seconds: u64,
     pub host: HostIdentity,

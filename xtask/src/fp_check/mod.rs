@@ -112,6 +112,8 @@ fn check(
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join(DEFAULT_MANIFEST));
     let manifest = read_manifest(&manifest_path)?;
+    let manifest_digest =
+        digest(&fs::read(&manifest_path).with_context(|| manifest_path.display().to_string())?);
 
     let selected = manifest
         .cases
@@ -139,6 +141,12 @@ fn check(
         .iter()
         .map(|result| (result.case_id.as_str(), result))
         .collect::<BTreeMap<_, _>>();
+    let manifest_provenance_error = (reference.manifest_digest != manifest_digest).then(|| {
+        format!(
+            "reference manifest digest mismatch: expected {manifest_digest}, observed {}",
+            reference.manifest_digest
+        )
+    });
 
     let mut results = Vec::with_capacity(selected.len());
     for case in selected {
@@ -166,6 +174,14 @@ fn check(
             Status::UnsupportedCapability | Status::MissingInfrastructure | Status::Fail
         ) {
             results.push((*reference_result).clone());
+            continue;
+        }
+        if let Some(detail) = &manifest_provenance_error {
+            let mut result = (*reference_result).clone();
+            result.stage = case.stage;
+            result.status = Status::Fail;
+            result.detail = detail.clone();
+            results.push(result);
             continue;
         }
         if let Err(detail) = validate_reference_evidence(
@@ -217,6 +233,7 @@ fn check(
 
     let checked = Report {
         schema_version: 1,
+        manifest_digest: reference.manifest_digest,
         profile: reference.profile,
         generated_at_unix_seconds: timestamp()?,
         host: reference.host,
@@ -305,6 +322,8 @@ fn reference(
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join(DEFAULT_MANIFEST));
     let manifest = read_manifest(&manifest_path)?;
+    let manifest_digest =
+        digest(&fs::read(&manifest_path).with_context(|| manifest_path.display().to_string())?);
     let selected = manifest
         .cases
         .iter()
@@ -321,6 +340,7 @@ fn reference(
                 &selected,
                 output_path,
                 requested_report_profile,
+                &manifest_digest,
                 ReferenceEnvironment {
                     compiler: CompilerIdentity {
                         version: String::new(),
@@ -349,6 +369,7 @@ fn reference(
                 &selected,
                 output_path,
                 requested_report_profile,
+                &manifest_digest,
                 ReferenceEnvironment {
                     compiler: CompilerIdentity {
                         version: String::new(),
@@ -384,6 +405,7 @@ fn reference(
                 &selected,
                 output_path,
                 &profile,
+                &manifest_digest,
                 ReferenceEnvironment {
                     compiler: CompilerIdentity {
                         version: compiler_version,
@@ -408,6 +430,7 @@ fn reference(
                 &selected,
                 output_path,
                 &profile,
+                &manifest_digest,
                 ReferenceEnvironment {
                     compiler: CompilerIdentity {
                         version: compiler_version,
@@ -437,6 +460,7 @@ fn reference(
     }
     let report = Report {
         schema_version: 1,
+        manifest_digest,
         profile,
         generated_at_unix_seconds: timestamp()?,
         host: HostIdentity { target, library },
@@ -461,6 +485,7 @@ fn write_missing_reference_report(
     selected: &[&Case],
     output_path: &Path,
     profile: &str,
+    manifest_digest: &str,
     environment: ReferenceEnvironment,
     detail: &str,
 ) -> anyhow::Result<()> {
@@ -487,6 +512,7 @@ fn write_missing_reference_report(
         .collect();
     let report = Report {
         schema_version: 1,
+        manifest_digest: manifest_digest.into(),
         profile: profile.into(),
         generated_at_unix_seconds: timestamp()?,
         host: environment.host,

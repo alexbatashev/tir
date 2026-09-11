@@ -225,7 +225,6 @@ fn report_rejects_a_wrong_result_bit() {
 }"#,
     )
     .unwrap();
-
     let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
         .args(["fp-check", "report", report.to_str().unwrap()])
         .output()
@@ -693,6 +692,19 @@ fn check_accepts_the_fma_reference_bits_and_flags() {
     }
   ]
 }"#,
+    )
+    .unwrap();
+    let manifest =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fcc/checks/Inputs/fp/cases.toml");
+    let mut manifest_digest = Sha256::new();
+    manifest_digest.input(fs::read(manifest).unwrap());
+    let manifest_digest = format!("sha256:{:x}", manifest_digest.result());
+    let mut reference_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&reference).unwrap()).unwrap();
+    reference_json["manifest_digest"] = serde_json::json!(manifest_digest);
+    fs::write(
+        &reference,
+        serde_json::to_vec_pretty(&reference_json).unwrap(),
     )
     .unwrap();
 
