@@ -169,6 +169,21 @@ pub enum Stage {
     Release,
 }
 
+impl Stage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reference => "reference",
+            Self::Scalar => "scalar",
+            Self::Round => "round",
+            Self::Fcc => "fcc",
+            Self::Math => "math",
+            Self::Rules => "rules",
+            Self::Vector => "vector",
+            Self::Release => "release",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Observation {
