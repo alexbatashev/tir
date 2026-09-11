@@ -152,6 +152,13 @@ fn check(
             });
             continue;
         };
+        if matches!(
+            reference_result.status,
+            Status::UnsupportedCapability | Status::MissingInfrastructure
+        ) {
+            results.push((*reference_result).clone());
+            continue;
+        }
         let comparison = case.expectation.compare(reference_result.observation.as_ref());
         let mut result = (*reference_result).clone();
         result.stage = case.stage;

@@ -66,6 +66,11 @@ pub enum Expectation {
     },
     NumericalBound {
         max_error: String,
+        metric: String,
+        domain: String,
+        zero_convention: String,
+        subnormal_convention: String,
+        exceptional_values: String,
     },
     CodeShape {
         #[serde(default)]
@@ -207,7 +212,29 @@ impl Expectation {
                     Err(format!("value {value} is not in the permitted set"))
                 }
             }
-            (Self::NumericalBound { max_error }, Observation::NumericalBound { error, .. }) => {
+            (
+                Self::NumericalBound {
+                    max_error,
+                    metric,
+                    domain,
+                    zero_convention,
+                    subnormal_convention,
+                    exceptional_values,
+                },
+                Observation::NumericalBound { error, .. },
+            ) => {
+                if [
+                    metric,
+                    domain,
+                    zero_convention,
+                    subnormal_convention,
+                    exceptional_values,
+                ]
+                .iter()
+                .any(|field| field.is_empty())
+                {
+                    return Err("numerical bound has an empty contract field".into());
+                }
                 let maximum = max_error
                     .parse::<f64>()
                     .map_err(|_| format!("invalid expected error bound {max_error}"))?;
