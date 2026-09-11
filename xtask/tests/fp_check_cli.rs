@@ -122,3 +122,52 @@ fn check_accepts_the_fma_reference_bits_and_flags() {
     assert_eq!(checked["results"][0]["status"], "pass");
     assert_eq!(checked["results"][1]["status"], "pass");
 }
+
+#[test]
+fn reference_records_gcc_provenance() {
+    let directory = tempfile::tempdir().unwrap();
+    let report = directory.path().join("reference.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args([
+            "fp-check",
+            "reference",
+            "--gcc",
+            "gcc",
+            "--case",
+            "fma.binary64.value.fused",
+            "--output",
+            report.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
+    assert_eq!(report["profile"], "gcc-15.2");
+    assert_eq!(report["host"]["target"], "x86_64-linux-gnu");
+    assert!(report["host"]["library"]
+        .as_str()
+        .unwrap()
+        .starts_with("glibc "));
+    assert_eq!(report["results"][0]["compiler"]["version"], "15.2.0");
+    assert!(report["results"][0]["compiler"]["executable"]
+        .as_str()
+        .unwrap()
+        .contains("gcc"));
+    assert!(report["results"][0]["source_digest"]
+        .as_str()
+        .unwrap()
+        .starts_with("sha256:"));
+    assert!(report["results"][0]["commands"].is_array());
+    assert_eq!(
+        report["results"][0]["observation"]["bits"],
+        "0xbc90000000000000"
+    );
+    assert_eq!(report["results"][0]["status"], "pass");
+}

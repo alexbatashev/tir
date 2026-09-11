@@ -11,7 +11,7 @@ source = "fcc/checks/Inputs/fp/reference/fma.c"
 language_mode = "gnu17"
 target_requirements = ["binary64", "fenv", "libm"]
 compiler_args = ["-O0", "-frounding-math", "-fno-builtin"]
-runtime_input_bits = ["0x3ff0000020000000", "0x3fefffffc0000000", "0xbff0000000000000"]
+runtime_input_bits = ["0x3ff0000002000000", "0x3feffffffc000000", "0xbff0000000000000"]
 run_args = ["separate"]
 probe = "execute"
 
@@ -33,7 +33,7 @@ source = "fcc/checks/Inputs/fp/reference/fma.c"
 language_mode = "gnu17"
 target_requirements = ["binary64", "fenv", "libm"]
 compiler_args = ["-O0", "-frounding-math", "-fno-builtin"]
-runtime_input_bits = ["0x3ff0000020000000", "0x3fefffffc0000000", "0xbff0000000000000"]
+runtime_input_bits = ["0x3ff0000002000000", "0x3feffffffc000000", "0xbff0000000000000"]
 run_args = ["fused"]
 probe = "execute"
 

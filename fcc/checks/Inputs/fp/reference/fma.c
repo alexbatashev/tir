@@ -4,6 +4,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static double separate(double a, double b, double c) {
@@ -17,12 +18,19 @@ static uint64_t bits(double value) {
   return result;
 }
 
+static double from_bits(const char *text) {
+  uint64_t value = strtoull(text, NULL, 0);
+  double result;
+  memcpy(&result, &value, sizeof(result));
+  return result;
+}
+
 int main(int argc, char **argv) {
-  if (argc != 2)
+  if (argc != 5)
     return 2;
-  double a = 0x1.000002p+0;
-  double b = 0x1.ffffffcp-1;
-  double c = -0x1p+0;
+  double a = from_bits(argv[2]);
+  double b = from_bits(argv[3]);
+  double c = from_bits(argv[4]);
   feclearexcept(FE_ALL_EXCEPT);
   double result = strcmp(argv[1], "fused") == 0 ? fma(a, b, c) : separate(a, b, c);
   int flags = fetestexcept(FE_ALL_EXCEPT);
