@@ -365,6 +365,76 @@ reference = "fixture"
 }
 
 #[test]
+fn reference_preserves_a_probe_that_misses_its_expectation() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("probe.c");
+    let manifest = directory.path().join("cases.toml");
+    let report = directory.path().join("reference.json");
+    fs::write(
+        &source,
+        "#include <stdio.h>\nint main(void) { puts(\"{\\\"kind\\\":\\\"exact_bits\\\",\\\"bits\\\":\\\"0x1\\\",\\\"flags\\\":[]}\"); return 0; }\n",
+    )
+    .unwrap();
+    fs::write(
+        &manifest,
+        format!(
+            r#"schema_version = 1
+
+[reference]
+profile = "gcc-15.2"
+compiler_version = "15.2.0"
+
+[[cases]]
+id = "wrong.probe"
+stage = "reference"
+source = "{}"
+language_mode = "c17"
+target_requirements = []
+compiler_args = []
+runtime_input_bits = []
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x0"
+flags = []
+
+[cases.oracle]
+kind = "fixture"
+identity = "fixture"
+version = "1"
+reference = "fixture"
+"#,
+            source.display()
+        ),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args([
+            "fp-check",
+            "reference",
+            "--gcc",
+            "gcc",
+            "--profile",
+            "host-test",
+            "--manifest",
+            manifest.to_str().unwrap(),
+            "--output",
+            report.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
+    assert_eq!(report["results"][0]["status"], "fail");
+    let artifacts = report["results"][0]["artifacts"].as_str().unwrap();
+    assert!(std::path::Path::new(artifacts).join("probe.c").is_file());
+    fs::remove_dir_all(artifacts).unwrap();
+}
+
+#[test]
 fn check_accepts_the_fma_reference_bits_and_flags() {
     let directory = tempfile::tempdir().unwrap();
     let reference = directory.path().join("reference.json");
