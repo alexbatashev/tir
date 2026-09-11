@@ -481,6 +481,11 @@ fn run_reference_case(
                 ),
                 Err(detail) => (Status::Fail, detail),
             };
+            let artifacts = if status == Status::Fail {
+                Some(directory.keep().display().to_string())
+            } else {
+                None
+            };
             Ok(CaseResult {
                 case_id: case.id.clone(),
                 stage: case.stage,
@@ -490,7 +495,7 @@ fn run_reference_case(
                 exit_status: executed.status.code(),
                 observation: Some(observation),
                 resolved_policy: None,
-                artifacts: None,
+                artifacts,
                 status,
                 detail,
             })
