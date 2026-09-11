@@ -1,6 +1,84 @@
 use std::fs;
 use std::process::Command;
 
+fn check_fixture(expectation: &str, observation: &str, reference_status: &str) -> (bool, serde_json::Value) {
+    let directory = tempfile::tempdir().unwrap();
+    let manifest = directory.path().join("cases.toml");
+    let reference = directory.path().join("reference.json");
+    let checked = directory.path().join("checked.json");
+    fs::write(
+        &manifest,
+        format!(
+            r#"schema_version = 1
+
+[reference]
+profile = "gcc-15.2"
+compiler_version = "15.2.0"
+
+[[cases]]
+id = "fixture.case"
+stage = "reference"
+source = "probe.c"
+language_mode = "c17"
+target_requirements = []
+compiler_args = []
+runtime_input_bits = []
+probe = "execute"
+
+[cases.expectation]
+{expectation}
+
+[cases.oracle]
+kind = "fixture"
+identity = "fixture"
+version = "1"
+reference = "fixture"
+"#,
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &reference,
+        format!(
+            r#"{{
+  "schema_version": 1,
+  "profile": "gcc-15.2",
+  "generated_at_unix_seconds": 0,
+  "host": {{ "target": "x86_64-linux-gnu", "library": "glibc 2.43" }},
+  "results": [{{
+    "case_id": "fixture.case",
+    "stage": "reference",
+    "compiler": {{ "version": "15.2.0", "executable": "/usr/bin/gcc" }},
+    "source_digest": "sha256:fixture",
+    "commands": [["gcc", "probe.c"]],
+    "exit_status": 0,
+    "observation": {observation},
+    "status": "{reference_status}",
+    "detail": "fixture"
+  }}]
+}}"#,
+        ),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args([
+            "fp-check",
+            "check",
+            "--stage",
+            "reference",
+            "--manifest",
+            manifest.to_str().unwrap(),
+            "--reference",
+            reference.to_str().unwrap(),
+            "--output",
+            checked.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let checked = serde_json::from_str(&fs::read_to_string(checked).unwrap()).unwrap();
+    (output.status.success(), checked)
+}
+
 #[test]
 fn report_rejects_a_wrong_result_bit() {
     let directory = tempfile::tempdir().unwrap();
@@ -51,6 +129,147 @@ fn report_rejects_a_wrong_result_bit() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn check_detects_a_wrong_result_bit() {
+    let (success, report) = check_fixture(
+        "kind = \"exact_bits\"\nbits = \"0x0000000000000000\"\nflags = []",
+        r#"{"kind":"exact_bits","bits":"0x0000000000000001","flags":[]}"#,
+        "pass",
+    );
+
+    assert!(!success);
+    assert_eq!(report["results"][0]["status"], "fail");
+    assert_eq!(
+        report["results"][0]["detail"],
+        "expected bits 0x0000000000000000, observed 0x0000000000000001"
+    );
+}
+
+#[test]
+fn check_detects_a_wrong_zero_sign() {
+    let (success, report) = check_fixture(
+        "kind = \"exact_bits\"\nbits = \"0x0000000000000000\"\nflags = []",
+        r#"{"kind":"exact_bits","bits":"0x8000000000000000","flags":[]}"#,
+        "pass",
+    );
+
+    assert!(!success);
+    assert_eq!(report["results"][0]["status"], "fail");
+    assert_eq!(
+        report["results"][0]["detail"],
+        "expected bits 0x0000000000000000, observed 0x8000000000000000"
+    );
+}
+
+#[test]
+fn check_detects_a_missing_flag() {
+    let (success, report) = check_fixture(
+        "kind = \"exact_bits\"\nbits = \"0x0000000000000000\"\nflags = [\"inexact\"]",
+        r#"{"kind":"exact_bits","bits":"0x0000000000000000","flags":[]}"#,
+        "pass",
+    );
+
+    assert!(!success);
+    assert_eq!(report["results"][0]["status"], "fail");
+    assert!(report["results"][0]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("missing flags [\"inexact\"]"));
+}
+
+#[test]
+fn check_detects_a_missing_errno_update() {
+    let (success, report) = check_fixture(
+        "kind = \"effects\"\nflags = []\nerrno = 34\nevents = []\ntrapped = false",
+        r#"{"kind":"effects","flags":[],"errno":123,"events":[],"trapped":false}"#,
+        "pass",
+    );
+
+    assert!(!success);
+    assert_eq!(report["results"][0]["status"], "fail");
+    assert_eq!(
+        report["results"][0]["detail"],
+        "expected errno Some(34), observed Some(123)"
+    );
+}
+
+#[test]
+fn check_detects_an_unexpected_trap() {
+    let (success, report) = check_fixture(
+        "kind = \"effects\"\nflags = []\nevents = []\ntrapped = false",
+        r#"{"kind":"effects","flags":[],"errno":null,"events":[],"trapped":true}"#,
+        "pass",
+    );
+
+    assert!(!success);
+    assert_eq!(report["results"][0]["status"], "fail");
+    assert_eq!(
+        report["results"][0]["detail"],
+        "expected trapped=false, observed trapped=true"
+    );
+}
+
+#[test]
+fn check_detects_an_absent_instruction() {
+    let (success, report) = check_fixture(
+        "kind = \"code_shape\"\nrequired = [\"vfmadd\"]\nforbidden = []",
+        r#"{"kind":"code_shape","instructions":["vmulsd %xmm1, %xmm0, %xmm0"]}"#,
+        "pass",
+    );
+
+    assert!(!success);
+    assert_eq!(report["results"][0]["status"], "fail");
+    assert_eq!(
+        report["results"][0]["detail"],
+        "required instruction vfmadd is absent"
+    );
+}
+
+#[test]
+fn check_preserves_an_unsupported_capability() {
+    let (success, report) = check_fixture(
+        "kind = \"exact_bits\"\nbits = \"0x0000000000000000\"\nflags = []",
+        "null",
+        "unsupported_capability",
+    );
+
+    assert!(!success);
+    assert_eq!(
+        report["results"][0]["status"],
+        "unsupported_capability"
+    );
+    assert_eq!(report["results"][0]["detail"], "fixture");
+}
+
+#[test]
+fn check_preserves_missing_infrastructure() {
+    let (success, report) = check_fixture(
+        "kind = \"exact_bits\"\nbits = \"0x0000000000000000\"\nflags = []",
+        "null",
+        "missing_infrastructure",
+    );
+
+    assert!(!success);
+    assert_eq!(
+        report["results"][0]["status"],
+        "missing_infrastructure"
+    );
+    assert_eq!(report["results"][0]["detail"], "fixture");
+}
+
+#[test]
+fn check_detects_a_numerical_error_above_the_bound() {
+    let (success, report) = check_fixture(
+        "kind = \"numerical_bound\"\nmax_error = \"1e-12\"\nmetric = \"relative\"\ndomain = \"[0.5, 2.0]\"\nzero_convention = \"excluded\"\nsubnormal_convention = \"relative\"\nexceptional_values = \"excluded\"",
+        r#"{"kind":"numerical_bound","value":"1.0","error":"2e-12"}"#,
+        "pass",
+    );
+
+    assert!(!success);
+    assert_eq!(report["results"][0]["status"], "fail");
+    assert_eq!(report["results"][0]["detail"], "error 2e-12 exceeds 1e-12");
 }
 
 #[test]
