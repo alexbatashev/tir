@@ -2,7 +2,7 @@ use std::fmt;
 
 use logos::Logos;
 
-use tir::utils::APInt;
+use tir::utils::{APFloat, APInt};
 
 pub(crate) fn decode_c_escapes(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
@@ -50,19 +50,66 @@ pub struct IntegerLiteral {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FloatingLiteral {
-    pub value: f64,
+    pub value: APFloat,
     pub spelling: String,
+    pub kind: FloatingLiteralKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatingLiteralKind {
+    Float,
+    Double,
+    LongDouble,
 }
 
 fn parse_floating_literal(spelling: &str) -> Option<FloatingLiteral> {
-    spelling
-        .replace('\'', "")
-        .parse()
-        .ok()
-        .map(|value| FloatingLiteral {
-            value,
-            spelling: spelling.to_string(),
-        })
+    let suffix_start = spelling.trim_end_matches(['f', 'F', 'l', 'L']).len();
+    let kind = match &spelling[suffix_start..] {
+        "f" | "F" => FloatingLiteralKind::Float,
+        "" => FloatingLiteralKind::Double,
+        "l" | "L" => FloatingLiteralKind::LongDouble,
+        _ => return None,
+    };
+    let digits = spelling[..suffix_start].replace('\'', "");
+    let value = if digits.starts_with("0x") || digits.starts_with("0X") {
+        parse_hexadecimal_floating_literal(&digits, kind)?
+    } else {
+        match kind {
+            FloatingLiteralKind::Float => {
+                APFloat::from_bits(8, 23, false, digits.parse::<f32>().ok()?.to_bits() as u128)
+            }
+            FloatingLiteralKind::Double | FloatingLiteralKind::LongDouble => {
+                APFloat::from_f64(digits.parse::<f64>().ok()?)
+            }
+        }
+    };
+    Some(FloatingLiteral {
+        value,
+        spelling: spelling.to_string(),
+        kind,
+    })
+}
+
+fn parse_hexadecimal_floating_literal(digits: &str, kind: FloatingLiteralKind) -> Option<APFloat> {
+    let digits = digits.get(2..)?;
+    let exponent_separator = digits.find(['p', 'P'])?;
+    let (fraction, exponent) = digits.split_at(exponent_separator);
+    let exponent = exponent.get(1..)?.parse::<i32>().ok()?;
+    let (integer, fraction) = fraction.split_once('.').unwrap_or((fraction, ""));
+    let significand = u128::from_str_radix(&format!("{integer}{fraction}"), 16).ok()?;
+    let exp2 = exponent.checked_sub(i32::try_from(fraction.len()).ok()?.checked_mul(4)?)?;
+    let (exp_width, mant_width) = match kind {
+        FloatingLiteralKind::Float => (8, 23),
+        FloatingLiteralKind::Double | FloatingLiteralKind::LongDouble => (11, 52),
+    };
+    Some(APFloat::from_significand(
+        exp_width,
+        mant_width,
+        false,
+        false,
+        significand,
+        exp2,
+    ))
 }
 
 fn parse_integer_literal(spelling: &str) -> Option<IntegerLiteral> {
@@ -197,7 +244,8 @@ pub enum Token {
     // Or regular expressions.
     #[regex("[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Identifier(String),
-    #[regex(r"([0-9][0-9']*\.[0-9']*|\.[0-9][0-9']*)([eE][+-]?[0-9][0-9']*)?|[0-9][0-9']*[eE][+-]?[0-9][0-9']*", |lex| parse_floating_literal(lex.slice()))]
+    #[regex(r"0[xX](([0-9a-fA-F][0-9a-fA-F']*(\.[0-9a-fA-F']*)?)|(\.[0-9a-fA-F][0-9a-fA-F']*))[pP][+-]?[0-9][0-9']*[fFlL]?", |lex| parse_floating_literal(lex.slice()))]
+    #[regex(r"(([0-9][0-9']*\.[0-9']*|\.[0-9][0-9']*)([eE][+-]?[0-9][0-9']*)?|[0-9][0-9']*[eE][+-]?[0-9][0-9']*)[fFlL]?", |lex| parse_floating_literal(lex.slice()))]
     FloatingLiteral(FloatingLiteral),
     #[regex("0[xX][0-9a-fA-F'][0-9a-fA-F']*[uUlL]*|0[bB][01'][01']*[uUlL]*|[0-9][0-9']*[uUlL]*", |lex| parse_integer_literal(lex.slice()))]
     IntegerLiteral(IntegerLiteral),

@@ -6,12 +6,14 @@
 //! Skipped when `cc` is unavailable.
 
 use super::link_support::{
-    assert_fcc_matches_host, assert_fcc_object_executes_with_host, cc_available, host_tests,
+    assert_fcc_matches_host, assert_fcc_matches_host_at_optimization_levels,
+    assert_fcc_object_executes_with_host, cc_available, host_tests,
 };
 
 host_tests! {
     assert_fcc_matches_host:
     variadic_double_argument_matches_host_compiler => ("int printf(const char *format, ...); int main(void) { printf(\"%.1f\\n\", 1.5); return 0; }\n",);
+    variadic_float_argument_matches_host_compiler => ("int printf(const char *format, ...); int main(void) { float value = 1.5f; printf(\"%.1f\\n\", value); return 0; }\n",);
     compares_program_with_host_compiler => (r#"int puts(const char *text);
 int main(void) { puts("same output"); return 17; }
 "#,);
@@ -511,6 +513,31 @@ int main(void) { if (read() == 61) return 0; return 1; }
 "#,);
 }
 
+host_tests! {
+    assert_fcc_matches_host_at_optimization_levels:
+    floating_negation_preserves_ieee_sign => (r#"int main(void) {
+    volatile double positive = 0.0;
+    double runtime_negative = -positive;
+    double literal_negative = -0.0;
+    double value = 1.25;
+    if (!(1.0 / runtime_negative < 0.0)) return 1;
+    if (!(1.0 / literal_negative < 0.0)) return 2;
+    return -(-value) == value ? 0 : 3;
+}
+"#,);
+    float_integer_conversions_match_host => (r#"int main(void) {
+    int signed_value = -7;
+    unsigned unsigned_value = 4000000000u;
+    float signed_float = signed_value;
+    float unsigned_float = unsigned_value;
+    if ((int)-7.75f != -7) return 1;
+    if ((unsigned)123.75f != 123u) return 2;
+    if (signed_float != -7.0f) return 3;
+    return unsigned_float == (float)4000000000u ? 0 : 4;
+}
+"#,);
+}
+
 // A struct laid out by `fcc` and one laid out by the host `cc` are the same
 // struct, so a member read and a `sizeof` cross the object boundary.
 host_tests! {
@@ -519,4 +546,16 @@ host_tests! {
         "struct Pair { char tag; int value; }; int read(struct Pair *); int main(void) { struct Pair pair = { 1, 73 }; return read(&pair) == 73 ? 0 : 1; }\n",);
     sizeof_struct_executes_through_driver => ("struct Pair { char tag; int value; }; int size(void) { return sizeof(struct Pair); }\n",
         "int size(void); int main(void) { return size() == 8 ? 0 : 1; }\n",);
+    float_pointer_storage_matches_host_layout => ("void set_middle(float *values) { values[1] = 4.5f; }\n",
+        "void set_middle(float *); int main(void) { float values[3] = { 1.25f, 2.5f, 3.75f }; set_middle(values); return values[0] == 1.25f && values[1] == 4.5f && values[2] == 3.75f ? 0 : 1; }\n",);
+    mixed_float_struct_matches_sysv_abi => ("struct Mixed { float value; int tag; }; struct Mixed update(struct Mixed value) { value.value += 0.5f; value.tag += 1; return value; }\n",
+        "struct Mixed { float value; int tag; }; struct Mixed update(struct Mixed); int main(void) { struct Mixed value = { 1.25f, 41 }; value = update(value); return value.value == 1.75f && value.tag == 42 ? 0 : 1; }\n",);
+    scalar_floats_and_pointer_match_sysv_abi => ("float combine(float left, int *scale, float right) { return (left + right) * *scale; }\n",
+        "float combine(float, int *, float); int main(void) { int scale = 3; return combine(1.25f, &scale, 2.75f) == 12.0f ? 0 : 1; }\n",);
+    ninth_float_argument_matches_sysv_abi => ("float sum9(float a, float b, float c, float d, float e, float f, float g, float h, float i) { return a+b+c+d+e+f+g+h+i; }\n",
+        "float sum9(float, float, float, float, float, float, float, float, float); int main(void) { return sum9(1,2,3,4,5,6,7,8,9) == 45.0f ? 0 : 1; }\n",);
+    float_width_conversions_match_sysv_abi => ("float narrow(double value) { float result = (float)value; return result; } double widen(float value) { double result = value; return result; }\n",
+        "float narrow(double); double widen(float); int main(void) { return narrow(1.00000006) == 1.00000011920928955078125f && widen(0.1f) == (double)0.1f ? 0 : 1; }\n",);
+    floating_initializers_match_host_object_layout => ("struct Mixed { float value; int tag; }; float values[3] = { 1.25f }; struct Mixed item = { 1.5f, 7 }; double negative = -0.0;\n",
+        "struct Mixed { float value; int tag; }; extern float values[3]; extern struct Mixed item; extern double negative; int main(void) { return values[0] == 1.25f && values[1] == 0.0f && values[2] == 0.0f && item.value == 1.5f && item.tag == 7 && 1.0 / negative < 0.0 ? 0 : 1; }\n",);
 }

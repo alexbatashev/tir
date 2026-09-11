@@ -544,6 +544,7 @@ fn scalar_root_kind(kind: &tir_symbolic::lang::SymKind) -> bool {
             | K::FSub
             | K::FMul
             | K::FDiv
+            | K::FCvt
             | K::SIToFP
             | K::UIToFP
             | K::FPToSI

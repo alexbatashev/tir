@@ -84,6 +84,12 @@ Pass explicit file paths to (re)generate specific tests, including brand-new
 ones. Hand-authored tests (those without the generated header) are never
 touched by a bulk regeneration.
 
+### Running external benchmarks
+
+Use `cargo xtask extbench compile` to compare compilation times and memory,
+or `cargo xtask extbench run` to time executables on the current host.
+See [External benchmarks](extbench.md) for filters and TOML configuration.
+
 ### Running fuzz tests
 
 We also have fuzzing set up for user-facing parsers. These tests require

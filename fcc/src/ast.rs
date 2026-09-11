@@ -266,6 +266,7 @@ pub enum AstLeaf {
         name: String,
         ty: CType,
         is_extern: bool,
+        is_static: bool,
     },
     Field {
         name: String,
@@ -445,7 +446,12 @@ fn payload_label(ast: &Ast, id: NodeId) -> Option<String> {
             name,
             ty,
             is_extern,
-        } => format!("Global {name:?} extern={is_extern}: {}", render_ctype(ty)),
+            is_static,
+        } => format!(
+            "Global {name:?} extern={is_extern}{}: {}",
+            if *is_static { " static" } else { "" },
+            render_ctype(ty)
+        ),
         AstLeaf::Field { name, ty } => {
             format!("Field {}: {}", declarator_name(name), render_ctype(ty))
         }

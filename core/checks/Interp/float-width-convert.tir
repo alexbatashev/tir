@@ -1,0 +1,13 @@
+// RUN: tir interp %s | filecheck %s
+
+module {
+  %fn_main = func.func @main() -> !f64 {
+    %0 = constantf {value = 1.5} : !f64
+    %1 = fcvt %0 : !f32
+    %2 = fcvt %1 : !f64
+    func.return %2
+  }
+  module_end
+}
+
+// CHECK: f64 1.5

@@ -1,7 +1,8 @@
-mod fcc_bench;
+mod extbench;
 mod fcc_fuzz;
 mod fcc_torture;
 mod gate;
+mod gate_bench;
 pub mod utils;
 mod verify_smt;
 
@@ -15,6 +16,9 @@ use crate::utils::project_root;
 
 #[derive(Parser)]
 enum Task {
+    /// Compile or run directory-defined external benchmarks.
+    #[command(subcommand)]
+    Extbench(extbench::Task),
     /// Build the TIR project
     Build,
     /// Build the project and run the check tests
@@ -41,12 +45,7 @@ enum Task {
         #[arg(long)]
         fcc: Option<PathBuf>,
     },
-    /// Time fcc and gcc at -O0 and -O2 on the passing torture execute cases and
-    /// coremark, recording fcc's peak RSS; print the sums, median ratio and
-    /// slowest cases, and fail on a >10 % time or >2 % peak regression against
-    /// the baseline
-    FccBench(fcc_bench::Options),
-    /// The pinned gate: fcc-bench against the baseline at -j1, then every
+    /// The pinned gate: compile measurements against the baseline at -j1, then every
     /// case again at -j8 with identical objects and peak RSS within 1.5x of
     /// the pinned sequential peaks, CoreMark timed at both, and a generated
     /// many-function unit held to the same contract
@@ -66,6 +65,7 @@ enum Task {
 fn main() -> anyhow::Result<()> {
     let sh = Shell::new()?;
     match Task::parse() {
+        Task::Extbench(task) => extbench::run(&project_root(), task),
         Task::Build => build(&sh),
         Task::Check => {
             build(&sh)?;
@@ -78,7 +78,6 @@ fn main() -> anyhow::Result<()> {
         Task::FccTorture { bless, fcc } => {
             fcc_torture::run(&sh, &project_root(), bless, fcc.as_deref())
         }
-        Task::FccBench(options) => fcc_bench::run(&sh, &project_root(), options),
         Task::Gate(options) => gate::run(&sh, &project_root(), options),
         Task::FccFuzz(options) => fcc_fuzz::run(&sh, &project_root(), &options),
         Task::CapiSmoke => capi_smoke(&sh),

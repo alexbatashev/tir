@@ -63,6 +63,7 @@ dialect! {
             DivFOp,
             SIToFPOp,
             UIToFPOp,
+            FPConvertOp,
             FPToSIOp,
             FPToUIOp,
             CmpFOp,

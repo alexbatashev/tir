@@ -1,7 +1,7 @@
 //! The pinned performance gate, and the parallel contract on top of it.
 //!
 //! Sequential (`-j1`) timings and peaks are judged against the pinned
-//! baseline exactly as `fcc-bench` judges them. Then every pinned case is
+//! baseline using the original GCC comparison contract. Then every pinned case is
 //! compiled again with `-j8`: the object must be the bytes `-j1` produced, and
 //! the peak may not pass [`PARALLEL_RSS_THRESHOLD`] times the pinned
 //! sequential peak, per case and in sum. CoreMark's wall time is recorded at
@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use xshell::Shell;
 
-use crate::fcc_bench::{
+use crate::gate_bench::{
     built_fcc, cases, judge, measure, peaks_by_label, time_fcc_to, Case, Level, Results,
 };
 

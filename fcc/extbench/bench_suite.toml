@@ -1,0 +1,26 @@
+[suite]
+package = "fcc"
+
+[[compiler]]
+name = "fcc"
+build = ["cargo", "build", "--release", "-p", "fcc", "--bin", "fcc"]
+compile = ["{root}/target/release/fcc", "-std=gnu17", "{level}", "{flags}", "-c", "{source}", "-o", "{output}"]
+link = ["{root}/target/release/fcc", "{objects}", "{link_flags}", "-o", "{output}"]
+
+[compiler.env]
+TIR_TIME_PASSES = "1"
+
+[compiler.metrics]
+frontend_ms = 'fcc-time: frontend_ms=([0-9.]+)'
+passes_ms = 'fcc-time: frontend_ms=[0-9.]+ passes_ms=([0-9.]+)'
+backend_ms = 'fcc-time: frontend_ms=[0-9.]+ passes_ms=[0-9.]+ backend_ms=([0-9.]+)'
+
+[[compiler]]
+name = "gcc"
+compile = ["gcc", "-std=gnu17", "{level}", "{flags}", "-c", "{source}", "-o", "{output}"]
+link = ["gcc", "{objects}", "{link_flags}", "-o", "{output}"]
+
+[[compiler]]
+name = "clang"
+compile = ["clang", "-std=gnu17", "{level}", "{flags}", "-c", "{source}", "-o", "{output}"]
+link = ["clang", "{objects}", "{link_flags}", "-o", "{output}"]

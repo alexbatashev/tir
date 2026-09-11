@@ -888,39 +888,67 @@ fn substitute_arguments(
 ) -> Vec<ExpansionToken> {
     let arguments = arguments
         .into_iter()
-        .map(|argument| expand_tokens(trim_argument(&argument), defines))
+        .map(|argument| trim_argument(&argument))
         .collect::<Vec<_>>();
     let mut substituted = Vec::new();
-    for token in replacement {
+    for (replacement_index, token) in replacement.iter().enumerate() {
         let parameter = match &token {
             Token::Identifier(name) => parameters.iter().position(|parameter| parameter == name),
             _ => None,
         };
         if let Some(index) = parameter {
-            substituted.extend(arguments[index].clone());
+            if adjacent_to_paste(&replacement, replacement_index) {
+                if arguments[index].is_empty() {
+                    substituted.push(PasteToken::Placemarker);
+                } else {
+                    substituted.extend(arguments[index].iter().cloned().map(PasteToken::Token));
+                }
+            } else {
+                substituted.extend(
+                    expand_tokens(arguments[index].clone(), defines)
+                        .into_iter()
+                        .map(PasteToken::Token),
+                );
+            }
         } else {
-            substituted.push(ExpansionToken {
-                token,
+            substituted.push(PasteToken::Token(ExpansionToken {
+                token: token.clone(),
                 span,
                 hideset: HashSet::new(),
-            });
+            }));
         }
     }
     paste_tokens(substituted)
 }
 
-fn paste_tokens(tokens: Vec<ExpansionToken>) -> Vec<ExpansionToken> {
+fn adjacent_to_paste(replacement: &[Token], index: usize) -> bool {
+    replacement[..index]
+        .iter()
+        .rev()
+        .find(|token| !is_whitespace(token))
+        .is_some_and(|token| *token == Token::HashHash)
+        || replacement[index + 1..]
+            .iter()
+            .find(|token| !is_whitespace(token))
+            .is_some_and(|token| *token == Token::HashHash)
+}
+
+enum PasteToken {
+    Token(ExpansionToken),
+    Placemarker,
+}
+
+fn paste_tokens(tokens: Vec<PasteToken>) -> Vec<ExpansionToken> {
     let mut input = VecDeque::from(tokens);
     let mut output = Vec::new();
     while let Some(operator) = input.pop_front() {
-        if operator.token != Token::HashHash {
+        if !matches!(&operator, PasteToken::Token(token) if token.token == Token::HashHash) {
             output.push(operator);
             continue;
         }
-        while output
-            .last()
-            .is_some_and(|token: &ExpansionToken| is_whitespace(&token.token))
-        {
+        while output.last().is_some_and(
+            |token| matches!(token, PasteToken::Token(token) if is_whitespace(&token.token)),
+        ) {
             output.pop();
         }
         let Some(left) = output.pop() else {
@@ -929,7 +957,7 @@ fn paste_tokens(tokens: Vec<ExpansionToken>) -> Vec<ExpansionToken> {
         };
         let right = loop {
             match input.pop_front() {
-                Some(token) if is_whitespace(&token.token) => {}
+                Some(PasteToken::Token(token)) if is_whitespace(&token.token) => {}
                 token => break token,
             }
         };
@@ -938,29 +966,46 @@ fn paste_tokens(tokens: Vec<ExpansionToken>) -> Vec<ExpansionToken> {
             output.push(operator);
             break;
         };
+        let (left, right) = match (left, right) {
+            (PasteToken::Placemarker, PasteToken::Placemarker) => {
+                output.push(PasteToken::Placemarker);
+                continue;
+            }
+            (PasteToken::Placemarker, token) | (token, PasteToken::Placemarker) => {
+                output.push(token);
+                continue;
+            }
+            (PasteToken::Token(left), PasteToken::Token(right)) => (left, right),
+        };
         let spelling = format!("{}{}", left.token, right.token);
         let mut lexer = Token::lexer(&spelling);
         let Some(Ok(token)) = lexer.next() else {
-            output.push(left);
+            output.push(PasteToken::Token(left));
             output.push(operator);
-            output.push(right);
+            output.push(PasteToken::Token(right));
             continue;
         };
         if lexer.next().is_some() {
-            output.push(left);
+            output.push(PasteToken::Token(left));
             output.push(operator);
-            output.push(right);
+            output.push(PasteToken::Token(right));
             continue;
         }
         let mut hideset = left.hideset;
         hideset.extend(right.hideset);
-        output.push(ExpansionToken {
+        output.push(PasteToken::Token(ExpansionToken {
             token,
             span: left.span,
             hideset,
-        });
+        }));
     }
     output
+        .into_iter()
+        .filter_map(|token| match token {
+            PasteToken::Token(token) => Some(token),
+            PasteToken::Placemarker => None,
+        })
+        .collect()
 }
 
 fn expand_tokens(

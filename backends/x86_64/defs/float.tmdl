@@ -437,6 +437,60 @@ instruction MovdGpr32Xmm for [X86_64] {
     behavior { dst = bitcast(src); }
 }
 
+instruction Cvtss2sd for [X86_64] {
+    param MNEMONIC: String = "cvtss2sd";
+
+    schedule { units = [WriteFPConvert]; }
+
+    operands {
+        dst: XMM,
+        src: XMM32,
+    }
+
+    encoding {
+        0xF3,
+        rex(0b0, dst, src, 0b0),
+        0x0F,
+        0x5A,
+        modrm_reg(dst, src),
+    }
+
+    asm {
+        "{self.MNEMONIC} {dst}, {src}"
+    }
+
+    behavior {
+        dst = fcvt(src, 11, 52);
+    }
+}
+
+instruction Cvtsd2ss for [X86_64] {
+    param MNEMONIC: String = "cvtsd2ss";
+
+    schedule { units = [WriteFPConvert]; }
+
+    operands {
+        dst: XMM32,
+        src: XMM,
+    }
+
+    encoding {
+        0xF2,
+        rex(0b0, dst, src, 0b0),
+        0x0F,
+        0x5A,
+        modrm_reg(dst, src),
+    }
+
+    asm {
+        "{self.MNEMONIC} {dst}, {src}"
+    }
+
+    behavior {
+        dst = fcvt(src, 8, 23);
+    }
+}
+
 instruction Cvtsi2ss32 for [X86_64] {
     param OPNAME: String = "cvtsi2ss32";
     param MNEMONIC: String = "cvtsi2ss";
@@ -772,4 +826,3 @@ instruction MovsdStoreDisp for [X86_64] {
         store(base + sext(imm, self.XLEN), 8, src);
     }
 }
-

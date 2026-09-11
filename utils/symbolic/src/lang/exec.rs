@@ -712,20 +712,21 @@ fn eval_float(kind: SymKind, c: &impl Fn(usize) -> Value) -> Value {
             _ => panic!("asfloat requires a scalar operand"),
         },
         SymKind::FCvt => {
-            let (value, width) = match c(0) {
-                Value::Int(v) => (v.to_u64() as u128, v.width()),
-                Value::Float(f) => (f.to_bits(), f.bit_width()),
-                _ => panic!("fcvt requires a scalar operand"),
-            };
-            let (exp, mant) = float_format(width, "fcvt");
             let exponent = as_int!(c(1), "fcvt").to_u64() as u32;
             let mantissa = as_int!(c(2), "fcvt").to_u64() as u32;
-            let converted =
-                APFloat::from_bits(exp, mant, false, value).convert(exponent, mantissa, false);
-            Value::Int(APInt::new(
-                converted.bit_width(),
-                converted.to_bits() as u64,
-            ))
+            match c(0) {
+                Value::Int(value) => {
+                    let (exp, mant) = float_format(value.width(), "fcvt");
+                    let converted = APFloat::from_bits(exp, mant, false, value.to_u64() as u128)
+                        .convert(exponent, mantissa, false);
+                    Value::Int(APInt::new(
+                        converted.bit_width(),
+                        converted.to_bits() as u64,
+                    ))
+                }
+                Value::Float(value) => Value::Float(value.convert(exponent, mantissa, false)),
+                _ => panic!("fcvt requires a scalar operand"),
+            }
         }
         SymKind::SIToFP | SymKind::UIToFP => {
             let signed = kind == SymKind::SIToFP;

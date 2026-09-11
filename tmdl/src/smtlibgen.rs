@@ -1942,6 +1942,7 @@ impl crate::semgen::TermBackend for SmtTerm<'_, '_> {
                 let (bits, width, _) = emit(self, child_node(0)?)?.as_bv();
                 matches!(width, 16 | 32 | 64).then_some(SmtVal::Float { bits, width })
             }
+            SymKind::FCvt => emit_smt_fcvt(self, graph, node, emit),
             SymKind::Split => {
                 let value = emit(self, child_node(0)?)?;
                 let count = const_child(1)? as u32;
@@ -2057,6 +2058,40 @@ impl crate::semgen::TermBackend for SmtTerm<'_, '_> {
             _ => None,
         }
     }
+}
+
+fn emit_smt_fcvt<'a, 'b, G: crate::semgen::ValueDag>(
+    term: &mut SmtTerm<'a, 'b>,
+    graph: &G,
+    node: NodeId,
+    emit: &mut dyn FnMut(&mut SmtTerm<'a, 'b>, NodeId) -> Option<SmtVal>,
+) -> Option<SmtVal> {
+    let mut children = graph.children(node);
+    let input = emit(term, children.next()?)?;
+    let exponent = crate::semgen::eval_const(graph, children.next()?)?.0 as u32;
+    let mantissa = crate::semgen::eval_const(graph, children.next()?)?.0 as u32;
+    smt_fcvt(input, exponent, mantissa)
+}
+
+fn smt_fcvt(input: SmtVal, exponent: u32, mantissa: u32) -> Option<SmtVal> {
+    let input = match input {
+        input @ SmtVal::Float { .. } => input,
+        SmtVal::Bits { expr, width, .. } if matches!(width, 16 | 32 | 64) => {
+            SmtVal::Float { bits: expr, width }
+        }
+        _ => return None,
+    };
+    let width = 1 + exponent + mantissa;
+    matches!(width, 16 | 32 | 64).then(|| {
+        SmtVal::float(
+            format!(
+                "((_ to_fp {exponent} {}) RNE {})",
+                mantissa + 1,
+                input.as_fp()
+            ),
+            width,
+        )
+    })
 }
 
 /// The SMT-LIB operator a scalar op is spelled with.

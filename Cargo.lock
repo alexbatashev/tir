@@ -2744,11 +2744,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "globset",
+ "regex",
  "serde",
  "serde_json",
+ "tempfile",
  "tir-isa-test-suite",
  "tir-verify",
  "tmdl",
+ "toml 0.9.12+spec-1.1.0",
  "xshell",
 ]
 

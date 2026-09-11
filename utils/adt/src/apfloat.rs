@@ -217,6 +217,28 @@ impl APFloat {
         Self::from_bits(11, 52, false, value.to_bits() as u128)
     }
 
+    /// Round the exact value `significand * 2^exp2` into a floating format.
+    pub fn from_significand(
+        exp_width: u32,
+        mant_width: u32,
+        explicit_leading_bit: bool,
+        sign: bool,
+        significand: u128,
+        exp2: i32,
+    ) -> Self {
+        if significand == 0 {
+            return Self::zero(exp_width, mant_width, explicit_leading_bit, sign);
+        }
+        Self::compose(
+            exp_width,
+            mant_width,
+            explicit_leading_bit,
+            sign,
+            significand,
+            exp2,
+        )
+    }
+
     /// Convert to f32 (may lose precision or be inaccurate for non-standard formats)
     pub fn to_f32(&self) -> f32 {
         if self.is_binary32() {

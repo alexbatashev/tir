@@ -708,14 +708,23 @@ fn from_sem_value(
         return Ok(Value::Ptr(int.to_u64()));
     }
     if let Some(float) = (ty_data.as_ref() as &dyn std::any::Any).downcast_ref::<FloatType>() {
-        let sem::Value::Float(float_value) = value else {
-            return Err(InterpError::Message("float result must be a float".into()));
+        let float_value = match value {
+            sem::Value::Float(float_value) => {
+                float_value.convert(float.exp_width(), float.mant_width(), false)
+            }
+            sem::Value::RawBits(bits) => APFloat::from_bits(
+                float.exp_width(),
+                float.mant_width(),
+                false,
+                bits.to_apint().to_u64() as u128,
+            ),
+            _ => {
+                return Err(InterpError::Message(
+                    "float result must be floating or raw bits".into(),
+                ));
+            }
         };
-        return Ok(Value::Float(float_value.convert(
-            float.exp_width(),
-            float.mant_width(),
-            false,
-        )));
+        return Ok(Value::Float(float_value));
     }
     if (ty_data.as_ref() as &dyn std::any::Any)
         .downcast_ref::<UnitType>()

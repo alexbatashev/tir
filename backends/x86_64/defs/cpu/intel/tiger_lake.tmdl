@@ -118,6 +118,10 @@ machine TigerLake ("tiger-lake") for [X86_64] {
         latency = 1;
         uop(Any4);
     }
+    bind WriteFPConvert {
+        latency = 4;
+        uop(Res0);
+    }
     bind WriteSIToFP {
         latency = 4;
         uop(Res0);

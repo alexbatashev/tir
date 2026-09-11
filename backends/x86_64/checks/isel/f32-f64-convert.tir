@@ -1,0 +1,21 @@
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
+// RUN: tir mc --march=x86_64 --filetype=obj-ascii %s | filecheck %s --check-prefix=OBJ
+
+module {
+  %fn_widen = func.func @widen(%0: !f32) -> !f64 {
+    %1 = fcvt %0 : !f64
+    func.return %1
+  }
+  %fn_narrow = func.func @narrow(%2: !f64) -> !f32 {
+    %3 = fcvt %2 : !f32
+    func.return %3
+  }
+  module_end
+}
+
+// CHECK: x86_64.cvtss2sd {dst = %{{[0-9]+}}:XMM, src = %{{[0-9]+}}:XMM}
+// CHECK: x86_64.cvtsd2ss {dst = %{{[0-9]+}}:XMM32, src = %{{[0-9]+}}:XMM}
+// OBJ: widen:
+// OBJ-NEXT: [0xF3, 0x0F, 0x5A, 0xC0]
+// OBJ: narrow:
+// OBJ-NEXT: [0xF2, 0x0F, 0x5A, 0xC0]

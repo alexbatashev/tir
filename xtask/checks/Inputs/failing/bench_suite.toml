@@ -1,0 +1,7 @@
+[suite]
+package = "fixture"
+
+[[compiler]]
+name = "gcc"
+compile = ["gcc", "{level}", "-c", "{source}", "-o", "{output}"]
+link = ["gcc", "{objects}", "-o", "{output}"]

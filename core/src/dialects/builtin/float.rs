@@ -249,6 +249,45 @@ impl UIToFPOp {
 }
 
 operation! {
+    FPConvertOp {
+        name: "fcvt",
+        dialect: "builtin",
+        operands: O {
+            input: "crate::builtin::FloatType",
+        },
+        results: R {
+            result: "crate::builtin::FloatType",
+        },
+        sem: "(set result (fcvt input $float_exponent $float_mantissa))",
+        interfaces: [crate::Speculatable],
+    }
+}
+
+impl crate::Speculatable for FPConvertOp {}
+
+impl FPConvertOp {
+    fn float_exponent(
+        &self,
+        g: &mut impl tir::graph::MutDag<
+            Node = tir::sem::SymKind,
+            Leaf = tir::sem::SymPayload<tir::ValueId>,
+        >,
+    ) -> tir::graph::NodeId {
+        float_format_node(&self.0, g, crate::builtin::FloatType::exp_width)
+    }
+
+    fn float_mantissa(
+        &self,
+        g: &mut impl tir::graph::MutDag<
+            Node = tir::sem::SymKind,
+            Leaf = tir::sem::SymPayload<tir::ValueId>,
+        >,
+    ) -> tir::graph::NodeId {
+        float_format_node(&self.0, g, crate::builtin::FloatType::mant_width)
+    }
+}
+
+operation! {
     CmpFOp {
         name: "cmpf",
         dialect: "builtin",

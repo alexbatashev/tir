@@ -8,6 +8,7 @@
 
 fn main() {
     tir_lit::workspace_harness_main(&[
+        ("xtask", tir_lit::Tool::cargo_test_bin("xtask", "xtask")),
         ("tir", tir_lit::Tool::cargo_test_bin("tir-tools", "tir")),
         ("fcc", tir_lit::Tool::cargo_test_bin("fcc", "fcc")),
         ("tmdlc", tir_lit::Tool::cargo_test_bin("tmdl", "tmdlc")),
