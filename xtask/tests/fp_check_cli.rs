@@ -362,6 +362,23 @@ fn check_detects_a_numerical_error_above_the_bound() {
 }
 
 #[test]
+fn check_requires_all_correlated_results() {
+    let (success, report) = check_fixture(
+        "kind = \"correlated_results\"\nresults = [\"strict:0x0\", \"relaxed:0x1\"]",
+        r#"{"kind":"correlated_results","results":["relaxed:0x1"]}"#,
+        "pass",
+        "reference",
+    );
+
+    assert!(!success);
+    assert_eq!(report["results"][0]["status"], "fail");
+    assert!(report["results"][0]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("correlated results"));
+}
+
+#[test]
 fn check_does_not_count_future_gcc_evidence_as_tir_support() {
     let (success, report) = check_fixture(
         "kind = \"exact_bits\"\nbits = \"0x0000000000000000\"\nflags = []",
