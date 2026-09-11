@@ -69,6 +69,316 @@ version = "2019"
 reference = "oracle-provenance.toml#scale-binary64"
 
 [[cases]]
+id = "round.binary64.halfway.upward"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/rounding.c"
+language_mode = "c17"
+target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0x3ff0000000000000", "0x3ca0000000000000"]
+run_args = ["add64", "upward"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x3ff0000000000001"
+flags = ["inexact"]
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 directed rounding"
+version = "2019"
+reference = "oracle-provenance.toml#directed-rounding"
+
+[[cases]]
+id = "round.binary64.halfway.nearest"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/rounding.c"
+language_mode = "c17"
+target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0x3ff0000000000000", "0x3ca0000000000000"]
+run_args = ["add64", "nearest"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x3ff0000000000000"
+flags = ["inexact"]
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 directed rounding"
+version = "2019"
+reference = "oracle-provenance.toml#directed-rounding"
+
+[[cases]]
+id = "round.binary64.halfway.downward"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/rounding.c"
+language_mode = "c17"
+target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0x3ff0000000000000", "0x3ca0000000000000"]
+run_args = ["add64", "downward"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x3ff0000000000000"
+flags = ["inexact"]
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 directed rounding"
+version = "2019"
+reference = "oracle-provenance.toml#directed-rounding"
+
+[[cases]]
+id = "round.binary64.negative_halfway.nearest"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/rounding.c"
+language_mode = "c17"
+target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0xbff0000000000000", "0xbca0000000000000"]
+run_args = ["add64", "nearest"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0xbff0000000000000"
+flags = ["inexact"]
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 directed rounding"
+version = "2019"
+reference = "oracle-provenance.toml#directed-rounding"
+
+[[cases]]
+id = "round.binary64.negative_halfway.downward"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/rounding.c"
+language_mode = "c17"
+target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0xbff0000000000000", "0xbca0000000000000"]
+run_args = ["add64", "downward"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0xbff0000000000001"
+flags = ["inexact"]
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 directed rounding"
+version = "2019"
+reference = "oracle-provenance.toml#directed-rounding"
+
+[[cases]]
+id = "round.binary64.overflow.nearest"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/rounding.c"
+language_mode = "c17"
+target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0x7fefffffffffffff", "0x4000000000000000"]
+run_args = ["mul64", "nearest"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x7ff0000000000000"
+flags = ["overflow", "inexact"]
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 directed rounding"
+version = "2019"
+reference = "oracle-provenance.toml#directed-rounding"
+
+[[cases]]
+id = "round.binary64.overflow.toward_zero"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/rounding.c"
+language_mode = "c17"
+target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0x7fefffffffffffff", "0x4000000000000000"]
+run_args = ["mul64", "toward_zero"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x7fefffffffffffff"
+flags = ["overflow", "inexact"]
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 directed rounding"
+version = "2019"
+reference = "oracle-provenance.toml#directed-rounding"
+
+[[cases]]
+id = "round.binary64.convert_f32.exact_subnormal"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/rounding.c"
+language_mode = "c17"
+target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0x36a0000000000000"]
+run_args = ["f64_to_f32", "nearest"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x00000001"
+flags = []
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 directed rounding"
+version = "2019"
+reference = "oracle-provenance.toml#directed-rounding"
+
+[[cases]]
+id = "round.binary64.convert_f32.inexact_subnormal"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/rounding.c"
+language_mode = "c17"
+target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0x36a8000000000000"]
+run_args = ["f64_to_f32", "nearest"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x00000002"
+flags = ["underflow", "inexact"]
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 directed rounding"
+version = "2019"
+reference = "oracle-provenance.toml#directed-rounding"
+
+[[cases]]
+id = "round.binary64.convert_f32.halfway_nearest"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/rounding.c"
+language_mode = "c17"
+target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0x3ff0000010000000"]
+run_args = ["f64_to_f32", "nearest"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x3f800000"
+flags = ["inexact"]
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 directed rounding"
+version = "2019"
+reference = "oracle-provenance.toml#directed-rounding"
+
+[[cases]]
+id = "round.binary64.convert_f32.halfway_upward"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/rounding.c"
+language_mode = "c17"
+target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0x3ff0000010000000"]
+run_args = ["f64_to_f32", "upward"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x3f800001"
+flags = ["inexact"]
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 directed rounding"
+version = "2019"
+reference = "oracle-provenance.toml#directed-rounding"
+
+[[cases]]
+id = "round.binary64.convert_i64.halfway_nearest"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/rounding.c"
+language_mode = "c17"
+target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0x3ff8000000000000"]
+run_args = ["to_i64", "nearest"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x0000000000000002"
+flags = ["inexact"]
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 directed rounding"
+version = "2019"
+reference = "oracle-provenance.toml#directed-rounding"
+
+[[cases]]
+id = "round.binary64.convert_i64.halfway_toward_zero"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/rounding.c"
+language_mode = "c17"
+target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0x3ff8000000000000"]
+run_args = ["to_i64", "toward_zero"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x0000000000000001"
+flags = ["inexact"]
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 directed rounding"
+version = "2019"
+reference = "oracle-provenance.toml#directed-rounding"
+
+[[cases]]
+id = "round.binary64.convert_i64.invalid_infinity"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/rounding.c"
+language_mode = "c17"
+target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0x7ff0000000000000"]
+run_args = ["to_i64_invalid", "nearest"]
+probe = "execute"
+
+[cases.expectation]
+kind = "effects"
+flags = ["invalid"]
+errno = 123
+events = []
+trapped = false
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 directed rounding"
+version = "2019"
+reference = "oracle-provenance.toml#directed-rounding"
+
+[[cases]]
 id = "scale.binary64.negative_min_subnormal"
 stage = "scalar"
 source = "fcc/checks/Inputs/fp/reference/scale.c"

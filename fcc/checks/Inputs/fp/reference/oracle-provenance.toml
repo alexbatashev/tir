@@ -27,3 +27,9 @@ standard = "IEEE 754-2019"
 operation = "binary64 division by the exact value 2 under roundTiesToEven"
 nan_policy = "quiet NaNs retain GCC's observed payload; signaling NaNs are quieted and raise invalid"
 tininess = "after rounding"
+
+[directed-rounding]
+kind = "ieee_operation"
+standard = "IEEE 754-2019"
+modes = ["roundTiesToEven", "roundTowardNegative", "roundTowardPositive", "roundTowardZero"]
+scope = "binary64 arithmetic, binary64-to-binary32 conversion, and C llrint observations"
