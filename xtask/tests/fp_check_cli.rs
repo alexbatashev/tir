@@ -228,3 +228,37 @@ fn check_rejects_an_empty_case_selection() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("no cases selected"));
     assert!(!checked.exists());
 }
+
+#[test]
+fn reference_records_same_expression_contraction() {
+    let directory = tempfile::tempdir().unwrap();
+    let report = directory.path().join("reference.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args([
+            "fp-check",
+            "reference",
+            "--gcc",
+            "gcc",
+            "--case",
+            "contraction.gnu17.same.default",
+            "--output",
+            report.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
+    assert_eq!(report["results"][0]["status"], "pass");
+    assert!(report["results"][0]["observation"]["instructions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|line| line.as_str().unwrap().contains("vfmadd")));
+}

@@ -14,3 +14,9 @@ availability = "required by later numerical-bound cases, not used for the closed
 [softfloat]
 version = "3e"
 availability = "not installed; cases that require it report missing infrastructure"
+
+[gcc-contraction]
+kind = "compatibility_observation"
+compiler = "GCC 15.2.0"
+target = "x86_64, -march=haswell"
+scope = "GNU C17 and ISO C17 assembly under the recorded -ffp-contract modes"
