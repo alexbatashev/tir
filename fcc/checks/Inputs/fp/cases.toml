@@ -48,6 +48,321 @@ version = "15.2.0"
 reference = "oracle-provenance.toml#gcc-contraction"
 
 [[cases]]
+id = "contraction.gnu17.same.off"
+stage = "round"
+source = "fcc/checks/Inputs/fp/reference/contraction.c"
+language_mode = "gnu17"
+target_requirements = ["x86_64", "haswell", "fma"]
+compiler_args = ["-O2", "-march=haswell", "-DPROBE_SAME", "-ffp-contract=off"]
+runtime_input_bits = []
+probe = "assembly"
+
+[cases.expectation]
+kind = "code_shape"
+required = ["vmulsd", "vaddsd"]
+forbidden = ["vfmadd"]
+
+[cases.oracle]
+kind = "gcc_compatibility"
+identity = "GCC"
+version = "15.2.0"
+reference = "oracle-provenance.toml#gcc-contraction"
+
+[[cases]]
+id = "contraction.gnu17.same.on"
+stage = "round"
+source = "fcc/checks/Inputs/fp/reference/contraction.c"
+language_mode = "gnu17"
+target_requirements = ["x86_64", "haswell", "fma"]
+compiler_args = ["-O2", "-march=haswell", "-DPROBE_SAME", "-ffp-contract=on"]
+runtime_input_bits = []
+probe = "assembly"
+
+[cases.expectation]
+kind = "code_shape"
+required = ["vfmadd"]
+forbidden = ["vmulsd"]
+
+[cases.oracle]
+kind = "gcc_compatibility"
+identity = "GCC"
+version = "15.2.0"
+reference = "oracle-provenance.toml#gcc-contraction"
+
+[[cases]]
+id = "contraction.gnu17.same.fast"
+stage = "round"
+source = "fcc/checks/Inputs/fp/reference/contraction.c"
+language_mode = "gnu17"
+target_requirements = ["x86_64", "haswell", "fma"]
+compiler_args = ["-O2", "-march=haswell", "-DPROBE_SAME", "-ffp-contract=fast"]
+runtime_input_bits = []
+probe = "assembly"
+
+[cases.expectation]
+kind = "code_shape"
+required = ["vfmadd"]
+forbidden = ["vmulsd"]
+
+[cases.oracle]
+kind = "gcc_compatibility"
+identity = "GCC"
+version = "15.2.0"
+reference = "oracle-provenance.toml#gcc-contraction"
+
+[[cases]]
+id = "contraction.gnu17.cross.default"
+stage = "round"
+source = "fcc/checks/Inputs/fp/reference/contraction.c"
+language_mode = "gnu17"
+target_requirements = ["x86_64", "haswell", "fma"]
+compiler_args = ["-O2", "-march=haswell", "-DPROBE_CROSS"]
+runtime_input_bits = []
+probe = "assembly"
+
+[cases.expectation]
+kind = "code_shape"
+required = ["vfmadd"]
+forbidden = ["vmulsd"]
+
+[cases.oracle]
+kind = "gcc_compatibility"
+identity = "GCC"
+version = "15.2.0"
+reference = "oracle-provenance.toml#gcc-contraction"
+
+[[cases]]
+id = "contraction.gnu17.cross.off"
+stage = "round"
+source = "fcc/checks/Inputs/fp/reference/contraction.c"
+language_mode = "gnu17"
+target_requirements = ["x86_64", "haswell", "fma"]
+compiler_args = ["-O2", "-march=haswell", "-DPROBE_CROSS", "-ffp-contract=off"]
+runtime_input_bits = []
+probe = "assembly"
+
+[cases.expectation]
+kind = "code_shape"
+required = ["vmulsd", "vaddsd"]
+forbidden = ["vfmadd"]
+
+[cases.oracle]
+kind = "gcc_compatibility"
+identity = "GCC"
+version = "15.2.0"
+reference = "oracle-provenance.toml#gcc-contraction"
+
+[[cases]]
+id = "contraction.gnu17.cross.on"
+stage = "round"
+source = "fcc/checks/Inputs/fp/reference/contraction.c"
+language_mode = "gnu17"
+target_requirements = ["x86_64", "haswell", "fma"]
+compiler_args = ["-O2", "-march=haswell", "-DPROBE_CROSS", "-ffp-contract=on"]
+runtime_input_bits = []
+probe = "assembly"
+
+[cases.expectation]
+kind = "code_shape"
+required = ["vmulsd", "vaddsd"]
+forbidden = ["vfmadd"]
+
+[cases.oracle]
+kind = "gcc_compatibility"
+identity = "GCC"
+version = "15.2.0"
+reference = "oracle-provenance.toml#gcc-contraction"
+
+[[cases]]
+id = "contraction.gnu17.cross.fast"
+stage = "round"
+source = "fcc/checks/Inputs/fp/reference/contraction.c"
+language_mode = "gnu17"
+target_requirements = ["x86_64", "haswell", "fma"]
+compiler_args = ["-O2", "-march=haswell", "-DPROBE_CROSS", "-ffp-contract=fast"]
+runtime_input_bits = []
+probe = "assembly"
+
+[cases.expectation]
+kind = "code_shape"
+required = ["vfmadd"]
+forbidden = ["vmulsd"]
+
+[cases.oracle]
+kind = "gcc_compatibility"
+identity = "GCC"
+version = "15.2.0"
+reference = "oracle-provenance.toml#gcc-contraction"
+
+[[cases]]
+id = "contraction.c17.same.default"
+stage = "round"
+source = "fcc/checks/Inputs/fp/reference/contraction.c"
+language_mode = "c17"
+target_requirements = ["x86_64", "haswell", "fma"]
+compiler_args = ["-O2", "-march=haswell", "-DPROBE_SAME"]
+runtime_input_bits = []
+probe = "assembly"
+
+[cases.expectation]
+kind = "code_shape"
+required = ["vmulsd", "vaddsd"]
+forbidden = ["vfmadd"]
+
+[cases.oracle]
+kind = "gcc_compatibility"
+identity = "GCC"
+version = "15.2.0"
+reference = "oracle-provenance.toml#gcc-contraction"
+
+[[cases]]
+id = "contraction.c17.same.off"
+stage = "round"
+source = "fcc/checks/Inputs/fp/reference/contraction.c"
+language_mode = "c17"
+target_requirements = ["x86_64", "haswell", "fma"]
+compiler_args = ["-O2", "-march=haswell", "-DPROBE_SAME", "-ffp-contract=off"]
+runtime_input_bits = []
+probe = "assembly"
+
+[cases.expectation]
+kind = "code_shape"
+required = ["vmulsd", "vaddsd"]
+forbidden = ["vfmadd"]
+
+[cases.oracle]
+kind = "gcc_compatibility"
+identity = "GCC"
+version = "15.2.0"
+reference = "oracle-provenance.toml#gcc-contraction"
+
+[[cases]]
+id = "contraction.c17.same.on"
+stage = "round"
+source = "fcc/checks/Inputs/fp/reference/contraction.c"
+language_mode = "c17"
+target_requirements = ["x86_64", "haswell", "fma"]
+compiler_args = ["-O2", "-march=haswell", "-DPROBE_SAME", "-ffp-contract=on"]
+runtime_input_bits = []
+probe = "assembly"
+
+[cases.expectation]
+kind = "code_shape"
+required = ["vfmadd"]
+forbidden = ["vmulsd"]
+
+[cases.oracle]
+kind = "gcc_compatibility"
+identity = "GCC"
+version = "15.2.0"
+reference = "oracle-provenance.toml#gcc-contraction"
+
+[[cases]]
+id = "contraction.c17.same.fast"
+stage = "round"
+source = "fcc/checks/Inputs/fp/reference/contraction.c"
+language_mode = "c17"
+target_requirements = ["x86_64", "haswell", "fma"]
+compiler_args = ["-O2", "-march=haswell", "-DPROBE_SAME", "-ffp-contract=fast"]
+runtime_input_bits = []
+probe = "assembly"
+
+[cases.expectation]
+kind = "code_shape"
+required = ["vfmadd"]
+forbidden = ["vmulsd"]
+
+[cases.oracle]
+kind = "gcc_compatibility"
+identity = "GCC"
+version = "15.2.0"
+reference = "oracle-provenance.toml#gcc-contraction"
+
+[[cases]]
+id = "contraction.c17.cross.default"
+stage = "round"
+source = "fcc/checks/Inputs/fp/reference/contraction.c"
+language_mode = "c17"
+target_requirements = ["x86_64", "haswell", "fma"]
+compiler_args = ["-O2", "-march=haswell", "-DPROBE_CROSS"]
+runtime_input_bits = []
+probe = "assembly"
+
+[cases.expectation]
+kind = "code_shape"
+required = ["vmulsd", "vaddsd"]
+forbidden = ["vfmadd"]
+
+[cases.oracle]
+kind = "gcc_compatibility"
+identity = "GCC"
+version = "15.2.0"
+reference = "oracle-provenance.toml#gcc-contraction"
+
+[[cases]]
+id = "contraction.c17.cross.off"
+stage = "round"
+source = "fcc/checks/Inputs/fp/reference/contraction.c"
+language_mode = "c17"
+target_requirements = ["x86_64", "haswell", "fma"]
+compiler_args = ["-O2", "-march=haswell", "-DPROBE_CROSS", "-ffp-contract=off"]
+runtime_input_bits = []
+probe = "assembly"
+
+[cases.expectation]
+kind = "code_shape"
+required = ["vmulsd", "vaddsd"]
+forbidden = ["vfmadd"]
+
+[cases.oracle]
+kind = "gcc_compatibility"
+identity = "GCC"
+version = "15.2.0"
+reference = "oracle-provenance.toml#gcc-contraction"
+
+[[cases]]
+id = "contraction.c17.cross.on"
+stage = "round"
+source = "fcc/checks/Inputs/fp/reference/contraction.c"
+language_mode = "c17"
+target_requirements = ["x86_64", "haswell", "fma"]
+compiler_args = ["-O2", "-march=haswell", "-DPROBE_CROSS", "-ffp-contract=on"]
+runtime_input_bits = []
+probe = "assembly"
+
+[cases.expectation]
+kind = "code_shape"
+required = ["vmulsd", "vaddsd"]
+forbidden = ["vfmadd"]
+
+[cases.oracle]
+kind = "gcc_compatibility"
+identity = "GCC"
+version = "15.2.0"
+reference = "oracle-provenance.toml#gcc-contraction"
+
+[[cases]]
+id = "contraction.c17.cross.fast"
+stage = "round"
+source = "fcc/checks/Inputs/fp/reference/contraction.c"
+language_mode = "c17"
+target_requirements = ["x86_64", "haswell", "fma"]
+compiler_args = ["-O2", "-march=haswell", "-DPROBE_CROSS", "-ffp-contract=fast"]
+runtime_input_bits = []
+probe = "assembly"
+
+[cases.expectation]
+kind = "code_shape"
+required = ["vfmadd"]
+forbidden = ["vmulsd"]
+
+[cases.oracle]
+kind = "gcc_compatibility"
+identity = "GCC"
+version = "15.2.0"
+reference = "oracle-provenance.toml#gcc-contraction"
+
+[[cases]]
 id = "fma.binary64.value.fused"
 stage = "reference"
 source = "fcc/checks/Inputs/fp/reference/fma.c"
