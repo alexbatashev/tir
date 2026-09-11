@@ -299,13 +299,61 @@ fn reference(
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join(DEFAULT_MANIFEST));
     let manifest = read_manifest(&manifest_path)?;
-    let compiler_path = resolve_executable(gcc)?;
+    let selected = manifest
+        .cases
+        .iter()
+        .filter(|case| case_filter.is_none_or(|id| case.id == id))
+        .collect::<Vec<_>>();
+    anyhow::ensure!(!selected.is_empty(), "no cases selected");
+
+    let requested_report_profile = requested_profile.unwrap_or(&manifest.reference.profile);
+    let compiler_path = match resolve_executable(gcc) {
+        Ok(path) => path,
+        Err(error) => {
+            return write_missing_reference_report(
+                root,
+                &selected,
+                output_path,
+                requested_report_profile,
+                CompilerIdentity {
+                    version: String::new(),
+                    executable: gcc.display().to_string(),
+                },
+                HostIdentity {
+                    target: String::new(),
+                    library: String::new(),
+                },
+                vec![vec![gcc.display().to_string()]],
+                &error.to_string(),
+            );
+        }
+    };
     let version_command = vec![
         compiler_path.display().to_string(),
         "-dumpfullversion".into(),
         "-dumpversion".into(),
     ];
-    let compiler_version = stdout(&version_command)?;
+    let compiler_version = match stdout(&version_command) {
+        Ok(version) => version,
+        Err(error) => {
+            return write_missing_reference_report(
+                root,
+                &selected,
+                output_path,
+                requested_report_profile,
+                CompilerIdentity {
+                    version: String::new(),
+                    executable: compiler_path.display().to_string(),
+                },
+                HostIdentity {
+                    target: String::new(),
+                    library: String::new(),
+                },
+                vec![version_command],
+                &error.to_string(),
+            );
+        }
+    };
     let profile = match requested_profile {
         Some(profile) if profile != manifest.reference.profile => profile.to_string(),
         Some(_) | None if compiler_version == manifest.reference.compiler_version => {
@@ -318,16 +366,49 @@ fn reference(
         ),
     };
     let target_command = vec![compiler_path.display().to_string(), "-dumpmachine".into()];
-    let target = stdout(&target_command)?;
+    let target = match stdout(&target_command) {
+        Ok(target) => target,
+        Err(error) => {
+            return write_missing_reference_report(
+                root,
+                &selected,
+                output_path,
+                &profile,
+                CompilerIdentity {
+                    version: compiler_version,
+                    executable: compiler_path.display().to_string(),
+                },
+                HostIdentity {
+                    target: String::new(),
+                    library: String::new(),
+                },
+                vec![version_command, target_command],
+                &error.to_string(),
+            );
+        }
+    };
     let library_command = vec!["getconf".into(), "GNU_LIBC_VERSION".into()];
-    let library = stdout(&library_command)?;
-
-    let selected = manifest
-        .cases
-        .iter()
-        .filter(|case| case_filter.is_none_or(|id| case.id == id))
-        .collect::<Vec<_>>();
-    anyhow::ensure!(!selected.is_empty(), "no cases selected");
+    let library = match stdout(&library_command) {
+        Ok(library) => library,
+        Err(error) => {
+            return write_missing_reference_report(
+                root,
+                &selected,
+                output_path,
+                &profile,
+                CompilerIdentity {
+                    version: compiler_version,
+                    executable: compiler_path.display().to_string(),
+                },
+                HostIdentity {
+                    target,
+                    library: String::new(),
+                },
+                vec![version_command, target_command, library_command],
+                &error.to_string(),
+            );
+        }
+    };
 
     let identity_commands = [version_command, target_command, library_command];
     let mut results = Vec::with_capacity(selected.len());
@@ -359,6 +440,54 @@ fn reference(
         output_path.display()
     );
     Ok(())
+}
+
+fn write_missing_reference_report(
+    root: &Path,
+    selected: &[&Case],
+    output_path: &Path,
+    profile: &str,
+    compiler: CompilerIdentity,
+    host: HostIdentity,
+    commands: Vec<Vec<String>>,
+    detail: &str,
+) -> anyhow::Result<()> {
+    let results = selected
+        .iter()
+        .map(|case| {
+            let source_digest = fs::read(root.join(&case.source))
+                .map(|contents| digest(&contents))
+                .unwrap_or_default();
+            CaseResult {
+                case_id: case.id.clone(),
+                stage: case.stage,
+                compiler: compiler.clone(),
+                source_digest,
+                commands: commands.clone(),
+                exit_status: None,
+                observation: None,
+                resolved_policy: None,
+                artifacts: None,
+                status: Status::MissingInfrastructure,
+                detail: detail.into(),
+            }
+        })
+        .collect();
+    let report = Report {
+        schema_version: 1,
+        profile: profile.into(),
+        generated_at_unix_seconds: timestamp()?,
+        host,
+        results,
+    };
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(output_path, serde_json::to_vec_pretty(&report)?)?;
+    anyhow::bail!(
+        "{detail}; missing-infrastructure report written to {}",
+        output_path.display()
+    )
 }
 
 fn run_reference_case(
