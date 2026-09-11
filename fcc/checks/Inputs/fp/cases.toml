@@ -264,8 +264,8 @@ runtime_input_bits = ["0x3ff0000002000000", "0x3feffffffc000000", "0xbff00000000
 probe = "manifest_only"
 
 [cases.expectation]
-kind = "permitted_set"
-values = ["strict:0x0000000000000000", "relaxed:0xbc90000000000000"]
+kind = "correlated_results"
+results = ["strict:0x0000000000000000", "relaxed:0xbc90000000000000"]
 
 [cases.oracle]
 kind = "design_contract"

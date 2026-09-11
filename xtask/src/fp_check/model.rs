@@ -82,6 +82,9 @@ pub enum Expectation {
     PermittedSet {
         values: Vec<String>,
     },
+    CorrelatedResults {
+        results: Vec<String>,
+    },
     NumericalBound {
         max_error: String,
         metric: String,
@@ -194,6 +197,9 @@ pub enum Observation {
     PermittedSet {
         value: String,
     },
+    CorrelatedResults {
+        results: Vec<String>,
+    },
     NumericalBound {
         value: String,
         error: String,
@@ -245,6 +251,20 @@ impl Expectation {
                     Ok(())
                 } else {
                     Err(format!("value {value} is not in the permitted set"))
+                }
+            }
+            (
+                Self::CorrelatedResults {
+                    results: expected,
+                },
+                Observation::CorrelatedResults { results: observed },
+            ) => {
+                if observed == expected {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "expected correlated results {expected:?}, observed {observed:?}"
+                    ))
                 }
             }
             (
