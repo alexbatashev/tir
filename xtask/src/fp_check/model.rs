@@ -7,7 +7,25 @@ use serde::{Deserialize, Serialize};
 pub struct Manifest {
     pub schema_version: u32,
     pub reference: ReferenceProfile,
+    #[serde(default)]
+    pub inventory: Vec<CoverageItem>,
     pub cases: Vec<Case>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoverageItem {
+    pub id: String,
+    pub stage: Stage,
+    pub area: String,
+    pub status: CoverageStatus,
+    pub requirements: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageStatus {
+    Unimplemented,
 }
 
 #[derive(Deserialize)]

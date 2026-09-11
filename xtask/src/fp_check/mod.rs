@@ -551,6 +551,28 @@ fn read_manifest(path: &Path) -> anyhow::Result<Manifest> {
         .map(|case| case.id.as_str())
         .collect::<BTreeSet<_>>();
     anyhow::ensure!(ids.len() == manifest.cases.len(), "duplicate case ID");
+    let inventory_ids = manifest
+        .inventory
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect::<BTreeSet<_>>();
+    anyhow::ensure!(
+        inventory_ids.len() == manifest.inventory.len(),
+        "duplicate coverage inventory ID"
+    );
+    anyhow::ensure!(
+        ids.is_disjoint(&inventory_ids),
+        "case and coverage inventory IDs overlap"
+    );
+    anyhow::ensure!(
+        manifest.inventory.iter().all(|item| {
+            item.stage == Stage::Release
+                && item.status == model::CoverageStatus::Unimplemented
+                && !item.area.is_empty()
+                && !item.requirements.is_empty()
+        }),
+        "invalid coverage inventory entry"
+    );
     Ok(manifest)
 }
 
