@@ -33,3 +33,8 @@ kind = "ieee_operation"
 standard = "IEEE 754-2019"
 modes = ["roundTiesToEven", "roundTowardNegative", "roundTowardPositive", "roundTowardZero"]
 scope = "binary64 arithmetic, binary64-to-binary32 conversion, and C llrint observations"
+
+[observable-effects]
+kind = "c_fenv"
+standard = "ISO C17 plus the GNU feenableexcept extension for the trap case"
+scope = "exception flags for unused arithmetic and ordered SIGFPE delivery around volatile stores"

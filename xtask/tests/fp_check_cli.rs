@@ -315,3 +315,29 @@ fn reference_records_directed_halfway_rounding() {
     assert_eq!(report["results"][0]["observation"]["bits"], "0x3ff0000000000001");
     assert_eq!(report["results"][0]["observation"]["flags"], serde_json::json!(["inexact"]));
 }
+
+#[test]
+fn reference_records_observable_dead_arithmetic() {
+    let directory = tempfile::tempdir().unwrap();
+    let report = directory.path().join("reference.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args([
+            "fp-check",
+            "reference",
+            "--gcc",
+            "gcc",
+            "--case",
+            "effects.dead_division.flags",
+            "--output",
+            report.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
+    assert_eq!(report["results"][0]["observation"]["flags"], serde_json::json!([]));
+    assert_eq!(report["results"][0]["observation"]["errno"], 123);
+    assert_eq!(report["results"][0]["status"], "pass");
+}

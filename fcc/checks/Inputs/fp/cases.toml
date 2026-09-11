@@ -91,6 +91,66 @@ version = "2019"
 reference = "oracle-provenance.toml#directed-rounding"
 
 [[cases]]
+id = "effects.dead_division.flags"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/effects.c"
+language_mode = "c17"
+target_requirements = ["binary64", "fenv", "libm"]
+compiler_args = ["-O2", "-frounding-math", "-ftrapping-math", "-DPROBE_DEAD"]
+runtime_input_bits = []
+run_args = ["dead"]
+probe = "execute"
+
+[cases.expectation]
+kind = "effects"
+flags = ["divide_by_zero"]
+errno = 123
+events = ["clear", "divide", "test"]
+trapped = false
+
+[cases.reference_expectation]
+kind = "effects"
+flags = []
+errno = 123
+events = ["clear", "divide", "test"]
+trapped = false
+
+[cases.oracle]
+kind = "c_fenv"
+identity = "ISO C floating environment"
+version = "C17"
+reference = "oracle-provenance.toml#observable-effects"
+
+[[cases]]
+id = "effects.trap_order.divide_before_store"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/effects.c"
+language_mode = "gnu17"
+target_requirements = ["x86_64", "glibc", "gnu_feenableexcept", "sigfpe", "libm"]
+compiler_args = ["-O2", "-frounding-math", "-ftrapping-math", "-DPROBE_TRAP"]
+runtime_input_bits = []
+run_args = ["trap"]
+probe = "execute"
+
+[cases.expectation]
+kind = "effects"
+flags = []
+events = ["store_before", "trap"]
+trapped = true
+
+[cases.reference_expectation]
+kind = "effects"
+flags = []
+events = ["store_before", "store_after"]
+trapped = false
+
+[cases.oracle]
+kind = "c_fenv"
+identity = "GNU C floating trap delivery"
+version = "glibc 2.43"
+reference = "oracle-provenance.toml#observable-effects"
+
+[[cases]]
 id = "round.binary64.halfway.nearest"
 stage = "scalar"
 source = "fcc/checks/Inputs/fp/reference/rounding.c"
