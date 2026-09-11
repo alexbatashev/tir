@@ -516,6 +516,87 @@ reference = "fixture"
 }
 
 #[test]
+fn reference_detects_a_store_moved_before_a_trap() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("probe.c");
+    let manifest = directory.path().join("cases.toml");
+    let report = directory.path().join("reference.json");
+    let original = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../fcc/checks/Inputs/fp/reference/effects.c"),
+    )
+    .unwrap();
+    let moved = original.replace(
+        "double result = one / zero;\n    (void)result;\n    event_state = 3;",
+        "event_state = 3;\n    double result = one / zero;\n    (void)result;",
+    );
+    assert_ne!(moved, original);
+    fs::write(&source, moved).unwrap();
+    fs::write(
+        &manifest,
+        format!(
+            r#"schema_version = 1
+
+[reference]
+profile = "gcc-15.2"
+compiler_version = "15.2.0"
+
+[[cases]]
+id = "trap.moved-store"
+stage = "reference"
+source = "{}"
+language_mode = "gnu17"
+target_requirements = ["libm"]
+compiler_args = ["-O0", "-frounding-math", "-ftrapping-math"]
+runtime_input_bits = []
+run_args = ["trap"]
+probe = "execute"
+
+[cases.expectation]
+kind = "effects"
+flags = []
+events = ["store_before", "trap"]
+trapped = true
+
+[cases.oracle]
+kind = "fixture"
+identity = "fixture"
+version = "1"
+reference = "fixture"
+"#,
+            source.display()
+        ),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args([
+            "fp-check",
+            "reference",
+            "--gcc",
+            "gcc",
+            "--profile",
+            "host-test",
+            "--manifest",
+            manifest.to_str().unwrap(),
+            "--output",
+            report.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
+    assert_eq!(report["results"][0]["status"], "fail");
+    assert_eq!(
+        report["results"][0]["observation"]["events"],
+        serde_json::json!(["store_before", "store_after", "trap"])
+    );
+    let artifacts = report["results"][0]["artifacts"].as_str().unwrap();
+    fs::remove_dir_all(artifacts).unwrap();
+}
+
+#[test]
 fn check_accepts_the_fma_reference_bits_and_flags() {
     let directory = tempfile::tempdir().unwrap();
     let reference = directory.path().join("reference.json");
