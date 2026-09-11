@@ -44,3 +44,8 @@ kind = "c_math_reporting"
 standard = "ISO C17"
 library = "glibc 2.43 libm"
 scope = "sqrt, log, and exp result bits, floating exceptions, and errno with sentinel 123"
+
+[gcc-recognition]
+kind = "compatibility_observation"
+compiler = "GCC 15.2.0"
+scope = "disabled builtins, user definitions, indirect calls, nested optimize scopes, and mixed-policy inlining"

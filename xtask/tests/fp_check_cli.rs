@@ -367,3 +367,59 @@ fn reference_records_negative_sqrt_reporting() {
     assert_eq!(report["results"][0]["observation"]["errno"], 33);
     assert_eq!(report["results"][0]["observation"]["result_bits"], "0xfff8000000000000");
 }
+
+#[test]
+fn reference_records_disabled_builtin_recognition() {
+    let directory = tempfile::tempdir().unwrap();
+    let report = directory.path().join("reference.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args([
+            "fp-check",
+            "reference",
+            "--gcc",
+            "gcc",
+            "--case",
+            "recognition.sqrt.builtin_disabled",
+            "--output",
+            report.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
+    assert!(report["results"][0]["observation"]["instructions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|line| line.as_str().unwrap().contains("sqrt@PLT")));
+}
+
+#[test]
+fn reference_accepts_the_expected_declaration_diagnostic() {
+    let directory = tempfile::tempdir().unwrap();
+    let report = directory.path().join("reference.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args([
+            "fp-check",
+            "reference",
+            "--gcc",
+            "gcc",
+            "--case",
+            "recognition.sqrt.declaration_mismatch",
+            "--output",
+            report.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
+    assert_eq!(report["results"][0]["status"], "pass");
+    assert!(report["results"][0]["observation"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("conflicting types for"));
+}

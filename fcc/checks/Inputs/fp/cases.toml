@@ -147,6 +147,131 @@ version = "2.43"
 reference = "oracle-provenance.toml#glibc-math-reporting"
 
 [[cases]]
+id = "recognition.sqrt.builtin_disabled"
+stage = "fcc"
+source = "fcc/checks/Inputs/fp/reference/recognition.c"
+language_mode = "gnu17"
+target_requirements = ["x86_64", "libm"]
+compiler_args = ["-O2", "-fno-builtin-sqrt", "-DPROBE_DISABLED_BUILTIN"]
+runtime_input_bits = []
+probe = "assembly"
+
+[cases.expectation]
+kind = "code_shape"
+required = ["sqrt@PLT"]
+forbidden = ["sqrtsd"]
+
+[cases.oracle]
+kind = "gcc_compatibility"
+identity = "GCC recognition and scope"
+version = "15.2.0"
+reference = "oracle-provenance.toml#gcc-recognition"
+
+[[cases]]
+id = "recognition.sqrt.declaration_mismatch"
+stage = "fcc"
+source = "fcc/checks/Inputs/fp/reference/declaration_mismatch.c"
+language_mode = "c17"
+target_requirements = ["diagnostics"]
+compiler_args = ["-O0"]
+runtime_input_bits = []
+probe = "compile_diagnostic"
+
+[cases.expectation]
+kind = "diagnostic"
+contains = "conflicting types for"
+
+[cases.oracle]
+kind = "gcc_compatibility"
+identity = "GCC diagnostics"
+version = "15.2.0"
+reference = "oracle-provenance.toml#gcc-recognition"
+
+[[cases]]
+id = "recognition.sin.user_defined"
+stage = "fcc"
+source = "fcc/checks/Inputs/fp/reference/recognition.c"
+language_mode = "gnu17"
+target_requirements = ["x86_64", "libm"]
+compiler_args = ["-O2", "-DPROBE_USER_FUNCTION"]
+runtime_input_bits = []
+probe = "assembly"
+
+[cases.expectation]
+kind = "code_shape"
+required = ["addsd"]
+forbidden = ["sin@PLT"]
+
+[cases.oracle]
+kind = "gcc_compatibility"
+identity = "GCC recognition and scope"
+version = "15.2.0"
+reference = "oracle-provenance.toml#gcc-recognition"
+
+[[cases]]
+id = "recognition.sqrt.indirect_call"
+stage = "fcc"
+source = "fcc/checks/Inputs/fp/reference/recognition.c"
+language_mode = "gnu17"
+target_requirements = ["x86_64", "libm"]
+compiler_args = ["-O2", "-DPROBE_INDIRECT_CALL"]
+runtime_input_bits = []
+probe = "assembly"
+
+[cases.expectation]
+kind = "code_shape"
+required = ["jmp"]
+forbidden = ["sqrtsd"]
+
+[cases.oracle]
+kind = "gcc_compatibility"
+identity = "GCC recognition and scope"
+version = "15.2.0"
+reference = "oracle-provenance.toml#gcc-recognition"
+
+[[cases]]
+id = "scope.fp_contract.nested"
+stage = "fcc"
+source = "fcc/checks/Inputs/fp/reference/recognition.c"
+language_mode = "gnu17"
+target_requirements = ["x86_64", "libm"]
+compiler_args = ["-O2", "-march=haswell", "-ffp-contract=fast", "-DPROBE_NESTED_SCOPE"]
+runtime_input_bits = []
+probe = "assembly"
+
+[cases.expectation]
+kind = "code_shape"
+required = ["vmulsd", "vaddsd", "vfmadd"]
+forbidden = []
+
+[cases.oracle]
+kind = "gcc_compatibility"
+identity = "GCC recognition and scope"
+version = "15.2.0"
+reference = "oracle-provenance.toml#gcc-recognition"
+
+[[cases]]
+id = "scope.fp_contract.mixed_inline"
+stage = "fcc"
+source = "fcc/checks/Inputs/fp/reference/recognition.c"
+language_mode = "gnu17"
+target_requirements = ["x86_64", "libm"]
+compiler_args = ["-O2", "-march=haswell", "-ffp-contract=fast", "-DPROBE_MIXED_INLINE"]
+runtime_input_bits = []
+probe = "assembly"
+
+[cases.expectation]
+kind = "code_shape"
+required = ["vmulsd", "vaddsd", "vfmadd"]
+forbidden = []
+
+[cases.oracle]
+kind = "gcc_compatibility"
+identity = "GCC recognition and scope"
+version = "15.2.0"
+reference = "oracle-provenance.toml#gcc-recognition"
+
+[[cases]]
 id = "math.sqrt.signaling_nan.glibc"
 stage = "math"
 source = "fcc/checks/Inputs/fp/reference/math_reporting.c"
