@@ -5,6 +5,7 @@ fn check_fixture(
     expectation: &str,
     observation: &str,
     reference_status: &str,
+    stage: &str,
 ) -> (bool, serde_json::Value) {
     let directory = tempfile::tempdir().unwrap();
     let manifest = directory.path().join("cases.toml");
@@ -21,7 +22,7 @@ compiler_version = "15.2.0"
 
 [[cases]]
 id = "fixture.case"
-stage = "reference"
+stage = "{stage}"
 source = "probe.c"
 language_mode = "c17"
 target_requirements = []
@@ -69,7 +70,7 @@ reference = "fixture"
             "fp-check",
             "check",
             "--stage",
-            "reference",
+            stage,
             "--manifest",
             manifest.to_str().unwrap(),
             "--reference",
@@ -141,6 +142,7 @@ fn check_detects_a_wrong_result_bit() {
         "kind = \"exact_bits\"\nbits = \"0x0000000000000000\"\nflags = []",
         r#"{"kind":"exact_bits","bits":"0x0000000000000001","flags":[]}"#,
         "pass",
+        "reference",
     );
 
     assert!(!success);
@@ -157,6 +159,7 @@ fn check_detects_a_wrong_zero_sign() {
         "kind = \"exact_bits\"\nbits = \"0x0000000000000000\"\nflags = []",
         r#"{"kind":"exact_bits","bits":"0x8000000000000000","flags":[]}"#,
         "pass",
+        "reference",
     );
 
     assert!(!success);
@@ -173,6 +176,7 @@ fn check_detects_a_missing_flag() {
         "kind = \"exact_bits\"\nbits = \"0x0000000000000000\"\nflags = [\"inexact\"]",
         r#"{"kind":"exact_bits","bits":"0x0000000000000000","flags":[]}"#,
         "pass",
+        "reference",
     );
 
     assert!(!success);
@@ -189,6 +193,7 @@ fn check_detects_a_missing_errno_update() {
         "kind = \"effects\"\nflags = []\nerrno = 34\nevents = []\ntrapped = false",
         r#"{"kind":"effects","flags":[],"errno":123,"events":[],"trapped":false}"#,
         "pass",
+        "reference",
     );
 
     assert!(!success);
@@ -205,6 +210,7 @@ fn check_detects_an_unexpected_trap() {
         "kind = \"effects\"\nflags = []\nevents = []\ntrapped = false",
         r#"{"kind":"effects","flags":[],"errno":null,"events":[],"trapped":true}"#,
         "pass",
+        "reference",
     );
 
     assert!(!success);
@@ -221,6 +227,7 @@ fn check_detects_an_absent_instruction() {
         "kind = \"code_shape\"\nrequired = [\"vfmadd\"]\nforbidden = []",
         r#"{"kind":"code_shape","instructions":["vmulsd %xmm1, %xmm0, %xmm0"]}"#,
         "pass",
+        "reference",
     );
 
     assert!(!success);
@@ -237,6 +244,7 @@ fn check_preserves_an_unsupported_capability() {
         "kind = \"exact_bits\"\nbits = \"0x0000000000000000\"\nflags = []",
         "null",
         "unsupported_capability",
+        "reference",
     );
 
     assert!(!success);
@@ -250,6 +258,7 @@ fn check_preserves_missing_infrastructure() {
         "kind = \"exact_bits\"\nbits = \"0x0000000000000000\"\nflags = []",
         "null",
         "missing_infrastructure",
+        "reference",
     );
 
     assert!(!success);
@@ -263,11 +272,25 @@ fn check_detects_a_numerical_error_above_the_bound() {
         "kind = \"numerical_bound\"\nmax_error = \"1e-12\"\nmetric = \"relative\"\ndomain = \"[0.5, 2.0]\"\nzero_convention = \"excluded\"\nsubnormal_convention = \"relative\"\nexceptional_values = \"excluded\"",
         r#"{"kind":"numerical_bound","value":"1.0","error":"2e-12"}"#,
         "pass",
+        "reference",
     );
 
     assert!(!success);
     assert_eq!(report["results"][0]["status"], "fail");
     assert_eq!(report["results"][0]["detail"], "error 2e-12 exceeds 1e-12");
+}
+
+#[test]
+fn check_does_not_count_future_gcc_evidence_as_tir_support() {
+    let (success, report) = check_fixture(
+        "kind = \"exact_bits\"\nbits = \"0x0000000000000000\"\nflags = []",
+        r#"{"kind":"exact_bits","bits":"0x0000000000000000","flags":[]}"#,
+        "pass",
+        "scalar",
+    );
+
+    assert!(!success);
+    assert_eq!(report["results"][0]["status"], "unsupported_capability");
 }
 
 #[test]
