@@ -928,6 +928,7 @@ fn prove_relaxation(rule: &Rule, guarded: &SemGraph) -> Result<(), String> {
                 | SymKind::FSub
                 | SymKind::FMul
                 | SymKind::FDiv
+                | SymKind::FCvt
                 | SymKind::Sqrt
                 | SymKind::Fma
         )

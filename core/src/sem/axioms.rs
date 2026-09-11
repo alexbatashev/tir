@@ -1283,7 +1283,7 @@ impl<'a> Lowering<'a> {
                 .map(|(value, _)| value)
         };
         match kind {
-            SymKind::SIToFP | SymKind::UIToFP => {
+            SymKind::SIToFP | SymKind::UIToFP | SymKind::FCvt => {
                 let exponent = operand(1).map_or(Expr::Lit(11), Expr::Scalar);
                 let mantissa = operand(2).map_or(Expr::Lit(52), Expr::Scalar);
                 self.extern_type(call::FLOAT_TYPE, smallvec![exponent, mantissa])

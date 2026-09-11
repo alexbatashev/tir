@@ -64,6 +64,25 @@ pub fn assert_fcc_matches_host(source: &str) {
     assert_eq!(fcc.stderr, host.stderr);
 }
 
+pub fn assert_fcc_matches_host_at_optimization_levels(source: &str) {
+    for level in ["-O0", "-O2"] {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("test.c"), source).unwrap();
+        run_fcc(dir.path(), &["cc", level, "test.c", "-o", "fcc-program"]);
+        let status = Command::new("cc")
+            .args([level, "test.c", "-o", "host-program"])
+            .current_dir(dir.path())
+            .status()
+            .expect("spawn host cc");
+        assert!(status.success(), "host cc {level} failed");
+        let fcc = run_program(dir.path(), "fcc-program");
+        let host = run_program(dir.path(), "host-program");
+        assert_eq!(exit_code(&fcc), exit_code(&host), "at {level}");
+        assert_eq!(fcc.stdout, host.stdout, "at {level}");
+        assert_eq!(fcc.stderr, host.stderr, "at {level}");
+    }
+}
+
 pub fn compile_host_object(dir: &Path, source: &str, output: &str) {
     fs::write(dir.join("host.c"), source).unwrap();
     let status = Command::new("cc")

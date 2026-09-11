@@ -639,6 +639,7 @@ fn intern_dag(
                 | tir_symbolic::lang::SymKind::FSub
                 | tir_symbolic::lang::SymKind::FMul
                 | tir_symbolic::lang::SymKind::FDiv
+                | tir_symbolic::lang::SymKind::FCvt
                 | tir_symbolic::lang::SymKind::SIToFP
                 | tir_symbolic::lang::SymKind::UIToFP
                 | tir_symbolic::lang::SymKind::Bitcast

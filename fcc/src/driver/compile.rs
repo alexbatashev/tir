@@ -168,6 +168,7 @@ pub(super) fn emit_machine_code(
     use tir::backend::binary::ObjectEmission;
     use tir::backend::pipeline::{Oracles, lower_and_emit};
 
+    let started = std::time::Instant::now();
     let Some(march) = opts.march.as_deref() else {
         eprintln!("fcc: error: --march is required for the asm and obj stages");
         std::process::exit(1);
@@ -195,6 +196,8 @@ pub(super) fn emit_machine_code(
         opts.jobs,
     );
 
+    let frontend = started.elapsed();
+    let passes_started = std::time::Instant::now();
     let mut pm = mid_end(opts);
     // Data lowering erases the δ ops, so the functions naming one must hold a
     // symbol address of their own by then. The backend prologue materializes
@@ -211,6 +214,8 @@ pub(super) fn emit_machine_code(
         std::process::exit(1);
     });
 
+    let passes = passes_started.elapsed();
+    let backend_started = std::time::Instant::now();
     let die = |e: String| -> ! {
         eprintln!("fcc: error: {e}");
         std::process::exit(1);
@@ -234,6 +239,7 @@ pub(super) fn emit_machine_code(
             },
         )
         .unwrap_or_else(|e| die(e));
+        report_phases(frontend, passes, backend_started.elapsed());
         return rendered.into_bytes();
     }
 
@@ -259,7 +265,24 @@ pub(super) fn emit_machine_code(
         eprintln!("fcc: error: failed to emit object: {e}");
         std::process::exit(1);
     });
-    tir::backend::binary::write_elf(&object, &format)
+    let output = tir::backend::binary::write_elf(&object, &format);
+    report_phases(frontend, passes, backend_started.elapsed());
+    output
+}
+
+fn report_phases(
+    frontend: std::time::Duration,
+    passes: std::time::Duration,
+    backend: std::time::Duration,
+) {
+    if std::env::var_os("TIR_TIME_PASSES").is_some_and(|value| value != "0") {
+        eprintln!(
+            "fcc-time: frontend_ms={:.3} passes_ms={:.3} backend_ms={:.3}",
+            frontend.as_secs_f64() * 1e3,
+            passes.as_secs_f64() * 1e3,
+            backend.as_secs_f64() * 1e3
+        );
+    }
 }
 
 /// Preprocess `source`, reporting any `#error`/`#warning` diagnostics. Exits if

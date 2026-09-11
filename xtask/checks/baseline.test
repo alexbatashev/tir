@@ -1,0 +1,3 @@
+# RUN: xtask extbench compile --suite %S/Inputs/local/bench_suite.toml --output /dev/null --baseline %S/Inputs/baseline.json 2>&1 | filecheck %s
+# CHECK: fixture/integer gcc -O0 main.c
+# CHECK: gcc -O0 baseline

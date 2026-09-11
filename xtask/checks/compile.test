@@ -1,0 +1,4 @@
+# RUN: xtask extbench compile --suite %S/Inputs/local/bench_suite.toml --output /dev/null | filecheck %s
+# CHECK: fixture/integer gcc -O0 main.c
+# CHECK-SAME: wall_ms=
+# CHECK-SAME: peak_rss_kb=

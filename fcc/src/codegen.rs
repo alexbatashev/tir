@@ -22,6 +22,7 @@ use tir::cfg::ops as cb;
 use tir::func::ops as func_ops;
 use tir::graph::{Dag, NodeId};
 use tir::ptr::{PtrType, ops as p};
+use tir::utils::APFloat;
 use tir::{Context, Operand, Operation, TypeId, ValueId};
 
 use crate::ast::*;
@@ -388,6 +389,7 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
     let mut defined_functions = HashSet::new();
     let mut declared_functions = HashSet::new();
     let mut internal_functions = HashSet::new();
+    let mut internal_globals = HashSet::new();
     // Entities already given storage: an initialized definition claims the
     // object outright, and repeated tentative definitions reserve it once.
     let mut reserved_globals = HashSet::new();
@@ -424,7 +426,10 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
             }
             AstKind::Global => {
                 let AstLeaf::Global {
-                    name, is_extern, ..
+                    name,
+                    is_extern,
+                    is_static,
+                    ..
                 } = ast.get_leaf_data(item).unwrap()
                 else {
                     unreachable!("global node carries a global payload");
@@ -434,6 +439,9 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                 }
                 if !*is_extern || ast.children(item).next().is_some() {
                     defined_globals.insert(node_entity(typed, item));
+                }
+                if *is_static {
+                    internal_globals.insert(node_entity(typed, item));
                 }
                 globals.insert(
                     node_entity(typed, item),
@@ -554,9 +562,14 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                     // A tentative definition reserves storage only when no
                     // other declaration of the object defines it.
                     if !is_extern && reserved_globals.insert(entity) {
-                        module
-                            .body()
-                            .append_op(b::global_zero(context, &global.name, size, align).build());
+                        let mut definition = b::global_zero(context, &global.name, size, align);
+                        if internal_globals.contains(&entity) {
+                            definition = definition.attr(
+                                "sym_visibility",
+                                AttributeValue::Str("private".to_string().into()),
+                            );
+                        }
+                        module.body().append_op(definition.build());
                     }
                     continue;
                 };
@@ -605,6 +618,12 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                         ),
                     );
                 }
+                if internal_globals.contains(&entity) {
+                    definition = definition.attr(
+                        "sym_visibility",
+                        AttributeValue::Str("private".to_string().into()),
+                    );
+                }
                 module.body().append_op(definition.build());
             }
             AstKind::RecordDecl | AstKind::EnumDecl | AstKind::Typedef | AstKind::Attribute => {}
@@ -627,8 +646,9 @@ fn lower_type(context: &Context, typed: &TypedAst, ty: QualType) -> TypeId {
         TypeKind::Integer(_) => IntegerType::new(context, typed.integer_width(ty).unwrap()),
         TypeKind::Pointer(_) | TypeKind::Array(_, _) => PtrType::opaque(context),
         TypeKind::Enum(_) => IntegerType::new(context, 32),
+        TypeKind::Float => FloatType::f32(context),
         TypeKind::Double => FloatType::f64(context),
-        TypeKind::Error | TypeKind::Float | TypeKind::LongDouble | TypeKind::Function { .. } => {
+        TypeKind::Error | TypeKind::LongDouble | TypeKind::Function { .. } => {
             IntegerType::new(context, 64)
         }
         TypeKind::Record(id) => StructType::new(context, &typed.record(*id).unwrap().name),
@@ -663,6 +683,18 @@ fn constant_initializer_data(
             let size = source_type_layout(typed, target).0 as usize;
             Some(ConstantData {
                 bytes: value.to_le_bytes()[..size].to_vec(),
+                relocations: Vec::new(),
+            })
+        }
+        TypeKind::Float | TypeKind::Double => {
+            let value = constant_floating_operand(typed, initializer, target)?;
+            let bytes = match typed.types().kind(target) {
+                TypeKind::Float => (value.to_bits() as u32).to_le_bytes().to_vec(),
+                TypeKind::Double => (value.to_bits() as u64).to_le_bytes().to_vec(),
+                _ => unreachable!(),
+            };
+            Some(ConstantData {
+                bytes,
                 relocations: Vec::new(),
             })
         }
@@ -715,6 +747,75 @@ fn constant_initializer_data(
         }
         _ => None,
     }
+}
+
+fn constant_floating_value(typed: &TypedAst, initializer: NodeId) -> Option<APFloat> {
+    let ast = typed.ast();
+    let target = node_type(typed, initializer);
+    let (exp_width, mant_width) = floating_format(typed, target)?;
+    let convert = |value: APFloat| value.convert(exp_width, mant_width, false);
+    match ast.get_node(initializer).kind {
+        AstKind::FloatLiteral => {
+            let AstLeaf::Float(value) = ast.get_leaf_data(initializer)? else {
+                return None;
+            };
+            Some(convert(value.value.clone()))
+        }
+        AstKind::Neg => constant_floating_operand(typed, ast.children(initializer).next()?, target)
+            .map(|value| value.neg()),
+        AstKind::Pos => {
+            let child = ast.children(initializer).next()?;
+            constant_floating_operand(typed, child, target)
+        }
+        AstKind::Cast => {
+            let child = ast.children(initializer).next()?;
+            constant_floating_operand(typed, child, target)
+        }
+        kind @ (AstKind::Add | AstKind::Sub | AstKind::Mul | AstKind::Div) => {
+            let mut children = ast.children(initializer);
+            let left = constant_floating_operand(typed, children.next()?, target)?;
+            let right = constant_floating_operand(typed, children.next()?, target)?;
+            Some(match kind {
+                AstKind::Add => left.add(&right),
+                AstKind::Sub => left.sub(&right),
+                AstKind::Mul => left.mul(&right),
+                AstKind::Div => left.div(&right),
+                _ => unreachable!(),
+            })
+        }
+        _ => integer_as_float(typed, initializer, target),
+    }
+}
+
+fn constant_floating_operand(typed: &TypedAst, node: NodeId, target: QualType) -> Option<APFloat> {
+    let (exp_width, mant_width) = floating_format(typed, target)?;
+    match typed.types().kind(node_type(typed, node)) {
+        TypeKind::Float | TypeKind::Double => constant_floating_value(typed, node)
+            .map(|value| value.convert(exp_width, mant_width, false)),
+        TypeKind::Integer(_) | TypeKind::Enum(_) => integer_as_float(typed, node, target),
+        _ => None,
+    }
+}
+
+fn floating_format(typed: &TypedAst, ty: QualType) -> Option<(u32, u32)> {
+    match typed.types().kind(ty) {
+        TypeKind::Float => Some((8, 23)),
+        TypeKind::Double => Some((11, 52)),
+        _ => None,
+    }
+}
+
+fn integer_as_float(typed: &TypedAst, node: NodeId, target: QualType) -> Option<APFloat> {
+    let value = typed.ast().get_annotation(node)?.constant?;
+    let (exp_width, mant_width) = floating_format(typed, target)?;
+    Some(APFloat::from_significand(
+        exp_width,
+        mant_width,
+        false,
+        value.is_negative(),
+        value.unsigned_abs() as u128,
+        0,
+    ))
 }
 
 fn constant_aggregate_initializer_data(
@@ -866,6 +967,7 @@ fn classify_function_type(context: &Context, typed: &TypedAst, ty: QualType) -> 
         ret,
         params: source_params,
         varargs,
+        prototype,
         ..
     } = typed.types().kind(ty)
     else {
@@ -883,7 +985,7 @@ fn classify_function_type(context: &Context, typed: &TypedAst, ty: QualType) -> 
     Signature {
         ret,
         params,
-        varargs: *varargs,
+        varargs: *varargs || !prototype,
     }
 }
 
@@ -1129,7 +1231,7 @@ fn classify_sysv_fields(
 ) -> Option<()> {
     let scalar_class = match typed.types().kind(ty) {
         TypeKind::Integer(_) | TypeKind::Enum(_) | TypeKind::Pointer(_) => Some(SysvClass::Integer),
-        TypeKind::Double => Some(SysvClass::Sse),
+        TypeKind::Float | TypeKind::Double => Some(SysvClass::Sse),
         _ => None,
     };
     if let Some(class) = scalar_class {
@@ -1222,7 +1324,11 @@ fn classify_aapcs64_hfa(
         || pieces
             .iter()
             .any(|piece| type_kind(context, piece.ty) != ValueKind::Float)
-        || source_type_layout(typed, ty).0 != pieces.len() as u64 * 8
+        || pieces
+            .iter()
+            .any(|piece| piece.ty != pieces.first().unwrap().ty)
+        || source_type_layout(typed, ty).0
+            != pieces.len() as u64 * abi_piece_size(context, pieces[0].ty).unwrap()
     {
         return None;
     }
@@ -1260,10 +1366,10 @@ fn flatten_aggregate_fields(
     pieces: &mut Vec<AbiPiece>,
 ) -> bool {
     match typed.types().kind(ty) {
-        TypeKind::Double => {
+        TypeKind::Float | TypeKind::Double => {
             pieces.push(AbiPiece {
                 offset,
-                ty: FloatType::f64(context),
+                ty: lower_type(context, typed, ty),
             });
             true
         }
@@ -1441,6 +1547,9 @@ fn lower_function(
             );
         }
     }
+    if signature.varargs {
+        param_values.push(context.create_value(VarArgsType::new(context), None));
+    }
     let param_ids: Vec<ValueId> = param_values.iter().map(|v| v.id()).collect();
 
     let region = context.create_region();
@@ -1544,9 +1653,15 @@ impl FnCodegen<'_> {
     }
 
     fn convert_scalar(&mut self, value: ValueId, source: QualType, target: QualType) -> ValueId {
-        if self.typed.integer_width(source).is_some()
-            && matches!(self.typed.types().kind(target), TypeKind::Double)
-        {
+        let source_floating = matches!(
+            self.typed.types().kind(source),
+            TypeKind::Float | TypeKind::Double
+        );
+        let target_floating = matches!(
+            self.typed.types().kind(target),
+            TypeKind::Float | TypeKind::Double
+        );
+        if self.typed.integer_width(source).is_some() && target_floating {
             let target_ty = lower_type(self.context, self.typed, target);
             return if self.typed.integer_is_signed(source) == Some(true) {
                 self.emit(b::sitofp(self.context, value, target_ty).build())
@@ -1556,9 +1671,7 @@ impl FnCodegen<'_> {
                     .result()
             };
         }
-        if matches!(self.typed.types().kind(source), TypeKind::Double)
-            && let Some(target_width) = self.typed.integer_width(target)
-        {
+        if source_floating && let Some(target_width) = self.typed.integer_width(target) {
             let target_ty = lower_type(self.context, self.typed, target);
             return if self.typed.integer_is_signed(target) == Some(true) {
                 self.emit(b::fptosi(self.context, value, target_ty).build())
@@ -1575,6 +1688,15 @@ impl FnCodegen<'_> {
                     .result()
             } else {
                 self.emit(b::fptoui(self.context, value, target_ty).build())
+                    .result()
+            };
+        }
+        if source_floating && target_floating {
+            let target_ty = lower_type(self.context, self.typed, target);
+            return if self.context.get_value(value).ty() == target_ty {
+                value
+            } else {
+                self.emit(b::fcvt(self.context, value, target_ty).build())
                     .result()
             };
         }
@@ -1730,7 +1852,7 @@ impl FnCodegen<'_> {
 
     /// C comparisons are ordered (false when either operand is NaN), except
     /// `!=`, which is the unordered-inclusive negation of `==`.
-    fn lower_double_compare(&mut self, kind: AstKind, lhs: ValueId, rhs: ValueId) -> ValueId {
+    fn lower_floating_compare(&mut self, kind: AstKind, lhs: ValueId, rhs: ValueId) -> ValueId {
         let predicate = match kind {
             AstKind::Lt => Predicate::Olt,
             AstKind::Gt => Predicate::Ogt,
@@ -1751,8 +1873,14 @@ impl FnCodegen<'_> {
         .result()
     }
 
-    fn lower_double_binary(&mut self, kind: AstKind, lhs: ValueId, rhs: ValueId) -> ValueId {
-        let ty = FloatType::f64(self.context);
+    fn lower_floating_binary(
+        &mut self,
+        kind: AstKind,
+        lhs: ValueId,
+        rhs: ValueId,
+        source_ty: QualType,
+    ) -> ValueId {
+        let ty = lower_type(self.context, self.typed, source_ty);
         macro_rules! bin {
             ($op:path) => {
                 self.emit($op(self.context, lhs, rhs, ty).build()).result()
@@ -1999,7 +2127,7 @@ impl FnCodegen<'_> {
         }
         let ir_type = lower_type(self.context, self.typed, target);
         let value = match self.typed.types().kind(target) {
-            TypeKind::Double => self
+            TypeKind::Float | TypeKind::Double => self
                 .emit(b::constantf(self.context, 0.0, ir_type).build())
                 .result(),
             TypeKind::Integer(_) | TypeKind::Enum(_) => self
@@ -2694,7 +2822,16 @@ impl FnCodegen<'_> {
                 let AstLeaf::Assign(_) = ast.get_leaf_data(stmt).unwrap() else {
                     unreachable!("assign node carries an assign payload");
                 };
-                let slot = self.locals[&node_entity(self.typed, stmt)];
+                let entity = node_entity(self.typed, stmt);
+                let slot = if let Some(slot) = self.locals.get(&entity).copied() {
+                    slot
+                } else {
+                    let global = self.globals[&entity].clone();
+                    Slot {
+                        ptr: self.symbols.data(self.context, &global.name),
+                        elem: global.elem,
+                    }
+                };
                 let value = ast.children(stmt).next().unwrap();
                 if let TypeKind::Record(id) = self.typed.types().kind(node_type(self.typed, stmt)) {
                     let record = self.typed.record(*id).unwrap().name.clone();
@@ -2768,11 +2905,35 @@ impl FnCodegen<'_> {
             .result()
     }
 
-    /// `value <predicate> 0`, at `int` width like every other C comparison: a
-    /// promoted value is nonzero exactly when the original is, and
-    /// zero-extension preserves that for either signedness.
+    /// Compare a scalar with zero using the source domain's equality rules.
     fn compare_against_zero(&mut self, value: ValueId, predicate: Predicate) -> ValueId {
         let ty = self.context.get_value(value).ty();
+        let is_float = {
+            let data = self.context.get_type_data(ty);
+            (data.as_ref() as &dyn std::any::Any)
+                .downcast_ref::<FloatType>()
+                .is_some()
+        };
+        if is_float {
+            let zero = self
+                .emit(b::constantf(self.context, 0.0, ty).build())
+                .result();
+            let predicate = match predicate {
+                Predicate::Eq => Predicate::Oeq,
+                Predicate::Ne => Predicate::Une,
+                _ => unreachable!("truth conversion uses equality predicates"),
+            };
+            return self
+                .emit(
+                    b::CmpFOpBuilder::new(self.context)
+                        .lhs(value)
+                        .rhs(zero)
+                        .predicate(predicate)
+                        .result_type(IntegerType::new(self.context, 1))
+                        .build(),
+                )
+                .result();
+        }
         let narrow = {
             let data = self.context.get_type_data(ty);
             (data.as_ref() as &dyn std::any::Any)
@@ -3092,6 +3253,16 @@ impl FnCodegen<'_> {
         }
         let ast = self.ast;
         let kind = ast.get_node(node).kind;
+        if matches!(
+            self.typed.types().kind(node_type(self.typed, node)),
+            TypeKind::LongDouble
+        ) {
+            return Err(unsupported(
+                ast,
+                node,
+                "long double expressions".to_string(),
+            ));
+        }
         if let Some(value) = ast.get_annotation(node).and_then(|info| info.constant)
             && matches!(
                 self.typed.types().kind(node_type(self.typed, node)),
@@ -3135,8 +3306,12 @@ impl FnCodegen<'_> {
                     };
                     LoweredExpr::Value(
                         self.emit(
-                            b::constantf(self.context, n.value, FloatType::f64(self.context))
-                                .build(),
+                            b::constantf(
+                                self.context,
+                                n.value.to_f64(),
+                                lower_type(self.context, self.typed, node_type(self.typed, node)),
+                            )
+                            .build(),
                         )
                         .result(),
                     )
@@ -3517,8 +3692,12 @@ impl FnCodegen<'_> {
             (AstKind::Add, TypeKind::Integer(_), TypeKind::Pointer(_)) => {
                 self.lower_pointer_offset(r, l, lhs_ty, rhs_ty, false)
             }
-            _ if matches!(self.typed.types().kind(source_ty), TypeKind::Double) => {
-                self.lower_double_binary(kind, l, r)
+            _ if matches!(
+                self.typed.types().kind(source_ty),
+                TypeKind::Float | TypeKind::Double
+            ) =>
+            {
+                self.lower_floating_binary(kind, l, r, source_ty)
             }
             _ => self.lower_integer_binary(kind, l, r, source_ty),
         };
@@ -3553,14 +3732,44 @@ impl FnCodegen<'_> {
             AstKind::Neg
                 if matches!(
                     self.typed.types().kind(node_type(self.typed, node)),
-                    TypeKind::Double
+                    TypeKind::Float | TypeKind::Double
                 ) =>
             {
-                let zero = self
-                    .emit(b::constantf(self.context, 0.0, result_ty).build())
+                let width =
+                    (source_type_layout(self.typed, node_type(self.typed, node)).0 * 8) as u32;
+                let integer_ty = IntegerType::new(self.context, width);
+                let bits = self
+                    .emit(
+                        b::BitcastOpBuilder::new(self.context)
+                            .input(operand)
+                            .result_type(integer_ty)
+                            .build(),
+                    )
                     .result();
-                self.emit(b::subf(self.context, zero, operand, result_ty).build())
-                    .result()
+                let sign = self
+                    .emit(
+                        b::constant(
+                            self.context,
+                            if width == 64 {
+                                i64::MIN
+                            } else {
+                                i64::from(i32::MIN)
+                            },
+                            integer_ty,
+                        )
+                        .build(),
+                    )
+                    .result();
+                let negated = self
+                    .emit(b::xori(self.context, bits, sign, integer_ty).build())
+                    .result();
+                self.emit(
+                    b::BitcastOpBuilder::new(self.context)
+                        .input(negated)
+                        .result_type(result_ty)
+                        .build(),
+                )
+                .result()
             }
             AstKind::Neg => {
                 let zero = self
@@ -3614,6 +3823,20 @@ impl FnCodegen<'_> {
                 .result();
             self.emit(p::ptradd(self.context, old, offset, elem).build())
                 .result()
+        } else if matches!(
+            self.typed.types().kind(operand_ty),
+            TypeKind::Float | TypeKind::Double
+        ) {
+            let one = self
+                .emit(b::constantf(self.context, 1.0, elem).build())
+                .result();
+            if increment {
+                self.emit(b::addf(self.context, old, one, elem).build())
+                    .result()
+            } else {
+                self.emit(b::subf(self.context, old, one, elem).build())
+                    .result()
+            }
         } else {
             let one = self
                 .emit(b::constant(self.context, 1, elem).build())
@@ -3647,7 +3870,7 @@ impl FnCodegen<'_> {
         // the operand's own type: it decides signed vs unsigned.
         let operand_ty = converted_node_type(self.typed, lhs_node);
         let value = match self.typed.types().kind(operand_ty) {
-            TypeKind::Double => self.lower_double_compare(kind, lhs, rhs),
+            TypeKind::Float | TypeKind::Double => self.lower_floating_compare(kind, lhs, rhs),
             TypeKind::Pointer(_) | TypeKind::Array(_, _) => {
                 let predicate = match kind {
                     AstKind::Lt => Predicate::Ult,
@@ -3733,7 +3956,9 @@ impl FnCodegen<'_> {
             let operand_ty = converted_node_type(self.typed, rhs_node);
             let lhs = self.convert_scalar(lhs, source_ty, operand_ty);
             let result = match self.typed.types().kind(operand_ty) {
-                TypeKind::Double => self.lower_double_binary(kind, lhs, rhs),
+                TypeKind::Float | TypeKind::Double => {
+                    self.lower_floating_binary(kind, lhs, rhs, operand_ty)
+                }
                 _ => self.lower_integer_binary(kind, lhs, rhs, operand_ty),
             };
             self.convert_scalar(result, operand_ty, source_ty)

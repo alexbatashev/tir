@@ -1,0 +1,29 @@
+// RUN: tmdlc --action=emit-smtlib --dialect=test --isa=TestIsa --output=- %s | filecheck %s
+
+isa TestIsa {
+    param XLEN: Integer = 64;
+}
+
+register_class F32 for [TestIsa] {
+    param ENCODING_LEN: Integer = 4;
+    param WIDTH: Integer = 32;
+    registers { f0..f15 => { traits = [float] }, }
+}
+
+register_class F64 for [TestIsa] {
+    param ENCODING_LEN: Integer = 4;
+    param WIDTH: Integer = 64;
+    registers { d0..d15 => { traits = [float] }, }
+}
+
+instruction Widen for [TestIsa] {
+    param MNEMONIC: String = "widen";
+    operands { dst: F64, src: F32, }
+    encoding { 0b00000000, dst, src, }
+    asm { "widen {dst}, {src}" }
+    behavior { dst = fcvt(src, 11, 52); }
+}
+
+// CHECK-NOT: UNSUPPORTED-BEHAVIOR: widen
+// CHECK: (define-fun execute_widen
+// CHECK-NEXT: (write_f64 st dst (fp.to_ieee_bv ((_ to_fp 11 53) RNE ((_ to_fp 8 24) (read_f32 st src))))))

@@ -1,0 +1,3 @@
+# RUN: env CARGO_MANIFEST_DIR=%S/../../xtask xtask extbench compile --list --package fcc --bench coremark | filecheck %s
+# CHECK: fcc/coremark
+# CHECK-NOT: torture

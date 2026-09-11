@@ -1603,7 +1603,17 @@ impl Analyzer<'_> {
                     ValueCategory::Value,
                 )
             }
-            AstKind::FloatLiteral => (self.types.intern(TypeKind::Double), ValueCategory::Value),
+            AstKind::FloatLiteral => {
+                let Some(AstLeaf::Float(literal)) = self.ast.get_leaf_data(node) else {
+                    return;
+                };
+                let kind = match literal.kind {
+                    crate::lexer::FloatingLiteralKind::Float => TypeKind::Float,
+                    crate::lexer::FloatingLiteralKind::Double => TypeKind::Double,
+                    crate::lexer::FloatingLiteralKind::LongDouble => TypeKind::LongDouble,
+                };
+                (self.types.intern(kind), ValueCategory::Value)
+            }
             AstKind::Character => (int, ValueCategory::Value),
             AstKind::String => {
                 let char_ty = self.types.intern(TypeKind::Integer(IntegerKind::Char));
@@ -2572,17 +2582,26 @@ impl Analyzer<'_> {
                 self.record_conversion(argument, parameter);
             }
         }
-        if varargs {
-            for &argument in arguments.iter().skip(params.len()) {
-                let source = self
-                    .ast
-                    .get_annotation(argument)
-                    .and_then(|info| info.ty)
-                    .unwrap_or(error);
-                if self.is_integer(source) {
-                    let promoted = self.integer_promotion(source);
-                    self.record_conversion(argument, promoted);
-                }
+        let promoted_start = if !prototype {
+            0
+        } else if varargs {
+            params.len()
+        } else {
+            arguments.len()
+        };
+        for &argument in arguments.iter().skip(promoted_start) {
+            let source = self
+                .ast
+                .get_annotation(argument)
+                .and_then(|info| info.ty)
+                .unwrap_or(error);
+            let promoted = match self.types.kind(source) {
+                TypeKind::Float => self.types.intern(TypeKind::Double),
+                TypeKind::Integer(_) | TypeKind::Enum(_) => self.integer_promotion(source),
+                _ => source,
+            };
+            if promoted != source {
+                self.record_conversion(argument, promoted);
             }
         }
         (ret, ValueCategory::Value)
@@ -2614,7 +2633,7 @@ impl Analyzer<'_> {
             (kind, children.as_slice(), self.types.kind(result_ty))
             && let Some(AstLeaf::Float(value)) = self.ast.get_leaf_data(*child)
         {
-            return self.cast_float_constant(value.value, *integer);
+            return self.cast_float_constant(value.value.to_f64(), *integer);
         }
         match (kind, children.as_slice()) {
             (AstKind::LogAnd, [left, right]) => {

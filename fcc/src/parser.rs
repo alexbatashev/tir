@@ -2330,6 +2330,7 @@ fn parse_external_tokens(
                             name: decl.name,
                             ty,
                             is_extern,
+                            is_static,
                         },
                     );
                     if let Some(initializer) = initializer {

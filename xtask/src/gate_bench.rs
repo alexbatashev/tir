@@ -7,26 +7,6 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use xshell::{cmd, Shell};
 
-use crate::fcc_torture::execute_corpus;
-
-const COREMARK_REPOSITORY: &str = "https://github.com/eembc/coremark.git";
-const COREMARK_REVISION: &str = "1f483d5b8316753a742cbf5590caf5bd0a4e4777";
-const COREMARK_PATH: &str = "target/test-suites/coremark";
-const COREMARK_UNITS: &[&str] = &[
-    "core_list_join.c",
-    "core_main.c",
-    "core_matrix.c",
-    "core_state.c",
-    "core_util.c",
-    "posix/core_portme.c",
-];
-const COREMARK_FLAGS: &[&str] = &[
-    "-I.",
-    "-Iposix",
-    "-DFLAGS_STR=\"\"",
-    "-DPERFORMANCE_RUN=1",
-    "-DITERATIONS=1000",
-];
 /// Nightly runners are noisy; anything under this is weather, not a regression.
 const REGRESSION_THRESHOLD: f64 = 1.10;
 /// The peak RSS sum is far quieter than wall time. Over three back-to-back runs
@@ -42,19 +22,6 @@ const RSS_CASE_THRESHOLD: f64 = 1.35;
 const SLOWEST_SHOWN: usize = 10;
 const WORST_PEAKS_SHOWN: usize = 5;
 const PEAK_PREFIX: &str = "tir-mem: summary peak_vmhwm_kb=";
-
-#[derive(clap::Args)]
-pub struct Options {
-    /// An already built compiler to time, instead of building a debug one.
-    #[arg(long)]
-    pub fcc: Option<PathBuf>,
-    /// Where to write this run's samples.
-    #[arg(long)]
-    pub output: Option<PathBuf>,
-    /// A previous run's samples to compare against.
-    #[arg(long)]
-    pub baseline: Option<PathBuf>,
-}
 
 /// One case timed at both ends of the contract: the cheapest correct compile,
 /// and the optimising one. Each fcc time is paired with the gcc time at the
@@ -124,24 +91,6 @@ pub struct Results {
     pub many_functions_o2_peak_kb: Option<u64>,
 }
 
-/// Times fcc and gcc at both `-O0` and `-O2` on every passing torture execute
-/// case and the
-/// coremark translation units, one at a time so the numbers are wall time on an
-/// idle machine. Fails when a case does not compile or when the fcc sum over
-/// the cases both runs share grew more than [`REGRESSION_THRESHOLD`] over the
-/// baseline. There is no per-case timeout: a hung compiler is the job's
-/// timeout to catch, and a poll loop would quantise the samples.
-pub fn run(sh: &Shell, root: &Path, options: Options) -> anyhow::Result<()> {
-    let fcc = built_fcc(sh, root, options.fcc)?;
-    let cases = cases(sh, root)?;
-    let results = measure(&fcc, &cases)?;
-    judge(
-        &results,
-        options.baseline.as_deref(),
-        options.output.as_deref(),
-    )
-}
-
 /// The compiler to time: `fcc` as given, or a release build of this tree.
 pub(crate) fn built_fcc(sh: &Shell, root: &Path, fcc: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     let fcc = match fcc {
@@ -158,23 +107,30 @@ pub(crate) fn built_fcc(sh: &Shell, root: &Path, fcc: Option<PathBuf>) -> anyhow
 
 /// Every pinned case: the passing torture execute cases, then the coremark
 /// units.
-pub(crate) fn cases(sh: &Shell, root: &Path) -> anyhow::Result<Vec<Case>> {
-    let mut cases = execute_corpus(sh, root)?
-        .into_iter()
-        .map(|file| Case {
-            label: format!("torture/{}", file.file_name().unwrap().to_string_lossy()),
-            file,
-            cwd: None,
-            flags: Vec::new(),
-        })
-        .collect::<Vec<_>>();
-    let coremark = fetch_coremark(sh, root)?;
-    cases.extend(COREMARK_UNITS.iter().map(|unit| Case {
-        label: format!("coremark/{unit}"),
-        file: coremark.join(unit),
-        cwd: Some(coremark.clone()),
-        flags: COREMARK_FLAGS.iter().map(|flag| flag.to_string()).collect(),
-    }));
+pub(crate) fn cases(_sh: &Shell, root: &Path) -> anyhow::Result<Vec<Case>> {
+    let mut cases = Vec::new();
+    for name in ["torture", "coremark"] {
+        for selection in crate::extbench::config::discover(root, None, Some("fcc"), name)? {
+            let prepared = crate::extbench::config::prepare(
+                &selection,
+                &root.join("target/extbench/sources"),
+            )?;
+            for file in prepared.sources {
+                let relative = file.strip_prefix(&prepared.directory)?;
+                let label = if name == "torture" {
+                    relative.strip_prefix("execute")?
+                } else {
+                    relative
+                };
+                cases.push(Case {
+                    label: format!("{name}/{}", label.display()),
+                    file,
+                    cwd: Some(prepared.directory.clone()),
+                    flags: prepared.config.flags.clone(),
+                });
+            }
+        }
+    }
     Ok(cases)
 }
 
@@ -207,11 +163,11 @@ pub(crate) fn measure(fcc: &Path, cases: &[Case]) -> anyhow::Result<Results> {
             _ => failed.push(case.label.clone()),
         }
         if (index + 1) % 50 == 0 || index + 1 == cases.len() {
-            println!("fcc bench progress: {}/{} cases", index + 1, cases.len());
+            println!("fcc gate progress: {}/{} cases", index + 1, cases.len());
         }
     }
     if !failed.is_empty() {
-        anyhow::bail!("fcc bench: failed to compile {}", failed.join(", "));
+        anyhow::bail!("fcc gate: failed to compile {}", failed.join(", "));
     }
     Ok(results)
 }
@@ -238,7 +194,7 @@ pub(crate) fn judge(
             );
             if after > before * REGRESSION_THRESHOLD {
                 anyhow::bail!(
-                    "fcc bench: compile time at {} regressed against the baseline",
+                    "fcc gate: compile time at {} regressed against the baseline",
                     level.flag()
                 );
             }
@@ -348,26 +304,6 @@ fn parse_peak_kb(stderr: &str) -> Option<u64> {
         .max()
 }
 
-fn fetch_coremark(sh: &Shell, root: &Path) -> anyhow::Result<PathBuf> {
-    let checkout = root.join(COREMARK_PATH);
-    if !checkout.join(".git").is_dir() {
-        fs::create_dir_all(&checkout)?;
-        cmd!(sh, "git -C {checkout} init").run()?;
-        cmd!(
-            sh,
-            "git -C {checkout} remote add origin {COREMARK_REPOSITORY}"
-        )
-        .run()?;
-    }
-    cmd!(
-        sh,
-        "git -C {checkout} fetch --depth 1 origin {COREMARK_REVISION}"
-    )
-    .run()?;
-    cmd!(sh, "git -C {checkout} checkout --detach FETCH_HEAD").run()?;
-    Ok(checkout)
-}
-
 fn fcc_sum(level: Level, results: &Results) -> f64 {
     results
         .samples
@@ -463,7 +399,7 @@ fn check_peaks(level: Level, baseline: &Results, current: &Results) -> anyhow::R
     }
     if after > before * RSS_THRESHOLD {
         anyhow::bail!(
-            "fcc bench: peak RSS at {} regressed against the baseline",
+            "fcc gate: peak RSS at {} regressed against the baseline",
             level.flag()
         );
     }
@@ -472,7 +408,7 @@ fn check_peaks(level: Level, baseline: &Results, current: &Results) -> anyhow::R
         .filter(|(_, before, after)| *after as f64 > *before as f64 * RSS_CASE_THRESHOLD)
     {
         anyhow::bail!(
-            "fcc bench: peak RSS at {} regressed on {path}: {before} kB -> {after} kB",
+            "fcc gate: peak RSS at {} regressed on {path}: {before} kB -> {after} kB",
             level.flag()
         );
     }
@@ -480,7 +416,7 @@ fn check_peaks(level: Level, baseline: &Results, current: &Results) -> anyhow::R
 }
 
 fn report(results: &Results) -> String {
-    let mut out = format!("fcc bench: {} cases\n", results.samples.len());
+    let mut out = format!("fcc gate: {} cases\n", results.samples.len());
     for level in [Level::O0, Level::O2] {
         let gcc_sum: f64 = results
             .samples

@@ -5,8 +5,11 @@ struct Aligned {
     long double value;
 };
 
+void observe_aligned(struct Aligned *value);
+
 long consume_aligned(long head, struct Aligned value) {
-    return head + (long) value.value;
+    observe_aligned(&value);
+    return head;
 }
 
 long call_aligned(long head, struct Aligned *value) {
