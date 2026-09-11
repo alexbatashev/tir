@@ -420,8 +420,25 @@ fn run_reference_case(
                     detail,
                 });
             }
-            let observation: Observation = serde_json::from_slice(&executed.stdout)
-                .with_context(|| format!("parsing observation for {}", case.id))?;
+            let observation: Observation = match serde_json::from_slice(&executed.stdout) {
+                Ok(observation) => observation,
+                Err(error) => {
+                    let artifacts = directory.keep();
+                    return Ok(CaseResult {
+                        case_id: case.id.clone(),
+                        stage: case.stage,
+                        compiler,
+                        source_digest,
+                        commands,
+                        exit_status: executed.status.code(),
+                        observation: None,
+                        resolved_policy: None,
+                        artifacts: Some(artifacts.display().to_string()),
+                        status: Status::Fail,
+                        detail: format!("invalid observation JSON: {error}"),
+                    });
+                }
+            };
             let expectation = case.reference_expectation.as_ref().unwrap_or(&case.expectation);
             let (status, detail) = match expectation.compare(Some(&observation)) {
                 Ok(()) => (
