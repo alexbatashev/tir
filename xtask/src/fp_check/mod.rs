@@ -15,6 +15,12 @@ use sha2::{Digest, Sha256};
 
 const DEFAULT_MANIFEST: &str = "fcc/checks/Inputs/fp/cases.toml";
 
+struct ReferenceEnvironment {
+    compiler: CompilerIdentity,
+    host: HostIdentity,
+    commands: Vec<Vec<String>>,
+}
+
 #[derive(clap::Subcommand)]
 pub enum Task {
     /// Record pinned GCC observations and provenance.
@@ -315,15 +321,17 @@ fn reference(
                 &selected,
                 output_path,
                 requested_report_profile,
-                CompilerIdentity {
-                    version: String::new(),
-                    executable: gcc.display().to_string(),
+                ReferenceEnvironment {
+                    compiler: CompilerIdentity {
+                        version: String::new(),
+                        executable: gcc.display().to_string(),
+                    },
+                    host: HostIdentity {
+                        target: String::new(),
+                        library: String::new(),
+                    },
+                    commands: vec![vec![gcc.display().to_string()]],
                 },
-                HostIdentity {
-                    target: String::new(),
-                    library: String::new(),
-                },
-                vec![vec![gcc.display().to_string()]],
                 &error.to_string(),
             );
         }
@@ -341,15 +349,17 @@ fn reference(
                 &selected,
                 output_path,
                 requested_report_profile,
-                CompilerIdentity {
-                    version: String::new(),
-                    executable: compiler_path.display().to_string(),
+                ReferenceEnvironment {
+                    compiler: CompilerIdentity {
+                        version: String::new(),
+                        executable: compiler_path.display().to_string(),
+                    },
+                    host: HostIdentity {
+                        target: String::new(),
+                        library: String::new(),
+                    },
+                    commands: vec![version_command],
                 },
-                HostIdentity {
-                    target: String::new(),
-                    library: String::new(),
-                },
-                vec![version_command],
                 &error.to_string(),
             );
         }
@@ -374,15 +384,17 @@ fn reference(
                 &selected,
                 output_path,
                 &profile,
-                CompilerIdentity {
-                    version: compiler_version,
-                    executable: compiler_path.display().to_string(),
+                ReferenceEnvironment {
+                    compiler: CompilerIdentity {
+                        version: compiler_version,
+                        executable: compiler_path.display().to_string(),
+                    },
+                    host: HostIdentity {
+                        target: String::new(),
+                        library: String::new(),
+                    },
+                    commands: vec![version_command, target_command],
                 },
-                HostIdentity {
-                    target: String::new(),
-                    library: String::new(),
-                },
-                vec![version_command, target_command],
                 &error.to_string(),
             );
         }
@@ -396,15 +408,17 @@ fn reference(
                 &selected,
                 output_path,
                 &profile,
-                CompilerIdentity {
-                    version: compiler_version,
-                    executable: compiler_path.display().to_string(),
+                ReferenceEnvironment {
+                    compiler: CompilerIdentity {
+                        version: compiler_version,
+                        executable: compiler_path.display().to_string(),
+                    },
+                    host: HostIdentity {
+                        target,
+                        library: String::new(),
+                    },
+                    commands: vec![version_command, target_command, library_command],
                 },
-                HostIdentity {
-                    target,
-                    library: String::new(),
-                },
-                vec![version_command, target_command, library_command],
                 &error.to_string(),
             );
         }
@@ -447,9 +461,7 @@ fn write_missing_reference_report(
     selected: &[&Case],
     output_path: &Path,
     profile: &str,
-    compiler: CompilerIdentity,
-    host: HostIdentity,
-    commands: Vec<Vec<String>>,
+    environment: ReferenceEnvironment,
     detail: &str,
 ) -> anyhow::Result<()> {
     let results = selected
@@ -461,9 +473,9 @@ fn write_missing_reference_report(
             CaseResult {
                 case_id: case.id.clone(),
                 stage: case.stage,
-                compiler: compiler.clone(),
+                compiler: environment.compiler.clone(),
                 source_digest,
-                commands: commands.clone(),
+                commands: environment.commands.clone(),
                 exit_status: None,
                 observation: None,
                 resolved_policy: None,
@@ -477,7 +489,7 @@ fn write_missing_reference_report(
         schema_version: 1,
         profile: profile.into(),
         generated_at_unix_seconds: timestamp()?,
-        host,
+        host: environment.host,
         results,
     };
     if let Some(parent) = output_path.parent() {
