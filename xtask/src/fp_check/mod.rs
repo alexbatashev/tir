@@ -301,6 +301,7 @@ fn run_reference_case(
     fs::write(&copied_source, &source_contents)?;
     let output_path = match case.probe {
         Probe::Assembly => directory.path().join("probe.s"),
+        Probe::CompileDiagnostic => directory.path().join("probe.o"),
         Probe::Execute => directory.path().join("probe"),
         Probe::ManifestOnly => unreachable!(),
     };
@@ -311,6 +312,8 @@ fn run_reference_case(
     compile.extend(case.compiler_args.iter().cloned());
     if matches!(case.probe, Probe::Assembly) {
         compile.push("-S".into());
+    } else if matches!(case.probe, Probe::CompileDiagnostic) {
+        compile.push("-c".into());
     }
     compile.push(copied_source.display().to_string());
     compile.extend(["-o".into(), output_path.display().to_string()]);
@@ -322,6 +325,48 @@ fn run_reference_case(
     let mut commands = identity_commands.to_vec();
     commands.push(compile.clone());
     let compiled = command_output(&compile)?;
+    if matches!(case.probe, Probe::CompileDiagnostic) {
+        let message = format!(
+            "{}{}",
+            String::from_utf8_lossy(&compiled.stdout),
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let observation = Observation::Diagnostic { message };
+        let expectation = case.reference_expectation.as_ref().unwrap_or(&case.expectation);
+        let comparison = expectation.compare(Some(&observation));
+        let (status, detail) = if compiled.status.success() {
+            (Status::Fail, "expected compilation to fail with a diagnostic".into())
+        } else {
+            match comparison {
+                Ok(()) => (
+                    Status::Pass,
+                    format!(
+                        "matches {} {} {}",
+                        case.oracle.kind, case.oracle.identity, case.oracle.version
+                    ),
+                ),
+                Err(detail) => (Status::Fail, detail),
+            }
+        };
+        let artifacts = if status == Status::Fail {
+            Some(directory.keep().display().to_string())
+        } else {
+            None
+        };
+        return Ok(CaseResult {
+            case_id: case.id.clone(),
+            stage: case.stage,
+            compiler,
+            source_digest,
+            commands,
+            exit_status: compiled.status.code(),
+            observation: Some(observation),
+            resolved_policy: None,
+            artifacts,
+            status,
+            detail,
+        });
+    }
     if !compiled.status.success() {
         let status = compiled.status.code();
         let detail = process_failure("compiler", &compiled);
@@ -438,6 +483,7 @@ fn run_reference_case(
                 detail,
             })
         }
+        Probe::CompileDiagnostic => unreachable!(),
         Probe::ManifestOnly => unreachable!(),
     }
 }

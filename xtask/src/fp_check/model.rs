@@ -40,6 +40,7 @@ pub struct Case {
 pub enum Probe {
     Execute,
     Assembly,
+    CompileDiagnostic,
     ManifestOnly,
 }
 
