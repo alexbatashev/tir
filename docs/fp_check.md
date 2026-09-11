@@ -44,7 +44,9 @@ Stage names are `reference`, `scalar`, `round`, `fcc`, `math`, `rules`,
 `vector`, and `release`. A missing required result, failed comparison,
 unsupported required capability, missing tool, or empty selection makes the
 command fail. The command writes the report before returning a comparison
-failure. Pass `--case ID` to reproduce one selected case.
+failure. Step 1 implements only the `reference` checker. It reports selected
+post-reference TIR cases as unsupported until their owning stages add a TIR
+observation path. Pass `--case ID` to reproduce one selected case.
 
 Manifest expectations use these kinds:
 
