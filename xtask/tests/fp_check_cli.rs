@@ -171,3 +171,60 @@ fn reference_records_gcc_provenance() {
     );
     assert_eq!(report["results"][0]["status"], "pass");
 }
+
+#[test]
+fn reference_rejects_a_missing_compiler() {
+    let directory = tempfile::tempdir().unwrap();
+    let report = directory.path().join("reference.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args([
+            "fp-check",
+            "reference",
+            "--gcc",
+            "/definitely/missing/gcc",
+            "--output",
+            report.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("/definitely/missing/gcc"));
+}
+
+#[test]
+fn check_rejects_an_empty_case_selection() {
+    let directory = tempfile::tempdir().unwrap();
+    let reference = directory.path().join("reference.json");
+    let checked = directory.path().join("checked.json");
+    fs::write(
+        &reference,
+        r#"{
+  "schema_version": 1,
+  "profile": "gcc-15.2",
+  "generated_at_unix_seconds": 0,
+  "host": { "target": "x86_64-linux-gnu", "library": "glibc 2.43" },
+  "results": []
+}"#,
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args([
+            "fp-check",
+            "check",
+            "--stage",
+            "reference",
+            "--case",
+            "missing.case",
+            "--reference",
+            reference.to_str().unwrap(),
+            "--output",
+            checked.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no cases selected"));
+    assert!(!checked.exists());
+}
