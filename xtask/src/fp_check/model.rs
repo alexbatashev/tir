@@ -31,6 +31,7 @@ pub struct Case {
     pub run_args: Vec<String>,
     pub probe: Probe,
     pub expectation: Expectation,
+    pub reference_expectation: Option<Expectation>,
     pub oracle: Oracle,
 }
 

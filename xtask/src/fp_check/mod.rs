@@ -368,7 +368,8 @@ fn run_reference_case(
             }
             let observation: Observation = serde_json::from_slice(&executed.stdout)
                 .with_context(|| format!("parsing observation for {}", case.id))?;
-            let (status, detail) = match case.expectation.compare(Some(&observation)) {
+            let expectation = case.reference_expectation.as_ref().unwrap_or(&case.expectation);
+            let (status, detail) = match expectation.compare(Some(&observation)) {
                 Ok(()) => (
                     Status::Pass,
                     format!(
@@ -407,7 +408,8 @@ fn run_reference_case(
                     .map(str::to_string)
                     .collect(),
             };
-            let (status, detail) = match case.expectation.compare(Some(&observation)) {
+            let expectation = case.reference_expectation.as_ref().unwrap_or(&case.expectation);
+            let (status, detail) = match expectation.compare(Some(&observation)) {
                 Ok(()) => (
                     Status::Pass,
                     format!(
