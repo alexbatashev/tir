@@ -372,7 +372,7 @@ probe = "assembly"
 
 [cases.expectation]
 kind = "code_shape"
-required = ["vmulsd", "vaddsd", "vfmadd"]
+required = ["call\tstrict_inline", "vmulsd", "vaddsd", "vfmadd"]
 forbidden = []
 
 [cases.oracle]

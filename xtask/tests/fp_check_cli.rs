@@ -1005,6 +1005,41 @@ fn reference_records_disabled_builtin_recognition() {
 }
 
 #[test]
+fn reference_records_the_mixed_policy_inline_boundary() {
+    let directory = tempfile::tempdir().unwrap();
+    let report = directory.path().join("reference.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args([
+            "fp-check",
+            "reference",
+            "--gcc",
+            "gcc",
+            "--profile",
+            "host-test",
+            "--case",
+            "scope.fp_contract.mixed_inline",
+            "--output",
+            report.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
+    assert_eq!(report["results"][0]["status"], "pass");
+    assert!(report["results"][0]["observation"]["instructions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|line| line.as_str().unwrap().contains("call\tstrict_inline")));
+}
+
+#[test]
 fn reference_accepts_the_expected_declaration_diagnostic() {
     let directory = tempfile::tempdir().unwrap();
     let report = directory.path().join("reference.json");
