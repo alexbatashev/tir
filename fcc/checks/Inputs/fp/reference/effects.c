@@ -10,9 +10,11 @@
 
 static sigjmp_buf jump;
 static volatile sig_atomic_t event_state;
+static volatile sig_atomic_t state_at_trap;
 
 static void handle_fpe(int signal) {
   (void)signal;
+  state_at_trap = event_state;
   event_state = 2;
   siglongjmp(jump, 1);
 }
@@ -60,6 +62,7 @@ static int trap_order(void) {
   volatile double zero = 0.0;
   feclearexcept(FE_ALL_EXCEPT);
   event_state = 1;
+  state_at_trap = 0;
   if (sigsetjmp(jump, 1) == 0) {
     if (feenableexcept(FE_DIVBYZERO) == -1)
       return 4;
@@ -69,7 +72,9 @@ static int trap_order(void) {
   }
   fedisableexcept(FE_DIVBYZERO);
   printf("{\"kind\":\"effects\",\"flags\":[],\"errno\":null,\"events\":[\"store_before\"");
-  if (event_state == 2)
+  if (state_at_trap == 3)
+    printf(",\"store_after\",\"trap\"");
+  else if (event_state == 2)
     printf(",\"trap\"");
   else if (event_state == 3)
     printf(",\"store_after\"");
