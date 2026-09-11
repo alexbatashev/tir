@@ -90,6 +90,11 @@ Use `cargo xtask extbench compile` to compare compilation times and memory,
 or `cargo xtask extbench run` to time executables on the current host.
 See [External benchmarks](extbench.md) for filters and TOML configuration.
 
+Use `cargo xtask fp-check` to record pinned GCC floating-point observations,
+compare cumulative semantic requirements, and summarize saved reports. See
+[Floating-point reference checks](fp_check.md) for the manifest and report
+schemas.
+
 ### Running fuzz tests
 
 We also have fuzzing set up for user-facing parsers. These tests require
