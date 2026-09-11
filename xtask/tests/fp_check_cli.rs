@@ -303,6 +303,23 @@ fn check_detects_an_unexpected_trap() {
 }
 
 #[test]
+fn check_detects_a_wrong_vector_lane_result() {
+    let (success, report) = check_fixture(
+        "kind = \"effects\"\nresult_bits = [\"0x3ff0000000000000\", \"0x4000000000000000\"]\nflags = []\nevents = [\"sqrt:lane1\"]\ntrapped = false",
+        r#"{"kind":"effects","result_bits":["0x3ff0000000000000","0x0000000000000000"],"flags":[],"errno":null,"events":["sqrt:lane1"],"trapped":false}"#,
+        "pass",
+        "reference",
+    );
+
+    assert!(!success);
+    assert_eq!(report["results"][0]["status"], "fail");
+    assert!(report["results"][0]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("result bits"));
+}
+
+#[test]
 fn check_detects_an_absent_instruction() {
     let (success, report) = check_fixture(
         "kind = \"code_shape\"\nrequired = [\"vfmadd\"]\nforbidden = []",
