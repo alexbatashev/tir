@@ -122,6 +122,156 @@ version = "C17"
 reference = "oracle-provenance.toml#observable-effects"
 
 [[cases]]
+id = "math.sqrt.negative.glibc"
+stage = "math"
+source = "fcc/checks/Inputs/fp/reference/math_reporting.c"
+language_mode = "c17"
+target_requirements = ["binary64", "fenv", "glibc", "libm"]
+compiler_args = ["-O0", "-frounding-math", "-fmath-errno", "-fno-builtin"]
+runtime_input_bits = ["0xbff0000000000000"]
+run_args = ["sqrt"]
+probe = "execute"
+
+[cases.expectation]
+kind = "effects"
+result_bits = "0xfff8000000000000"
+flags = ["invalid"]
+errno = 33
+events = ["call", "report"]
+trapped = false
+
+[cases.oracle]
+kind = "c_math_reporting"
+identity = "glibc libm"
+version = "2.43"
+reference = "oracle-provenance.toml#glibc-math-reporting"
+
+[[cases]]
+id = "math.sqrt.signaling_nan.glibc"
+stage = "math"
+source = "fcc/checks/Inputs/fp/reference/math_reporting.c"
+language_mode = "c17"
+target_requirements = ["binary64", "fenv", "glibc", "libm"]
+compiler_args = ["-O0", "-frounding-math", "-fmath-errno", "-fno-builtin"]
+runtime_input_bits = ["0x7ff0000000000042"]
+run_args = ["sqrt"]
+probe = "execute"
+
+[cases.expectation]
+kind = "effects"
+result_bits = "0x7ff8000000000042"
+flags = ["invalid"]
+errno = 123
+events = ["call", "report"]
+trapped = false
+
+[cases.oracle]
+kind = "c_math_reporting"
+identity = "glibc libm"
+version = "2.43"
+reference = "oracle-provenance.toml#glibc-math-reporting"
+
+[[cases]]
+id = "math.log.pole.glibc"
+stage = "math"
+source = "fcc/checks/Inputs/fp/reference/math_reporting.c"
+language_mode = "c17"
+target_requirements = ["binary64", "fenv", "glibc", "libm"]
+compiler_args = ["-O0", "-frounding-math", "-fmath-errno", "-fno-builtin"]
+runtime_input_bits = ["0x0000000000000000"]
+run_args = ["log"]
+probe = "execute"
+
+[cases.expectation]
+kind = "effects"
+result_bits = "0xfff0000000000000"
+flags = ["divide_by_zero"]
+errno = 34
+events = ["call", "report"]
+trapped = false
+
+[cases.oracle]
+kind = "c_math_reporting"
+identity = "glibc libm"
+version = "2.43"
+reference = "oracle-provenance.toml#glibc-math-reporting"
+
+[[cases]]
+id = "math.exp.overflow.glibc"
+stage = "math"
+source = "fcc/checks/Inputs/fp/reference/math_reporting.c"
+language_mode = "c17"
+target_requirements = ["binary64", "fenv", "glibc", "libm"]
+compiler_args = ["-O0", "-frounding-math", "-fmath-errno", "-fno-builtin"]
+runtime_input_bits = ["0x408f400000000000"]
+run_args = ["exp"]
+probe = "execute"
+
+[cases.expectation]
+kind = "effects"
+result_bits = "0x7ff0000000000000"
+flags = ["overflow", "inexact"]
+errno = 34
+events = ["call", "report"]
+trapped = false
+
+[cases.oracle]
+kind = "c_math_reporting"
+identity = "glibc libm"
+version = "2.43"
+reference = "oracle-provenance.toml#glibc-math-reporting"
+
+[[cases]]
+id = "math.exp.underflow.glibc"
+stage = "math"
+source = "fcc/checks/Inputs/fp/reference/math_reporting.c"
+language_mode = "c17"
+target_requirements = ["binary64", "fenv", "glibc", "libm"]
+compiler_args = ["-O0", "-frounding-math", "-fmath-errno", "-fno-builtin"]
+runtime_input_bits = ["0xc08f400000000000"]
+run_args = ["exp"]
+probe = "execute"
+
+[cases.expectation]
+kind = "effects"
+result_bits = "0x0000000000000000"
+flags = ["underflow", "inexact"]
+errno = 34
+events = ["call", "report"]
+trapped = false
+
+[cases.oracle]
+kind = "c_math_reporting"
+identity = "glibc libm"
+version = "2.43"
+reference = "oracle-provenance.toml#glibc-math-reporting"
+
+[[cases]]
+id = "math.sqrt.exact_errno_sentinel.glibc"
+stage = "math"
+source = "fcc/checks/Inputs/fp/reference/math_reporting.c"
+language_mode = "c17"
+target_requirements = ["binary64", "fenv", "glibc", "libm"]
+compiler_args = ["-O0", "-frounding-math", "-fmath-errno", "-fno-builtin"]
+runtime_input_bits = ["0x4010000000000000"]
+run_args = ["sqrt"]
+probe = "execute"
+
+[cases.expectation]
+kind = "effects"
+result_bits = "0x4000000000000000"
+flags = []
+errno = 123
+events = ["call", "report"]
+trapped = false
+
+[cases.oracle]
+kind = "c_math_reporting"
+identity = "glibc libm"
+version = "2.43"
+reference = "oracle-provenance.toml#glibc-math-reporting"
+
+[[cases]]
 id = "effects.trap_order.divide_before_store"
 stage = "scalar"
 source = "fcc/checks/Inputs/fp/reference/effects.c"

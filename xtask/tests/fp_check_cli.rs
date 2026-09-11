@@ -341,3 +341,29 @@ fn reference_records_observable_dead_arithmetic() {
     assert_eq!(report["results"][0]["observation"]["errno"], 123);
     assert_eq!(report["results"][0]["status"], "pass");
 }
+
+#[test]
+fn reference_records_negative_sqrt_reporting() {
+    let directory = tempfile::tempdir().unwrap();
+    let report = directory.path().join("reference.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args([
+            "fp-check",
+            "reference",
+            "--gcc",
+            "gcc",
+            "--case",
+            "math.sqrt.negative.glibc",
+            "--output",
+            report.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
+    assert_eq!(report["results"][0]["observation"]["flags"], serde_json::json!(["invalid"]));
+    assert_eq!(report["results"][0]["observation"]["errno"], 33);
+    assert_eq!(report["results"][0]["observation"]["result_bits"], "0xfff8000000000000");
+}

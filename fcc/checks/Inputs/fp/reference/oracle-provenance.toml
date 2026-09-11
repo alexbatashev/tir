@@ -38,3 +38,9 @@ scope = "binary64 arithmetic, binary64-to-binary32 conversion, and C llrint obse
 kind = "c_fenv"
 standard = "ISO C17 plus the GNU feenableexcept extension for the trap case"
 scope = "exception flags for unused arithmetic and ordered SIGFPE delivery around volatile stores"
+
+[glibc-math-reporting]
+kind = "c_math_reporting"
+standard = "ISO C17"
+library = "glibc 2.43 libm"
+scope = "sqrt, log, and exp result bits, floating exceptions, and errno with sentinel 123"
