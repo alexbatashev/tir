@@ -3,7 +3,9 @@
 `cargo xtask fp-check` records compiler observations and compares them with
 independent semantic expectations. The case manifest lives at
 `fcc/checks/Inputs/fp/cases.toml`. Stable case IDs and stage ownership let later
-compiler stages extend the same data set.
+compiler stages extend the same data set. The manifest also keeps the release
+inventory for wider binary formats, decimal and complex arithmetic, remaining
+math functions, target options, long-double ABIs, and feature macros.
 
 ## Record GCC observations
 
