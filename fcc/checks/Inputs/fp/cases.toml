@@ -4,6 +4,48 @@ schema_version = 1
 profile = "gcc-15.2"
 compiler_version = "15.2.0"
 
+[[inventory]]
+id = "coverage.formats.wider_binary"
+stage = "release"
+area = "binary formats"
+status = "unimplemented"
+requirements = ["binary16", "bfloat16", "binary80", "binary128"]
+
+[[inventory]]
+id = "coverage.formats.decimal"
+stage = "release"
+area = "decimal arithmetic"
+status = "unimplemented"
+requirements = ["decimal32", "decimal64", "decimal128"]
+
+[[inventory]]
+id = "coverage.complex.arithmetic"
+stage = "release"
+area = "complex arithmetic"
+status = "unimplemented"
+requirements = ["complex binary formats", "complex decimal formats", "complex operators"]
+
+[[inventory]]
+id = "coverage.math.remaining_functions"
+stage = "release"
+area = "C math functions"
+status = "unimplemented"
+requirements = ["pow", "tan", "asin", "acos", "atan2", "hyperbolic", "error", "gamma"]
+
+[[inventory]]
+id = "coverage.targets.fp_options"
+stage = "release"
+area = "target options"
+status = "unimplemented"
+requirements = ["excess precision", "evaluation method", "ISA math options", "long double ABI"]
+
+[[inventory]]
+id = "coverage.reporting.feature_macros"
+stage = "release"
+area = "feature macros"
+status = "unimplemented"
+requirements = ["FLT_EVAL_METHOD", "math_errhandling", "IEC 60559 feature macros", "decimal feature macros"]
+
 [[cases]]
 id = "fma.binary64.value.separate"
 stage = "reference"
