@@ -157,6 +157,7 @@ fn check(
         };
         if case.stage > Stage::Reference {
             let mut result = (*reference_result).clone();
+            result.stage = case.stage;
             result.status = Status::UnsupportedCapability;
             result.detail = format!(
                 "TIR {} stage checks are not implemented",
