@@ -291,6 +291,7 @@ fn check_does_not_count_future_gcc_evidence_as_tir_support() {
 
     assert!(!success);
     assert_eq!(report["results"][0]["status"], "unsupported_capability");
+    assert_eq!(report["results"][0]["stage"], "scalar");
 }
 
 #[test]
