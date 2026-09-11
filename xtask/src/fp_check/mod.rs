@@ -3,15 +3,38 @@ mod model;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
-use model::{CaseResult, Manifest, Report, Stage, Status};
+use model::{
+    Case, CaseResult, CompilerIdentity, HostIdentity, Manifest, Observation, Probe, Report, Stage,
+    Status,
+};
+use sha2::{Digest, Sha256};
 
 const DEFAULT_MANIFEST: &str = "fcc/checks/Inputs/fp/cases.toml";
 
 #[derive(clap::Subcommand)]
 pub enum Task {
+    /// Record pinned GCC observations and provenance.
+    Reference {
+        /// GCC executable to probe.
+        #[arg(long)]
+        gcc: PathBuf,
+        /// JSON reference report to write.
+        #[arg(long)]
+        output: PathBuf,
+        /// Run one stable case ID.
+        #[arg(long)]
+        case: Option<String>,
+        /// Name a non-default compiler profile explicitly.
+        #[arg(long)]
+        profile: Option<String>,
+        /// Use a non-default case manifest.
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+    },
     /// Compare saved observations with cumulative stage requirements.
     Check {
         /// Highest cumulative stage to check.
@@ -39,6 +62,20 @@ pub enum Task {
 
 pub fn run(root: &Path, task: Task) -> anyhow::Result<()> {
     match task {
+        Task::Reference {
+            gcc,
+            output,
+            case,
+            profile,
+            manifest,
+        } => reference(
+            root,
+            &gcc,
+            &output,
+            case.as_deref(),
+            profile.as_deref(),
+            manifest.as_deref(),
+        ),
         Task::Check {
             stage,
             reference,
@@ -68,17 +105,7 @@ fn check(
     let manifest_path = manifest_path
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join(DEFAULT_MANIFEST));
-    let manifest: Manifest = toml::from_str(
-        &fs::read_to_string(&manifest_path).with_context(|| manifest_path.display().to_string())?,
-    )
-    .with_context(|| manifest_path.display().to_string())?;
-    anyhow::ensure!(manifest.schema_version == 1, "unsupported manifest schema version");
-    let ids = manifest
-        .cases
-        .iter()
-        .map(|case| case.id.as_str())
-        .collect::<BTreeSet<_>>();
-    anyhow::ensure!(ids.len() == manifest.cases.len(), "duplicate case ID");
+    let manifest = read_manifest(&manifest_path)?;
 
     let selected = manifest
         .cases
@@ -110,7 +137,7 @@ fn check(
             results.push(CaseResult {
                 case_id: case.id.clone(),
                 stage: case.stage,
-                compiler: model::CompilerIdentity {
+                compiler: CompilerIdentity {
                     version: manifest.reference.compiler_version.clone(),
                     executable: String::new(),
                 },
@@ -131,7 +158,10 @@ fn check(
         match comparison {
             Ok(()) => {
                 result.status = Status::Pass;
-                result.detail = format!("matches {} {}", case.oracle.identity, case.oracle.version);
+                result.detail = format!(
+                    "matches {} {} {}",
+                    case.oracle.kind, case.oracle.identity, case.oracle.version
+                );
             }
             Err(detail) => {
                 result.status = Status::Fail;
@@ -144,7 +174,7 @@ fn check(
     let checked = Report {
         schema_version: 1,
         profile: reference.profile,
-        generated_at_unix_seconds: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+        generated_at_unix_seconds: timestamp()?,
         host: reference.host,
         results,
     };
@@ -158,6 +188,264 @@ fn check(
         output_path.display()
     );
     Ok(())
+}
+
+fn reference(
+    root: &Path,
+    gcc: &Path,
+    output_path: &Path,
+    case_filter: Option<&str>,
+    requested_profile: Option<&str>,
+    manifest_path: Option<&Path>,
+) -> anyhow::Result<()> {
+    let manifest_path = manifest_path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join(DEFAULT_MANIFEST));
+    let manifest = read_manifest(&manifest_path)?;
+    let compiler_path = resolve_executable(gcc)?;
+    let version_command = vec![
+        compiler_path.display().to_string(),
+        "-dumpfullversion".into(),
+        "-dumpversion".into(),
+    ];
+    let compiler_version = stdout(&version_command)?;
+    let profile = match requested_profile {
+        Some(profile) if profile != manifest.reference.profile => profile.to_string(),
+        Some(_) | None if compiler_version == manifest.reference.compiler_version => {
+            manifest.reference.profile.clone()
+        }
+        _ => anyhow::bail!(
+            "GCC reference requires version {}; observed {}. Use --profile with a distinct name for a separate reference",
+            manifest.reference.compiler_version,
+            compiler_version
+        ),
+    };
+    let target_command = vec![compiler_path.display().to_string(), "-dumpmachine".into()];
+    let target = stdout(&target_command)?;
+    let library_command = vec!["getconf".into(), "GNU_LIBC_VERSION".into()];
+    let library = stdout(&library_command)?;
+
+    let selected = manifest
+        .cases
+        .iter()
+        .filter(|case| case_filter.is_none_or(|id| case.id == id))
+        .collect::<Vec<_>>();
+    anyhow::ensure!(!selected.is_empty(), "no cases selected");
+
+    let identity_commands = [version_command, target_command, library_command];
+    let mut results = Vec::with_capacity(selected.len());
+    for case in selected {
+        results.push(run_reference_case(
+            root,
+            case,
+            &compiler_path,
+            &compiler_version,
+            &identity_commands,
+        )?);
+    }
+    let report = Report {
+        schema_version: 1,
+        profile,
+        generated_at_unix_seconds: timestamp()?,
+        host: HostIdentity { target, library },
+        results,
+    };
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(output_path, serde_json::to_vec_pretty(&report)?)?;
+    anyhow::ensure!(
+        report.results.iter().all(|result| result.status == Status::Pass),
+        "one or more reference cases failed; report written to {}",
+        output_path.display()
+    );
+    Ok(())
+}
+
+fn run_reference_case(
+    root: &Path,
+    case: &Case,
+    compiler_path: &Path,
+    compiler_version: &str,
+    identity_commands: &[Vec<String>],
+) -> anyhow::Result<CaseResult> {
+    let source = root.join(&case.source);
+    let source_contents = fs::read(&source).with_context(|| source.display().to_string())?;
+    let source_digest = digest(&source_contents);
+    let compiler = CompilerIdentity {
+        version: compiler_version.into(),
+        executable: compiler_path.display().to_string(),
+    };
+    if matches!(case.probe, Probe::ManifestOnly) {
+        return Ok(CaseResult {
+            case_id: case.id.clone(),
+            stage: case.stage,
+            compiler,
+            source_digest,
+            commands: identity_commands.to_vec(),
+            exit_status: None,
+            observation: None,
+            resolved_policy: None,
+            artifacts: None,
+            status: Status::UnsupportedCapability,
+            detail: format!(
+                "manifest-only case requires {} from {}",
+                case.target_requirements.join(", "),
+                case.oracle.reference
+            ),
+        });
+    }
+
+    let directory = tempfile::Builder::new().prefix("tir-fp-check-").tempdir()?;
+    let copied_source = directory.path().join("probe.c");
+    fs::write(&copied_source, &source_contents)?;
+    let executable = directory.path().join("probe");
+    let mut compile = vec![
+        compiler_path.display().to_string(),
+        format!("-std={}", case.language_mode),
+    ];
+    compile.extend(case.compiler_args.iter().cloned());
+    compile.push(copied_source.display().to_string());
+    compile.extend(["-o".into(), executable.display().to_string()]);
+    if case.target_requirements.iter().any(|requirement| requirement == "libm") {
+        compile.push("-lm".into());
+    }
+    let mut commands = identity_commands.to_vec();
+    commands.push(compile.clone());
+    let compiled = command_output(&compile)?;
+    if !compiled.status.success() {
+        let status = compiled.status.code();
+        let detail = process_failure("compiler", &compiled);
+        let artifacts = directory.keep();
+        return Ok(CaseResult {
+            case_id: case.id.clone(),
+            stage: case.stage,
+            compiler,
+            source_digest,
+            commands,
+            exit_status: status,
+            observation: None,
+            resolved_policy: None,
+            artifacts: Some(artifacts.display().to_string()),
+            status: Status::Fail,
+            detail,
+        });
+    }
+
+    match case.probe {
+        Probe::Execute => {
+            let mut run = vec![executable.display().to_string()];
+            run.extend(case.run_args.iter().cloned());
+            run.extend(case.runtime_input_bits.iter().cloned());
+            commands.push(run.clone());
+            let executed = command_output(&run)?;
+            if !executed.status.success() {
+                let status = executed.status.code();
+                let detail = process_failure("probe", &executed);
+                let artifacts = directory.keep();
+                return Ok(CaseResult {
+                    case_id: case.id.clone(),
+                    stage: case.stage,
+                    compiler,
+                    source_digest,
+                    commands,
+                    exit_status: status,
+                    observation: None,
+                    resolved_policy: None,
+                    artifacts: Some(artifacts.display().to_string()),
+                    status: Status::Fail,
+                    detail,
+                });
+            }
+            let observation: Observation = serde_json::from_slice(&executed.stdout)
+                .with_context(|| format!("parsing observation for {}", case.id))?;
+            let (status, detail) = match case.expectation.compare(Some(&observation)) {
+                Ok(()) => (
+                    Status::Pass,
+                    format!(
+                        "matches {} {} {}",
+                        case.oracle.kind, case.oracle.identity, case.oracle.version
+                    ),
+                ),
+                Err(detail) => (Status::Fail, detail),
+            };
+            Ok(CaseResult {
+                case_id: case.id.clone(),
+                stage: case.stage,
+                compiler,
+                source_digest,
+                commands,
+                exit_status: executed.status.code(),
+                observation: Some(observation),
+                resolved_policy: None,
+                artifacts: None,
+                status,
+                detail,
+            })
+        }
+        Probe::Assembly => anyhow::bail!("assembly probes are not implemented yet"),
+        Probe::ManifestOnly => unreachable!(),
+    }
+}
+
+fn read_manifest(path: &Path) -> anyhow::Result<Manifest> {
+    let manifest: Manifest = toml::from_str(
+        &fs::read_to_string(path).with_context(|| path.display().to_string())?,
+    )
+    .with_context(|| path.display().to_string())?;
+    anyhow::ensure!(manifest.schema_version == 1, "unsupported manifest schema version");
+    let ids = manifest
+        .cases
+        .iter()
+        .map(|case| case.id.as_str())
+        .collect::<BTreeSet<_>>();
+    anyhow::ensure!(ids.len() == manifest.cases.len(), "duplicate case ID");
+    Ok(manifest)
+}
+
+fn resolve_executable(path: &Path) -> anyhow::Result<PathBuf> {
+    if path.components().count() > 1 {
+        return path.canonicalize().with_context(|| path.display().to_string());
+    }
+    let search = std::env::var_os("PATH").context("PATH is not set")?;
+    std::env::split_paths(&search)
+        .map(|directory| directory.join(path))
+        .find(|candidate| candidate.is_file())
+        .context("GCC executable was not found")?
+        .canonicalize()
+        .context("resolving GCC executable")
+}
+
+fn stdout(argv: &[String]) -> anyhow::Result<String> {
+    let output = command_output(argv)?;
+    anyhow::ensure!(output.status.success(), "{}", process_failure(&argv[0], &output));
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
+fn command_output(argv: &[String]) -> anyhow::Result<Output> {
+    Command::new(&argv[0])
+        .args(&argv[1..])
+        .output()
+        .with_context(|| format!("starting {}", argv[0]))
+}
+
+fn process_failure(name: &str, output: &Output) -> String {
+    format!(
+        "{name} failed with {}: {}{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+fn digest(contents: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    digest.input(contents);
+    format!("sha256:{:x}", digest.result())
+}
+
+fn timestamp() -> anyhow::Result<u64> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
 
 fn report(path: &Path) -> anyhow::Result<()> {
