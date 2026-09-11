@@ -1,0 +1,49 @@
+schema_version = 1
+
+[reference]
+profile = "gcc-15.2"
+compiler_version = "15.2.0"
+
+[[cases]]
+id = "fma.binary64.value.separate"
+stage = "reference"
+source = "fcc/checks/Inputs/fp/reference/fma.c"
+language_mode = "gnu17"
+target_requirements = ["binary64", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math", "-fno-builtin"]
+runtime_input_bits = ["0x3ff0000020000000", "0x3fefffffc0000000", "0xbff0000000000000"]
+run_args = ["separate"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x0000000000000000"
+flags = ["inexact"]
+
+[cases.oracle]
+kind = "exact_derivation"
+identity = "IEEE 754 binary64"
+version = "2019"
+reference = "oracle-provenance.toml#fma-binary64"
+
+[[cases]]
+id = "fma.binary64.value.fused"
+stage = "reference"
+source = "fcc/checks/Inputs/fp/reference/fma.c"
+language_mode = "gnu17"
+target_requirements = ["binary64", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math", "-fno-builtin"]
+runtime_input_bits = ["0x3ff0000020000000", "0x3fefffffc0000000", "0xbff0000000000000"]
+run_args = ["fused"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0xbc90000000000000"
+flags = []
+
+[cases.oracle]
+kind = "exact_derivation"
+identity = "IEEE 754 binary64"
+version = "2019"
+reference = "oracle-provenance.toml#fma-binary64"

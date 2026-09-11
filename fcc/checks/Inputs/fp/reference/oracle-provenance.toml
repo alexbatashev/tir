@@ -1,0 +1,16 @@
+schema_version = 1
+
+[fma-binary64]
+kind = "exact_derivation"
+standard = "IEEE 754-2019"
+inputs = ["a = 1 + 2^-27", "b = 1 - 2^-27", "c = -1"]
+separate = "a*b is the midpoint 1 - 2^-54 and rounds to even 1 with inexact; adding -1 yields +0"
+fused = "a*b+c is exactly -2^-54, encoded as 0xbc90000000000000 with no exception"
+
+[mpfr]
+version = "4.2.2"
+availability = "required by later numerical-bound cases, not used for the closed-form FMA case"
+
+[softfloat]
+version = "3e"
+availability = "not installed; cases that require it report missing infrastructure"

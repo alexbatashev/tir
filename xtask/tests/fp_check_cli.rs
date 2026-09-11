@@ -52,3 +52,73 @@ fn report_rejects_a_wrong_result_bit() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn check_accepts_the_fma_reference_bits_and_flags() {
+    let directory = tempfile::tempdir().unwrap();
+    let reference = directory.path().join("reference.json");
+    let output_path = directory.path().join("checked.json");
+    fs::write(
+        &reference,
+        r#"{
+  "schema_version": 1,
+  "profile": "gcc-15.2",
+  "generated_at_unix_seconds": 0,
+  "host": {
+    "target": "x86_64-linux-gnu",
+    "library": "glibc 2.43"
+  },
+  "results": [
+    {
+      "case_id": "fma.binary64.value.separate",
+      "stage": "reference",
+      "compiler": { "version": "gcc 15.2.0", "executable": "/usr/bin/gcc" },
+      "source_digest": "sha256:test",
+      "commands": [["gcc", "fma.c", "separate"]],
+      "exit_status": 0,
+      "observation": { "kind": "exact_bits", "bits": "0x0000000000000000", "flags": ["inexact"] },
+      "status": "pass",
+      "detail": "matches exact derivation"
+    },
+    {
+      "case_id": "fma.binary64.value.fused",
+      "stage": "reference",
+      "compiler": { "version": "gcc 15.2.0", "executable": "/usr/bin/gcc" },
+      "source_digest": "sha256:test",
+      "commands": [["gcc", "fma.c", "fused"]],
+      "exit_status": 0,
+      "observation": { "kind": "exact_bits", "bits": "0xbc90000000000000", "flags": [] },
+      "status": "pass",
+      "detail": "matches exact derivation"
+    }
+  ]
+}"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args([
+            "fp-check",
+            "check",
+            "--stage",
+            "reference",
+            "--reference",
+            reference.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let checked: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(output_path).unwrap()).unwrap();
+    assert_eq!(checked["results"][0]["status"], "pass");
+    assert_eq!(checked["results"][1]["status"], "pass");
+}
