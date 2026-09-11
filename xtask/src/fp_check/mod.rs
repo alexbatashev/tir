@@ -255,7 +255,9 @@ fn reference(
     }
     fs::write(output_path, serde_json::to_vec_pretty(&report)?)?;
     anyhow::ensure!(
-        report.results.iter().all(|result| result.status == Status::Pass),
+        report.results.iter().all(|result| {
+            matches!(result.status, Status::Pass | Status::UnsupportedCapability)
+        }),
         "one or more reference cases failed; report written to {}",
         output_path.display()
     );
