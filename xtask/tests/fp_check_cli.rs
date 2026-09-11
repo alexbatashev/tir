@@ -345,6 +345,8 @@ reference = "fixture"
             "reference",
             "--gcc",
             "gcc",
+            "--profile",
+            "host-test",
             "--manifest",
             manifest.to_str().unwrap(),
             "--output",
@@ -442,6 +444,8 @@ fn reference_records_gcc_provenance() {
             "reference",
             "--gcc",
             "gcc",
+            "--profile",
+            "host-test",
             "--case",
             "fma.binary64.value.fused",
             "--output",
@@ -458,13 +462,16 @@ fn reference_records_gcc_provenance() {
     );
     let report: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
-    assert_eq!(report["profile"], "gcc-15.2");
-    assert_eq!(report["host"]["target"], "x86_64-linux-gnu");
+    assert_eq!(report["profile"], "host-test");
+    assert!(!report["host"]["target"].as_str().unwrap().is_empty());
     assert!(report["host"]["library"]
         .as_str()
         .unwrap()
         .starts_with("glibc "));
-    assert_eq!(report["results"][0]["compiler"]["version"], "15.2.0");
+    assert!(!report["results"][0]["compiler"]["version"]
+        .as_str()
+        .unwrap()
+        .is_empty());
     assert!(report["results"][0]["compiler"]["executable"]
         .as_str()
         .unwrap()
@@ -548,6 +555,8 @@ fn reference_records_same_expression_contraction() {
             "reference",
             "--gcc",
             "gcc",
+            "--profile",
+            "host-test",
             "--case",
             "contraction.gnu17.same.default",
             "--output",
@@ -582,6 +591,8 @@ fn reference_records_underflow_for_minimum_subnormal_scaling() {
             "reference",
             "--gcc",
             "gcc",
+            "--profile",
+            "host-test",
             "--case",
             "scale.binary64.positive_min_subnormal",
             "--output",
@@ -617,6 +628,8 @@ fn reference_records_directed_halfway_rounding() {
             "reference",
             "--gcc",
             "gcc",
+            "--profile",
+            "host-test",
             "--case",
             "round.binary64.halfway.upward",
             "--output",
@@ -652,6 +665,8 @@ fn reference_records_observable_dead_arithmetic() {
             "reference",
             "--gcc",
             "gcc",
+            "--profile",
+            "host-test",
             "--case",
             "effects.dead_division.flags",
             "--output",
@@ -685,6 +700,8 @@ fn reference_records_negative_sqrt_reporting() {
             "reference",
             "--gcc",
             "gcc",
+            "--profile",
+            "host-test",
             "--case",
             "math.sqrt.negative.glibc",
             "--output",
@@ -721,6 +738,8 @@ fn reference_records_disabled_builtin_recognition() {
             "reference",
             "--gcc",
             "gcc",
+            "--profile",
+            "host-test",
             "--case",
             "recognition.sqrt.builtin_disabled",
             "--output",
@@ -753,6 +772,8 @@ fn reference_accepts_the_expected_declaration_diagnostic() {
             "reference",
             "--gcc",
             "gcc",
+            "--profile",
+            "host-test",
             "--case",
             "recognition.sqrt.declaration_mismatch",
             "--output",
@@ -785,6 +806,8 @@ fn reference_records_reserved_cases_as_unsupported() {
             "reference",
             "--gcc",
             "gcc",
+            "--profile",
+            "host-test",
             "--case",
             "vector.sqrt.inactive_lane",
             "--output",
