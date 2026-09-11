@@ -262,3 +262,31 @@ fn reference_records_same_expression_contraction() {
         .iter()
         .any(|line| line.as_str().unwrap().contains("vfmadd")));
 }
+
+#[test]
+fn reference_records_underflow_for_minimum_subnormal_scaling() {
+    let directory = tempfile::tempdir().unwrap();
+    let report = directory.path().join("reference.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args([
+            "fp-check",
+            "reference",
+            "--gcc",
+            "gcc",
+            "--case",
+            "scale.binary64.positive_min_subnormal",
+            "--output",
+            report.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
+    assert_eq!(report["results"][0]["observation"]["bits"], "0x0000000000000000");
+    assert_eq!(
+        report["results"][0]["observation"]["flags"],
+        serde_json::json!(["underflow", "inexact"])
+    );
+}

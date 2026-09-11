@@ -48,6 +48,237 @@ version = "15.2.0"
 reference = "oracle-provenance.toml#gcc-contraction"
 
 [[cases]]
+id = "scale.binary64.positive_min_subnormal"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/scale.c"
+language_mode = "c17"
+target_requirements = ["binary64", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0x0000000000000001"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x0000000000000000"
+flags = ["underflow", "inexact"]
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 binary64 divide"
+version = "2019"
+reference = "oracle-provenance.toml#scale-binary64"
+
+[[cases]]
+id = "scale.binary64.negative_min_subnormal"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/scale.c"
+language_mode = "c17"
+target_requirements = ["binary64", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0x8000000000000001"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x8000000000000000"
+flags = ["underflow", "inexact"]
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 binary64 divide"
+version = "2019"
+reference = "oracle-provenance.toml#scale-binary64"
+
+[[cases]]
+id = "scale.binary64.positive_zero"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/scale.c"
+language_mode = "c17"
+target_requirements = ["binary64", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0x0000000000000000"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x0000000000000000"
+flags = []
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 binary64 divide"
+version = "2019"
+reference = "oracle-provenance.toml#scale-binary64"
+
+[[cases]]
+id = "scale.binary64.negative_zero"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/scale.c"
+language_mode = "c17"
+target_requirements = ["binary64", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0x8000000000000000"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x8000000000000000"
+flags = []
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 binary64 divide"
+version = "2019"
+reference = "oracle-provenance.toml#scale-binary64"
+
+[[cases]]
+id = "scale.binary64.positive_normal"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/scale.c"
+language_mode = "c17"
+target_requirements = ["binary64", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0x3ff0000000000000"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x3fe0000000000000"
+flags = []
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 binary64 divide"
+version = "2019"
+reference = "oracle-provenance.toml#scale-binary64"
+
+[[cases]]
+id = "scale.binary64.negative_normal"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/scale.c"
+language_mode = "c17"
+target_requirements = ["binary64", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0xbff0000000000000"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0xbfe0000000000000"
+flags = []
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 binary64 divide"
+version = "2019"
+reference = "oracle-provenance.toml#scale-binary64"
+
+[[cases]]
+id = "scale.binary64.minimum_normal"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/scale.c"
+language_mode = "c17"
+target_requirements = ["binary64", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0x0010000000000000"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x0008000000000000"
+flags = []
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 binary64 divide"
+version = "2019"
+reference = "oracle-provenance.toml#scale-binary64"
+
+[[cases]]
+id = "scale.binary64.positive_infinity"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/scale.c"
+language_mode = "c17"
+target_requirements = ["binary64", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0x7ff0000000000000"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x7ff0000000000000"
+flags = []
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 binary64 divide"
+version = "2019"
+reference = "oracle-provenance.toml#scale-binary64"
+
+[[cases]]
+id = "scale.binary64.negative_infinity"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/scale.c"
+language_mode = "c17"
+target_requirements = ["binary64", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0xfff0000000000000"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0xfff0000000000000"
+flags = []
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 binary64 divide"
+version = "2019"
+reference = "oracle-provenance.toml#scale-binary64"
+
+[[cases]]
+id = "scale.binary64.quiet_nan_payload"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/scale.c"
+language_mode = "c17"
+target_requirements = ["binary64", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0x7ff8000000000042"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x7ff8000000000042"
+flags = []
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 binary64 divide"
+version = "2019"
+reference = "oracle-provenance.toml#scale-binary64"
+
+[[cases]]
+id = "scale.binary64.signaling_nan_payload"
+stage = "scalar"
+source = "fcc/checks/Inputs/fp/reference/scale.c"
+language_mode = "c17"
+target_requirements = ["binary64", "fenv", "libm"]
+compiler_args = ["-O0", "-frounding-math"]
+runtime_input_bits = ["0x7ff0000000000042"]
+probe = "execute"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x7ff8000000000042"
+flags = ["invalid"]
+
+[cases.oracle]
+kind = "ieee_operation"
+identity = "IEEE 754 binary64 divide"
+version = "2019"
+reference = "oracle-provenance.toml#scale-binary64"
+
+[[cases]]
 id = "contraction.gnu17.same.off"
 stage = "round"
 source = "fcc/checks/Inputs/fp/reference/contraction.c"

@@ -20,3 +20,10 @@ kind = "compatibility_observation"
 compiler = "GCC 15.2.0"
 target = "x86_64, -march=haswell"
 scope = "GNU C17 and ISO C17 assembly under the recorded -ffp-contract modes"
+
+[scale-binary64]
+kind = "ieee_operation"
+standard = "IEEE 754-2019"
+operation = "binary64 division by the exact value 2 under roundTiesToEven"
+nan_policy = "quiet NaNs retain GCC's observed payload; signaling NaNs are quieted and raise invalid"
+tininess = "after rounding"
