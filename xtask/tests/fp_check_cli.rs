@@ -1,16 +1,40 @@
 use std::fs;
 use std::process::Command;
 
+use sha2::{Digest, Sha256};
+
 fn check_fixture(
     expectation: &str,
     observation: &str,
     reference_status: &str,
     stage: &str,
 ) -> (bool, serde_json::Value) {
+    check_fixture_with_compiler(
+        expectation,
+        observation,
+        reference_status,
+        stage,
+        "15.2.0",
+    )
+}
+
+fn check_fixture_with_compiler(
+    expectation: &str,
+    observation: &str,
+    reference_status: &str,
+    stage: &str,
+    compiler_version: &str,
+) -> (bool, serde_json::Value) {
     let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("probe.c");
     let manifest = directory.path().join("cases.toml");
     let reference = directory.path().join("reference.json");
     let checked = directory.path().join("checked.json");
+    let source_contents = b"int main(void) { return 0; }\n";
+    fs::write(&source, source_contents).unwrap();
+    let mut source_digest = Sha256::new();
+    source_digest.input(source_contents);
+    let source_digest = format!("sha256:{:x}", source_digest.result());
     fs::write(
         &manifest,
         format!(
@@ -23,7 +47,7 @@ compiler_version = "15.2.0"
 [[cases]]
 id = "fixture.case"
 stage = "{stage}"
-source = "probe.c"
+source = "{}"
 language_mode = "c17"
 target_requirements = []
 compiler_args = []
@@ -39,6 +63,7 @@ identity = "fixture"
 version = "1"
 reference = "fixture"
 "#,
+            source.display(),
         ),
     )
     .unwrap();
@@ -53,8 +78,8 @@ reference = "fixture"
   "results": [{{
     "case_id": "fixture.case",
     "stage": "reference",
-    "compiler": {{ "version": "15.2.0", "executable": "/usr/bin/gcc" }},
-    "source_digest": "sha256:fixture",
+    "compiler": {{ "version": "{compiler_version}", "executable": "/usr/bin/gcc" }},
+    "source_digest": "{source_digest}",
     "commands": [["gcc", "probe.c"]],
     "exit_status": 0,
     "observation": {observation},
@@ -82,6 +107,24 @@ reference = "fixture"
         .unwrap();
     let checked = serde_json::from_str(&fs::read_to_string(checked).unwrap()).unwrap();
     (output.status.success(), checked)
+}
+
+#[test]
+fn check_rejects_stale_compiler_provenance() {
+    let (success, report) = check_fixture_with_compiler(
+        "kind = \"exact_bits\"\nbits = \"0x0\"\nflags = []",
+        r#"{"kind":"exact_bits","bits":"0x0","flags":[]}"#,
+        "pass",
+        "reference",
+        "0.0.0",
+    );
+
+    assert!(!success);
+    assert_eq!(report["results"][0]["status"], "fail");
+    assert!(report["results"][0]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("compiler version"));
 }
 
 #[test]
