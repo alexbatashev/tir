@@ -26,6 +26,7 @@ fn check_fixture_with_compiler(
         stage,
         compiler_version,
         None,
+        None,
     )
 }
 
@@ -36,6 +37,7 @@ fn check_fixture_with_provenance(
     stage: &str,
     compiler_version: &str,
     recorded_source_digest: Option<&str>,
+    recorded_manifest_digest: Option<&str>,
 ) -> (bool, serde_json::Value) {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("probe.c");
@@ -80,11 +82,17 @@ reference = "fixture"
         ),
     )
     .unwrap();
+    let manifest_contents = fs::read(&manifest).unwrap();
+    let mut manifest_digest = Sha256::new();
+    manifest_digest.input(&manifest_contents);
+    let actual_manifest_digest = format!("sha256:{:x}", manifest_digest.result());
+    let manifest_digest = recorded_manifest_digest.unwrap_or(&actual_manifest_digest);
     fs::write(
         &reference,
         format!(
             r#"{{
   "schema_version": 1,
+  "manifest_digest": "{manifest_digest}",
   "profile": "gcc-15.2",
   "generated_at_unix_seconds": 0,
   "host": {{ "target": "x86_64-linux-gnu", "library": "glibc 2.43" }},
@@ -149,6 +157,7 @@ fn check_rejects_stale_source_provenance() {
         "reference",
         "15.2.0",
         Some("sha256:stale"),
+        None,
     );
 
     assert!(!success);
@@ -157,6 +166,26 @@ fn check_rejects_stale_source_provenance() {
         .as_str()
         .unwrap()
         .contains("source digest"));
+}
+
+#[test]
+fn check_rejects_stale_case_configuration() {
+    let (success, report) = check_fixture_with_provenance(
+        "kind = \"exact_bits\"\nbits = \"0x0\"\nflags = []",
+        r#"{"kind":"exact_bits","bits":"0x0","flags":[]}"#,
+        "pass",
+        "reference",
+        "15.2.0",
+        None,
+        Some("sha256:stale"),
+    );
+
+    assert!(!success);
+    assert_eq!(report["results"][0]["status"], "fail");
+    assert!(report["results"][0]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("manifest digest"));
 }
 
 #[test]
