@@ -101,7 +101,7 @@ pub enum Expectation {
     },
     Effects {
         #[serde(default)]
-        result_bits: Option<String>,
+        result_bits: Option<ResultBits>,
         #[serde(default)]
         flags: Vec<String>,
         errno: Option<i32>,
@@ -209,7 +209,7 @@ pub enum Observation {
     },
     Effects {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        result_bits: Option<String>,
+        result_bits: Option<ResultBits>,
         flags: Vec<String>,
         errno: Option<i32>,
         events: Vec<String>,
@@ -219,6 +219,13 @@ pub enum Observation {
     Diagnostic {
         message: String,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ResultBits {
+    Scalar(String),
+    Vector(Vec<String>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

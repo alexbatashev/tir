@@ -2,9 +2,11 @@ schema_version = 1
 
 [inactive-vector-lanes]
 inputs = ["-1.0", "4.0"]
-active_length = 1
+active_length = 2
 mask = [false, true]
-requirement = "the inactive negative lane performs no sqrt and raises no exception"
+passthrough_bits = ["0x3ff0000000000000", "0x0000000000000000"]
+result_bits = ["0x3ff0000000000000", "0x4000000000000000"]
+requirement = "lane zero returns its passthrough without executing sqrt; active lane one executes sqrt(4.0) and returns 2.0"
 
 [reduction-order]
 inputs = ["1e16", "-1e16", "1.0"]

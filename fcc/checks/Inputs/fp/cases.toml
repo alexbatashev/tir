@@ -221,7 +221,7 @@ probe = "manifest_only"
 
 [cases.expectation]
 kind = "effects"
-result_bits = "0x0000000000000000"
+result_bits = ["0x3ff0000000000000", "0x4000000000000000"]
 flags = []
 events = ["sqrt:lane1"]
 trapped = false
