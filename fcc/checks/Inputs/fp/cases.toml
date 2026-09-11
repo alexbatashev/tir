@@ -168,6 +168,90 @@ version = "15.2.0"
 reference = "oracle-provenance.toml#gcc-recognition"
 
 [[cases]]
+id = "vector.sqrt.inactive_lane"
+stage = "vector"
+source = "fcc/checks/Inputs/fp/reference/reserved-requirements.toml"
+language_mode = "tir"
+target_requirements = ["vector_math", "active_length", "masked_effects"]
+compiler_args = []
+runtime_input_bits = ["0xbff0000000000000", "0x4010000000000000"]
+probe = "manifest_only"
+
+[cases.expectation]
+kind = "effects"
+result_bits = "0x0000000000000000"
+flags = []
+events = ["sqrt:lane1"]
+trapped = false
+
+[cases.oracle]
+kind = "design_contract"
+identity = "floating-semantics vector contract"
+version = "1"
+reference = "reserved-requirements.toml#inactive-vector-lanes"
+
+[[cases]]
+id = "vector.reduction.left_fold"
+stage = "vector"
+source = "fcc/checks/Inputs/fp/reference/reserved-requirements.toml"
+language_mode = "tir"
+target_requirements = ["vector_reduction", "ordered_evaluation"]
+compiler_args = []
+runtime_input_bits = ["0x4341c37937e08000", "0xc341c37937e08000", "0x3ff0000000000000"]
+probe = "manifest_only"
+
+[cases.expectation]
+kind = "exact_bits"
+bits = "0x3ff0000000000000"
+flags = []
+
+[cases.oracle]
+kind = "exact_derivation"
+identity = "ordered binary64 left fold"
+version = "1"
+reference = "reserved-requirements.toml#reduction-order"
+
+[[cases]]
+id = "round.shared_result.strict_and_relaxed"
+stage = "round"
+source = "fcc/checks/Inputs/fp/reference/reserved-requirements.toml"
+language_mode = "tir"
+target_requirements = ["fp_round", "correlated_results", "strict_consumer"]
+compiler_args = []
+runtime_input_bits = ["0x3ff0000002000000", "0x3feffffffc000000", "0xbff0000000000000"]
+probe = "manifest_only"
+
+[cases.expectation]
+kind = "permitted_set"
+values = ["strict:0x0000000000000000", "relaxed:0xbc90000000000000"]
+
+[cases.oracle]
+kind = "design_contract"
+identity = "floating-semantics correlated evaluation contract"
+version = "1"
+reference = "reserved-requirements.toml#shared-strict-relaxed"
+
+[[cases]]
+id = "rules.approximation.composed_bound"
+stage = "rules"
+source = "fcc/checks/Inputs/fp/reference/reserved-requirements.toml"
+language_mode = "tir"
+target_requirements = ["refinement_witness", "composed_error_bound", "mpfr"]
+compiler_args = []
+runtime_input_bits = ["0x3fe0000000000000"]
+probe = "manifest_only"
+
+[cases.expectation]
+kind = "numerical_bound"
+max_error = "1e-12"
+
+[cases.oracle]
+kind = "mpfr_bound"
+identity = "MPFR"
+version = "4.2.2"
+reference = "reserved-requirements.toml#approximation-composition"
+
+[[cases]]
 id = "recognition.sqrt.declaration_mismatch"
 stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/declaration_mismatch.c"

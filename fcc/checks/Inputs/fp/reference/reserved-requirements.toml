@@ -1,0 +1,30 @@
+schema_version = 1
+
+[inactive-vector-lanes]
+inputs = ["-1.0", "4.0"]
+active_length = 1
+mask = [false, true]
+requirement = "the inactive negative lane performs no sqrt and raises no exception"
+
+[reduction-order]
+inputs = ["1e16", "-1e16", "1.0"]
+initial_value = "0.0"
+order = "left fold"
+result_bits = "0x3ff0000000000000"
+requirement = "a parallel tree needs reassociation permission or an equivalence proof"
+
+[shared-strict-relaxed]
+producer = "a*b+c with the binary64 FMA discriminator inputs"
+strict_result = "0x0000000000000000"
+relaxed_result = "0xbc90000000000000"
+requirement = "a shared producer retains the strict rounding while the relaxed consumer uses a separate fused candidate"
+
+[approximation-composition]
+reference = "exp(log(x))"
+metric = "relative error"
+domain = "binary64 finite x in [0.5, 2.0]"
+maximum_error = "1e-12"
+zero_convention = "not applicable because zero is outside the domain"
+subnormal_convention = "subnormal candidates use the same relative metric"
+exceptional_values = "NaN and infinities are outside the finite domain"
+requirement = "compose every step against the original reference; an approximate intermediate is not exact"

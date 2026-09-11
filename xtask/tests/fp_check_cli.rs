@@ -423,3 +423,28 @@ fn reference_accepts_the_expected_declaration_diagnostic() {
         .unwrap()
         .contains("conflicting types for"));
 }
+
+#[test]
+fn reference_records_reserved_cases_as_unsupported() {
+    let directory = tempfile::tempdir().unwrap();
+    let report = directory.path().join("reference.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args([
+            "fp-check",
+            "reference",
+            "--gcc",
+            "gcc",
+            "--case",
+            "vector.sqrt.inactive_lane",
+            "--output",
+            report.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(report).unwrap()).unwrap();
+    assert_eq!(report["results"][0]["status"], "unsupported_capability");
+    assert!(report["results"][0]["observation"].is_null());
+}
