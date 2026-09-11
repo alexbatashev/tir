@@ -299,15 +299,24 @@ fn run_reference_case(
     let directory = tempfile::Builder::new().prefix("tir-fp-check-").tempdir()?;
     let copied_source = directory.path().join("probe.c");
     fs::write(&copied_source, &source_contents)?;
-    let executable = directory.path().join("probe");
+    let output_path = match case.probe {
+        Probe::Assembly => directory.path().join("probe.s"),
+        Probe::Execute => directory.path().join("probe"),
+        Probe::ManifestOnly => unreachable!(),
+    };
     let mut compile = vec![
         compiler_path.display().to_string(),
         format!("-std={}", case.language_mode),
     ];
     compile.extend(case.compiler_args.iter().cloned());
+    if matches!(case.probe, Probe::Assembly) {
+        compile.push("-S".into());
+    }
     compile.push(copied_source.display().to_string());
-    compile.extend(["-o".into(), executable.display().to_string()]);
-    if case.target_requirements.iter().any(|requirement| requirement == "libm") {
+    compile.extend(["-o".into(), output_path.display().to_string()]);
+    if matches!(case.probe, Probe::Execute)
+        && case.target_requirements.iter().any(|requirement| requirement == "libm")
+    {
         compile.push("-lm".into());
     }
     let mut commands = identity_commands.to_vec();
@@ -334,7 +343,7 @@ fn run_reference_case(
 
     match case.probe {
         Probe::Execute => {
-            let mut run = vec![executable.display().to_string()];
+            let mut run = vec![output_path.display().to_string()];
             run.extend(case.run_args.iter().cloned());
             run.extend(case.runtime_input_bits.iter().cloned());
             commands.push(run.clone());
@@ -383,7 +392,50 @@ fn run_reference_case(
                 detail,
             })
         }
-        Probe::Assembly => anyhow::bail!("assembly probes are not implemented yet"),
+        Probe::Assembly => {
+            let assembly = fs::read_to_string(&output_path)?;
+            let observation = Observation::CodeShape {
+                instructions: assembly
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| {
+                        !line.is_empty()
+                            && !line.starts_with('.')
+                            && !line.starts_with('#')
+                            && !line.ends_with(':')
+                    })
+                    .map(str::to_string)
+                    .collect(),
+            };
+            let (status, detail) = match case.expectation.compare(Some(&observation)) {
+                Ok(()) => (
+                    Status::Pass,
+                    format!(
+                        "matches {} {} {}",
+                        case.oracle.kind, case.oracle.identity, case.oracle.version
+                    ),
+                ),
+                Err(detail) => (Status::Fail, detail),
+            };
+            let artifacts = if status == Status::Fail {
+                Some(directory.keep().display().to_string())
+            } else {
+                None
+            };
+            Ok(CaseResult {
+                case_id: case.id.clone(),
+                stage: case.stage,
+                compiler,
+                source_digest,
+                commands,
+                exit_status: compiled.status.code(),
+                observation: Some(observation),
+                resolved_policy: None,
+                artifacts,
+                status,
+                detail,
+            })
+        }
         Probe::ManifestOnly => unreachable!(),
     }
 }
