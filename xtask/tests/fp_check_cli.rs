@@ -25,6 +25,24 @@ fn check_fixture_with_compiler(
     stage: &str,
     compiler_version: &str,
 ) -> (bool, serde_json::Value) {
+    check_fixture_with_provenance(
+        expectation,
+        observation,
+        reference_status,
+        stage,
+        compiler_version,
+        None,
+    )
+}
+
+fn check_fixture_with_provenance(
+    expectation: &str,
+    observation: &str,
+    reference_status: &str,
+    stage: &str,
+    compiler_version: &str,
+    recorded_source_digest: Option<&str>,
+) -> (bool, serde_json::Value) {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("probe.c");
     let manifest = directory.path().join("cases.toml");
@@ -34,7 +52,8 @@ fn check_fixture_with_compiler(
     fs::write(&source, source_contents).unwrap();
     let mut source_digest = Sha256::new();
     source_digest.input(source_contents);
-    let source_digest = format!("sha256:{:x}", source_digest.result());
+    let actual_source_digest = format!("sha256:{:x}", source_digest.result());
+    let source_digest = recorded_source_digest.unwrap_or(&actual_source_digest);
     fs::write(
         &manifest,
         format!(
@@ -77,10 +96,10 @@ reference = "fixture"
   "host": {{ "target": "x86_64-linux-gnu", "library": "glibc 2.43" }},
   "results": [{{
     "case_id": "fixture.case",
-    "stage": "reference",
+    "stage": "{stage}",
     "compiler": {{ "version": "{compiler_version}", "executable": "/usr/bin/gcc" }},
     "source_digest": "{source_digest}",
-    "commands": [["gcc", "probe.c"]],
+    "commands": [["/usr/bin/gcc", "probe.c"]],
     "exit_status": 0,
     "observation": {observation},
     "status": "{reference_status}",
@@ -125,6 +144,25 @@ fn check_rejects_stale_compiler_provenance() {
         .as_str()
         .unwrap()
         .contains("compiler version"));
+}
+
+#[test]
+fn check_rejects_stale_source_provenance() {
+    let (success, report) = check_fixture_with_provenance(
+        "kind = \"exact_bits\"\nbits = \"0x0\"\nflags = []",
+        r#"{"kind":"exact_bits","bits":"0x0","flags":[]}"#,
+        "pass",
+        "reference",
+        "15.2.0",
+        Some("sha256:stale"),
+    );
+
+    assert!(!success);
+    assert_eq!(report["results"][0]["status"], "fail");
+    assert!(report["results"][0]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("source digest"));
 }
 
 #[test]
@@ -496,9 +534,9 @@ fn check_accepts_the_fma_reference_bits_and_flags() {
     {
       "case_id": "fma.binary64.value.separate",
       "stage": "reference",
-      "compiler": { "version": "gcc 15.2.0", "executable": "/usr/bin/gcc" },
-      "source_digest": "sha256:test",
-      "commands": [["gcc", "fma.c", "separate"]],
+      "compiler": { "version": "15.2.0", "executable": "/usr/bin/gcc" },
+      "source_digest": "sha256:ab2f986627ae1e2caf008e3845c1dbfceed5e386904dd525513a594c47190e7d",
+      "commands": [["/usr/bin/gcc", "fma.c", "separate"]],
       "exit_status": 0,
       "observation": { "kind": "exact_bits", "bits": "0x0000000000000000", "flags": ["inexact"] },
       "status": "pass",
@@ -507,9 +545,9 @@ fn check_accepts_the_fma_reference_bits_and_flags() {
     {
       "case_id": "fma.binary64.value.fused",
       "stage": "reference",
-      "compiler": { "version": "gcc 15.2.0", "executable": "/usr/bin/gcc" },
-      "source_digest": "sha256:test",
-      "commands": [["gcc", "fma.c", "fused"]],
+      "compiler": { "version": "15.2.0", "executable": "/usr/bin/gcc" },
+      "source_digest": "sha256:ab2f986627ae1e2caf008e3845c1dbfceed5e386904dd525513a594c47190e7d",
+      "commands": [["/usr/bin/gcc", "fma.c", "fused"]],
       "exit_status": 0,
       "observation": { "kind": "exact_bits", "bits": "0xbc90000000000000", "flags": [] },
       "status": "pass",

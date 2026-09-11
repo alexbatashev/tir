@@ -155,6 +155,28 @@ fn check(
             });
             continue;
         };
+        if matches!(
+            reference_result.status,
+            Status::UnsupportedCapability | Status::MissingInfrastructure | Status::Fail
+        ) {
+            results.push((*reference_result).clone());
+            continue;
+        }
+        if let Err(detail) = validate_reference_evidence(
+            root,
+            &manifest,
+            case,
+            reference_result,
+            &reference.host,
+            &reference.profile,
+        ) {
+            let mut result = (*reference_result).clone();
+            result.stage = case.stage;
+            result.status = Status::Fail;
+            result.detail = detail;
+            results.push(result);
+            continue;
+        }
         if case.stage > Stage::Reference {
             let mut result = (*reference_result).clone();
             result.stage = case.stage;
@@ -164,13 +186,6 @@ fn check(
                 case.stage.as_str()
             );
             results.push(result);
-            continue;
-        }
-        if matches!(
-            reference_result.status,
-            Status::UnsupportedCapability | Status::MissingInfrastructure
-        ) {
-            results.push((*reference_result).clone());
             continue;
         }
         let comparison = case
@@ -213,6 +228,62 @@ fn check(
         "floating-point comparison failed; report written to {}",
         output_path.display()
     );
+    Ok(())
+}
+
+fn validate_reference_evidence(
+    root: &Path,
+    manifest: &Manifest,
+    case: &Case,
+    result: &CaseResult,
+    host: &HostIdentity,
+    profile: &str,
+) -> Result<(), String> {
+    if result.stage != case.stage {
+        return Err(format!(
+            "reference stage mismatch: expected {}, observed {}",
+            case.stage.as_str(),
+            result.stage.as_str()
+        ));
+    }
+    if profile == manifest.reference.profile
+        && result.compiler.version != manifest.reference.compiler_version
+    {
+        return Err(format!(
+            "reference compiler version mismatch: expected {}, observed {}",
+            manifest.reference.compiler_version, result.compiler.version
+        ));
+    }
+    if result.compiler.version.is_empty() || result.compiler.executable.is_empty() {
+        return Err("reference compiler identity is incomplete".into());
+    }
+    if host.target.is_empty() || host.library.is_empty() {
+        return Err("reference host identity is incomplete".into());
+    }
+    let source = root.join(&case.source);
+    let contents = fs::read(&source).map_err(|error| {
+        format!(
+            "cannot validate reference source {}: {error}",
+            source.display()
+        )
+    })?;
+    let expected_digest = digest(&contents);
+    if result.source_digest != expected_digest {
+        return Err(format!(
+            "reference source digest mismatch: expected {expected_digest}, observed {}",
+            result.source_digest
+        ));
+    }
+    if result.commands.is_empty() || result.commands.iter().any(Vec::is_empty) {
+        return Err("reference commands are missing".into());
+    }
+    if !result.commands.iter().any(|command| {
+        command
+            .first()
+            .is_some_and(|program| program == &result.compiler.executable)
+    }) {
+        return Err("reference commands do not identify the recorded compiler".into());
+    }
     Ok(())
 }
 
