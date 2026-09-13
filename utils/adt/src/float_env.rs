@@ -40,6 +40,16 @@ pub enum FloatWidth {
     W64,
 }
 
+impl FloatWidth {
+    /// Number of bits in the interchange representation.
+    pub const fn bit_width(self) -> u32 {
+        match self {
+            Self::W32 => 32,
+            Self::W64 => 64,
+        }
+    }
+}
+
 /// Result bits and IEEE flags ordered as invalid, divide-by-zero, overflow,
 /// underflow, and inexact in bits four through zero.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

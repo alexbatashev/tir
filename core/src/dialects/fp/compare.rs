@@ -1,16 +1,17 @@
 use tir_adt::{APInt, ComparisonKind, compare_float};
 
 use super::arithmetic::{float_width, width_of_float};
-use super::resource::{apply_flags, effect_records, verify_ports};
-use super::{ComparisonBehavior, ComparisonSemantics, Exceptions, SubnormalMode};
+use super::resource::{apply_flags, effect_records, effects_for, verify_ports};
+use super::{ComparisonBehavior, Exceptions, SubnormalMode};
 use crate::builtin::{IntegerType, StateResource};
 use crate::graph::{Dag, MetaMutDag, NodeId};
 use crate::sem::{SemGraph, SymKind, SymPayload};
 use crate::{
-    Context, Error, HasResourceSemantics, ResourceAccess, ResourceEffect, ResourceEffects,
-    ResourceSemantics, operation,
+    Context, Error, HasResourceSemantics, ResourceEffect, ResourceEffects, ResourceSemantics,
+    operation,
 };
 
+use super::semantics::{interp_error, speculatable_if_ignore};
 use crate as tir;
 
 operation! {
@@ -37,17 +38,6 @@ impl CmpOp {
     }
 }
 
-fn required_effects(semantics: &ComparisonSemantics) -> Vec<(StateResource, ResourceAccess)> {
-    match semantics.exceptions {
-        Exceptions::Ignore => Vec::new(),
-        Exceptions::Flags => vec![(StateResource::FpEnv, ResourceAccess::Change)],
-        Exceptions::FlagsAndTraps => vec![
-            (StateResource::FpEnv, ResourceAccess::Change),
-            (StateResource::Memory, ResourceAccess::Change),
-        ],
-    }
-}
-
 impl tir::Verifiable for CmpOp {
     fn verify_impl(&self, context: &Context) -> Result<(), Error> {
         let operands = self.0.value_operands();
@@ -65,30 +55,24 @@ impl tir::Verifiable for CmpOp {
                 "fp comparison supports gradual subnormals".into(),
             ));
         }
-        let required = required_effects(semantics);
+        let required = effects_for(None, semantics.exceptions);
         verify_ports(&self.0, &required)
     }
 }
 
 impl crate::Speculatable for CmpOp {
     fn is_speculatable(&self) -> bool {
-        self.semantics()
-            .comparison()
-            .is_ok_and(|s| s.exceptions == Exceptions::Ignore)
+        speculatable_if_ignore(self.semantics().comparison().map(|s| s.exceptions))
     }
 }
 
 impl ResourceEffects for CmpOp {
     fn resource_effects(&self) -> Vec<ResourceEffect> {
         let semantics = self.semantics();
-        effect_records(
-            &self.0,
-            required_effects(
-                semantics
-                    .comparison()
-                    .expect("verified comparison semantics"),
-            ),
-        )
+        let semantics = semantics
+            .comparison()
+            .expect("verified comparison semantics");
+        effect_records(&self.0, effects_for(None, semantics.exceptions))
     }
 }
 
@@ -166,12 +150,9 @@ impl HasResourceSemantics for CmpOp {
             };
         }
         let operands = self.0.value_operands();
-        let width = match float_width(&self.0.context, self.0.context.get_value(operands[0]).ty())
+        let width = float_width(&self.0.context, self.0.context.get_value(operands[0]).ty())
             .expect("verified comparison format")
-        {
-            tir_adt::FloatWidth::W32 => 32,
-            tir_adt::FloatWidth::W64 => 64,
-        };
+            .bit_width();
         let signaling_only = semantics.behavior == ComparisonBehavior::Quiet;
         let lhs = super::resource::value(&mut graph, &self.0, operands[0]);
         let rhs = super::resource::value(&mut graph, &self.0, operands[1]);
@@ -223,9 +204,7 @@ impl crate::interp::Interp for CmpOp {
             ));
         }
         let semantics = self.semantics();
-        let semantics = semantics
-            .comparison()
-            .map_err(|error| crate::interp::InterpError::Message(error.to_string()))?;
+        let semantics = semantics.comparison().map_err(interp_error)?;
         let result = compare_float(
             width,
             lhs.to_bits() as u64,

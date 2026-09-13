@@ -1,5 +1,5 @@
 use std::fs;
-use std::process::Command;
+use std::process::{Command, Output};
 
 use sha2::{Digest, Sha256};
 
@@ -233,6 +233,69 @@ fn report_rejects_a_wrong_result_bit() {
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("fail=1"),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn report_with_effects_observation(observation: &str) -> Output {
+    let directory = tempfile::tempdir().unwrap();
+    let report = directory.path().join("report.json");
+    fs::write(
+        &report,
+        format!(
+            r#"{{
+  "schema_version": 1,
+  "profile": "gcc-15.2",
+  "generated_at_unix_seconds": 0,
+  "host": {{ "target": "x86_64-linux-gnu", "library": "glibc 2.43" }},
+  "results": [{{
+    "case_id": "effects.fixture",
+    "stage": "reference",
+    "compiler": {{ "version": "15.2.0", "executable": "/usr/bin/gcc" }},
+    "source_digest": "sha256:test",
+    "commands": [["/usr/bin/gcc", "probe.c"]],
+    "exit_status": 0,
+    "observation": {observation},
+    "status": "pass",
+    "detail": "fixture"
+  }}]
+}}"#,
+        ),
+    )
+    .unwrap();
+    Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["fp-check", "report", report.to_str().unwrap()])
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn report_rejects_effects_observations_without_flags_or_events() {
+    for field in ["flags", "events"] {
+        let mut observation = serde_json::json!({
+            "kind": "effects", "flags": [], "events": [], "errno": null, "trapped": false
+        });
+        observation.as_object_mut().unwrap().remove(field);
+        let output = report_with_effects_observation(&observation.to_string());
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("missing field `{field}`")),
+            "stderr:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn report_accepts_unknown_effects_observation_fields() {
+    let output = report_with_effects_observation(
+        r#"{"kind":"effects","flags":[],"errno":null,"events":[],"trapped":false,"extension":true}"#,
+    );
+
+    assert!(
+        output.status.success(),
         "stdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)

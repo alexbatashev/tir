@@ -1,5 +1,7 @@
 use tir_adt::APFloat;
 
+use super::arithmetic::float_type_parts;
+use super::semantics::interp_error;
 use crate::builtin::FloatType;
 use crate::{Context, Error, Operation, operation};
 
@@ -41,8 +43,8 @@ impl crate::interp::Interp for ConstantOp {
         _state: &mut crate::interp::ExecutionState,
     ) -> Result<Vec<crate::interp::Value>, crate::interp::InterpError> {
         let context = self.handle().context.clone();
-        let (exponent, mantissa, _) = float_format(&context, self.result())
-            .map_err(|error| crate::interp::InterpError::Message(error.to_string()))?;
+        let (exponent, mantissa, _) =
+            float_format(&context, self.result()).map_err(interp_error)?;
         Ok(vec![crate::interp::Value::Float(APFloat::from_bits(
             exponent,
             mantissa,
@@ -53,12 +55,13 @@ impl crate::interp::Interp for ConstantOp {
 }
 
 fn float_format(context: &Context, value: crate::ValueId) -> Result<(u32, u32, u32), Error> {
-    let ty = context.get_type_data(context.get_value(value).ty());
-    (ty.as_ref() as &dyn std::any::Any)
-        .downcast_ref::<FloatType>()
-        .filter(|ty| matches!(ty.bit_width(), 32 | 64))
-        .map(|ty| (ty.exp_width(), ty.mant_width(), ty.bit_width()))
-        .ok_or_else(|| {
-            Error::VerificationError("fp.constant supports only binary32 and binary64".into())
-        })
+    let invalid =
+        || Error::VerificationError("fp.constant supports only binary32 and binary64".into());
+    let (exponent, mantissa) =
+        float_type_parts(context, context.get_value(value).ty()).map_err(|_| invalid())?;
+    let width = 1 + exponent + mantissa;
+    if !matches!(width, 32 | 64) {
+        return Err(invalid());
+    }
+    Ok((exponent, mantissa, width))
 }

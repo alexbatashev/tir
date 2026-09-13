@@ -1,17 +1,18 @@
 use tir_adt::{APFloat, APInt, FloatOp, FloatWidth, eval_float};
 
 use super::arithmetic::{
-    canonicalize_nan, float_parts, float_width, required_effects, rounding_node, value_operation,
-    verify_policy, width_of_float,
+    canonicalize_nan, float_parts, float_width, rounding_node, value_operation, verify_policy,
+    width_of_float,
 };
-use super::resource::{apply_flags, effect_records, verify_ports};
-use super::{ArithmeticSemantics, Exceptions, IntegerConversionSemantics, Rounding, SubnormalMode};
-use crate::builtin::{FloatType, IntegerType, StateResource};
+use super::resource::{apply_flags, effect_records, effects_for, verify_ports};
+use super::{ArithmeticSemantics, IntegerConversionSemantics, Rounding, SubnormalMode};
+use crate::builtin::{FloatType, IntegerType};
 use crate::{
-    Context, Error, HasResourceSemantics, ResourceAccess, ResourceEffect, ResourceEffects,
-    ResourceSemantics, TypeId, operation,
+    Context, Error, HasResourceSemantics, ResourceEffect, ResourceEffects, ResourceSemantics,
+    TypeId, operation,
 };
 
+use super::semantics::{interp_error, speculatable_if_ignore};
 use crate as tir;
 
 fn int_width(context: &Context, ty: TypeId) -> Result<FloatWidth, Error> {
@@ -51,18 +52,10 @@ fn verify_arithmetic(
 ) -> Result<(), Error> {
     verify_policy(semantics)?;
     float_width(context, context.get_value(op.value_results()[0]).ty())?;
-    verify_ports(op, &required_effects(semantics))
-}
-
-fn integer_effects(semantics: &IntegerConversionSemantics) -> Vec<(StateResource, ResourceAccess)> {
-    let arithmetic = ArithmeticSemantics {
-        rounding: semantics.rounding,
-        exceptions: semantics.exceptions,
-        nan: super::NaNPolicy::AnyQuiet,
-        subnormals: semantics.subnormals,
-        tininess: super::Tininess::AfterRounding,
-    };
-    required_effects(&arithmetic)
+    verify_ports(
+        op,
+        &effects_for(Some(semantics.rounding), semantics.exceptions),
+    )
 }
 
 fn rounding(value: Rounding, state: &crate::interp::ExecutionState) -> tir_adt::RoundingMode {
@@ -155,7 +148,13 @@ fn integer_conversion_semantics(
 }
 
 macro_rules! arithmetic_conversion {
-    ($op:ident, $name:tt, $input_type:tt, $kind:expr, $generic:expr, $rounded:expr) => {
+    (float, $op:ident, $name:tt, $kind:expr, $generic:expr, $rounded:expr) => {
+        arithmetic_conversion!(@impl $op, $name, "FloatType", float_width, $kind, $generic, $rounded);
+    };
+    (integer, $op:ident, $name:tt, $kind:expr, $generic:expr, $rounded:expr) => {
+        arithmetic_conversion!(@impl $op, $name, "IntegerType", int_width, $kind, $generic, $rounded);
+    };
+    (@impl $op:ident, $name:tt, $input_type:tt, $source_width:ident, $kind:expr, $generic:expr, $rounded:expr) => {
         operation! {
             $op {
                 name: $name, dialect: "fp",
@@ -189,27 +188,21 @@ macro_rules! arithmetic_conversion {
             fn verify_impl(&self, context: &Context) -> Result<(), Error> {
                 let semantics = self.semantics();
                 let semantics = semantics.arithmetic()?;
-                if stringify!($op) != "ConvertOp" {
-                    int_width(context, context.get_value(self.0.value_operands()[0]).ty())?;
-                } else {
-                    float_width(context, context.get_value(self.0.value_operands()[0]).ty())?;
-                }
+                $source_width(context, context.get_value(self.0.value_operands()[0]).ty())?;
                 verify_arithmetic(context, &self.0, semantics)
             }
         }
         impl crate::Speculatable for $op {
             fn is_speculatable(&self) -> bool {
-                self.semantics().arithmetic().is_ok_and(|s| s.exceptions == Exceptions::Ignore)
+                speculatable_if_ignore(self.semantics().arithmetic().map(|s| s.exceptions))
             }
         }
 
         impl ResourceEffects for $op {
             fn resource_effects(&self) -> Vec<ResourceEffect> {
                 let semantics = self.semantics();
-                effect_records(
-                    &self.0,
-                    required_effects(semantics.arithmetic().expect("verified semantics")),
-                )
+                let semantics = semantics.arithmetic().expect("verified semantics");
+                effect_records(&self.0, effects_for(Some(semantics.rounding), semantics.exceptions))
             }
         }
         impl HasResourceSemantics for $op {
@@ -240,18 +233,12 @@ macro_rules! arithmetic_conversion {
                 let semantics = self.semantics();
                 let semantics = semantics
                     .arithmetic()
-                    .map_err(|error| crate::interp::InterpError::Message(error.to_string()))?;
+                    .map_err(interp_error)?;
                 let source_type = self.0.context.get_value(self.0.value_operands()[0]).ty();
                 let destination_type = self.0.context.get_value(self.0.value_results()[0]).ty();
-                let source = if stringify!($op) == "ConvertOp" {
-                    float_width(&self.0.context, source_type)
-                        .map_err(|e| crate::interp::InterpError::Message(e.to_string()))?
-                } else {
-                    int_width(&self.0.context, source_type)
-                        .map_err(|e| crate::interp::InterpError::Message(e.to_string()))?
-                };
+                let source = $source_width(&self.0.context, source_type).map_err(interp_error)?;
                 let destination = float_width(&self.0.context, destination_type)
-                    .map_err(|e| crate::interp::InterpError::Message(e.to_string()))?;
+                    .map_err(interp_error)?;
                 let bits = match &operands[0] {
                     crate::interp::Value::Float(value) => value.to_bits() as u64,
                     crate::interp::Value::Int(value) => value.to_u64(),
@@ -289,25 +276,25 @@ macro_rules! arithmetic_conversion {
 }
 
 arithmetic_conversion!(
+    float,
     ConvertOp,
     "convert",
-    "FloatType",
     FloatOp::Convert,
     tir::sem::SymKind::FCvt,
     tir::sem::SymKind::FCvtRound
 );
 arithmetic_conversion!(
+    integer,
     FromSiOp,
     "from_si",
-    "IntegerType",
     FloatOp::SignedToFloat,
     tir::sem::SymKind::SIToFP,
     tir::sem::SymKind::SIToFPRound
 );
 arithmetic_conversion!(
+    integer,
     FromUiOp,
     "from_ui",
-    "IntegerType",
     FloatOp::UnsignedToFloat,
     tir::sem::SymKind::UIToFP,
     tir::sem::SymKind::UIToFPRound
@@ -355,21 +342,19 @@ macro_rules! to_integer {
                         "FP conversion supports gradual subnormals".into(),
                     ));
                 }
-                verify_ports(&self.0, &integer_effects(semantics))
+                verify_ports(&self.0, &effects_for(Some(semantics.rounding), semantics.exceptions))
             }
         }
         impl crate::Speculatable for $op {
             fn is_speculatable(&self) -> bool {
-                self.semantics().integer_conversion().is_ok_and(|s| s.exceptions == Exceptions::Ignore)
+                speculatable_if_ignore(self.semantics().integer_conversion().map(|s| s.exceptions))
             }
         }
         impl ResourceEffects for $op {
             fn resource_effects(&self) -> Vec<ResourceEffect> {
                 let semantics = self.semantics();
-                effect_records(
-                    &self.0,
-                    integer_effects(semantics.integer_conversion().expect("verified semantics")),
-                )
+                let semantics = semantics.integer_conversion().expect("verified semantics");
+                effect_records(&self.0, effects_for(Some(semantics.rounding), semantics.exceptions))
             }
         }
         impl HasResourceSemantics for $op {
@@ -399,13 +384,13 @@ macro_rules! to_integer {
                 let semantics = self.semantics();
                 let semantics = semantics
                     .integer_conversion()
-                    .map_err(|error| crate::interp::InterpError::Message(error.to_string()))?;
+                    .map_err(interp_error)?;
                 let source = width_of_float(value)?;
                 let destination = int_width(
                     &self.0.context,
                     self.0.context.get_value(self.result()).ty(),
                 )
-                .map_err(|e| crate::interp::InterpError::Message(e.to_string()))?;
+                .map_err(interp_error)?;
                 let result = apply_flags(
                     eval_float(
                         $kind,
@@ -417,10 +402,7 @@ macro_rules! to_integer {
                     semantics.exceptions,
                     state,
                 )?;
-                let width = match destination {
-                    FloatWidth::W32 => 32,
-                    FloatWidth::W64 => 64,
-                };
+                let width = destination.bit_width();
                 Ok(vec![crate::interp::Value::Int(APInt::new(
                     width,
                     result.bits,

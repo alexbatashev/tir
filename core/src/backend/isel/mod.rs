@@ -885,7 +885,45 @@ fn relaxation_error(rule: &Rule, why: &str) -> String {
 
 /// Prove result refinement on the selection pattern's defined domain.
 fn prove_relaxation(rule: &Rule, guarded: &SemGraph) -> Result<GuardedRelaxationProof, String> {
-    use tir::sem::{FloatFormat, SemType};
+    let (pattern, guarded) = peel_relaxation_effect(rule, guarded)?;
+    let pattern = &pattern;
+    let guarded = &guarded;
+    let pattern_root = pattern.root().unwrap();
+    let full_root = guarded.root().unwrap();
+    let immediate_symbols: HashSet<u32> = rule
+        .operand_constraints
+        .iter()
+        .filter(|(_, c)| matches!(c, OperandConstraint::Immediate))
+        .map(|(symbol, _)| *symbol)
+        .collect();
+    let candidate = relaxation_candidate(rule, guarded, pattern, &immediate_symbols)?;
+    let register_width = infer_widths(guarded, |_| None)[full_root.index()].unwrap_or(64);
+    let floating = relaxation_uses_float(&candidate);
+    if !floating
+        && *guarded.get_kind(full_root) == SymKind::If
+        && let Some(else_arm) = guarded.children(full_root).nth(2)
+    {
+        let (canonical_else, else_root, _) =
+            canonicalize_for_selection(guarded, else_arm, &immediate_symbols);
+        if subgraphs_equal(&canonical_else, else_root, pattern, pattern_root)
+            && relaxation_holds(guarded, full_root, else_arm, register_width)
+        {
+            return Ok(GuardedRelaxationProof::Proven);
+        }
+    }
+    let symbol_types = relaxation_symbol_types(rule, guarded, &candidate, register_width)?;
+    if let Some(proof) = prove_float_relaxation(guarded, &candidate, &symbol_types, floating) {
+        return Ok(proof);
+    }
+    Err(relaxation_error(
+        rule,
+        &format!(
+            "guard relaxation `D(pattern) => guarded == pattern` is not valid at register width {register_width}"
+        ),
+    ))
+}
+
+fn peel_relaxation_effect(rule: &Rule, guarded: &SemGraph) -> Result<(SemGraph, SemGraph), String> {
     let mut value_pattern = SemGraph::new();
     let pattern_root = rule
         .pattern
@@ -900,12 +938,6 @@ fn prove_relaxation(rule: &Rule, guarded: &SemGraph) -> Result<GuardedRelaxation
     tir_symbolic::sem::copy_subgraph(&mut value_pattern, &rule.pattern, root, &mut HashMap::new());
     let pattern = &value_pattern;
     let pattern_root = pattern.root().unwrap();
-    let immediate_symbols: HashSet<u32> = rule
-        .operand_constraints
-        .iter()
-        .filter(|(_, c)| matches!(c, OperandConstraint::Immediate))
-        .map(|(symbol, _)| *symbol)
-        .collect();
     let full_root = guarded
         .root()
         .ok_or_else(|| relaxation_error(rule, "empty guarded semantics"))?;
@@ -923,11 +955,20 @@ fn prove_relaxation(rule: &Rule, guarded: &SemGraph) -> Result<GuardedRelaxation
             full_root
         };
     tir_symbolic::sem::copy_subgraph(&mut observed, guarded, observed_root, &mut HashMap::new());
-    let guarded = &observed;
+    Ok((value_pattern, observed))
+}
+
+fn relaxation_candidate(
+    rule: &Rule,
+    guarded: &SemGraph,
+    pattern: &SemGraph,
+    immediate_symbols: &HashSet<u32>,
+) -> Result<SemGraph, String> {
     let full_root = guarded.root().unwrap();
+    let pattern_root = pattern.root().unwrap();
     let matches_pattern = |candidate: &SemGraph| {
         let (canonical, root, _) =
-            canonicalize_for_selection(candidate, candidate.root().unwrap(), &immediate_symbols);
+            canonicalize_for_selection(candidate, candidate.root().unwrap(), immediate_symbols);
         subgraphs_equal(&canonical, root, pattern, pattern_root)
     };
     let candidate = tir_symbolic::lang::selection_fallback_preserving_rounding(guarded, full_root)
@@ -956,9 +997,11 @@ fn prove_relaxation(rule: &Rule, guarded: &SemGraph) -> Result<GuardedRelaxation
             "guarded else arm does not match the selection pattern",
         ));
     }
-    let candidate_root = candidate.root().unwrap();
-    let register_width = infer_widths(guarded, |_| None)[full_root.index()].unwrap_or(64);
-    let floating = candidate.postorder(candidate_root).any(|node| {
+    Ok(candidate)
+}
+
+fn relaxation_uses_float(candidate: &SemGraph) -> bool {
+    candidate.postorder(candidate.root().unwrap()).any(|node| {
         matches!(
             candidate.get_kind(node),
             SymKind::FPToSI
@@ -984,43 +1027,43 @@ fn prove_relaxation(rule: &Rule, guarded: &SemGraph) -> Result<GuardedRelaxation
                 | SymKind::FPToSIRound
                 | SymKind::FPToUIRound
         )
-    });
-    if !floating
-        && *guarded.get_kind(full_root) == SymKind::If
-        && let Some(else_arm) = guarded.children(full_root).nth(2)
-    {
-        let (canonical_else, else_root, _) =
-            canonicalize_for_selection(guarded, else_arm, &immediate_symbols);
-        if subgraphs_equal(&canonical_else, else_root, pattern, pattern_root)
-            && relaxation_holds(guarded, full_root, else_arm, register_width)
-        {
-            return Ok(GuardedRelaxationProof::Proven);
-        }
-    }
+    })
+}
+
+fn relaxation_symbol_types(
+    rule: &Rule,
+    guarded: &SemGraph,
+    candidate: &SemGraph,
+    register_width: u32,
+) -> Result<Vec<tir::sem::SemType>, String> {
+    use tir::sem::SemType;
+
     let symbol_count = symbol_ids(guarded)
         .into_iter()
-        .chain(symbol_ids(&candidate))
+        .chain(symbol_ids(candidate))
         .max()
         .map_or(0, |id| id + 1) as usize;
     let mut symbol_types = vec![SemType::bits(register_width); symbol_count];
     for (symbol, requirement) in &rule.operand_registers {
-        let width = requirement.width();
-        let ty = if requirement.capability.float && !requirement.capability.integer {
-            let (exponent, mantissa) = match width {
-                16 => (5, 10),
-                32 => (8, 23),
-                64 => (11, 52),
-                128 => (15, 112),
-                _ => return Err(relaxation_error(rule, "unsupported float register format")),
-            };
-            SemType::Float(FloatFormat::new(exponent, mantissa))
-        } else {
-            SemType::bits(width)
-        };
+        let ty = requirement
+            .exclusive_float_type()
+            .map_err(|()| relaxation_error(rule, "unsupported float register format"))?
+            .unwrap_or_else(|| SemType::bits(requirement.width()));
         if let Some(slot) = symbol_types.get_mut(*symbol as usize) {
             *slot = ty;
         }
     }
+    Ok(symbol_types)
+}
+
+fn prove_float_relaxation(
+    guarded: &SemGraph,
+    candidate: &SemGraph,
+    symbol_types: &[tir::sem::SemType],
+    floating: bool,
+) -> Option<GuardedRelaxationProof> {
+    let candidate_root = candidate.root().unwrap();
+    let full_root = guarded.root().unwrap();
     let mut proof_candidate_root = candidate_root;
     let mut proof_guarded_root = full_root;
     if matches!(
@@ -1028,7 +1071,7 @@ fn prove_relaxation(rule: &Rule, guarded: &SemGraph) -> Result<GuardedRelaxation
         SymKind::SExt | SymKind::ZExt
     ) && candidate.get_kind(candidate_root) == guarded.get_kind(full_root)
         && subgraphs_equal(
-            &candidate,
+            candidate,
             candidate.children(candidate_root).nth(1).unwrap(),
             guarded,
             guarded.children(full_root).nth(1).unwrap(),
@@ -1040,7 +1083,7 @@ fn prove_relaxation(rule: &Rule, guarded: &SemGraph) -> Result<GuardedRelaxation
     let mut proof_candidate = SemGraph::new();
     tir_symbolic::sem::copy_subgraph(
         &mut proof_candidate,
-        &candidate,
+        candidate,
         proof_candidate_root,
         &mut HashMap::new(),
     );
@@ -1052,10 +1095,10 @@ fn prove_relaxation(rule: &Rule, guarded: &SemGraph) -> Result<GuardedRelaxation
         &mut HashMap::new(),
     );
     if floating
-        && (float_refinement::ieee_arithmetic_refines(guarded, &candidate, &symbol_types)
-            || SmtOracle.refines_typed(&proof_candidate, &proof_guarded, &symbol_types))
+        && (float_refinement::ieee_arithmetic_refines(guarded, candidate, symbol_types)
+            || SmtOracle.refines_typed(&proof_candidate, &proof_guarded, symbol_types))
     {
-        return Ok(GuardedRelaxationProof::Proven);
+        return Some(GuardedRelaxationProof::Proven);
     }
     for graph in [&proof_candidate, &proof_guarded] {
         for node in graph.postorder(graph.root().unwrap()) {
@@ -1064,18 +1107,13 @@ fn prove_relaxation(rule: &Rule, guarded: &SemGraph) -> Result<GuardedRelaxation
                 && !matches!(graph.children(node).nth(2).and_then(|mode| graph.get_leaf_data(mode)),
                     Some(SymPayload::Int(mode)) if mode.to_u64() == 1)
             {
-                return Ok(GuardedRelaxationProof::Unsupported(format!(
+                return Some(GuardedRelaxationProof::Unsupported(format!(
                     "unsupported {kind:?}: bit-blasting requires toward-zero rounding"
                 )));
             }
         }
     }
-    Err(relaxation_error(
-        rule,
-        &format!(
-            "guard relaxation `D(pattern) => guarded == pattern` is not valid at register width {register_width}"
-        ),
-    ))
+    None
 }
 
 /// The conjunction of definedness conditions of every partial-kind node reachable

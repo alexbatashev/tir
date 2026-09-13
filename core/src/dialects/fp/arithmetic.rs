@@ -1,11 +1,12 @@
 use tir_adt::{APFloat, FloatOp, FloatWidth, eval_float};
 
-use super::resource::{apply_flags, effect_records, verify_ports};
-use super::{ArithmeticSemantics, Exceptions, NaNPolicy, Rounding, SubnormalMode, Tininess};
-use crate::builtin::{FloatType, StateResource};
+use super::resource::{apply_flags, effect_records, effects_for, verify_ports};
+use super::semantics::{interp_error, rounding_code, speculatable_if_ignore};
+use super::{ArithmeticSemantics, NaNPolicy, Rounding, SubnormalMode, Tininess};
+use crate::builtin::FloatType;
 use crate::{
-    Context, Error, HasResourceSemantics, ResourceAccess, ResourceEffect, ResourceEffects,
-    ResourceSemantics, TypeId, operation,
+    Context, Error, HasResourceSemantics, ResourceEffect, ResourceEffects, ResourceSemantics,
+    TypeId, operation,
 };
 
 use crate as tir;
@@ -27,7 +28,7 @@ fn verify(
     }
     float_width(context, result_type)?;
     verify_policy(semantics)?;
-    let required = required_effects(semantics);
+    let required = effects_for(Some(semantics.rounding), semantics.exceptions);
     verify_ports(op, &required)
 }
 
@@ -40,25 +41,6 @@ pub(super) fn verify_policy(semantics: &ArithmeticSemantics) -> Result<(), Error
         ));
     }
     Ok(())
-}
-
-pub(crate) fn required_effects(
-    semantics: &ArithmeticSemantics,
-) -> Vec<(StateResource, ResourceAccess)> {
-    let mut effects = Vec::new();
-    match (semantics.rounding, semantics.exceptions) {
-        (Rounding::Fixed(_), Exceptions::Ignore) => {}
-        (Rounding::Dynamic, Exceptions::Ignore) => {
-            effects.push((StateResource::FpEnv, ResourceAccess::Read));
-        }
-        (_, Exceptions::Flags | Exceptions::FlagsAndTraps) => {
-            effects.push((StateResource::FpEnv, ResourceAccess::Change));
-        }
-    }
-    if semantics.exceptions == Exceptions::FlagsAndTraps {
-        effects.push((StateResource::Memory, ResourceAccess::Change));
-    }
-    effects
 }
 
 fn evaluate(
@@ -155,21 +137,15 @@ macro_rules! arithmetic_op {
 
         impl crate::Speculatable for $op {
             fn is_speculatable(&self) -> bool {
-                self.semantics().arithmetic().is_ok_and(|s| s.exceptions == Exceptions::Ignore)
+                speculatable_if_ignore(self.semantics().arithmetic().map(|s| s.exceptions))
             }
         }
 
         impl ResourceEffects for $op {
             fn resource_effects(&self) -> Vec<ResourceEffect> {
                 let semantics = self.semantics();
-                effect_records(
-                    &self.0,
-                    required_effects(
-                        semantics
-                            .arithmetic()
-                            .expect("verified arithmetic semantics"),
-                    ),
-                )
+                let semantics = semantics.arithmetic().expect("verified arithmetic semantics");
+                effect_records(&self.0, effects_for(Some(semantics.rounding), semantics.exceptions))
             }
         }
 
@@ -197,7 +173,7 @@ macro_rules! arithmetic_op {
                 let semantics = self.semantics();
                 let semantics = semantics
                     .arithmetic()
-                    .map_err(|error| crate::interp::InterpError::Message(error.to_string()))?;
+                    .map_err(interp_error)?;
                 evaluate($kind, semantics, operands, state)
             }
         }
@@ -214,13 +190,7 @@ pub(crate) fn rounding_node(
     let Rounding::Fixed(rounding) = rounding else {
         return None;
     };
-    let value = match rounding {
-        tir_adt::RoundingMode::TiesToEven => 0,
-        tir_adt::RoundingMode::TowardZero => 1,
-        tir_adt::RoundingMode::TowardNegative => 2,
-        tir_adt::RoundingMode::TowardPositive => 3,
-        tir_adt::RoundingMode::TiesToAway => 4,
-    };
+    let value = rounding_code(rounding);
     let node = graph.add_node(tir::sem::SymKind::Constant);
     graph.set_leaf_data(
         node,
@@ -309,22 +279,50 @@ fn arithmetic_semantics(
     } else {
         Some(rounding_node(graph, semantics.rounding)?)
     };
-    let value = value_operation(
+    let canonical_bits = (semantics.nan == NaNPolicy::Canonical)
+        .then(|| super::resource::constant(graph, width.bit_width(), canonical_nan(width)));
+    Some(
+        build_arithmetic_value(
+            graph,
+            &operands,
+            (generic, rounded),
+            nearest_any_quiet,
+            rounding,
+            semantics.nan,
+            canonical_bits,
+        )
+        .0,
+    )
+}
+
+pub(super) fn build_arithmetic_value(
+    graph: &mut impl tir::graph::MutDag<
+        Node = tir::sem::SymKind,
+        Leaf = tir::sem::SymPayload<tir::ValueId>,
+    >,
+    operands: &[tir::graph::NodeId],
+    kinds: (tir::sem::SymKind, tir::sem::SymKind),
+    use_generic: bool,
+    rounding: Option<tir::graph::NodeId>,
+    nan: NaNPolicy,
+    canonical_bits: Option<tir::graph::NodeId>,
+) -> (tir::graph::NodeId, tir::graph::NodeId) {
+    let evaluation = value_operation(
         graph,
-        if nearest_any_quiet { generic } else { rounded },
-        &operands,
+        if use_generic { kinds.0 } else { kinds.1 },
+        operands,
         rounding,
     );
-    Some(match semantics.nan {
-        NaNPolicy::PreservePayload => preserve_payload_observation(graph, value),
-        NaNPolicy::Canonical => {
-            let (exponent, mantissa) = float_parts(width);
-            let bits =
-                super::resource::constant(graph, 1 + exponent + mantissa, canonical_nan(width));
-            super::resource::canonicalize_nan(graph, value, bits)
-        }
-        NaNPolicy::AnyQuiet => value,
-    })
+    let value = match nan {
+        NaNPolicy::PreservePayload => preserve_payload_observation(graph, evaluation),
+        NaNPolicy::Canonical => super::resource::canonicalize_nan(
+            graph,
+            evaluation,
+            canonical_bits.expect("canonical NaN policy has canonical bits"),
+        ),
+        NaNPolicy::AnyQuiet => evaluation,
+    };
+    (value, evaluation)
 }
 
 pub(super) fn value_operation(
@@ -362,17 +360,21 @@ pub(crate) fn preserve_payload_observation(
 }
 
 pub(crate) fn float_width(context: &Context, ty: TypeId) -> Result<FloatWidth, Error> {
-    let data = context.get_type_data(ty);
-    let float = (data.as_ref() as &dyn std::any::Any)
-        .downcast_ref::<FloatType>()
-        .ok_or_else(|| Error::VerificationError("expected floating type".into()))?;
-    match (float.exp_width(), float.mant_width()) {
+    match float_type_parts(context, ty)? {
         (8, 23) => Ok(FloatWidth::W32),
         (11, 52) => Ok(FloatWidth::W64),
         _ => Err(Error::VerificationError(
             "fp arithmetic supports only binary32 and binary64".into(),
         )),
     }
+}
+
+pub(super) fn float_type_parts(context: &Context, ty: TypeId) -> Result<(u32, u32), Error> {
+    let data = context.get_type_data(ty);
+    let float = (data.as_ref() as &dyn std::any::Any)
+        .downcast_ref::<FloatType>()
+        .ok_or_else(|| Error::VerificationError("expected floating type".into()))?;
+    Ok((float.exp_width(), float.mant_width()))
 }
 
 pub(crate) fn width_of_float(value: &APFloat) -> Result<FloatWidth, crate::interp::InterpError> {

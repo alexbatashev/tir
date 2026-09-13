@@ -500,12 +500,7 @@ fn emit_cond_branch_rule(
         .collect();
     let (canon_pattern, canon_root, forced_widths) =
         tir_symbolic::lang::canonicalize_for_selection(pattern, root, &immediate_symbols);
-    let mut pattern_widths = tir_symbolic::lang::infer_widths(&canon_pattern, |_| None);
-    for (index, forced) in forced_widths.iter().enumerate() {
-        if forced.is_some() {
-            pattern_widths[index] = *forced;
-        }
-    }
+    let pattern_widths = selection_pattern_widths(&canon_pattern, forced_widths);
     let (offset, typed) = intern_dag(&canon_pattern, canon_root, &pattern_widths);
     let pattern_spec = SpecPattern {
         offset,

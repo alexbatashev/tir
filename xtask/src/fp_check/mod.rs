@@ -218,10 +218,7 @@ fn check(
         match comparison {
             Ok(()) => {
                 result.status = Status::Pass;
-                result.detail = format!(
-                    "matches {} {} {}",
-                    case.oracle.kind, case.oracle.identity, case.oracle.version
-                );
+                result.detail = case.oracle_detail();
             }
             Err(detail) => {
                 result.status = Status::Fail;
@@ -613,13 +610,7 @@ fn run_reference_case(
             )
         } else {
             match comparison {
-                Ok(()) => (
-                    Status::Pass,
-                    format!(
-                        "matches {} {} {}",
-                        case.oracle.kind, case.oracle.identity, case.oracle.version
-                    ),
-                ),
+                Ok(()) => (Status::Pass, case.oracle_detail()),
                 Err(detail) => (Status::Fail, detail),
             }
         };
@@ -643,22 +634,16 @@ fn run_reference_case(
         });
     }
     if !compiled.status.success() {
-        let status = compiled.status.code();
         let detail = process_failure("compiler", &compiled);
-        let artifacts = directory.keep();
-        return Ok(CaseResult {
-            case_id: case.id.clone(),
-            stage: case.stage,
+        return Ok(fail_case(
+            case,
             compiler,
             source_digest,
             commands,
-            exit_status: status,
-            observation: None,
-            resolved_policy: None,
-            artifacts: Some(artifacts.display().to_string()),
-            status: Status::Fail,
+            compiled.status.code(),
+            directory,
             detail,
-        });
+        ));
     }
 
     match case.probe {
@@ -669,40 +654,29 @@ fn run_reference_case(
             commands.push(run.clone());
             let executed = command_output(&run)?;
             if !executed.status.success() {
-                let status = executed.status.code();
                 let detail = process_failure("probe", &executed);
-                let artifacts = directory.keep();
-                return Ok(CaseResult {
-                    case_id: case.id.clone(),
-                    stage: case.stage,
+                return Ok(fail_case(
+                    case,
                     compiler,
                     source_digest,
                     commands,
-                    exit_status: status,
-                    observation: None,
-                    resolved_policy: None,
-                    artifacts: Some(artifacts.display().to_string()),
-                    status: Status::Fail,
+                    executed.status.code(),
+                    directory,
                     detail,
-                });
+                ));
             }
             let observation: Observation = match serde_json::from_slice(&executed.stdout) {
                 Ok(observation) => observation,
                 Err(error) => {
-                    let artifacts = directory.keep();
-                    return Ok(CaseResult {
-                        case_id: case.id.clone(),
-                        stage: case.stage,
+                    return Ok(fail_case(
+                        case,
                         compiler,
                         source_digest,
                         commands,
-                        exit_status: executed.status.code(),
-                        observation: None,
-                        resolved_policy: None,
-                        artifacts: Some(artifacts.display().to_string()),
-                        status: Status::Fail,
-                        detail: format!("invalid observation JSON: {error}"),
-                    });
+                        executed.status.code(),
+                        directory,
+                        format!("invalid observation JSON: {error}"),
+                    ));
                 }
             };
             let expectation = case
@@ -710,13 +684,7 @@ fn run_reference_case(
                 .as_ref()
                 .unwrap_or(&case.expectation);
             let (status, detail) = match expectation.compare(Some(&observation)) {
-                Ok(()) => (
-                    Status::Pass,
-                    format!(
-                        "matches {} {} {}",
-                        case.oracle.kind, case.oracle.identity, case.oracle.version
-                    ),
-                ),
+                Ok(()) => (Status::Pass, case.oracle_detail()),
                 Err(detail) => (Status::Fail, detail),
             };
             let artifacts = if status == Status::Fail {
@@ -758,13 +726,7 @@ fn run_reference_case(
                 .as_ref()
                 .unwrap_or(&case.expectation);
             let (status, detail) = match expectation.compare(Some(&observation)) {
-                Ok(()) => (
-                    Status::Pass,
-                    format!(
-                        "matches {} {} {}",
-                        case.oracle.kind, case.oracle.identity, case.oracle.version
-                    ),
-                ),
+                Ok(()) => (Status::Pass, case.oracle_detail()),
                 Err(detail) => (Status::Fail, detail),
             };
             let artifacts = if status == Status::Fail {
@@ -788,6 +750,30 @@ fn run_reference_case(
         }
         Probe::CompileDiagnostic => unreachable!(),
         Probe::ManifestOnly => unreachable!(),
+    }
+}
+
+fn fail_case(
+    case: &Case,
+    compiler: CompilerIdentity,
+    source_digest: String,
+    commands: Vec<Vec<String>>,
+    exit_status: Option<i32>,
+    directory: tempfile::TempDir,
+    detail: String,
+) -> CaseResult {
+    CaseResult {
+        case_id: case.id.clone(),
+        stage: case.stage,
+        compiler,
+        source_digest,
+        commands,
+        exit_status,
+        observation: None,
+        resolved_policy: None,
+        artifacts: Some(directory.keep().display().to_string()),
+        status: Status::Fail,
+        detail,
     }
 }
 

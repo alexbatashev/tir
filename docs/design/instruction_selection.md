@@ -900,6 +900,9 @@ operands), and a proved width-1 identity
 hand-written rule.
 Canonicalization observes this identity only at the pattern root; the complete
 target behavior remains attached to the rule for refinement proof.
+`prove_relaxation` separates effect-wrapper removal, candidate selection,
+register-derived symbol typing, and floating refinement proof. Unsupported
+rounded-conversion encodings remain distinct from proven rules.
 
 Instructions that read or write the PC *unconditionally* (`jal`, `jalr`,
 `auipc`) get **no value rule**: their pattern would hide the control-flow

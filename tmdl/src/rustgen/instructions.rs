@@ -262,22 +262,6 @@ struct InstrEmitCtx<'a> {
     implicit_reads: &'a [(String, u32)],
 }
 
-fn selection_pattern_widths(
-    graph: &tir_graph::GenericDag<
-        tir_symbolic::lang::SymKind,
-        tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
-    >,
-    forced: Vec<Option<u32>>,
-) -> Vec<Option<u32>> {
-    let mut widths = tir_symbolic::lang::infer_widths(graph, |_| None);
-    for (width, forced) in widths.iter_mut().zip(forced) {
-        if forced.is_some() {
-            *width = forced;
-        }
-    }
-    widths
-}
-
 fn fp_value_patterns(
     semantics: &InstructionSemantics,
     immediate_symbols: &HashSet<u32>,

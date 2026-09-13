@@ -1982,48 +1982,28 @@ impl FnCodegen<'_> {
         source_ty: QualType,
     ) -> ValueId {
         let ty = lower_type(self.context, self.typed, source_ty);
-        let semantics = self.arithmetic_semantics();
+        self.emit_fp_binop(kind, lhs, rhs, ty)
+    }
+
+    fn emit_fp_binop(&self, kind: AstKind, lhs: ValueId, rhs: ValueId, ty: TypeId) -> ValueId {
+        macro_rules! emit {
+            ($builder:ident) => {
+                self.emit(
+                    fp::$builder::new(self.context)
+                        .lhs(lhs)
+                        .rhs(rhs)
+                        .semantics(self.arithmetic_semantics())
+                        .result_type(ty)
+                        .build(),
+                )
+                .result()
+            };
+        }
         match kind {
-            AstKind::Add | AstKind::AddAssign => self
-                .emit(
-                    fp::AddOpBuilder::new(self.context)
-                        .lhs(lhs)
-                        .rhs(rhs)
-                        .semantics(semantics)
-                        .result_type(ty)
-                        .build(),
-                )
-                .result(),
-            AstKind::Sub | AstKind::SubAssign => self
-                .emit(
-                    fp::SubOpBuilder::new(self.context)
-                        .lhs(lhs)
-                        .rhs(rhs)
-                        .semantics(semantics)
-                        .result_type(ty)
-                        .build(),
-                )
-                .result(),
-            AstKind::Mul | AstKind::MulAssign => self
-                .emit(
-                    fp::MulOpBuilder::new(self.context)
-                        .lhs(lhs)
-                        .rhs(rhs)
-                        .semantics(semantics)
-                        .result_type(ty)
-                        .build(),
-                )
-                .result(),
-            AstKind::Div | AstKind::DivAssign => self
-                .emit(
-                    fp::DivOpBuilder::new(self.context)
-                        .lhs(lhs)
-                        .rhs(rhs)
-                        .semantics(semantics)
-                        .result_type(ty)
-                        .build(),
-                )
-                .result(),
+            AstKind::Add | AstKind::AddAssign => emit!(AddOpBuilder),
+            AstKind::Sub | AstKind::SubAssign => emit!(SubOpBuilder),
+            AstKind::Mul | AstKind::MulAssign => emit!(MulOpBuilder),
+            AstKind::Div | AstKind::DivAssign => emit!(DivOpBuilder),
             _ => unreachable!(),
         }
     }
@@ -3949,28 +3929,16 @@ impl FnCodegen<'_> {
             TypeKind::Float | TypeKind::Double
         ) {
             let one = self.float_one(elem);
-            let semantics = self.arithmetic_semantics();
-            if increment {
-                self.emit(
-                    fp::AddOpBuilder::new(self.context)
-                        .lhs(old)
-                        .rhs(one)
-                        .semantics(semantics)
-                        .result_type(elem)
-                        .build(),
-                )
-                .result()
-            } else {
-                self.emit(
-                    fp::SubOpBuilder::new(self.context)
-                        .lhs(old)
-                        .rhs(one)
-                        .semantics(semantics)
-                        .result_type(elem)
-                        .build(),
-                )
-                .result()
-            }
+            self.emit_fp_binop(
+                if increment {
+                    AstKind::Add
+                } else {
+                    AstKind::Sub
+                },
+                old,
+                one,
+                elem,
+            )
         } else {
             let one = self
                 .emit(b::constant(self.context, 1, elem).build())

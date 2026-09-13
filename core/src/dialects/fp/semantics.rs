@@ -307,16 +307,47 @@ fn exact_fields(fields: &BTreeMap<String, AttributeValue>, expected: &[&str]) ->
     Ok(())
 }
 
+const ROUNDING_NAMES: [(RoundingMode, &str); 5] = [
+    (RoundingMode::TiesToEven, "nearest_even"),
+    (RoundingMode::TowardZero, "toward_zero"),
+    (RoundingMode::TowardNegative, "toward_negative"),
+    (RoundingMode::TowardPositive, "toward_positive"),
+    (RoundingMode::TiesToAway, "ties_away"),
+];
+
+pub(super) fn parse_rounding(name: &str) -> Option<RoundingMode> {
+    ROUNDING_NAMES
+        .iter()
+        .find_map(|&(mode, spelling)| (spelling == name).then_some(mode))
+}
+
+pub(super) fn rounding_code(mode: RoundingMode) -> u64 {
+    match mode {
+        RoundingMode::TiesToEven => 0,
+        RoundingMode::TowardZero => 1,
+        RoundingMode::TowardNegative => 2,
+        RoundingMode::TowardPositive => 3,
+        RoundingMode::TiesToAway => 4,
+    }
+}
+
+pub(super) fn speculatable_if_ignore(exceptions: Result<Exceptions, Error>) -> bool {
+    exceptions.is_ok_and(|exceptions| exceptions == Exceptions::Ignore)
+}
+
+pub(super) fn interp_error(error: Error) -> crate::interp::InterpError {
+    crate::interp::InterpError::Message(error.to_string())
+}
+
 fn rounding(fields: &BTreeMap<String, AttributeValue>) -> Result<Rounding, Error> {
-    Ok(match string(fields, "rounding")? {
-        "nearest_even" => Rounding::Fixed(RoundingMode::TiesToEven),
-        "toward_zero" => Rounding::Fixed(RoundingMode::TowardZero),
-        "toward_negative" => Rounding::Fixed(RoundingMode::TowardNegative),
-        "toward_positive" => Rounding::Fixed(RoundingMode::TowardPositive),
-        "ties_away" => Rounding::Fixed(RoundingMode::TiesToAway),
-        "dynamic" => Rounding::Dynamic,
-        _ => return Err(invalid("unknown rounding policy")),
-    })
+    let name = string(fields, "rounding")?;
+    if name == "dynamic" {
+        Ok(Rounding::Dynamic)
+    } else {
+        parse_rounding(name)
+            .map(Rounding::Fixed)
+            .ok_or_else(|| invalid("unknown rounding policy"))
+    }
 }
 
 fn exceptions(fields: &BTreeMap<String, AttributeValue>) -> Result<Exceptions, Error> {
@@ -347,11 +378,13 @@ fn string<'a>(fields: &'a BTreeMap<String, AttributeValue>, name: &str) -> Resul
 
 fn rounding_name(value: Rounding) -> &'static str {
     match value {
-        Rounding::Fixed(RoundingMode::TiesToEven) => "nearest_even",
-        Rounding::Fixed(RoundingMode::TowardZero) => "toward_zero",
-        Rounding::Fixed(RoundingMode::TowardNegative) => "toward_negative",
-        Rounding::Fixed(RoundingMode::TowardPositive) => "toward_positive",
-        Rounding::Fixed(RoundingMode::TiesToAway) => "ties_away",
+        Rounding::Fixed(mode) => {
+            ROUNDING_NAMES
+                .iter()
+                .find(|&&(candidate, _)| candidate == mode)
+                .expect("every rounding mode has a spelling")
+                .1
+        }
         Rounding::Dynamic => "dynamic",
     }
 }

@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,6 +53,15 @@ pub struct Case {
     pub oracle: Oracle,
 }
 
+impl Case {
+    pub fn oracle_detail(&self) -> String {
+        format!(
+            "matches {} {} {}",
+            self.oracle.kind, self.oracle.identity, self.oracle.version
+        )
+    }
+}
+
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Probe {
@@ -99,17 +108,7 @@ pub enum Expectation {
         #[serde(default)]
         forbidden: Vec<String>,
     },
-    Effects {
-        #[serde(default)]
-        result_bits: Option<ResultBits>,
-        #[serde(default)]
-        flags: Vec<String>,
-        errno: Option<i32>,
-        #[serde(default)]
-        events: Vec<String>,
-        #[serde(default)]
-        trapped: bool,
-    },
+    Effects(#[serde(deserialize_with = "deserialize_expected_effects")] Effects),
     Diagnostic {
         contains: String,
     },
@@ -192,35 +191,13 @@ impl Stage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Observation {
-    ExactBits {
-        bits: String,
-        flags: Vec<String>,
-    },
-    PermittedSet {
-        value: String,
-    },
-    CorrelatedResults {
-        results: Vec<String>,
-    },
-    NumericalBound {
-        value: String,
-        error: String,
-    },
-    CodeShape {
-        instructions: Vec<String>,
-    },
-    Effects {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        result_bits: Option<ResultBits>,
-        flags: Vec<String>,
-        errno: Option<i32>,
-        events: Vec<String>,
-        #[serde(default)]
-        trapped: bool,
-    },
-    Diagnostic {
-        message: String,
-    },
+    ExactBits { bits: String, flags: Vec<String> },
+    PermittedSet { value: String },
+    CorrelatedResults { results: Vec<String> },
+    NumericalBound { value: String, error: String },
+    CodeShape { instructions: Vec<String> },
+    Effects(Effects),
+    Diagnostic { message: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,6 +205,69 @@ pub enum Observation {
 pub enum ResultBits {
     Scalar(String),
     Vector(Vec<String>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Effects {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_bits: Option<ResultBits>,
+    pub flags: Vec<String>,
+    pub errno: Option<i32>,
+    pub events: Vec<String>,
+    #[serde(default)]
+    pub trapped: bool,
+}
+
+impl Effects {
+    fn compare(&self, observed: &Self) -> Result<(), String> {
+        if observed.result_bits != self.result_bits {
+            return Err(format!(
+                "expected result bits {:?}, observed {:?}",
+                self.result_bits, observed.result_bits
+            ));
+        }
+        compare_flags(&self.flags, &observed.flags)?;
+        if observed.errno != self.errno {
+            return Err(format!(
+                "expected errno {:?}, observed {:?}",
+                self.errno, observed.errno
+            ));
+        }
+        if observed.trapped != self.trapped {
+            return Err(format!(
+                "expected trapped={}, observed trapped={}",
+                self.trapped, observed.trapped
+            ));
+        }
+        if observed.events != self.events {
+            return Err(format!(
+                "expected events {:?}, observed {:?}",
+                self.events, observed.events
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn deserialize_expected_effects<'de, D>(deserializer: D) -> Result<Effects, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    const FIELDS: &[&str] = &["result_bits", "flags", "errno", "events", "trapped"];
+    let mut fields = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+    if let Some(field) = fields
+        .keys()
+        .find(|field| !FIELDS.contains(&field.as_str()))
+    {
+        return Err(serde::de::Error::unknown_field(field, FIELDS));
+    }
+    fields
+        .entry("flags")
+        .or_insert_with(|| serde_json::json!([]));
+    fields
+        .entry("events")
+        .or_insert_with(|| serde_json::json!([]));
+    serde_json::from_value(serde_json::Value::Object(fields)).map_err(serde::de::Error::custom)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,45 +370,7 @@ impl Expectation {
                 }
                 Ok(())
             }
-            (
-                Self::Effects {
-                    result_bits: expected_bits,
-                    flags: expected_flags,
-                    errno: expected_errno,
-                    events: expected_events,
-                    trapped: expected_trap,
-                },
-                Observation::Effects {
-                    result_bits,
-                    flags,
-                    errno,
-                    events,
-                    trapped,
-                },
-            ) => {
-                if result_bits != expected_bits {
-                    return Err(format!(
-                        "expected result bits {expected_bits:?}, observed {result_bits:?}"
-                    ));
-                }
-                compare_flags(expected_flags, flags)?;
-                if errno != expected_errno {
-                    return Err(format!(
-                        "expected errno {expected_errno:?}, observed {errno:?}"
-                    ));
-                }
-                if trapped != expected_trap {
-                    return Err(format!(
-                        "expected trapped={expected_trap}, observed trapped={trapped}"
-                    ));
-                }
-                if events != expected_events {
-                    return Err(format!(
-                        "expected events {expected_events:?}, observed {events:?}"
-                    ));
-                }
-                Ok(())
-            }
+            (Self::Effects(expected), Observation::Effects(observed)) => expected.compare(observed),
             (Self::Diagnostic { contains }, Observation::Diagnostic { message }) => {
                 if message.contains(contains) {
                     Ok(())

@@ -187,12 +187,7 @@ fn emit_flag_branch_rules(
                     candidate_root,
                     &immediate_symbols,
                 );
-            let mut pattern_widths = tir_symbolic::lang::infer_widths(&canon_pattern, |_| None);
-            for (index, forced) in forced_widths.iter().enumerate() {
-                if forced.is_some() {
-                    pattern_widths[index] = *forced;
-                }
-            }
+            let pattern_widths = selection_pattern_widths(&canon_pattern, forced_widths);
             let (offset, typed) = intern_dag(&canon_pattern, canon_root, &pattern_widths);
             let pattern_spec = SpecPattern {
                 offset,
@@ -454,12 +449,7 @@ fn emit_aliased_zero_branch_rules(
             let no_immediates: HashSet<u32> = HashSet::new();
             let (canon_pattern, canon_root, forced_widths) =
                 tir_symbolic::lang::canonicalize_for_selection(&pattern, root, &no_immediates);
-            let mut pattern_widths = tir_symbolic::lang::infer_widths(&canon_pattern, |_| None);
-            for (index, forced) in forced_widths.iter().enumerate() {
-                if forced.is_some() {
-                    pattern_widths[index] = *forced;
-                }
-            }
+            let pattern_widths = selection_pattern_widths(&canon_pattern, forced_widths);
             let (offset, typed) = intern_dag(&canon_pattern, canon_root, &pattern_widths);
             let pattern_spec = SpecPattern {
                 offset,
@@ -718,12 +708,7 @@ fn emit_flag_reader_rules(
                     if_root,
                     &immediate_symbols,
                 );
-            let mut pattern_widths = tir_symbolic::lang::infer_widths(&canon_pattern, |_| None);
-            for (index, forced) in forced_widths.iter().enumerate() {
-                if forced.is_some() {
-                    pattern_widths[index] = *forced;
-                }
-            }
+            let pattern_widths = selection_pattern_widths(&canon_pattern, forced_widths);
             let (offset, typed) = intern_dag(&canon_pattern, canon_root, &pattern_widths);
             let pattern_spec = SpecPattern {
                 offset,

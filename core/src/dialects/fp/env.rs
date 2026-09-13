@@ -1,6 +1,7 @@
 use tir_adt::{APInt, RoundingMode};
 
 use super::resource::{effect_records, state_for, transition_semantics, verify_ports};
+use super::semantics::{parse_rounding, rounding_code};
 use super::{EnvironmentType, RoundingType, resource};
 use crate::builtin::StateResource;
 use crate::graph::{MetaMutDag, NodeId};
@@ -48,7 +49,7 @@ impl RoundingConstantOp {
         Some(resource::constant(
             graph,
             3,
-            parse_rounding(&self.mode())? as u64,
+            rounding_code(parse_rounding(&self.mode())?),
         ))
     }
 }
@@ -188,17 +189,6 @@ operation! {
 
 impl crate::Speculatable for RoundingConstantOp {}
 
-fn parse_rounding(name: &str) -> Option<RoundingMode> {
-    Some(match name {
-        "nearest_even" => RoundingMode::TiesToEven,
-        "toward_zero" => RoundingMode::TowardZero,
-        "toward_negative" => RoundingMode::TowardNegative,
-        "toward_positive" => RoundingMode::TowardPositive,
-        "ties_away" => RoundingMode::TiesToAway,
-        _ => return None,
-    })
-}
-
 fn required_effects(access: ResourceAccess, memory: bool) -> Vec<(StateResource, ResourceAccess)> {
     let mut effects = vec![(StateResource::FpEnv, access)];
     effects.extend(memory.then_some((StateResource::Memory, ResourceAccess::Change)));
@@ -209,9 +199,8 @@ fn read_field_semantics(op: &tir::OpHandle, field_kind: ResourceField) -> Resour
     let context = &op.context;
     let mut graph = SemGraph::new();
     let state = resource::value(&mut graph, op, op.state_operands()[0]);
-    let resource = resource::constant(&mut graph, 2, StateResource::FpEnv.semantic_code());
-    let field = resource::constant(&mut graph, 2, field_kind.semantic_code());
-    let value = resource::operation(&mut graph, SymKind::StateRead, &[state, resource, field]);
+    let resource = resource::resource(&mut graph, StateResource::FpEnv);
+    let field = resource::field(&mut graph, field_kind);
     let value_ty = match field_kind {
         ResourceField::FpRounding => crate::builtin::IntegerType::new(context, 3),
         ResourceField::FpFlags | ResourceField::FpTraps => {
@@ -219,12 +208,15 @@ fn read_field_semantics(op: &tir::OpHandle, field_kind: ResourceField) -> Resour
         }
         ResourceField::Whole => unreachable!("FP snapshots compose individual fields"),
     };
-    graph.set_actual_type(value, value_ty);
-    let access = resource::constant(&mut graph, 1, ResourceAccess::Read.semantic_code());
-    let observation = resource::operation(
+    let value = resource::state_read(&mut graph, state, resource, field, value_ty);
+    let observation = resource::state_assign(
         &mut graph,
-        SymKind::StateAssign,
-        &[state, resource, field, access, value],
+        state,
+        resource,
+        field,
+        ResourceAccess::Read,
+        value,
+        context.get_value(op.state_results()[0]).ty(),
     );
     ResourceSemantics {
         graph,
@@ -243,16 +235,18 @@ fn write_field_semantics(
     let context = &op.context;
     let mut graph = SemGraph::new();
     let state = resource::value(&mut graph, op, op.state_operands()[0]);
-    let resource = resource::constant(&mut graph, 2, StateResource::FpEnv.semantic_code());
-    let field = resource::constant(&mut graph, 2, field_kind.semantic_code());
+    let resource = resource::resource(&mut graph, StateResource::FpEnv);
+    let field = resource::field(&mut graph, field_kind);
     let value = resource::value(&mut graph, op, value);
-    let access = resource::constant(&mut graph, 1, ResourceAccess::Change.semantic_code());
-    let root = resource::operation(
+    let root = resource::state_assign(
         &mut graph,
-        SymKind::StateAssign,
-        &[state, resource, field, access, value],
+        state,
+        resource,
+        field,
+        ResourceAccess::Change,
+        value,
+        context.get_value(op.state_results()[0]).ty(),
     );
-    graph.set_actual_type(root, context.get_value(op.state_results()[0]).ty());
     ResourceSemantics {
         graph,
         raised_flags: None,
@@ -279,20 +273,28 @@ impl HasResourceSemantics for ClearFlagsOp {
         let context = &self.0.context;
         let mut graph = SemGraph::new();
         let state = resource::value(&mut graph, &self.0, self.0.state_operands()[0]);
-        let resource = resource::constant(&mut graph, 2, StateResource::FpEnv.semantic_code());
-        let field = resource::constant(&mut graph, 2, ResourceField::FpFlags.semantic_code());
-        let old = resource::operation(&mut graph, SymKind::StateRead, &[state, resource, field]);
+        let resource = resource::resource(&mut graph, StateResource::FpEnv);
+        let field = resource::field(&mut graph, ResourceField::FpFlags);
+        let old = resource::state_read(
+            &mut graph,
+            state,
+            resource,
+            field,
+            crate::builtin::IntegerType::new(context, 5),
+        );
         let mask = resource::value(&mut graph, &self.0, self.0.operands()[0]);
         let ones = resource::constant(&mut graph, 5, 0b1_1111);
         let inverse = resource::operation(&mut graph, SymKind::Xor, &[mask, ones]);
         let flags = resource::operation(&mut graph, SymKind::And, &[old, inverse]);
-        let access = resource::constant(&mut graph, 1, ResourceAccess::Change.semantic_code());
-        let root = resource::operation(
+        let root = resource::state_assign(
             &mut graph,
-            SymKind::StateAssign,
-            &[state, resource, field, access, flags],
+            state,
+            resource,
+            field,
+            ResourceAccess::Change,
+            flags,
+            context.get_value(self.0.state_results()[0]).ty(),
         );
-        graph.set_actual_type(root, context.get_value(self.0.state_results()[0]).ty());
         ResourceSemantics {
             graph,
             raised_flags: None,
@@ -361,16 +363,17 @@ fn assign_field(
     value: NodeId,
     state_ty: crate::TypeId,
 ) -> NodeId {
-    let resource = resource::constant(graph, 2, StateResource::FpEnv.semantic_code());
-    let field = resource::constant(graph, 2, field_kind.semantic_code());
-    let access = resource::constant(graph, 1, ResourceAccess::Change.semantic_code());
-    let assigned = resource::operation(
+    let resource = resource::resource(graph, StateResource::FpEnv);
+    let field = resource::field(graph, field_kind);
+    resource::state_assign(
         graph,
-        SymKind::StateAssign,
-        &[state, resource, field, access, value],
-    );
-    graph.set_actual_type(assigned, state_ty);
-    assigned
+        state,
+        resource,
+        field,
+        ResourceAccess::Change,
+        value,
+        state_ty,
+    )
 }
 
 fn read_field(
@@ -379,11 +382,9 @@ fn read_field(
     field_kind: ResourceField,
     ty: crate::TypeId,
 ) -> NodeId {
-    let resource = resource::constant(graph, 2, StateResource::FpEnv.semantic_code());
-    let field = resource::constant(graph, 2, field_kind.semantic_code());
-    let read = resource::operation(graph, SymKind::StateRead, &[state, resource, field]);
-    graph.set_actual_type(read, ty);
-    read
+    let resource = resource::resource(graph, StateResource::FpEnv);
+    let field = resource::field(graph, field_kind);
+    resource::state_read(graph, state, resource, field, ty)
 }
 
 fn snapshot_value(context: &Context, graph: &mut SemGraph, state: NodeId) -> NodeId {
@@ -595,7 +596,7 @@ impl crate::interp::Interp for RaiseFlagsOp {
     ) -> Result<Vec<crate::interp::Value>, crate::interp::InterpError> {
         let raised = mask(&operands[0])?;
         state.fp_environment.flags |= raised;
-        trap_if_enabled(raised, self.trapping(), state)?;
+        resource::check_trap(raised, state.fp_environment.traps, self.trapping())?;
         Ok(Vec::new())
     }
 }
@@ -614,21 +615,7 @@ impl crate::interp::Interp for UpdateOp {
         let raised = state.fp_environment.flags;
         state.fp_environment = *snapshot;
         state.fp_environment.flags |= raised;
-        trap_if_enabled(raised, self.trapping(), state)?;
+        resource::check_trap(raised, state.fp_environment.traps, self.trapping())?;
         Ok(Vec::new())
-    }
-}
-
-fn trap_if_enabled(
-    raised: u8,
-    trapping: bool,
-    state: &crate::interp::ExecutionState,
-) -> Result<(), crate::interp::InterpError> {
-    if trapping && raised & state.fp_environment.traps != 0 {
-        Err(crate::interp::InterpError::Message(
-            "floating-point trap".into(),
-        ))
-    } else {
-        Ok(())
     }
 }

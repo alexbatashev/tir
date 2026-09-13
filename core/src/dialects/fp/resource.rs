@@ -8,6 +8,26 @@ use crate::{
     Error, OpHandle, ResourceAccess, ResourceEffect, ResourceField, ResourceSemantics, ValueId,
 };
 
+pub(super) fn effects_for(
+    rounding: Option<Rounding>,
+    exceptions: Exceptions,
+) -> Vec<(StateResource, ResourceAccess)> {
+    let mut effects = Vec::new();
+    match (rounding, exceptions) {
+        (None | Some(Rounding::Fixed(_)), Exceptions::Ignore) => {}
+        (Some(Rounding::Dynamic), Exceptions::Ignore) => {
+            effects.push((StateResource::FpEnv, ResourceAccess::Read));
+        }
+        (_, Exceptions::Flags | Exceptions::FlagsAndTraps) => {
+            effects.push((StateResource::FpEnv, ResourceAccess::Change));
+        }
+    }
+    if exceptions == Exceptions::FlagsAndTraps {
+        effects.push((StateResource::Memory, ResourceAccess::Change));
+    }
+    effects
+}
+
 pub(super) fn value(graph: &mut SemGraph, op: &OpHandle, value: ValueId) -> NodeId {
     let node = graph.add_node(SymKind::Symbol);
     graph.set_leaf_data(node, SymPayload::Value(value));
@@ -104,12 +124,26 @@ pub(super) fn apply_flags(
     if exceptions != Exceptions::Ignore {
         state.fp_environment.flags |= result.flags;
     }
-    if exceptions == Exceptions::FlagsAndTraps && result.flags & state.fp_environment.traps != 0 {
-        return Err(crate::interp::InterpError::Message(
-            "floating-point trap".into(),
-        ));
-    }
+    check_trap(
+        result.flags,
+        state.fp_environment.traps,
+        exceptions == Exceptions::FlagsAndTraps,
+    )?;
     Ok(result)
+}
+
+pub(super) fn check_trap(
+    raised: u8,
+    traps: u8,
+    trapping: bool,
+) -> Result<(), crate::interp::InterpError> {
+    if trapping && raised & traps != 0 {
+        Err(crate::interp::InterpError::Message(
+            "floating-point trap".into(),
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) fn resource(graph: &mut SemGraph, resource: StateResource) -> NodeId {
@@ -183,7 +217,9 @@ fn arithmetic_value(
         && semantics.nan == NaNPolicy::AnyQuiet
         && semantics.rounding == Rounding::Fixed(tir_adt::RoundingMode::TiesToEven);
     let rounding = match semantics.rounding {
-        Rounding::Fixed(mode) if !uses_generic => Some(constant(graph, 3, mode as u64)),
+        Rounding::Fixed(mode) if !uses_generic => {
+            Some(constant(graph, 3, super::semantics::rounding_code(mode)))
+        }
         Rounding::Fixed(_) => None,
         Rounding::Dynamic => {
             let state = environment.expect("dynamic rounding requires FP environment state");
@@ -198,28 +234,27 @@ fn arithmetic_value(
             ))
         }
     };
-    operands.extend(rounding);
-    let evaluation = operation(
+    let canonical_bits = (semantics.nan == NaNPolicy::Canonical).then(|| {
+        let width = super::arithmetic::float_width(&op.context, result_ty)
+            .expect("verified FP arithmetic has a floating result");
+        let bits = constant(
+            graph,
+            width.bit_width(),
+            super::arithmetic::canonical_nan(width),
+        );
+        graph.set_actual_type(bits, IntegerType::new(&op.context, width.bit_width()));
+        bits
+    });
+    let (result, evaluation) = super::arithmetic::build_arithmetic_value(
         graph,
-        if uses_generic { generic } else { rounded },
         &operands,
+        (generic, rounded),
+        uses_generic,
+        rounding,
+        semantics.nan,
+        canonical_bits,
     );
     graph.set_actual_type(evaluation, result_ty);
-    let result = match semantics.nan {
-        NaNPolicy::Canonical => {
-            let width = super::arithmetic::float_width(&op.context, result_ty)
-                .expect("verified FP arithmetic has a floating result");
-            let (exponent, mantissa) = super::arithmetic::float_parts(width);
-            let bit_width = 1 + exponent + mantissa;
-            let bits = constant(graph, bit_width, super::arithmetic::canonical_nan(width));
-            graph.set_actual_type(bits, IntegerType::new(&op.context, bit_width));
-            canonicalize_nan(graph, evaluation, bits)
-        }
-        NaNPolicy::PreservePayload => {
-            super::arithmetic::preserve_payload_observation(graph, evaluation)
-        }
-        NaNPolicy::AnyQuiet => evaluation,
-    };
     graph.set_actual_type(result, result_ty);
     (result, evaluation, rounding)
 }
@@ -410,7 +445,7 @@ pub(super) fn integer_conversion(
         width as u64,
     );
     let rounding = match semantics.rounding {
-        Rounding::Fixed(mode) => constant(&mut graph, 3, mode as u64),
+        Rounding::Fixed(mode) => constant(&mut graph, 3, super::semantics::rounding_code(mode)),
         Rounding::Dynamic => {
             let resource = resource(&mut graph, StateResource::FpEnv);
             let field = field(&mut graph, ResourceField::FpRounding);

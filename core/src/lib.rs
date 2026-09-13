@@ -71,6 +71,7 @@ pub(crate) mod run;
 pub mod schema;
 mod scoped_attr;
 pub mod sem;
+mod state_verification;
 mod store;
 pub mod symbol_table;
 mod target_env;

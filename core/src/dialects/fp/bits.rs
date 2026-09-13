@@ -1,6 +1,6 @@
 use tir_adt::{APFloat, APInt, FloatClass, FloatWidth, classify_float};
 
-use super::arithmetic::width_of_float;
+use super::arithmetic::{float_parts, width_of_float};
 use crate::{SameOperandAndResultType, Speculatable, operation};
 
 use crate as tir;
@@ -102,10 +102,7 @@ fn sign_mask(width: FloatWidth) -> u64 {
 }
 
 fn from_bits(width: FloatWidth, bits: u64) -> crate::interp::Value {
-    let (exponent, mantissa) = match width {
-        FloatWidth::W32 => (8, 23),
-        FloatWidth::W64 => (11, 52),
-    };
+    let (exponent, mantissa) = float_parts(width);
     crate::interp::Value::Float(APFloat::from_bits(exponent, mantissa, false, bits as u128))
 }
 
