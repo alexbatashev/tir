@@ -10,5 +10,6 @@ module {
 }
 
 // CHECK-LABEL: asm.symbol {name = "get_flags"
-// CHECK-NOT: riscv.csrrs.fflags
-// CHECK: %{{[0-9]+}} = riscv.csr{{rs|rc}} {rd = %{{[0-9]+}}:GPR, csr = fflags, csr_tied = fflags, rs1 = x0}
+// CHECK: %[[ENV:[0-9]+]] = state.entry_state : !state<fp.env>
+// CHECK-NEXT: %{{[0-9]+}} = riscv.read_fflags {rd = %{{[0-9]+}}:GPR} state(%[[ENV]])
+// CHECK-NEXT: asm.vret

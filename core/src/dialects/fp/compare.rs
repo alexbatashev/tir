@@ -159,6 +159,7 @@ impl HasResourceSemantics for CmpOp {
         if semantics.exceptions == Exceptions::Ignore {
             return ResourceSemantics {
                 graph,
+                raised_flags: None,
                 root: result,
                 value_results: vec![result],
                 state_results: Vec::new(),

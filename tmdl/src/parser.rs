@@ -1797,6 +1797,9 @@ where
                     }
                     "program_counter" => Some(RegisterTrait::ProgramCounter),
                     "status_flag" => Some(RegisterTrait::StatusFlag),
+                    "fp_flags" => Some(RegisterTrait::FpFlags),
+                    "fp_rounding" => Some(RegisterTrait::FpRounding),
+                    "fp_traps" => Some(RegisterTrait::FpTraps),
                     "float" => Some(RegisterTrait::Float),
                     "polymorphic" => Some(RegisterTrait::Polymorphic),
                     _ => {

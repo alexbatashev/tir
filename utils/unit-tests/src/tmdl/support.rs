@@ -122,6 +122,7 @@ fn named_kind(name: &str) -> SymKind {
         "FPFlags" => SymKind::FPFlags,
         "Symbol" => SymKind::Symbol,
         "Constant" => SymKind::Constant,
+        "FPEffect" => SymKind::FPEffect,
         "If" => SymKind::If,
         "ZExt" => SymKind::ZExt,
         "SExt" => SymKind::SExt,

@@ -511,6 +511,9 @@ enum RegisterTrait {
     HardwiredZero,
     ProgramCounter,
     StatusFlag,
+    FpFlags,
+    FpRounding,
+    FpTraps,
     Float,
     Polymorphic,
 }
@@ -521,6 +524,9 @@ impl From<&ast::RegisterTrait> for RegisterTrait {
             ast::RegisterTrait::HardwiredZero => Self::HardwiredZero,
             ast::RegisterTrait::ProgramCounter => Self::ProgramCounter,
             ast::RegisterTrait::StatusFlag => Self::StatusFlag,
+            ast::RegisterTrait::FpFlags => Self::FpFlags,
+            ast::RegisterTrait::FpRounding => Self::FpRounding,
+            ast::RegisterTrait::FpTraps => Self::FpTraps,
             ast::RegisterTrait::Float => Self::Float,
             ast::RegisterTrait::Polymorphic => Self::Polymorphic,
         }

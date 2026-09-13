@@ -37,15 +37,16 @@ pub(super) fn ieee_arithmetic_refines(
                 return false;
             }
             let children: Vec<_> = full.children(node).collect();
-            children.len() == operands.len() + 1
-                && matches!(
-                    full.get_leaf_data(children[operands.len()]),
-                    Some(SymPayload::Int(mode)) if mode.width() == 3 && mode.to_u64() == 0
-                )
-                && operands
-                    .iter()
-                    .zip(&children)
-                    .all(|(&lhs, &rhs)| subgraphs_equal(candidate, lhs, full, rhs))
+            (if *candidate.get_kind(candidate_root) == rounded {
+                children.len() == operands.len()
+            } else {
+                children.len() == operands.len() + 1
+                    && matches!(full.get_leaf_data(children[operands.len()]),
+                        Some(SymPayload::Int(mode)) if mode.width() == 3 && mode.to_u64() == 0)
+            }) && operands
+                .iter()
+                .zip(&children)
+                .all(|(&lhs, &rhs)| subgraphs_equal(candidate, lhs, full, rhs))
         })
         .collect();
     if shared.is_empty() {
@@ -81,6 +82,18 @@ fn rounded_kind(kind: SymKind) -> Option<SymKind> {
         SymKind::FDiv => SymKind::FDivRound,
         SymKind::Sqrt => SymKind::SqrtRound,
         SymKind::Fma => SymKind::FmaRound,
+        SymKind::FCvt => SymKind::FCvtRound,
+        SymKind::SIToFP => SymKind::SIToFPRound,
+        SymKind::UIToFP => SymKind::UIToFPRound,
+        SymKind::FAddRound
+        | SymKind::FSubRound
+        | SymKind::FMulRound
+        | SymKind::FDivRound
+        | SymKind::SqrtRound
+        | SymKind::FmaRound
+        | SymKind::FCvtRound
+        | SymKind::SIToFPRound
+        | SymKind::UIToFPRound => kind,
         _ => return None,
     })
 }

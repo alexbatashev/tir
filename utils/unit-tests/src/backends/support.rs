@@ -108,6 +108,15 @@ fn guarded_relaxations_hold_for_all_rules() {
         ),
     ];
     for (backend, rules) in rules {
-        prove_guarded_relaxations(&rules).unwrap_or_else(|error| panic!("{backend}: {error:?}"));
+        let report = prove_guarded_relaxations(&rules)
+            .unwrap_or_else(|error| panic!("{backend}: {error:?}"));
+        println!(
+            "{backend}: {} proven, {} unsupported",
+            report.proven.len(),
+            report.unsupported.len()
+        );
+        for (rule, reason) in report.unsupported {
+            println!("{backend}: {rule}: {reason}");
+        }
     }
 }

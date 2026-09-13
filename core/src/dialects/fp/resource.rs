@@ -259,6 +259,7 @@ pub(super) fn transition_semantics(
         .collect();
     ResourceSemantics {
         graph,
+        raised_flags: None,
         root,
         value_results: value_result.into_iter().collect(),
         state_results,
@@ -299,7 +300,9 @@ pub(super) fn flagged_result(
         graph.set_actual_type(trap, op.context.get_value(memory_value).ty());
         trap
     });
-    transition_semantics(op, Some(result), environment, memory, graph)
+    let mut semantics = transition_semantics(op, Some(result), environment, memory, graph);
+    semantics.raised_flags = Some(raised);
+    semantics
 }
 
 fn finish_rounded(
@@ -340,6 +343,7 @@ fn finish_rounded(
     });
     ResourceSemantics {
         graph,
+        raised_flags: None,
         root: result,
         value_results: vec![result],
         state_results: environment_out.into_iter().collect(),

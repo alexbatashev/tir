@@ -14,6 +14,7 @@ mod cover;
 mod destruct;
 mod emit;
 mod float_refinement;
+mod fp_flags;
 mod matches;
 mod node;
 mod pattern;
@@ -390,11 +391,20 @@ pub enum RuleKind {
 /// against its REX twin).
 pub const LATENCY_COST_SCALE: u32 = 16;
 
+/// The instruction's declared update to hardware floating-point flags.
+#[derive(Clone)]
+pub enum FpFlags<T> {
+    None,
+    Clobber,
+    Exact(T),
+}
+
 pub struct Rule {
     pub name: &'static str,
     pub pattern: SemGraph,
     pub base_cost: u32,
     pub kind: RuleKind,
+    pub fp_flags: FpFlags<SemGraph>,
     /// A companion instruction emitted immediately before the rule's own — a
     /// flag-setting compare (`cmp`, x86 `cmp`/`test`) whose status-register
     /// writes the branch instruction's condition reads. TMDL derives such rules
@@ -430,6 +440,7 @@ impl Rule {
             pattern,
             base_cost,
             kind: RuleKind::Value,
+            fp_flags: FpFlags::None,
             prelude_emit: None,
             operand_constraints: Vec::new(),
             operand_registers: Vec::new(),
@@ -832,22 +843,34 @@ pub struct InstructionSelectPass {
     solved: HashSet<OpId>,
 }
 
-/// Prove, for every rule carrying [`Rule::guarded_semantics`], that relaxing the
-/// full behavior to its pure [`Rule::pattern`] is sound: the instruction result
-/// refines the source result wherever the IR op is defined. An unprovable rule is reported
-/// as [`PassError::InvalidRuleSet`] naming the rule and the failed obligation.
-///
-/// Pass construction runs this only under [`verify_axioms`]; each backend's test
-/// suite calls it directly over its full generated ruleset, so the obligation stays
-/// enforced per commit without re-proving on every compile.
-pub fn prove_guarded_relaxations(rules: &[Rule]) -> Result<(), PassError> {
+/// Results for guarded rules whose obligations were proved or could not be encoded.
+#[derive(Debug, Default)]
+pub struct GuardedRelaxationProofs {
+    pub proven: Vec<String>,
+    pub unsupported: Vec<(String, String)>,
+}
+
+enum GuardedRelaxationProof {
+    Proven,
+    Unsupported(String),
+}
+
+/// Prove guarded rule refinement, reporting unsupported encodings separately.
+/// Invalid supported obligations return [`PassError::InvalidRuleSet`].
+pub fn prove_guarded_relaxations(rules: &[Rule]) -> Result<GuardedRelaxationProofs, PassError> {
+    let mut report = GuardedRelaxationProofs::default();
     for rule in rules {
         let Some(guarded) = &rule.guarded_semantics else {
             continue;
         };
-        prove_relaxation(rule, guarded).map_err(PassError::InvalidRuleSet)?;
+        match prove_relaxation(rule, guarded).map_err(PassError::InvalidRuleSet)? {
+            GuardedRelaxationProof::Unsupported(reason) => {
+                report.unsupported.push((rule.name.to_string(), reason))
+            }
+            GuardedRelaxationProof::Proven => report.proven.push(rule.name.to_string()),
+        }
     }
-    Ok(())
+    Ok(report)
 }
 
 fn relaxation_error(rule: &Rule, why: &str) -> String {
@@ -855,12 +878,57 @@ fn relaxation_error(rule: &Rule, why: &str) -> String {
 }
 
 /// Prove result refinement on the selection pattern's defined domain.
-fn prove_relaxation(rule: &Rule, guarded: &SemGraph) -> Result<(), String> {
+fn prove_relaxation(rule: &Rule, guarded: &SemGraph) -> Result<GuardedRelaxationProof, String> {
     use tir::sem::{FloatFormat, SemType};
+    let mut value_pattern = SemGraph::new();
+    let pattern_root = rule
+        .pattern
+        .root()
+        .ok_or_else(|| relaxation_error(rule, "empty selection pattern"))?;
+    let effect = *rule.pattern.get_kind(pattern_root) == SymKind::FPEffect;
+    let root = if effect {
+        rule.pattern.children(pattern_root).next().unwrap()
+    } else {
+        pattern_root
+    };
+    tir_symbolic::sem::copy_subgraph(&mut value_pattern, &rule.pattern, root, &mut HashMap::new());
+    let pattern = &value_pattern;
+    let pattern_root = pattern.root().unwrap();
+    let immediate_symbols: HashSet<u32> = rule
+        .operand_constraints
+        .iter()
+        .filter(|(_, c)| matches!(c, OperandConstraint::Immediate))
+        .map(|(symbol, _)| *symbol)
+        .collect();
     let full_root = guarded
         .root()
         .ok_or_else(|| relaxation_error(rule, "empty guarded semantics"))?;
-    let candidate = tir_symbolic::lang::selection_fallback(guarded, full_root)
+    let mut observed = SemGraph::new();
+    let observed_root =
+        if effect && matches!(guarded.get_kind(full_root), SymKind::SExt | SymKind::ZExt) {
+            let child = guarded.children(full_root).next().unwrap();
+            let width = infer_widths(guarded, |_| None)[child.index()];
+            if width.is_some() && width == infer_widths(pattern, |_| None)[pattern_root.index()] {
+                child
+            } else {
+                full_root
+            }
+        } else {
+            full_root
+        };
+    tir_symbolic::sem::copy_subgraph(&mut observed, guarded, observed_root, &mut HashMap::new());
+    let guarded = &observed;
+    let full_root = guarded.root().unwrap();
+    let matches_pattern = |candidate: &SemGraph| {
+        let (canonical, root, _) =
+            canonicalize_for_selection(candidate, candidate.root().unwrap(), &immediate_symbols);
+        subgraphs_equal(&canonical, root, pattern, pattern_root)
+    };
+    let candidate = tir_symbolic::lang::selection_fallback_preserving_rounding(guarded, full_root)
+        .filter(&matches_pattern)
+        .or_else(|| {
+            tir_symbolic::lang::selection_fallback(guarded, full_root).filter(&matches_pattern)
+        })
         .or_else(|| {
             if *guarded.get_kind(full_root) != SymKind::If {
                 return None;
@@ -876,35 +944,51 @@ fn prove_relaxation(rule: &Rule, guarded: &SemGraph) -> Result<(), String> {
             Some(candidate)
         })
         .ok_or_else(|| relaxation_error(rule, "guarded semantics has no selection fallback"))?;
-    let candidate_root = candidate.root().unwrap();
-    let immediate_symbols: HashSet<u32> = rule
-        .operand_constraints
-        .iter()
-        .filter(|(_, c)| matches!(c, OperandConstraint::Immediate))
-        .map(|(symbol, _)| *symbol)
-        .collect();
-    let (canonical, canonical_root, _) =
-        canonicalize_for_selection(&candidate, candidate_root, &immediate_symbols);
-    let pattern_root = rule
-        .pattern
-        .root()
-        .ok_or_else(|| relaxation_error(rule, "empty selection pattern"))?;
-    if !subgraphs_equal(&canonical, canonical_root, &rule.pattern, pattern_root) {
+    if !matches_pattern(&candidate) {
         return Err(relaxation_error(
             rule,
             "guarded else arm does not match the selection pattern",
         ));
     }
+    let candidate_root = candidate.root().unwrap();
     let register_width = infer_widths(guarded, |_| None)[full_root.index()].unwrap_or(64);
-    if *guarded.get_kind(full_root) == SymKind::If
+    let floating = candidate.postorder(candidate_root).any(|node| {
+        matches!(
+            candidate.get_kind(node),
+            SymKind::FPToSI
+                | SymKind::FPToUI
+                | SymKind::SIToFP
+                | SymKind::UIToFP
+                | SymKind::FAdd
+                | SymKind::FSub
+                | SymKind::FMul
+                | SymKind::FDiv
+                | SymKind::FCvt
+                | SymKind::Sqrt
+                | SymKind::Fma
+                | SymKind::FAddRound
+                | SymKind::FSubRound
+                | SymKind::FMulRound
+                | SymKind::FDivRound
+                | SymKind::FmaRound
+                | SymKind::SqrtRound
+                | SymKind::FCvtRound
+                | SymKind::SIToFPRound
+                | SymKind::UIToFPRound
+                | SymKind::FPToSIRound
+                | SymKind::FPToUIRound
+        )
+    });
+    if !floating
+        && *guarded.get_kind(full_root) == SymKind::If
         && let Some(else_arm) = guarded.children(full_root).nth(2)
     {
         let (canonical_else, else_root, _) =
             canonicalize_for_selection(guarded, else_arm, &immediate_symbols);
-        if subgraphs_equal(&canonical_else, else_root, &rule.pattern, pattern_root)
+        if subgraphs_equal(&canonical_else, else_root, pattern, pattern_root)
             && relaxation_holds(guarded, full_root, else_arm, register_width)
         {
-            return Ok(());
+            return Ok(GuardedRelaxationProof::Proven);
         }
     }
     let symbol_count = symbol_ids(guarded)
@@ -931,22 +1015,6 @@ fn prove_relaxation(rule: &Rule, guarded: &SemGraph) -> Result<(), String> {
             *slot = ty;
         }
     }
-    let floating = candidate.postorder(candidate_root).any(|node| {
-        matches!(
-            candidate.get_kind(node),
-            SymKind::FPToSI
-                | SymKind::FPToUI
-                | SymKind::SIToFP
-                | SymKind::UIToFP
-                | SymKind::FAdd
-                | SymKind::FSub
-                | SymKind::FMul
-                | SymKind::FDiv
-                | SymKind::FCvt
-                | SymKind::Sqrt
-                | SymKind::Fma
-        )
-    });
     let mut proof_candidate_root = candidate_root;
     let mut proof_guarded_root = full_root;
     if matches!(
@@ -978,10 +1046,23 @@ fn prove_relaxation(rule: &Rule, guarded: &SemGraph) -> Result<(), String> {
         &mut HashMap::new(),
     );
     if floating
-        && (SmtOracle.refines_typed(&proof_candidate, &proof_guarded, &symbol_types)
-            || float_refinement::ieee_arithmetic_refines(guarded, &candidate, &symbol_types))
+        && (float_refinement::ieee_arithmetic_refines(guarded, &candidate, &symbol_types)
+            || SmtOracle.refines_typed(&proof_candidate, &proof_guarded, &symbol_types))
     {
-        return Ok(());
+        return Ok(GuardedRelaxationProof::Proven);
+    }
+    for graph in [&proof_candidate, &proof_guarded] {
+        for node in graph.postorder(graph.root().unwrap()) {
+            let kind = *graph.get_kind(node);
+            if matches!(kind, SymKind::FPToSIRound | SymKind::FPToUIRound)
+                && !matches!(graph.children(node).nth(2).and_then(|mode| graph.get_leaf_data(mode)),
+                    Some(SymPayload::Int(mode)) if mode.to_u64() == 1)
+            {
+                return Ok(GuardedRelaxationProof::Unsupported(format!(
+                    "unsupported {kind:?}: bit-blasting requires toward-zero rounding"
+                )));
+            }
+        }
     }
     Err(relaxation_error(
         rule,
@@ -1085,7 +1166,12 @@ impl InstructionSelectPass {
     /// rule is a target-definition bug that must fail loudly, not at runtime.
     pub fn new(rules: Vec<Rule>) -> Self {
         if verify_axioms() {
-            prove_guarded_relaxations(&rules).unwrap_or_else(|e| panic!("{e}"));
+            let report = prove_guarded_relaxations(&rules).unwrap_or_else(|e| panic!("{e}"));
+            assert!(
+                report.unsupported.is_empty(),
+                "unsupported rule proofs: {:?}",
+                report.unsupported
+            );
         }
         Self::build(rules)
     }
@@ -1173,6 +1259,15 @@ impl InstructionSelectPass {
     /// Install semantic invariants used to saturate the program e-graph.
     pub fn with_theory(mut self, theory: Theory) -> Self {
         self.theory = theory;
+        self
+    }
+
+    /// Install read-zero and ignored-write facts derived from target register traits.
+    pub fn with_hardwired_zero_fields(
+        mut self,
+        fields: &[(tir::sem::StateResourceKind, tir::sem::StateFieldKind)],
+    ) -> Self {
+        self.theory = self.theory.with_hardwired_zero_fields(fields);
         self
     }
 
@@ -1602,7 +1697,16 @@ impl InstructionSelectPass {
         for (&op_id, &class) in roots_by_op {
             let def_region = scopes.op_region[&op_id];
             let root = egraph.find(class);
-            if !node::class_is_pure(egraph, root) {
+            let op = context.get_op(op_id);
+            let unused_read = op.clone().as_interface::<dyn tir::MemoryRead>().is_some()
+                && op
+                    .value_results()
+                    .iter()
+                    .all(|value| operand_uses.get(value).copied().unwrap_or(0) == 0);
+            if !node::class_is_pure(egraph, root)
+                && !unused_read
+                && !node::is_identity_effect(egraph, root)
+            {
                 demand.insert((root, def_region));
             }
             for result in context.get_op(op_id).value_results() {
@@ -1803,20 +1907,21 @@ impl InstructionSelectPass {
         let mut answered: Vec<(ValueId, ValueId)> = Vec::new();
         for op in plan.erase_ops.into_iter().rev() {
             let instance = context.get_op(op);
-            // A read the cover answered from another access leaves memory where
+            // A read the cover answered from another access leaves its resource where
             // that one left it: its readers take the state it observed. Only a
             // read is ever answered this way — a write's term is a state
             // nothing before it names, so no other access can stand for it.
-            if let Some(effect) = crate::analysis::effects::resource_effect(
-                &instance,
-                tir::builtin::StateResource::Memory,
-            ) && effect.access == tir::ResourceAccess::Read
-                && let (Some(&published), Some(&observed)) =
-                    (effect.produced.first(), effect.observed.first())
-                && !claimed.contains(&published)
-            {
-                context.replace_value_uses(published, observed);
-                answered.push((published, observed));
+            if let Some(effects) = instance.clone().as_interface::<dyn tir::ResourceEffects>() {
+                for effect in effects.resource_effects() {
+                    if effect.access == tir::ResourceAccess::Read
+                        && let (Some(&published), Some(&observed)) =
+                            (effect.produced.first(), effect.observed.first())
+                        && !claimed.contains(&published)
+                    {
+                        context.replace_value_uses(published, observed);
+                        answered.push((published, observed));
+                    }
+                }
             }
             let op = OperationRef::new(instance);
             context.erase_op_keeping_results(&op)?;
@@ -2035,8 +2140,7 @@ impl InstructionSelectPass {
             });
             state_by_class
                 .entry(fs.egraph.find(root))
-                .or_default()
-                .extend(states);
+                .or_insert_with(|| states.collect());
         }
 
         let mut destinations = HashMap::new();
@@ -2080,7 +2184,11 @@ impl InstructionSelectPass {
                             .bindings
                             .pattern_nodes
                             .iter()
-                            .filter(|binding| !binding.is_boundary && !binding.is_state)
+                            .filter(|binding| {
+                                !binding.is_boundary
+                                    && !binding.is_state
+                                    && !node::class_is_pure(&fs.egraph, binding.class)
+                            })
                             .flat_map(|binding| {
                                 state_by_class
                                     .get(&fs.egraph.find(binding.class))
@@ -2110,6 +2218,21 @@ impl InstructionSelectPass {
             .collect();
 
         let mut value_remaps = Vec::new();
+        for &op in &op_ids {
+            if fs
+                .op_root
+                .get(&op)
+                .is_some_and(|root| node::is_identity_effect(&fs.egraph, *root))
+            {
+                let effects = context
+                    .get_op(op)
+                    .as_interface::<dyn tir::ResourceEffects>()
+                    .expect("an effect root has resource ports");
+                for effect in effects.resource_effects() {
+                    value_remaps.extend(effect.produced.into_iter().zip(effect.observed));
+                }
+            }
+        }
         let mut remap_class_values = |class: Id, destination: ValueId| {
             for member in fs.base_members(class) {
                 if let Some(values) = fs.class_values.get(&member) {
@@ -2463,7 +2586,10 @@ impl InstructionSelectPass {
             // (boundary constraints were already enforced during the search).
             let interior_ok = (0..compiled.nodes.len()).all(|index| {
                 let node = Id::from_raw(index as u32);
-                if node == pattern_root || compiled.node_meta[node.index()].duplicable {
+                if node == pattern_root
+                    || compiled.node_meta[node.index()].duplicable
+                    || compiled.node_meta[node.index()].is_state
+                {
                     return true;
                 }
                 let class = fs.egraph.find(m.bindings[node.index()]);
@@ -2484,6 +2610,10 @@ impl InstructionSelectPass {
                 }
                 let class = m.bindings[node as usize];
                 captures.bind(symbol, fs.egraph.find(class));
+            }
+
+            if region_op.is_some_and(|op| !fp_flags::accepts(context, fs, op, rule, &captures)) {
+                continue;
             }
 
             let pattern_nodes: Vec<PatternNodeBinding> = compiled
@@ -2593,7 +2723,7 @@ fn value_match_allowed(
     let Some(meta) = compiled.node_meta.get(pattern_node.index()) else {
         return true;
     };
-    if pattern_node == pattern_root || meta.duplicable {
+    if pattern_node == pattern_root || meta.duplicable || meta.is_state {
         return true;
     }
     let class = fs.egraph.find(class);

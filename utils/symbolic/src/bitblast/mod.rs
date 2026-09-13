@@ -265,11 +265,7 @@ impl<'g, V> Blaster<'g, V> {
             FPToSIRound | FPToUIRound
                 if self.const_u64(self.graph.children(id).nth(2).unwrap())? == 1 =>
             {
-                let signed = kind == FPToSIRound;
-                let value = self.encode_float_to_int(id, signed)?;
-                let valid = self.float_to_int_defined(id, signed)?;
-                let zero = vec![self.zero(); value.len()];
-                Ok(self.mux_bits(valid, &value, &zero))
+                self.encode_float_to_int(id, kind == FPToSIRound)
             }
             SIToFP => self.encode_int_to_float(id, true),
             UIToFP => self.encode_int_to_float(id, false),
@@ -280,6 +276,9 @@ impl<'g, V> Blaster<'g, V> {
     }
 
     fn encode_defined(&mut self, id: NodeId) -> Result<Lit, BitblastError> {
+        if *self.graph.get_kind(id) == SymKind::FPFlags {
+            return Ok(self.one);
+        }
         let mut defined = self.one;
         let children: Vec<NodeId> = self.graph.children(id).collect();
         for child in children {
@@ -287,11 +286,11 @@ impl<'g, V> Blaster<'g, V> {
         }
 
         match self.graph.get_kind(id) {
-            SymKind::FPToSI => {
+            SymKind::FPToSI | SymKind::FPToSIRound => {
                 let in_range = self.float_to_int_defined(id, true)?;
                 Ok(self.gate_and(defined, in_range))
             }
-            SymKind::FPToUI => {
+            SymKind::FPToUI | SymKind::FPToUIRound => {
                 let in_range = self.float_to_int_defined(id, false)?;
                 Ok(self.gate_and(defined, in_range))
             }

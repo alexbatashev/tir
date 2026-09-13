@@ -35,7 +35,21 @@ operation! {
         attributes: A { mode: "Str" },
         results: R { result: "RoundingType" },
         interfaces: [crate::interp::Interp, crate::Speculatable],
+        sem: "(set result $value_semantics)",
         verifier: "true",
+    }
+}
+
+impl RoundingConstantOp {
+    fn value_semantics(
+        &self,
+        graph: &mut impl crate::graph::MutDag<Node = SymKind, Leaf = crate::sem::SymPayload<ValueId>>,
+    ) -> Option<NodeId> {
+        Some(resource::constant(
+            graph,
+            3,
+            parse_rounding(&self.mode())? as u64,
+        ))
     }
 }
 
@@ -203,7 +217,7 @@ fn read_field_semantics(op: &tir::OpHandle, field_kind: ResourceField) -> Resour
         ResourceField::FpFlags | ResourceField::FpTraps => {
             crate::builtin::IntegerType::new(context, 5)
         }
-        ResourceField::Whole => EnvironmentType::new(context),
+        ResourceField::Whole => unreachable!("FP snapshots compose individual fields"),
     };
     graph.set_actual_type(value, value_ty);
     let access = resource::constant(&mut graph, 1, ResourceAccess::Read.semantic_code());
@@ -214,6 +228,7 @@ fn read_field_semantics(op: &tir::OpHandle, field_kind: ResourceField) -> Resour
     );
     ResourceSemantics {
         graph,
+        raised_flags: None,
         root: value,
         value_results: vec![value],
         state_results: vec![observation],
@@ -240,6 +255,7 @@ fn write_field_semantics(
     graph.set_actual_type(root, context.get_value(op.state_results()[0]).ty());
     ResourceSemantics {
         graph,
+        raised_flags: None,
         root,
         value_results: Vec::new(),
         state_results: vec![root],
@@ -279,6 +295,7 @@ impl HasResourceSemantics for ClearFlagsOp {
         graph.set_actual_type(root, context.get_value(self.0.state_results()[0]).ty());
         ResourceSemantics {
             graph,
+            raised_flags: None,
             root,
             value_results: Vec::new(),
             state_results: vec![root],
@@ -306,13 +323,26 @@ impl HasResourceSemantics for SetTrapsOp {
 
 impl HasResourceSemantics for SaveOp {
     fn resource_semantics(&self) -> ResourceSemantics {
-        read_field_semantics(&self.0, ResourceField::Whole)
+        let mut graph = SemGraph::new();
+        let state = resource::value(&mut graph, &self.0, environment_state(&self.0));
+        let snapshot = snapshot_value(&self.0.context, &mut graph, state);
+        transition_semantics(&self.0, Some(snapshot), state, None, graph)
     }
 }
 
 impl HasResourceSemantics for RestoreOp {
     fn resource_semantics(&self) -> ResourceSemantics {
-        write_field_semantics(&self.0, self.0.operands()[0], ResourceField::Whole)
+        let mut graph = SemGraph::new();
+        let state = environment_state(&self.0);
+        let incoming = resource::value(&mut graph, &self.0, state);
+        let snapshot = resource::value(&mut graph, &self.0, self.0.value_operands()[0]);
+        let restored = restore_snapshot(
+            &mut graph,
+            incoming,
+            snapshot,
+            self.0.context.get_value(state).ty(),
+        );
+        transition_semantics(&self.0, None, restored, None, graph)
     }
 }
 
@@ -356,6 +386,53 @@ fn read_field(
     read
 }
 
+fn snapshot_value(context: &Context, graph: &mut SemGraph, state: NodeId) -> NodeId {
+    let width = resource::constant(graph, 4, 13);
+    let flags = read_field(
+        graph,
+        state,
+        ResourceField::FpFlags,
+        crate::builtin::IntegerType::new(context, 5),
+    );
+    let mut snapshot = resource::operation(graph, SymKind::ZExt, &[flags, width]);
+    for (field, bits, shift) in [
+        (ResourceField::FpRounding, 3, 5u64),
+        (ResourceField::FpTraps, 5, 8),
+    ] {
+        let value = read_field(
+            graph,
+            state,
+            field,
+            crate::builtin::IntegerType::new(context, bits),
+        );
+        let value = resource::operation(graph, SymKind::ZExt, &[value, width]);
+        let shift = resource::constant(graph, u64::BITS - shift.leading_zeros(), shift);
+        let value = resource::operation(graph, SymKind::ShiftLeft, &[value, shift]);
+        snapshot = resource::operation(graph, SymKind::Or, &[snapshot, value]);
+    }
+    graph.set_actual_type(snapshot, EnvironmentType::new(context));
+    snapshot
+}
+
+fn restore_snapshot(
+    graph: &mut SemGraph,
+    mut state: NodeId,
+    snapshot: NodeId,
+    state_ty: crate::TypeId,
+) -> NodeId {
+    for (field, high, low) in [
+        (ResourceField::FpFlags, 4u64, 0u64),
+        (ResourceField::FpRounding, 7, 5),
+        (ResourceField::FpTraps, 12, 8),
+    ] {
+        let high = resource::constant(graph, (u64::BITS - high.leading_zeros()).max(1), high);
+        let low = resource::constant(graph, (u64::BITS - low.leading_zeros()).max(1), low);
+        let value = resource::operation(graph, SymKind::Extract, &[snapshot, high, low]);
+        state = assign_field(graph, state, field, value, state_ty);
+    }
+    state
+}
+
 fn trap_state(op: &tir::OpHandle, graph: &mut SemGraph, raised: NodeId, traps: NodeId) -> NodeId {
     let memory_value = memory_state(op);
     let memory = resource::value(graph, op, memory_value);
@@ -396,12 +473,7 @@ impl HasResourceSemantics for HoldOp {
         let mut graph = SemGraph::new();
         let environment_value = environment_state(&self.0);
         let environment = resource::value(&mut graph, &self.0, environment_value);
-        let snapshot = read_field(
-            &mut graph,
-            environment,
-            ResourceField::Whole,
-            EnvironmentType::new(context),
-        );
+        let snapshot = snapshot_value(context, &mut graph, environment);
         let zero = resource::constant(&mut graph, 5, 0);
         let environment = assign_field(
             &mut graph,
@@ -436,10 +508,9 @@ impl HasResourceSemantics for UpdateOp {
         graph.set_actual_type(saved_flags, flags_ty);
         let flags = resource::operation(&mut graph, SymKind::Or, &[saved_flags, raised]);
         graph.set_actual_type(flags, flags_ty);
-        let environment = assign_field(
+        let environment = restore_snapshot(
             &mut graph,
             environment,
-            ResourceField::Whole,
             snapshot,
             context.get_value(environment_value).ty(),
         );

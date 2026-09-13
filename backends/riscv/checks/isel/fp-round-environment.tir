@@ -11,5 +11,5 @@ module {
 }
 
 // CHECK-LABEL: asm.symbol {name = "round_environment"
-// CHECK: riscv.csrrw.frm
-// CHECK: riscv.csrrs {rd = %{{[0-9]+}}:GPR, csr = frm, csr_tied = frm, rs1 = x0}
+// CHECK: riscv.set_fround
+// CHECK: riscv.read_fround {rd = %{{[0-9]+}}:GPR}

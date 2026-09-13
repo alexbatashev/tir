@@ -280,6 +280,7 @@ pub fn infer_types<V>(
             | SymKind::StateIf
             | SymKind::StateTry
             | SymKind::StateHandler => SemType::State,
+            SymKind::FPEffect => child(0),
             SymKind::StateRead => {
                 inference.unify(&child(0), &SemType::State)?;
                 state_field_type_at(graph, children[1], children[2])?
@@ -329,7 +330,8 @@ pub fn infer_widths<V>(
                 },
 
                 SymKind::FPFlags => Some(5),
-                SymKind::FAddRound
+                SymKind::FPEffect
+                | SymKind::FAddRound
                 | SymKind::FSubRound
                 | SymKind::FMulRound
                 | SymKind::FDivRound
@@ -465,6 +467,7 @@ pub fn canonicalize_for_selection<V: Clone>(
     let mut new_root = canon_rebuild(
         graph,
         root,
+        root,
         immediate_symbols,
         &mut out,
         &mut memo,
@@ -583,6 +586,7 @@ fn is_extended_zero<V>(
 fn canon_rebuild<V: Clone>(
     graph: &impl Dag<Node = SymKind, Leaf = SymPayload<V>>,
     node: NodeId,
+    root: NodeId,
     immediate_symbols: &HashSet<u32>,
     out: &mut GenericDag<SymKind, SymPayload<V>>,
     memo: &mut HashMap<usize, NodeId>,
@@ -605,7 +609,7 @@ fn canon_rebuild<V: Clone>(
             None
         }
     {
-        let value = canon_rebuild(graph, value, immediate_symbols, out, memo, forced);
+        let value = canon_rebuild(graph, value, root, immediate_symbols, out, memo, forced);
         memo.insert(node.index(), value);
         return value;
     }
@@ -638,23 +642,25 @@ fn canon_rebuild<V: Clone>(
         && (*graph.get_node(children[0]) == SymKind::LoadMemory
             || is_immediate_leaf(graph, children[0], immediate_symbols))
     {
-        let inner = canon_rebuild(graph, children[0], immediate_symbols, out, memo, forced);
+        let inner = canon_rebuild(
+            graph,
+            children[0],
+            root,
+            immediate_symbols,
+            out,
+            memo,
+            forced,
+        );
         memo.insert(node.index(), inner);
         return inner;
     }
 
-    // Collapse `sext/zext(e, w)` to the bare `e` forced to its inferred width `n`
-    // when `e` roots pure integer arithmetic that inference pins to a known width:
-    // selection canonicalization runs under the junk-upper Narrow contract, so a
-    // pattern that materializes `ext(e_n, w)` provides at least the low `n` bits of
-    // `e_n`, and consumers of a narrow class re-narrow through their own operand-width
-    // constraints — the extension is a view, not a computation. This is what types
-    // interior narrow arithmetic (e.g. the `Div` inside riscv `remw`'s Euclidean
-    // `Sub(x, Mul(Div(x,y), y))`) and typed state fields. The allowlist excludes comparisons: `zext(x < y,
-    // w)` is the register materialization of a 1-bit result (riscv `slt`), where the
-    // extension is a computation, not a view, and collapsing it would drop the
-    // materializer the rule set requires for that comparison kind.
-    if matches!(kind, SymKind::SExt | SymKind::ZExt)
+    // A root extension exposes the narrow value under the junk-upper contract.
+    // Interior extensions contribute high bits to their parent computation.
+    // Force the inner width so arithmetic such as remw's Div stays narrow.
+    // Comparisons still need an explicit register materializer.
+    if node == root
+        && matches!(kind, SymKind::SExt | SymKind::ZExt)
         && children.len() == 2
         && matches!(
             graph.get_node(children[0]),
@@ -677,7 +683,15 @@ fn canon_rebuild<V: Clone>(
         )
         && let Some(width) = infer_widths(graph, |_| None)[children[0].index()]
     {
-        let inner = canon_rebuild(graph, children[0], immediate_symbols, out, memo, forced);
+        let inner = canon_rebuild(
+            graph,
+            children[0],
+            root,
+            immediate_symbols,
+            out,
+            memo,
+            forced,
+        );
         forced.insert(inner.index(), width);
         memo.insert(node.index(), inner);
         return inner;
@@ -688,7 +702,7 @@ fn canon_rebuild<V: Clone>(
         && children.len() == 2
         && let Some((source, hi)) = extract_from_zero_hi(graph, children[0])
     {
-        let inner = canon_rebuild(graph, source, immediate_symbols, out, memo, forced);
+        let inner = canon_rebuild(graph, source, root, immediate_symbols, out, memo, forced);
         forced.insert(inner.index(), (hi + 1) as u32);
         memo.insert(node.index(), inner);
         return inner;
@@ -711,11 +725,12 @@ fn canon_rebuild<V: Clone>(
         if sc.len() == 2
             && let Some((value_src, hi)) = extract_from_zero_hi(graph, sc[0])
         {
-            let value = canon_rebuild(graph, value_src, immediate_symbols, out, memo, forced);
+            let value = canon_rebuild(graph, value_src, root, immediate_symbols, out, memo, forced);
             forced.insert(value.index(), (hi + 1) as u32);
             let amount = canon_rebuild(
                 graph,
                 shift_amount_src(graph, sc[1]),
+                root,
                 immediate_symbols,
                 out,
                 memo,
@@ -742,11 +757,28 @@ fn canon_rebuild<V: Clone>(
     // `extract(x, vl - 1, 0)` with `vl` a dynamic sub-width — which this would
     // mis-collapse to the full value; add a width guard here if such a behavior
     // is introduced.
-    if is_low_extract(graph, node) {
+    // Keep a shared source full-width when another slice observes its high bits.
+    if is_low_extract(graph, node)
+        && !(0..graph.len()).any(|index| {
+            let other = NodeId::from_index(index);
+            if *graph.get_node(other) != SymKind::Extract {
+                return false;
+            }
+            let slices: Vec<_> = graph.children(other).collect();
+            slices.len() == 3
+                && (slices[0] == children[0]
+                    || matches!(
+                        (graph.get_leaf_data(slices[0]), graph.get_leaf_data(children[0])),
+                        (Some(SymPayload::SymbolId(lhs)), Some(SymPayload::SymbolId(rhs)))
+                            if lhs == rhs
+                    ))
+                && const_u64(graph, slices[2]) != Some(0)
+        })
+    {
         let mut ch = graph.children(node);
         let source = ch.next().expect("extract has a value operand");
         let hi = const_u64(graph, ch.next().expect("extract has a hi operand"));
-        let inner = canon_rebuild(graph, source, immediate_symbols, out, memo, forced);
+        let inner = canon_rebuild(graph, source, root, immediate_symbols, out, memo, forced);
         if let Some(hi) = hi {
             forced.insert(inner.index(), (hi + 1) as u32);
         }
@@ -757,10 +789,19 @@ fn canon_rebuild<V: Clone>(
     // Shift-amount mask strip (mask is implicit in the encoding):
     //   Shift(v, Extract(amt, k, 0)) / Shift(v, Clamp(amt, _, _)) -> Shift(v, amt)
     if is_shift(kind) && children.len() == 2 {
-        let value = canon_rebuild(graph, children[0], immediate_symbols, out, memo, forced);
+        let value = canon_rebuild(
+            graph,
+            children[0],
+            root,
+            immediate_symbols,
+            out,
+            memo,
+            forced,
+        );
         let amount = canon_rebuild(
             graph,
             shift_amount_src(graph, children[1]),
+            root,
             immediate_symbols,
             out,
             memo,
@@ -776,8 +817,24 @@ fn canon_rebuild<V: Clone>(
     // Normalize the load's metadata child to 0 so source IR loads match both signed
     // and unsigned target forms; signedness lives in the surrounding SExt/ZExt.
     if kind == SymKind::LoadMemory && children.len() == 3 {
-        let address = canon_rebuild(graph, children[0], immediate_symbols, out, memo, forced);
-        let bytes = canon_rebuild(graph, children[1], immediate_symbols, out, memo, forced);
+        let address = canon_rebuild(
+            graph,
+            children[0],
+            root,
+            immediate_symbols,
+            out,
+            memo,
+            forced,
+        );
+        let bytes = canon_rebuild(
+            graph,
+            children[1],
+            root,
+            immediate_symbols,
+            out,
+            memo,
+            forced,
+        );
         let zero = out.add_node(SymKind::Constant);
         out.set_leaf_data(zero, SymPayload::Int(APInt::new(1, 0)));
         let new_node = out.add_node(kind);
@@ -791,17 +848,41 @@ fn canon_rebuild<V: Clone>(
     // Collapse the explicit store truncation `extract(rs, 31, 0)` to the inner value,
     // forcing its width; source IR already carries the stored value's width.
     if kind == SymKind::StoreMemory && children.len() == 4 {
-        let address = canon_rebuild(graph, children[0], immediate_symbols, out, memo, forced);
-        let bytes = canon_rebuild(graph, children[1], immediate_symbols, out, memo, forced);
+        let address = canon_rebuild(
+            graph,
+            children[0],
+            root,
+            immediate_symbols,
+            out,
+            memo,
+            forced,
+        );
+        let bytes = canon_rebuild(
+            graph,
+            children[1],
+            root,
+            immediate_symbols,
+            out,
+            memo,
+            forced,
+        );
         let value_src = children[2];
         let value = if let Some((source, hi)) = extract_from_zero_hi(graph, value_src) {
-            let inner = canon_rebuild(graph, source, immediate_symbols, out, memo, forced);
+            let inner = canon_rebuild(graph, source, root, immediate_symbols, out, memo, forced);
             forced.insert(inner.index(), (hi + 1) as u32);
             inner
         } else {
-            canon_rebuild(graph, value_src, immediate_symbols, out, memo, forced)
+            canon_rebuild(graph, value_src, root, immediate_symbols, out, memo, forced)
         };
-        let address_space = canon_rebuild(graph, children[3], immediate_symbols, out, memo, forced);
+        let address_space = canon_rebuild(
+            graph,
+            children[3],
+            root,
+            immediate_symbols,
+            out,
+            memo,
+            forced,
+        );
         let new_node = out.add_node(kind);
         out.add_edge(new_node, address);
         out.add_edge(new_node, bytes);
@@ -815,7 +896,7 @@ fn canon_rebuild<V: Clone>(
         let operation = children[0];
         let operands: Vec<_> = graph
             .children(operation)
-            .map(|child| canon_rebuild(graph, child, immediate_symbols, out, memo, forced))
+            .map(|child| canon_rebuild(graph, child, root, immediate_symbols, out, memo, forced))
             .collect();
         let rounded = out.add_node(*graph.get_kind(operation));
         for operand in operands {
@@ -827,19 +908,6 @@ fn canon_rebuild<V: Clone>(
         return flags;
     }
 
-    let generic = match kind {
-        SymKind::SIToFPRound => Some((SymKind::SIToFP, 0)),
-        SymKind::UIToFPRound => Some((SymKind::UIToFP, 0)),
-        _ => None,
-    };
-    let (kind, children) = if let Some((generic, rounding)) = generic
-        && children.last().and_then(|&rm| const_u64(graph, rm)) == Some(rounding)
-    {
-        (generic, &children[..children.len() - 1])
-    } else {
-        (kind, children.as_slice())
-    };
-
     // Default: copy leaves, rebuild operations from canonicalized children.
     let new_node = if children.is_empty() {
         let new_node = out.add_node(kind);
@@ -850,7 +918,7 @@ fn canon_rebuild<V: Clone>(
     } else {
         let new_children: Vec<NodeId> = children
             .iter()
-            .map(|&child| canon_rebuild(graph, child, immediate_symbols, out, memo, forced))
+            .map(|&child| canon_rebuild(graph, child, root, immediate_symbols, out, memo, forced))
             .collect();
         let new_node = out.add_node(kind);
         for child in new_children {
@@ -890,6 +958,23 @@ fn selection_default_kind<A>(graph: &crate::sem::SemGraph<A>, node: NodeId) -> O
 pub fn selection_fallback<A: Clone>(
     graph: &crate::sem::SemGraph<A>,
     root: NodeId,
+) -> Option<crate::sem::SemGraph<A>> {
+    selection_fallback_impl(graph, root, false)
+}
+
+/// Propose an unguarded selection pattern while retaining explicit rounding.
+/// The caller must prove refinement on the candidate's defined domain.
+pub fn selection_fallback_preserving_rounding<A: Clone>(
+    graph: &crate::sem::SemGraph<A>,
+    root: NodeId,
+) -> Option<crate::sem::SemGraph<A>> {
+    selection_fallback_impl(graph, root, true)
+}
+
+fn selection_fallback_impl<A: Clone>(
+    graph: &crate::sem::SemGraph<A>,
+    root: NodeId,
+    preserve_rounding: bool,
 ) -> Option<crate::sem::SemGraph<A>> {
     fn rounded_kind<A>(graph: &crate::sem::SemGraph<A>, node: NodeId) -> bool {
         matches!(
@@ -935,6 +1020,7 @@ pub fn selection_fallback<A: Clone>(
         out: &mut crate::sem::SemGraph<A>,
         memo: &mut HashMap<usize, NodeId>,
         changed: &mut bool,
+        preserve_rounding: bool,
     ) -> NodeId {
         if let Some(&existing) = memo.get(&node.index()) {
             return existing;
@@ -974,24 +1060,33 @@ pub fn selection_fallback<A: Clone>(
             } else {
                 None
             };
+            let conversion_branch = [children[2], children[1]].into_iter().find(|&branch| {
+                graph.preorder(branch).any(|node| {
+                    matches!(
+                        graph.get_kind(node),
+                        SymKind::FPToSIRound | SymKind::FPToUIRound
+                    )
+                })
+            });
             let branch = rounded_nan_branch
-                .or(default_branch)
+                .or(conversion_branch)
+                .or_else(|| (!preserve_rounding).then_some(default_branch).flatten())
                 .or_else(|| (kind == SymKind::StateIf).then_some(children[2]));
             if let Some(branch) = branch {
                 *changed = true;
-                let result = rebuild(graph, branch, out, memo, changed);
+                let result = rebuild(graph, branch, out, memo, changed, preserve_rounding);
                 memo.insert(node.index(), result);
                 return result;
             }
         }
-        if let Some(generic) = selection_default_kind(graph, node) {
+        if !preserve_rounding && let Some(generic) = selection_default_kind(graph, node) {
             *changed = true;
             kind = generic;
             children.pop();
         }
         let children: Vec<_> = children
             .into_iter()
-            .map(|child| rebuild(graph, child, out, memo, changed))
+            .map(|child| rebuild(graph, child, out, memo, changed, preserve_rounding))
             .collect();
         let result = out.add_node(kind);
         if let Some(payload) = graph.get_leaf_data(node) {
@@ -1006,6 +1101,13 @@ pub fn selection_fallback<A: Clone>(
 
     let mut out = crate::sem::SemGraph::new();
     let mut changed = false;
-    rebuild(graph, root, &mut out, &mut HashMap::new(), &mut changed);
+    rebuild(
+        graph,
+        root,
+        &mut out,
+        &mut HashMap::new(),
+        &mut changed,
+        preserve_rounding,
+    );
     changed.then_some(out)
 }

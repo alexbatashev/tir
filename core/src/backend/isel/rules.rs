@@ -11,8 +11,8 @@ use tir::sem::{ExtendSemBytes, ExtendSemBytesTyped, SymKind};
 use tir::{Context, NewOp, OpHandle, Operation, PassError};
 
 use crate::backend::isel::{
-    EmitRequest, ImmRange, RegisterCapability, RegisterRequirement, Rule, RuleEmitFn, RuleKind,
-    RuleMatch,
+    EmitRequest, FpFlags, ImmRange, RegisterCapability, RegisterRequirement, Rule, RuleEmitFn,
+    RuleKind, RuleMatch,
 };
 use crate::backend::regalloc::RegClassId;
 use crate::graph::MetaMutDag;
@@ -264,6 +264,7 @@ pub struct RuleSpec {
     /// [`crate::backend::isel::LATENCY_COST_SCALE`] plus the encoding size.
     pub emits: &'static [&'static crate::backend::InstrInfo],
     pub kind: RuleKind,
+    pub fp_flags: FpFlags<PatternRef>,
     /// Emitter for the prelude instruction, when the rule emits a flag-setting
     /// companion first. Generated as a shim over [`emit_with`].
     pub prelude_emit: Option<RuleEmitFn>,
@@ -361,6 +362,13 @@ pub fn build_rules(
             pattern: build_pattern(context, kinds, blob, &spec.pattern),
             base_cost,
             kind: spec.kind,
+            fp_flags: match &spec.fp_flags {
+                FpFlags::None => FpFlags::None,
+                FpFlags::Clobber => FpFlags::Clobber,
+                FpFlags::Exact(pattern) => {
+                    FpFlags::Exact(build_pattern(context, kinds, blob, pattern))
+                }
+            },
             prelude_emit: spec.prelude_emit,
             operand_constraints: spec.constraints.to_vec(),
             operand_registers,

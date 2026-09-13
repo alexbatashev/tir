@@ -138,6 +138,7 @@ fn rule_spec(offset: u32, features: &'static [u16]) -> RuleSpec {
         },
         emits: EMITS,
         kind: RuleKind::Value,
+        fp_flags: tir::backend::isel::FpFlags::None,
         prelude_emit: None,
         emit_fn: nop_emit,
         constraints: &[],

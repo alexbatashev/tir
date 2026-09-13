@@ -1,0 +1,14 @@
+// RUN: tir mc --march=rv64ifd --stage=isel %s | filecheck %s
+
+module {
+  %fn_main = func.func @main(%lhs: !f64, %rhs: !f64) -> !f64 {
+    %env0 = state.entry_state : !state<fp.env>
+    %result, %env1 = fp.div %lhs, %rhs state(%env0) {semantics = {exceptions = "flags", nan = "canonical"}} : !f64
+    func.return %result state(%env1)
+  }
+  module_end
+}
+
+// CHECK-LABEL: asm.symbol {name = "main"
+// CHECK: riscv.fdiv.d.rne
+// CHECK-NOT: riscv.fdiv.d

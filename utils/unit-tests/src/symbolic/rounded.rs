@@ -76,6 +76,7 @@ fn rounded_rtz_conversion_refines_partial_conversion() {
         (SymKind::FPToUI, SymKind::FPToUIRound),
     ] {
         assert!(SmtOracle.refines(&graph(generic), &graph(rounded), &[64]));
+        assert!(SmtOracle.refines(&graph(rounded), &graph(generic), &[64]));
         assert!(SmtOracle.refines_typed(
             &graph(generic),
             &graph(rounded),
@@ -273,4 +274,39 @@ fn selection_fallback_preserves_existing_unrounded_guards() {
         graph.add_edge(value, child);
     }
     assert!(selection_fallback(&graph, value).is_none());
+}
+
+#[test]
+fn selection_fallback_preserves_rounded_conversion_inside_invalid_guard() {
+    use tir_graph::Dag;
+    use tir_symbolic::lang::selection_fallback_preserving_rounding;
+    use tir_symbolic::sem::SemGraph;
+    let mut graph = SemGraph::<()>::new();
+    let input = graph.add_node(SymKind::Symbol);
+    graph.set_leaf_data(input, SymPayload::SymbolId(0));
+    let width = graph.add_node(SymKind::Constant);
+    graph.set_leaf_data(width, SymPayload::Int(APInt::new(32, 64)));
+    let rm = graph.add_node(SymKind::Constant);
+    graph.set_leaf_data(rm, SymPayload::Int(APInt::new(3, 0)));
+    let converted = graph.add_node(SymKind::FPToSIRound);
+    for child in [input, width, rm] {
+        graph.add_edge(converted, child);
+    }
+    let invalid = graph.add_node(SymKind::Symbol);
+    graph.set_leaf_data(invalid, SymPayload::SymbolId(1));
+    let saturated = graph.add_node(SymKind::Constant);
+    graph.set_leaf_data(saturated, SymPayload::Int(APInt::new(64, i64::MAX as u64)));
+    let guarded = graph.add_node(SymKind::If);
+    for child in [invalid, saturated, converted] {
+        graph.add_edge(guarded, child);
+    }
+    let outer = graph.add_node(SymKind::If);
+    for child in [invalid, saturated, guarded] {
+        graph.add_edge(outer, child);
+    }
+    let candidate = selection_fallback_preserving_rounding(&graph, outer).unwrap();
+    assert_eq!(
+        *candidate.get_kind(candidate.root().unwrap()),
+        SymKind::FPToSIRound
+    );
 }

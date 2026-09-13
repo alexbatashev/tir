@@ -1,0 +1,48 @@
+// RUN: tir mc --march=rv64ifd --stage=isel %s | filecheck %s --check-prefix=ISEL
+// RUN: tir interp --function=invalid %s | filecheck %s --check-prefix=NANIR
+// RUN: tir interp %s | filecheck %s --check-prefix=INTERP
+// RUN: tir mc --march=rv64ifd --filetype=asm -o /tmp/tir-riscv-convert-rne.s %s
+// RUN: isasim --march=rv64ifd --entry=main --until-pc=0 --trace-registers-end /tmp/tir-riscv-convert-rne.s | filecheck %s --check-prefix=EXEC
+// RUN: isasim --march=rv64ifd --entry=invalid --until-pc=0 --trace-registers-end /tmp/tir-riscv-convert-rne.s | filecheck %s --check-prefix=NANFLAGS
+// RUN: tir mc --march=rv64ifd --filetype=asm --shuffle-machine-order -o /tmp/tir-riscv-convert-rne.s %s
+// RUN: isasim --march=rv64ifd --entry=main --until-pc=0 --trace-registers-end /tmp/tir-riscv-convert-rne.s | filecheck %s --check-prefix=EXEC
+// RUN: isasim --march=rv64ifd --entry=invalid --until-pc=0 --trace-registers-end /tmp/tir-riscv-convert-rne.s | filecheck %s --check-prefix=NANFLAGS
+
+module {
+  %fn_main = func.func @main() -> !i64 {
+    %env0 = state.entry_state : !state<fp.env>
+    %all_flags = constant {value = 31} : !i5
+    %env1 = fp.clear_flags %all_flags state(%env0)
+    %value = fp.constant {bits = 4609434218613702656} : !f64
+    %integer, %env2 = fp.to_si %value state(%env1) {semantics = {kind = "to_integer", rounding = "nearest_even", exceptions = "flags", subnormals = "gradual", invalid = "indeterminate"}} : !i64
+    %flags, %env3 = fp.get_flags state(%env2) : !i5
+    %shift = constant {value = 8} : !i64
+    %shifted = shli %integer, %shift : !i64
+    %wide_flags = extui %flags : !i64
+    %observed = ori %shifted, %wide_flags : !i64
+    func.return %observed state(%env3)
+  }
+  %fn_invalid = func.func @invalid() -> !i64 {
+    %env0 = state.entry_state : !state<fp.env>
+    %all_flags = constant {value = 31} : !i5
+    %env1 = fp.clear_flags %all_flags state(%env0)
+    %value = fp.constant {bits = 9221120237041090560} : !f64
+    %integer, %env2 = fp.to_si %value state(%env1) {semantics = {kind = "to_integer", rounding = "nearest_even", exceptions = "flags", subnormals = "gradual", invalid = "indeterminate"}} : !i64
+    %flags, %env3 = fp.get_flags state(%env2) : !i5
+    %observed = extui %flags : !i64
+    func.return %observed state(%env3)
+  }
+  module_end
+}
+
+// INTERP: i64 513
+// EXEC: final registers:
+// EXEC-DAG: GPR[10] = 0x201
+// EXEC-DAG: CSR[1] = 0x1
+
+// ISEL-COUNT-2: riscv.fcvt.l.d.rne {{.*}} state(
+
+// NANIR: i64 16
+// NANFLAGS: final registers:
+// NANFLAGS-DAG: GPR[10] = 0x10
+// NANFLAGS-DAG: CSR[1] = 0x10

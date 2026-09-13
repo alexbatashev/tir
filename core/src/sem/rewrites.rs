@@ -45,6 +45,88 @@ impl Theory {
         self.rules.push(rule);
     }
 
+    /// Add the read-zero and ignored-write laws declared by target register traits.
+    pub(crate) fn with_hardwired_zero_fields(
+        mut self,
+        fields: &[(super::StateResourceKind, super::StateFieldKind)],
+    ) -> Self {
+        use super::{SymPayload, template_node};
+        use smallvec::smallvec;
+        use tir_relational::{Atom, HeadOp, LabelFill, Plan, Query};
+
+        let constant = |width, value| {
+            template_node(
+                SymKind::Constant,
+                Some(SymPayload::Int(tir_adt::APInt::new(width, value))),
+                None,
+            )
+        };
+        for &(resource, field) in fields {
+            let width = resource
+                .field_schema(field)
+                .and_then(|schema| schema.bit_width)
+                .expect("a hardwired register field has a scalar width");
+            for write in [false, true] {
+                let mut atoms = vec![
+                    Atom::Node {
+                        template: template_node(
+                            if write {
+                                SymKind::StateAssign
+                            } else {
+                                SymKind::StateRead
+                            },
+                            None,
+                            None,
+                        ),
+                        args: if write {
+                            smallvec![1, 2, 3, 4, 5]
+                        } else {
+                            smallvec![1, 2, 3]
+                        },
+                        class: 0,
+                        row: None,
+                    },
+                    Atom::Literal {
+                        value: constant(2, resource as u64),
+                        class: 2,
+                    },
+                    Atom::Literal {
+                        value: constant(2, field as u64),
+                        class: 3,
+                    },
+                ];
+                if write {
+                    atoms.push(Atom::Literal {
+                        value: constant(1, super::StateAccessKind::Change as u64),
+                        class: 4,
+                    });
+                }
+                self.push_rule(Rule {
+                    name: format!(
+                        "hardwired-zero-{resource:?}-{field:?}-{}",
+                        if write { "write" } else { "read" }
+                    ),
+                    plan: Plan::compile(Query::tree(if write { 6 } else { 4 }, 0, atoms)),
+                    head: if write {
+                        vec![HeadOp::Union(0, 1)]
+                    } else {
+                        vec![
+                            HeadOp::Insert {
+                                label: LabelFill::plain(constant(width, 0)),
+                                args: smallvec![],
+                                into: 4,
+                            },
+                            HeadOp::Union(0, 4),
+                        ]
+                    },
+                    head_vars: u32::from(!write),
+                    post_saturation: false,
+                });
+            }
+        }
+        self
+    }
+
     /// Whether any axiom decomposes a wide constant in place.
     pub fn materializes_constants(&self) -> bool {
         self.axioms.iter().any(Axiom::materializes_constants)

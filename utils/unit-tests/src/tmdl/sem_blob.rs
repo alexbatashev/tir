@@ -102,7 +102,7 @@ fn rounded_mode_literals_keep_the_semantic_three_bit_width() {
     for mode in ["0b000", "0b001"] {
         let generated = super::support::generate_source(
             "rounding-width.tmdl",
-            &source.replace("0b100", mode),
+            &source.replace("fadd(a, b, 0b000)", &format!("fadd(a, b, {mode})")),
             "test",
         );
         let expected = if mode == "0b000" {

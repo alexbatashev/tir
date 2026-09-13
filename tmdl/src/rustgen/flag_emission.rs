@@ -256,6 +256,7 @@ fn emit_flag_branch_rules(
                 None,
                 &imm_range_entries,
                 None,
+                FpFlags::None,
             );
             isel_rule_emitters.push(quote! {
                 #emitter_ts
@@ -529,6 +530,7 @@ fn emit_aliased_zero_branch_rules(
                 None,
                 &[],
                 None,
+                FpFlags::None,
             );
             isel_rule_emitters.push(quote! {
                 #emitter_ts
@@ -859,6 +861,7 @@ fn emit_flag_reader_rules(
                 Some(result_spec),
                 &imm_range_entries,
                 None,
+                FpFlags::None,
             );
             isel_rule_emitters.push(quote! {
                 #emitter_ts

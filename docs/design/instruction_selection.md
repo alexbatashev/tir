@@ -1227,6 +1227,30 @@ environment. A rounded symbolic node is the value, and `FPFlags(node)` computes
 its correlated flags. Neither needs an outcome projection or an instruction
 sequence.
 
+A changing FP environment operation is rooted at `FPEffect(value, state)` in
+selection's graph. The incoming state distinguishes otherwise equal operations;
+the wrapper is impure, so an unused numeric result does not remove a required
+flag update. Numeric and published state results name the wrapper's class.
+Dynamic rounding with ignored exceptions reads the rounding field through
+`StateRead` and forwards its unchanged environment state.
+
+The generator emits ordinary value rules and effect rules from the same
+instruction behavior. The state child of an effect pattern is an unnamed
+wildcard; the selected instruction adopts the source resource ports. A trapping
+operation also transfers its memory ports. RISC-V preserves this ordering but
+does not deliver hardware FP traps.
+
+Each generated rule declares `fp_flags`: `None` for no flags assignment,
+`Clobber` for another update, or `Exact(term)` for a sole sticky update of the
+form `flags = flags | term`. A source operation requiring flags only accepts an
+Exact rule whose raised term matches after binding operands and canonicalizing.
+The `fp_flags`, `fp_rounding`, and `fp_traps` register traits identify environment fields;
+fixed-CSR instructions supply field reads and writes through their declared
+behaviors. A field also marked `hardwired_zero` contributes target facts that
+its reads are zero and its writes leave the incoming state unchanged. Selection
+forwards the ports of an effect proved to leave its state unchanged.
+Snapshots pack the three fields into 13 bits; restoring assigns each field.
+
 Strict floating-point arithmetic requires the exact non-NaN result, including
 signed zero and infinity. An arithmetic NaN result permits any quiet NaN payload
 and sign. Instruction selection therefore checks result membership when a target
@@ -1234,7 +1258,8 @@ chooses a particular quiet NaN. It does not equate arbitrary floating-point bit
 patterns or relax moves, constants, or bitcasts.
 
 The refinement proof first checks that the source arithmetic and the target's
-constant round-to-nearest arithmetic have the same operation and operands. It
+rounded arithmetic have the same operation, operands, and rounding mode.
+A generic arithmetic node fixes the mode to nearest-even. It
 replaces that shared result with a fresh floating-point symbol and retains the
 target's result-selection expression. The proof checks two cases for every bit
 pattern of that symbol: a non-NaN result must keep every bit, and a NaN result
@@ -1250,5 +1275,9 @@ clipping, as a proof obligation. A candidate can use the generic conversion
 only when its constant rounding mode matches that conversion's semantics. The
 typed refinement proof checks every input on which the source conversion is
 defined and requires the same result bits. Target behavior on invalid source
-inputs can define clipping or NaN results without weakening this check. A
-failed or unsupported proof rejects the candidate.
+inputs can define clipping or NaN results without weakening this check.
+`FPFlags` remains defined even when the numeric conversion result is not.
+The proof report separates proven rules from unsupported encodings; non-toward-zero
+rounded float-to-integer conversions currently need an unsupported bit-blast
+encoding. Failed proofs reject the rule set, and verification mode also rejects
+unsupported proofs.

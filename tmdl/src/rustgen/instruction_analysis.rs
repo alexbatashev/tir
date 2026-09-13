@@ -38,15 +38,111 @@ fn analyze_instruction_semantics(
     numeric_params: &HashMap<String, i64>,
     isa_param_values: &HashMap<String, i64>,
     register_index_map: &HashMap<(String, String), u32>,
+    fp_fields: &HashMap<String, FpField>,
 ) -> Option<InstructionSemantics> {
-    let rhs = resolve_behavior_rhs(behavior, operands, defined_register_operands)?;
+    let mut assignments = Vec::new();
+    crate::utils::visit_statements(behavior, &mut |stmt| {
+        if let ast::Expr::Assign(a) = stmt
+            && let Some((class, _)) = assignment_dest_register_path(&a.dest)
+            && let Some(field) = fp_fields.get(&class)
+        {
+            assignments.push((a, *field));
+        }
+    });
+    let flags: Vec<_> = assignments
+        .iter()
+        .filter(|(_, field)| field.kind == tir_symbolic::lang::StateFieldKind::FpFlags)
+        .collect();
+    let exact = match flags.as_slice() {
+        [(assign, _)] => match assign.value.as_ref() {
+            ast::Expr::Binary(binary)
+                if binary.op == ast::BinOp::BitwiseOr
+                    && assignment_dest_register_path(&binary.lhs)
+                        == assignment_dest_register_path(&assign.dest) =>
+            {
+                Some(binary.rhs.as_ref())
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    let assigns_state = defined_register_operands.is_empty() && !assignments.is_empty();
+    let mut expressions = if assigns_state {
+        assignments.iter().map(|(a, _)| a.value.as_ref()).collect()
+    } else {
+        vec![resolve_behavior_rhs(
+            behavior,
+            operands,
+            defined_register_operands,
+        )?]
+    };
+    let flags_root_index = expressions.len();
+    expressions.extend(exact);
     let mut pattern = tir_symbolic::sem::SemGraph::new();
-    let lowering = rhs.lower_to_sema_with_isa(
+    let (mut roots, mut lowering) = ast::Expr::lower_all_to_sema_with_isa(
+        &expressions,
         &mut pattern,
         numeric_params,
         isa_param_values,
         register_index_map,
     )?;
+    let reads: HashMap<_, _> = lowering
+        .register_symbols
+        .iter()
+        .filter_map(|((class, _), symbol)| fp_fields.get(class).map(|field| (*symbol, *field)))
+        .collect();
+    if !reads.is_empty() {
+        use tir_graph::Dag;
+        let original = pattern;
+        pattern = tir_symbolic::sem::SemGraph::new();
+        let mut memo = HashMap::new();
+        for root in &mut roots {
+            *root = tir_symbolic::sem::copy_subgraph_with(
+                &mut pattern,
+                &original,
+                *root,
+                &mut memo,
+                &mut |graph, node| {
+                    if let Some(tir_symbolic::lang::SymPayload::SymbolId(symbol)) =
+                        original.get_leaf_data(node)
+                        && let Some(field) = reads.get(symbol)
+                    {
+                        return tir_symbolic::sem::CopyAction::Replace(fp_state_term(
+                            graph, *field, None, None,
+                        ));
+                    }
+                    tir_symbolic::sem::CopyAction::Keep
+                },
+            );
+        }
+        lowering
+            .register_symbols
+            .retain(|(class, _), _| !fp_fields.contains_key(class));
+    }
+    let root = if assigns_state {
+        use tir_graph::MutDag;
+        let mut state = pattern.add_node(tir_symbolic::lang::SymKind::StateBlock);
+        for ((_, field), value) in assignments.iter().zip(&roots) {
+            state = fp_state_term(&mut pattern, *field, Some(state), Some(*value));
+        }
+        state
+    } else {
+        roots[0]
+    };
+    let fp_flags = if exact.is_some() {
+        let mut flags_graph = tir_symbolic::sem::SemGraph::new();
+        let flags_root = tir_symbolic::sem::copy_subgraph(
+            &mut flags_graph,
+            &pattern,
+            roots[flags_root_index],
+            &mut HashMap::new(),
+        );
+        FpFlags::Exact((flags_graph, flags_root))
+    } else if flags.is_empty() {
+        FpFlags::None
+    } else {
+        FpFlags::Clobber
+    };
     let fixed_register_by_class = split_fixed_registers(&lowering.register_symbols);
 
     let guarded_semantics = defined_register_operands.first().and_then(|dst| {
@@ -60,15 +156,16 @@ fn analyze_instruction_semantics(
     });
 
     let (pattern, root, guarded_semantics) =
-        if let Some(candidate) = tir_symbolic::lang::selection_fallback(&pattern, lowering.root) {
+        if let Some(candidate) = tir_symbolic::lang::selection_fallback(&pattern, root) {
             use tir_graph::Dag;
-            let root = candidate.root()?;
-            (candidate, root, Some((pattern, lowering.root)))
+            let candidate_root = candidate.root()?;
+            (candidate, candidate_root, Some((pattern, root)))
         } else {
-            (pattern, lowering.root, guarded_semantics)
+            (pattern, root, guarded_semantics)
         };
 
     Some(InstructionSemantics {
+        fp_flags,
         pattern,
         root,
         variable_symbols: lowering.variable_symbols,
@@ -379,6 +476,13 @@ fn width_sensitive_symbols(
             }
             K::Div | K::UDiv | K::SRem | K::URem if untyped => &[0, 1],
             K::ShiftRightLogic | K::ShiftRightArithmetic if untyped => &[0],
+            K::SIToFP | K::UIToFP | K::SIToFPRound | K::UIToFPRound
+                if dag.children(node).next().is_some_and(|input| {
+                    node_widths.get(input.index()).copied().flatten().is_none()
+                }) =>
+            {
+                &[0]
+            }
             K::SExt | K::ZExt => &[0],
             _ => &[],
         };
@@ -804,4 +908,47 @@ fn behavior_updates_fp_environment(expr: &ast::Expr) -> bool {
         );
     });
     updates
+}
+
+fn fp_state_term(
+    graph: &mut tir_symbolic::sem::SemGraph,
+    field: FpField,
+    state: Option<tir_graph::NodeId>,
+    value: Option<tir_graph::NodeId>,
+) -> tir_graph::NodeId {
+    use tir_graph::MutDag;
+    use tir_symbolic::lang::{StateAccessKind, StateResourceKind, SymKind, SymPayload};
+    let mut constant = |width, value| {
+        let node = graph.add_node(SymKind::Constant);
+        graph.set_leaf_data(node, SymPayload::Int(tir_adt::APInt::new(width, value)));
+        node
+    };
+    if field.hardwired_zero {
+        return if value.is_some() {
+            state.unwrap_or_else(|| graph.add_node(SymKind::StateBlock))
+        } else {
+            let width = StateResourceKind::FpEnvironment
+                .field_schema(field.kind)
+                .unwrap()
+                .bit_width
+                .unwrap();
+            constant(width, 0)
+        };
+    }
+    let resource = constant(2, StateResourceKind::FpEnvironment as u64);
+    let field = constant(2, field.kind as u64);
+    let access = value.map(|_| constant(1, StateAccessKind::Change as u64));
+    let state = state.unwrap_or_else(|| graph.add_node(SymKind::StateBlock));
+    let root = graph.add_node(if value.is_some() {
+        SymKind::StateAssign
+    } else {
+        SymKind::StateRead
+    });
+    for child in [Some(state), Some(resource), Some(field), access, value]
+        .into_iter()
+        .flatten()
+    {
+        graph.add_edge(root, child);
+    }
+    root
 }

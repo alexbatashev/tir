@@ -2,7 +2,14 @@
 // Instruction analysis helpers
 // ---------------------------------------------------------------------------
 
+enum FpFlags<T> {
+    None,
+    Clobber,
+    Exact(T),
+}
+
 struct InstructionSemantics {
+    fp_flags: FpFlags<(tir_symbolic::sem::SemGraph, tir_graph::NodeId)>,
     pattern: tir_symbolic::sem::SemGraph,
     root: tir_graph::NodeId,
     variable_symbols: HashMap<String, u32>,

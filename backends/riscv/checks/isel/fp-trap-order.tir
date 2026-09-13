@@ -1,0 +1,18 @@
+// RUN: tir mc --march=rv64ifd --filetype=asm --shuffle-machine-order %s | filecheck %s
+
+module {
+  %fn_ordered = func.func @ordered(%before: !ptr.p<!i32>, %after: !ptr.p<!i32>, %first: !i32, %second: !i32, %numerator: !f64, %denominator: !f64) {
+    %memory0 = state.entry_state : !state<memory>
+    %env0 = state.entry_state : !state<fp.env>
+    %memory1 = ptr.store %first, %before state(%memory0)
+    %unused, %env1, %memory2 = fp.div %numerator, %denominator state(%env0, %memory1) {semantics = {exceptions = "flags_and_traps"}} : !f64
+    %memory3 = ptr.store %second, %after state(%memory2)
+    func.return state(%memory3, %env1)
+  }
+  module_end
+}
+
+// CHECK-LABEL: ordered:
+// CHECK: sw
+// CHECK-NEXT: fdiv.d
+// CHECK-NEXT: sw

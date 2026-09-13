@@ -200,6 +200,8 @@ impl ResourceField {
 pub struct ResourceSemantics {
     pub graph: SemGraph,
     pub root: NodeId,
+    /// Flags raised by this operation, before accumulation in the environment.
+    pub raised_flags: Option<NodeId>,
     pub value_results: Vec<NodeId>,
     pub state_results: Vec<NodeId>,
 }

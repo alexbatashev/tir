@@ -584,6 +584,7 @@ fn emit_one_division_rule(
         None,
         &[],
         None,
+        FpFlags::None,
     );
     isel_rule_emitters.push(quote! {
         #prelude_ts

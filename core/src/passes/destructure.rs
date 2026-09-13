@@ -762,6 +762,7 @@ impl Lowering<'_> {
                 let leaf = instance.operands().is_empty()
                     && instance.regions().is_empty()
                     && instance.state_results().is_empty()
+                    && inputs[index].is_empty()
                     && !implicit.contains(&op);
                 if !leaf {
                     return (index, 1);

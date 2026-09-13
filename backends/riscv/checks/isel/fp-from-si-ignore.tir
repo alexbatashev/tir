@@ -1,0 +1,13 @@
+// RUN: tir mc --march=rv64ifd --stage=isel %s | filecheck %s
+
+module {
+  %fn_main = func.func @main(%lhs: !i64) -> !f64 {
+    %result = fp.from_si %lhs : !f64
+    func.return %result
+  }
+  module_end
+}
+
+// CHECK-LABEL: asm.symbol {name = "main"
+// CHECK: riscv.fcvt.d.l.rne
+// CHECK-NOT: riscv.fcvt.d.l

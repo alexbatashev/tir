@@ -553,6 +553,7 @@ fn emit_cond_branch_rule(
         None,
         &imm_range_entries,
         None,
+        FpFlags::None,
     );
     (
         quote! {
@@ -668,7 +669,8 @@ fn intern_dag(
                 | tir_symbolic::lang::SymKind::Bitcast
                 | tir_symbolic::lang::SymKind::LoadMemory
                 | tir_symbolic::lang::SymKind::LoadReserved
-        ) && dag.get_leaf_data(node_id).is_none()
+        ) && (dag.get_leaf_data(node_id).is_none()
+            || *dag.get_node(node_id) == tir_symbolic::lang::SymKind::Symbol)
             && let Some(Some(width)) = widths.get(node_id.index()).copied()
         {
             ops.push(tir_symbolic::sem::SemOp::Typed(width));

@@ -390,14 +390,6 @@ impl<'a> SemDagBuilder<'a> {
         if let Some(class) = self.build_memory_effect(op) {
             return Some(class);
         }
-        if op.has_interface::<dyn tir::HasResourceSemantics>()
-            && op
-                .clone()
-                .as_interface::<dyn tir::ResourceEffects>()
-                .is_some_and(|effects| !effects.resource_effects().is_empty())
-        {
-            return None;
-        }
         if let Some(semantics) = op
             .clone()
             .as_interface::<dyn tir::HasResourceSemantics>()
@@ -430,14 +422,45 @@ impl<'a> SemDagBuilder<'a> {
         semantics: &tir::ResourceSemantics,
     ) -> Id {
         let types = self.infer_local_types(&semantics.graph, &[]);
-        let root = self.lower_graph_node(&semantics.graph, semantics.root, &[], types.as_deref());
+        let value = self.lower_graph_node(&semantics.graph, semantics.root, &[], types.as_deref());
+        let effects = op
+            .clone()
+            .as_interface::<dyn tir::ResourceEffects>()
+            .expect("resource semantics declare effects")
+            .resource_effects();
+        let environment = effects
+            .iter()
+            .find(|effect| effect.resource == crate::builtin::StateResource::FpEnv);
+        let change = environment.filter(|effect| effect.access == tir::ResourceAccess::Change);
+        let root = if let Some(effect) = change {
+            let state = self.build_from_value(effect.observed[0]);
+            self.add_op(
+                SymKind::FPEffect,
+                vec![value, state],
+                op.value_results()
+                    .first()
+                    .map(|result| self.context.get_value(*result).ty()),
+            )
+        } else {
+            value
+        };
         for (&result, &node) in op.value_results().iter().zip(&semantics.value_results) {
-            let class = self.lower_graph_node(&semantics.graph, node, &[], types.as_deref());
+            let class = if change.is_some() {
+                root
+            } else {
+                self.lower_graph_node(&semantics.graph, node, &[], types.as_deref())
+            };
             self.value_to_class.insert(result, class);
         }
-        for (&result, &node) in op.state_results().iter().zip(&semantics.state_results) {
-            let class = self.lower_graph_node(&semantics.graph, node, &[], types.as_deref());
-            self.value_to_class.insert(result, class);
+        for effect in &effects {
+            let class = if change.is_some() {
+                root
+            } else {
+                self.build_from_value(effect.observed[0])
+            };
+            for &result in &effect.produced {
+                self.value_to_class.insert(result, class);
+            }
         }
         root
     }
@@ -575,7 +598,10 @@ impl<'a> SemDagBuilder<'a> {
             {
                 self.add_input_value(value, value_ty)
             } else {
-                self.build_for_op(&def)
+                self.build_for_op(&def);
+                self.value_to_class
+                    .get(&value)
+                    .copied()
                     .unwrap_or_else(|| self.add_input_value(value, value_ty))
             }
         } else {
@@ -659,6 +685,11 @@ impl<'a> SemDagBuilder<'a> {
     ) -> Id {
         let node_ty = graph
             .get_actual_type(node)
+            .map(|ty| {
+                semantic_type(self.context, ty)
+                    .and_then(|ty| ir_type(self.context, &ty))
+                    .unwrap_or(ty)
+            })
             .or_else(|| types.and_then(|types| ir_type(self.context, &types[node.index()])));
         match graph.get_node(node) {
             SymKind::Symbol => match graph.get_leaf_data(node) {

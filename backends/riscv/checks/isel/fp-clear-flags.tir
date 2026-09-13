@@ -10,4 +10,4 @@ module {
 }
 
 // CHECK-LABEL: asm.symbol {name = "clear_flags"
-// CHECK: riscv.csrrc.fflags
+// CHECK: riscv.clear_fflags

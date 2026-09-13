@@ -347,6 +347,19 @@ impl BehaviorGraph {
     /// The term a `let` statement itself evaluates: `root` is expanded, nested
     /// bindings read their symbols.
     pub fn binding_value_graph(&self, root: NodeId) -> Option<(ValueGraph, NodeId)> {
+        // FPFlags needs the rounded operation and its operands, not its cached
+        // numeric result. Evaluation of that operation is deterministic.
+        let rounded_operations: std::collections::HashSet<_> = self
+            .graph
+            .preorder(root)
+            .filter(|&node| *self.graph.get_node(node) == SymKind::FPFlags)
+            .flat_map(|node| self.graph.children(node))
+            .collect();
+        let is_bound = |node| {
+            node != root
+                && self.let_symbols.contains_key(&node)
+                && !rounded_operations.contains(&node)
+        };
         // The term stops at a bound node: what lies below it is the binding's
         // own statement, not part of this one.
         let mut needed = std::collections::HashSet::new();
@@ -355,7 +368,7 @@ impl BehaviorGraph {
             if !needed.insert(node.index()) {
                 continue;
             }
-            if node != root && self.let_symbols.contains_key(&node) {
+            if is_bound(node) {
                 continue;
             }
             pending.extend(self.graph.children(node));
@@ -368,7 +381,7 @@ impl BehaviorGraph {
                 continue;
             }
             if let Some(&symbol) = self.let_symbols.get(&node)
-                && node != root
+                && is_bound(node)
             {
                 let leaf = out.add_node(SymKind::Symbol);
                 out.set_leaf_data(leaf, SymPayload::SymbolId(symbol));

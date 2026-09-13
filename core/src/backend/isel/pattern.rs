@@ -25,13 +25,14 @@ use super::{ImmRange, RegisterRequirement};
 pub(crate) enum PatternNode {
     Template(SemNode),
     Capture(u32),
+    Wildcard,
 }
 
 impl PatternNode {
     pub(crate) fn symbol(&self) -> Option<u32> {
         match self {
             PatternNode::Capture(symbol) => Some(*symbol),
-            PatternNode::Template(_) => None,
+            PatternNode::Template(_) | PatternNode::Wildcard => None,
         }
     }
 }
@@ -80,6 +81,7 @@ pub(crate) struct PatternNodeMeta {
     pub(crate) imm_range: Option<ImmRange>,
     /// The symbolic value type inferred from the semantic operator signatures.
     pub(crate) semantic_type: Option<SemType>,
+    declared_type: Option<tir::TypeId>,
     /// What a match demands of the class bound here; meaningful for boundary
     /// and constant nodes.
     pub(crate) demand: BoundaryDemand,
@@ -217,6 +219,14 @@ impl CompiledIselPattern {
         let Some(meta) = self.node_meta.get(pattern_node.index()) else {
             return true;
         };
+        if let Some(expected) = meta
+            .declared_type
+            .and_then(|ty| tir::sem::egraph::semantic_type(ctx, ty))
+            && let Some(actual) = class_semantic_type(ctx, egraph, class)
+            && TypeUnifier::default().unify(&expected, &actual).is_err()
+        {
+            return false;
+        }
         if let Some(required) = meta.register
             && let Some(actual) = class_register_type(ctx, egraph, class, pointer_width)
             && !required.accepts(&actual)
@@ -526,6 +536,7 @@ fn visit(
         return;
     }
     match &nodes[node.index()] {
+        PatternNode::Wildcard => {}
         PatternNode::Capture(_) => captures.push(node.0),
         PatternNode::Template(template) => {
             atoms.push(Atom::Node {
@@ -624,6 +635,7 @@ fn compile_isel_pattern_node(
                     .find(|(s, _)| s == symbol)
                     .map(|(_, r)| *r),
                 semantic_type: Some(inferred_types[node.index()].clone()),
+                declared_type: expr.get_actual_type(node),
                 ..Default::default()
             });
             compiled
@@ -656,7 +668,21 @@ fn compile_isel_pattern_node(
             // smaller ids than the node itself.
             let mut children = expr
                 .children(node)
-                .map(|child| {
+                .enumerate()
+                .map(|(index, child)| {
+                    if (index == 0
+                        && matches!(kind, SymKind::StateRead | SymKind::StateAssign)
+                        && *expr.get_node(child) != SymKind::StateAssign)
+                        || (index == 1 && *kind == SymKind::FPEffect)
+                    {
+                        let state = push(nodes, PatternNode::Wildcard);
+                        node_meta.push(PatternNodeMeta {
+                            is_state: true,
+                            duplicable: true,
+                            ..Default::default()
+                        });
+                        return Some(state);
+                    }
                     compile_isel_pattern_node(
                         expr,
                         child,
@@ -702,7 +728,7 @@ fn compile_isel_pattern_node(
     Some(compiled)
 }
 
-fn widen_pattern_literal(value: &tir::utils::APInt, ty: &SemType) -> tir::utils::APInt {
+pub(super) fn widen_pattern_literal(value: &tir::utils::APInt, ty: &SemType) -> tir::utils::APInt {
     let width = match ty {
         SemType::Bits(Width::Const(width)) | SemType::RawBits(Width::Const(width)) => *width,
         _ => return value.clone(),

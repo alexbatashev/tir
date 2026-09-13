@@ -9,7 +9,10 @@ mod sexpr;
 mod types;
 
 pub use exec::{Memory, execute, execute_with_memory};
-pub use infer::{canonicalize_for_selection, infer_types, infer_widths, selection_fallback};
+pub use infer::{
+    canonicalize_for_selection, infer_types, infer_widths, selection_fallback,
+    selection_fallback_preserving_rounding,
+};
 pub use ops::{SCALAR_OPS, ScalarOp, SmtTemplate, WidthRule, scalar_op, scalar_op_named};
 pub use sexpr::{BuildError, SemBuilderHooks, SemExpr, build, op_kind, op_name, parse};
 pub use types::{FloatFormat, SemType, TypeError, TypeUnifier, TypeVar, Width, WidthVar};
@@ -163,6 +166,8 @@ pub enum SymKind {
     /// Read one logical field from a typed resource state:
     /// `[state, resource, field]`.
     StateRead,
+    /// ISel value anchored to the incoming FP environment state.
+    FPEffect,
     /// `[n, w]`: an iterator of `n` lanes of `w` bits holding the values
     /// 0..n-1 — the lane indices. Gives `map`/`zip` lambdas positional
     /// awareness (RVV `vid.v`, slides, gathers, per-lane addresses).
@@ -329,10 +334,6 @@ impl StateResourceKind {
             (Self::Memory, Whole) => Some(StateFieldSchema {
                 bit_width: None,
                 maximum: None,
-            }),
-            (Self::FpEnvironment, Whole) => Some(StateFieldSchema {
-                bit_width: Some(13),
-                maximum: Some(0x1fff),
             }),
             (Self::FpEnvironment, FpRounding) => Some(StateFieldSchema {
                 bit_width: Some(3),

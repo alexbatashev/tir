@@ -16,7 +16,7 @@ module {
 }
 
 // CHECK-LABEL: asm.symbol {name = "dynamic"
-// CHECK: %[[SET:[0-9]+]] = riscv.csrrw.frm {{.*}} state(%[[ENTRY:[0-9]+]])
+// CHECK: %[[SET:[0-9]+]] = riscv.set_fround {{.*}} state(%[[ENTRY:[0-9]+]])
 // CHECK-NEXT: %[[ADD:[0-9]+]] = riscv.fadd.d {{.*}} state(%[[SET]])
-// CHECK-NEXT: %[[GET:[0-9]+]] = riscv.csrrs {rd = %{{[0-9]+}}:GPR, csr = fflags, csr_tied = fflags, rs1 = x0} state(%[[ADD]])
+// CHECK-NEXT: %[[GET:[0-9]+]] = riscv.read_fflags {rd = %{{[0-9]+}}:GPR} state(%[[ADD]])
 // CHECK: asm.vret

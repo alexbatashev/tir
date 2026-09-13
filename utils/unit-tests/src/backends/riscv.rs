@@ -484,6 +484,7 @@ fn isa_params_resolve_from_the_selected_base() {
             ("FPR64", 64),
             ("FFLAGS", 5),
             ("FRM", 3),
+            ("FPTRAPS", 5),
             ("GPRC", 32),
             ("FPR64C", 64),
             ("FPR32C", 32),
@@ -501,6 +502,7 @@ fn isa_params_resolve_from_the_selected_base() {
             ("FPR64", 64),
             ("FFLAGS", 5),
             ("FRM", 3),
+            ("FPTRAPS", 5),
             ("GPRC", 64),
             ("FPR64C", 64),
             ("FPR32C", 32),
@@ -524,4 +526,29 @@ fn counter_registers_follow_the_feature_set() {
     assert_eq!(rv32.len(), 6);
     assert!(rv32.contains(&("CSR", 0xC80, PerfCounter::CyclesHigh)));
     assert!(rv32.contains(&("CSR", 0xC82, PerfCounter::InstructionsRetiredHigh)));
+}
+
+#[test]
+fn division_rule_records_exact_raised_flags() {
+    let context = Context::with_default_dialects();
+    let rules = tir_riscv::get_isel_rules(&context, &[Feature::RV64I, Feature::F, Feature::D]);
+    let rule = rules.iter().find(|rule| rule.name == "fdivdrne").unwrap();
+    let tir::backend::isel::FpFlags::Exact(flags) = &rule.fp_flags else {
+        panic!("rounded division must describe its exact raised flags");
+    };
+    let root = flags.root().unwrap();
+    assert_eq!(*flags.get_kind(root), SymKind::FPFlags);
+    let value = flags.children(root).next().unwrap();
+    assert_eq!(*flags.get_kind(value), SymKind::FDivRound);
+}
+
+#[test]
+fn classification_rule_does_not_claim_exact_flags() {
+    let context = Context::with_default_dialects();
+    let rules = tir_riscv::get_isel_rules(&context, &[Feature::RV64I, Feature::F, Feature::D]);
+    let rule = rules.iter().find(|rule| rule.name == "fclassd").unwrap();
+    assert!(matches!(
+        rule.fp_flags,
+        tir::backend::isel::FpFlags::None | tir::backend::isel::FpFlags::Clobber
+    ));
 }
