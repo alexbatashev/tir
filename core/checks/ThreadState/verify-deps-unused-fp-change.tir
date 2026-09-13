@@ -1,0 +1,13 @@
+// RUN: not tir opt --pass verify-deps %s 2>&1 | filecheck %s
+
+module {
+  %f = func.func @main(%value: !i32) -> !i32 {
+    %env = state.entry_state : !state<fp.env>
+    %mask = constant {value = 1} : !i5
+    %next = fp.clear_flags %mask state(%env)
+    -> %value
+  }
+  module_end
+}
+
+// CHECK: fp.clear_flags in @main is demanded by nothing

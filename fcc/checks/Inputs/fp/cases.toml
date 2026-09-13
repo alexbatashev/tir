@@ -91,7 +91,7 @@ reference = "oracle-provenance.toml#gcc-contraction"
 
 [[cases]]
 id = "scale.binary64.positive_min_subnormal"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/scale.c"
 language_mode = "c17"
 target_requirements = ["binary64", "fenv", "libm"]
@@ -112,7 +112,7 @@ reference = "oracle-provenance.toml#scale-binary64"
 
 [[cases]]
 id = "round.binary64.halfway.upward"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/rounding.c"
 language_mode = "c17"
 target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
@@ -134,7 +134,7 @@ reference = "oracle-provenance.toml#directed-rounding"
 
 [[cases]]
 id = "effects.dead_division.flags"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/effects.c"
 language_mode = "c17"
 target_requirements = ["binary64", "fenv", "libm"]
@@ -529,7 +529,7 @@ reference = "oracle-provenance.toml#glibc-math-reporting"
 
 [[cases]]
 id = "effects.trap_order.divide_before_store"
-stage = "scalar"
+stage = "release"
 source = "fcc/checks/Inputs/fp/reference/effects.c"
 language_mode = "gnu17"
 target_requirements = ["x86_64", "glibc", "gnu_feenableexcept", "sigfpe", "libm"]
@@ -558,7 +558,7 @@ reference = "oracle-provenance.toml#observable-effects"
 
 [[cases]]
 id = "round.binary64.halfway.nearest"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/rounding.c"
 language_mode = "c17"
 target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
@@ -580,7 +580,7 @@ reference = "oracle-provenance.toml#directed-rounding"
 
 [[cases]]
 id = "round.binary64.halfway.downward"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/rounding.c"
 language_mode = "c17"
 target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
@@ -602,7 +602,7 @@ reference = "oracle-provenance.toml#directed-rounding"
 
 [[cases]]
 id = "round.binary64.negative_halfway.nearest"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/rounding.c"
 language_mode = "c17"
 target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
@@ -624,7 +624,7 @@ reference = "oracle-provenance.toml#directed-rounding"
 
 [[cases]]
 id = "round.binary64.negative_halfway.downward"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/rounding.c"
 language_mode = "c17"
 target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
@@ -646,7 +646,7 @@ reference = "oracle-provenance.toml#directed-rounding"
 
 [[cases]]
 id = "round.binary64.overflow.nearest"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/rounding.c"
 language_mode = "c17"
 target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
@@ -668,7 +668,7 @@ reference = "oracle-provenance.toml#directed-rounding"
 
 [[cases]]
 id = "round.binary64.overflow.toward_zero"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/rounding.c"
 language_mode = "c17"
 target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
@@ -690,7 +690,7 @@ reference = "oracle-provenance.toml#directed-rounding"
 
 [[cases]]
 id = "round.binary64.convert_f32.exact_subnormal"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/rounding.c"
 language_mode = "c17"
 target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
@@ -712,7 +712,7 @@ reference = "oracle-provenance.toml#directed-rounding"
 
 [[cases]]
 id = "round.binary64.convert_f32.inexact_subnormal"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/rounding.c"
 language_mode = "c17"
 target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
@@ -734,7 +734,7 @@ reference = "oracle-provenance.toml#directed-rounding"
 
 [[cases]]
 id = "round.binary64.convert_f32.halfway_nearest"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/rounding.c"
 language_mode = "c17"
 target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
@@ -756,7 +756,7 @@ reference = "oracle-provenance.toml#directed-rounding"
 
 [[cases]]
 id = "round.binary64.convert_f32.halfway_upward"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/rounding.c"
 language_mode = "c17"
 target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
@@ -778,7 +778,7 @@ reference = "oracle-provenance.toml#directed-rounding"
 
 [[cases]]
 id = "round.binary64.convert_i64.halfway_nearest"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/rounding.c"
 language_mode = "c17"
 target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
@@ -800,7 +800,7 @@ reference = "oracle-provenance.toml#directed-rounding"
 
 [[cases]]
 id = "round.binary64.convert_i64.halfway_toward_zero"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/rounding.c"
 language_mode = "c17"
 target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
@@ -822,7 +822,7 @@ reference = "oracle-provenance.toml#directed-rounding"
 
 [[cases]]
 id = "round.binary64.convert_i64.invalid_infinity"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/rounding.c"
 language_mode = "c17"
 target_requirements = ["binary64", "dynamic_rounding", "fenv", "libm"]
@@ -846,7 +846,7 @@ reference = "oracle-provenance.toml#directed-rounding"
 
 [[cases]]
 id = "scale.binary64.negative_min_subnormal"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/scale.c"
 language_mode = "c17"
 target_requirements = ["binary64", "fenv", "libm"]
@@ -867,7 +867,7 @@ reference = "oracle-provenance.toml#scale-binary64"
 
 [[cases]]
 id = "scale.binary64.positive_zero"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/scale.c"
 language_mode = "c17"
 target_requirements = ["binary64", "fenv", "libm"]
@@ -888,7 +888,7 @@ reference = "oracle-provenance.toml#scale-binary64"
 
 [[cases]]
 id = "scale.binary64.negative_zero"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/scale.c"
 language_mode = "c17"
 target_requirements = ["binary64", "fenv", "libm"]
@@ -909,7 +909,7 @@ reference = "oracle-provenance.toml#scale-binary64"
 
 [[cases]]
 id = "scale.binary64.positive_normal"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/scale.c"
 language_mode = "c17"
 target_requirements = ["binary64", "fenv", "libm"]
@@ -930,7 +930,7 @@ reference = "oracle-provenance.toml#scale-binary64"
 
 [[cases]]
 id = "scale.binary64.negative_normal"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/scale.c"
 language_mode = "c17"
 target_requirements = ["binary64", "fenv", "libm"]
@@ -951,7 +951,7 @@ reference = "oracle-provenance.toml#scale-binary64"
 
 [[cases]]
 id = "scale.binary64.minimum_normal"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/scale.c"
 language_mode = "c17"
 target_requirements = ["binary64", "fenv", "libm"]
@@ -972,7 +972,7 @@ reference = "oracle-provenance.toml#scale-binary64"
 
 [[cases]]
 id = "scale.binary64.positive_infinity"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/scale.c"
 language_mode = "c17"
 target_requirements = ["binary64", "fenv", "libm"]
@@ -993,7 +993,7 @@ reference = "oracle-provenance.toml#scale-binary64"
 
 [[cases]]
 id = "scale.binary64.negative_infinity"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/scale.c"
 language_mode = "c17"
 target_requirements = ["binary64", "fenv", "libm"]
@@ -1014,7 +1014,7 @@ reference = "oracle-provenance.toml#scale-binary64"
 
 [[cases]]
 id = "scale.binary64.quiet_nan_payload"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/scale.c"
 language_mode = "c17"
 target_requirements = ["binary64", "fenv", "libm"]
@@ -1035,7 +1035,7 @@ reference = "oracle-provenance.toml#scale-binary64"
 
 [[cases]]
 id = "scale.binary64.signaling_nan_payload"
-stage = "scalar"
+stage = "fcc"
 source = "fcc/checks/Inputs/fp/reference/scale.c"
 language_mode = "c17"
 target_requirements = ["binary64", "fenv", "libm"]

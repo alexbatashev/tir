@@ -1,0 +1,17 @@
+// RUN: tir opt --verify --pass verify-deps %s | filecheck %s
+
+module {
+  %f = func.func @main() {
+    %env0 = state.entry_state : !state<fp.env>
+    %nearest = fp.rounding_constant {mode = "nearest_even"} : !fp.rounding
+    %env1 = scf.loop (%env = %env0) {
+      %next = fp.set_round %nearest state(%env)
+      %stop = constant {value = 0} : !i1
+      -> %stop, %next, %env
+    }
+    -> %env1
+  }
+  module_end
+}
+
+// CHECK: scf.loop

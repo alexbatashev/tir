@@ -1,0 +1,12 @@
+// RUN: tir opt --verify %s | filecheck %s
+
+module {
+  %f = func.func @main(%p: !ptr.p<!i32>) -> !i32 {
+    %memory = state.entry_state : !state<memory>
+    %value = ptr.load %p state(%memory) : !i32
+    -> %value, %memory
+  }
+  module_end
+}
+
+// CHECK: ptr.load

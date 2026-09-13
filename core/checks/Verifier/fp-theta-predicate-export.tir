@@ -1,0 +1,15 @@
+// RUN: not tir opt --verify --pass verify-deps %s 2>&1 | filecheck %s
+
+module {
+  %f = func.func @main(%a: !f64, %b: !f64) {
+    %env0 = state.entry_state : !state<fp.env>
+    %env1 = scf.loop (%env = %env0) {
+      %again, %next = fp.cmp %a, %b state(%env) {predicate = "olt", semantics = {kind = "comparison", behavior = "signaling", exceptions = "flags", subnormals = "gradual"}} : !i1
+      -> %again, %next, %env
+    }
+    -> %env1
+  }
+  module_end
+}
+
+// CHECK: state %{{[0-9]+}} has incompatible concurrent uses

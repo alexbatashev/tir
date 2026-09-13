@@ -246,32 +246,89 @@ pub fn verify_op_tree(context: &Context, op_id: OpId) -> Result<(), Error> {
 /// at most one unordered operation may change it. Other resources, including the
 /// floating-point environment, describe one executed continuation and do not
 /// permit unordered reads. Mutually exclusive branch arms may consume the same
-/// state. One operation naming a state twice consumes it once.
+/// state. An operation naming a state twice consumes it once, except for
+/// exports through region results or return and yield terminators.
 ///
-/// The check is structural, so it cannot see chains: that every access of a chain
-/// is in the cone of the state its next write takes is what the insertion-order
-/// shuffling of the fuzzer and `--shuffle-seed` is for, not this.
+/// Theta consumers are exclusive when their demand paths are disjoint. This
+/// check does not prove that every access is in the cone of the state its next
+/// write takes; insertion-order shuffling and `--shuffle-seed` check that.
 ///
 /// State crossing a region boundary does so as a carried argument, which is a
 /// fresh value, so a single walk of the whole tree suffices.
 pub(crate) fn verify_state_forks(context: &Context, op_id: OpId) -> Result<(), Error> {
-    let mut consumers: std::collections::HashMap<crate::ValueId, Vec<(OpId, bool)>> =
+    let mut consumers: std::collections::HashMap<crate::ValueId, Vec<(StateConsumer, bool)>> =
         std::collections::HashMap::new();
+    let mut theta_paths = std::collections::HashMap::new();
     let mut worklist = vec![op_id];
     while let Some(op_id) = worklist.pop() {
         let instance = context.get_op(op_id);
+        let exports =
+            instance.is::<crate::func::ReturnOp>() || instance.is::<crate::scf::YieldOp>();
         for operand in instance.state_operands() {
             let resource = context
                 .state_resource(context.get_value(operand).ty())
                 .expect("state operand has a state type");
             let observes = resource_access(&instance, resource) != crate::ResourceAccess::Change;
             let taken = consumers.entry(operand).or_default();
-            if !taken.iter().any(|(taker, _)| *taker == op_id) {
-                taken.push((op_id, observes));
+            let consumer = StateConsumer::Op(op_id);
+            if exports || !taken.iter().any(|(taker, _)| *taker == consumer) {
+                taken.push((consumer, observes));
             }
         }
         for region_id in instance.regions().iter().rev() {
-            worklist.extend(context.get_region(*region_id).op_ids().iter().rev());
+            let region = context.get_region(*region_id);
+            let results = region.results();
+            let paths = instance
+                .clone()
+                .as_interface::<dyn crate::Theta>()
+                .filter(|theta| theta.body() == *region_id)
+                .map(|theta| {
+                    let binding = theta.binding();
+                    let mut paths = std::collections::HashMap::new();
+                    for (path, range) in [
+                        (ExportPath::Continue, binding.continue_.clone()),
+                        (ExportPath::Exit, binding.exit.clone()),
+                    ] {
+                        let mut roots = results[range].to_vec();
+                        roots.push(theta.predicate());
+                        while let Some(value) = roots.pop() {
+                            let Some(op) = context.get_value(value).defining_op() else {
+                                continue;
+                            };
+                            if context.parent_nodes_region(op) != Some(*region_id) {
+                                continue;
+                            }
+                            let membership = paths.entry(op).or_insert(0);
+                            if *membership & path.mask() == 0 {
+                                *membership |= path.mask();
+                                roots.extend(crate::region::values_read(context, op));
+                            }
+                        }
+                    }
+                    theta_paths.insert(*region_id, paths);
+                    vec![
+                        (ExportPath::Continue, binding.continue_),
+                        (ExportPath::Exit, binding.exit),
+                    ]
+                })
+                .unwrap_or_else(|| vec![(ExportPath::Only, 0..results.len())]);
+            for (path, range) in paths {
+                for &result in &results[range] {
+                    if context
+                        .state_resource(context.get_value(result).ty())
+                        .is_some()
+                    {
+                        consumers.entry(result).or_default().push((
+                            StateConsumer::Export {
+                                region: *region_id,
+                                path,
+                            },
+                            true,
+                        ));
+                    }
+                }
+            }
+            worklist.extend(region.op_ids().iter().rev());
         }
     }
     for (value, taken) in &consumers {
@@ -284,7 +341,7 @@ pub(crate) fn verify_state_forks(context: &Context, op_id: OpId) -> Result<(), E
             .any(|(index, &(left, left_reads))| {
                 taken[index + 1..].iter().any(|&(right, right_reads)| {
                     !(permits_read_forks && left_reads && right_reads)
-                        && !mutually_exclusive(context, *value, left, right)
+                        && !mutually_exclusive(context, *value, left, right, &theta_paths)
                 })
             });
         if conflicts {
@@ -297,38 +354,93 @@ pub(crate) fn verify_state_forks(context: &Context, op_id: OpId) -> Result<(), E
     Ok(())
 }
 
-fn mutually_exclusive(context: &Context, value: crate::ValueId, left: OpId, right: OpId) -> bool {
-    let ancestry = |mut op| {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StateConsumer {
+    Op(OpId),
+    Export {
+        region: crate::RegionId,
+        path: ExportPath,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExportPath {
+    Only,
+    Continue,
+    Exit,
+}
+
+impl ExportPath {
+    fn mask(self) -> u8 {
+        match self {
+            Self::Only => 3,
+            Self::Continue => 1,
+            Self::Exit => 2,
+        }
+    }
+}
+
+fn mutually_exclusive(
+    context: &Context,
+    value: crate::ValueId,
+    left: StateConsumer,
+    right: StateConsumer,
+    theta_paths: &std::collections::HashMap<RegionId, std::collections::HashMap<OpId, u8>>,
+) -> bool {
+    if left == right {
+        return false;
+    }
+    let ancestry = |mut consumer| {
         let mut ancestry = Vec::new();
-        while let Some(region) = context.region_of_op(op) {
-            let Some(owner) = context.get_region(region).parent_op() else {
+        let mut region = match consumer {
+            StateConsumer::Op(op) => context.region_of_op(op),
+            StateConsumer::Export { region, .. } => Some(region),
+        };
+        while let Some(current) = region {
+            let Some(owner) = context.get_region(current).parent_op() else {
                 break;
             };
-            ancestry.push((owner, region));
-            op = owner;
+            let paths = match consumer {
+                StateConsumer::Op(op) => theta_paths
+                    .get(&current)
+                    .map_or(3, |paths| paths.get(&op).copied().unwrap_or(0)),
+                StateConsumer::Export { path, .. } => path.mask(),
+            };
+            ancestry.push((owner, current, paths));
+            consumer = StateConsumer::Op(owner);
+            region = context.region_of_op(owner);
         }
         ancestry
     };
     let left_ancestry = ancestry(left);
     let right_ancestry = ancestry(right);
-    let exclusive_arms = left_ancestry.iter().any(|&(owner, left_region)| {
-        right_ancestry
-            .iter()
-            .find(|(candidate, _)| *candidate == owner)
-            .is_some_and(|&(_, right_region)| {
-                if left_region == right_region {
-                    return false;
-                }
-                context
-                    .get_op(owner)
-                    .as_interface::<dyn crate::Gamma>()
-                    .is_some_and(|gamma| {
-                        let arms = gamma.arms();
-                        arms.contains(&left_region) && arms.contains(&right_region)
-                    })
-            })
-    });
-    exclusive_arms || mutually_exclusive_cfg(context, value, left, right)
+    let exclusive_arms = left_ancestry
+        .iter()
+        .any(|&(owner, left_region, left_paths)| {
+            right_ancestry
+                .iter()
+                .find(|(candidate, _, _)| *candidate == owner)
+                .is_some_and(|&(_, right_region, right_paths)| {
+                    if left_region == right_region {
+                        return theta_paths.contains_key(&left_region)
+                            && left_paths & right_paths == 0;
+                    }
+                    context
+                        .get_op(owner)
+                        .as_interface::<dyn crate::Gamma>()
+                        .is_some_and(|gamma| {
+                            let arms = gamma.arms();
+                            arms.contains(&left_region) && arms.contains(&right_region)
+                        })
+                })
+        });
+    exclusive_arms
+        || match (left, right) {
+            (StateConsumer::Op(left), StateConsumer::Op(right)) => {
+                mutually_exclusive_cfg(context, value, left, right)
+            }
+            _ => false,
+        }
 }
 
 fn mutually_exclusive_cfg(

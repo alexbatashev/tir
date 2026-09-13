@@ -198,7 +198,7 @@ fn a_rule_sequence_exports_a_middle_result_and_wires_a_temporary() {
             RuleStep::new(emit_add),
             RuleStep::new(emit_add),
             RuleStep {
-                bindings: &[((0, StepBinding::Result(StepResult { step: 0, result: 0 })))],
+                bindings: &[(0, StepBinding::Result(StepResult { step: 0, result: 0 }))],
                 ..RuleStep::new(emit_add)
             },
         ],

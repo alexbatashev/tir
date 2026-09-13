@@ -1,4 +1,5 @@
 // RUN: tir opt --pass verify-deps %s | filecheck %s
+// RUN: tir opt --pass verify-deps,dce --verify %s | filecheck %s --check-prefix=DCE
 
 module {
   %f = func.func @main(%a: !f64, %b: !f64) -> !f64 {
@@ -9,3 +10,6 @@ module {
 }
 
 // CHECK: fp.add
+// DCE: func.func
+// DCE-NOT: fp.add
+// DCE: module_end

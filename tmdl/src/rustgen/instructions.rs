@@ -1701,6 +1701,7 @@ fn emit_instruction(
     // touches memory is put on it by selection, and a call is handed the
     // chain of the call it finalizes whatever its own opcode says.
     let (reads_memory, writes_memory) = behavior_memory_effects(&inst.behavior);
+    let touches_memory = reads_memory || writes_memory;
     let state_schema = quote! { state: "in_out", };
 
     out.instruction_defs.push(quote! {
@@ -1848,7 +1849,7 @@ fn emit_instruction(
                     }).collect(),
                 };
                 let mut effects = Vec::new();
-                if #reads_memory || #writes_memory {
+                if #touches_memory {
                     effects.push(effect(
                         tir::builtin::StateResource::Memory,
                         if #writes_memory {
