@@ -1,0 +1,32 @@
+// RUN: tir opt --pass restructure-nodes,verify-deps --verify %s | filecheck %s
+
+module {
+  %f = func.func @choose(%condition: !i1, %a: !f32, %b: !f32) -> !fp.rounding {
+    %up = fp.rounding_constant {mode = "toward_positive"} : !fp.rounding
+    %down = fp.rounding_constant {mode = "toward_negative"} : !fp.rounding
+    cfg.cond_br %condition, ^then, ^else
+  ^then:
+    fp.set_round %up
+    %then_value = fp.add %a, %b {semantics = {rounding = "dynamic"}} : !f32
+    cfg.br ^join
+  ^else:
+    fp.set_round %down
+    %else_value = fp.add %a, %b {semantics = {rounding = "dynamic"}} : !f32
+    cfg.br ^join
+  ^join:
+    %mode = fp.get_round : !fp.rounding
+    func.return %mode
+  }
+  module_end
+}
+
+// CHECK: %[[ENV:[0-9]+]] = state.entry_state : !state<fp.env>
+// CHECK: %[[JOIN:[0-9]+]] = scf.switch %{{[0-9]+}} args(%[[ENV]]) (%[[ELSE:[0-9]+]]) {
+// CHECK: %[[DOWN:[0-9]+]] = fp.set_round {{.*}} state(%[[ELSE]])
+// CHECK-NEXT: %{{[0-9]+}}, %[[DOWN_READ:[0-9]+]] = fp.add {{.*}} state(%[[DOWN]]) {semantics = {rounding = "dynamic"}}
+// CHECK: -> %[[DOWN_READ]]
+// CHECK: (%[[THEN:[0-9]+]]) {
+// CHECK: %[[UP:[0-9]+]] = fp.set_round {{.*}} state(%[[THEN]])
+// CHECK-NEXT: %{{[0-9]+}}, %[[UP_READ:[0-9]+]] = fp.add {{.*}} state(%[[UP]]) {semantics = {rounding = "dynamic"}}
+// CHECK: -> %[[UP_READ]]
+// CHECK: %{{[0-9]+}}, %{{[0-9]+}} = fp.get_round state(%[[JOIN]]) : !fp.rounding

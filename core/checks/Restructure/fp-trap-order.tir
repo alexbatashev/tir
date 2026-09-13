@@ -1,0 +1,19 @@
+// RUN: tir opt --pass restructure-nodes,verify-deps --verify %s | filecheck %s
+// RUN: tir opt --pass restructure-nodes,instcombine-nodes,verify-deps --verify %s | filecheck %s
+
+module {
+  %f = func.func @ordered(%slot: !ptr.p<!i32>, %a: !f64, %b: !f64) {
+    %one = constant {value = 1} : !i32
+    %two = constant {value = 2} : !i32
+    ptr.store %one, %slot
+    %quotient = fp.div %a, %b {semantics = {exceptions = "flags_and_traps"}} : !f64
+    ptr.store %two, %slot
+    func.return
+  }
+  module_end
+}
+
+// CHECK: %[[STORE1:[0-9]+]] = ptr.store {{.*}} state(%{{[0-9]+}})
+// CHECK: %{{[0-9]+}}, %[[ENV:[0-9]+]], %[[MEM:[0-9]+]] = fp.div {{.*}} state(%{{[0-9]+}}, %[[STORE1]]) {semantics = {exceptions = "flags_and_traps"}}
+// CHECK-NEXT: %[[STORE2:[0-9]+]] = ptr.store {{.*}} state(%[[MEM]])
+// CHECK-NEXT: -> %[[STORE2]], %[[ENV]]

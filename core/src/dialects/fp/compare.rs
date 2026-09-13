@@ -19,7 +19,7 @@ operation! {
         operands: O { lhs: "crate::builtin::FloatType", rhs: "crate::builtin::FloatType" },
         attributes: A { predicate: "Predicate in FLOAT", semantics: "FpSemantics" },
         results: R { result: "crate::Integer<1>" },
-        interfaces: [ResourceEffects, HasResourceSemantics, crate::interp::Interp],
+        interfaces: [ResourceEffects, HasResourceSemantics, crate::Speculatable, crate::interp::Interp],
         sem: "(set result $cmp_expr)",
         state: "in_out", verifier: "true",
     }
@@ -67,6 +67,14 @@ impl tir::Verifiable for CmpOp {
         }
         let required = required_effects(semantics);
         verify_ports(&self.0, &required)
+    }
+}
+
+impl crate::Speculatable for CmpOp {
+    fn is_speculatable(&self) -> bool {
+        self.semantics()
+            .comparison()
+            .is_ok_and(|s| s.exceptions == Exceptions::Ignore)
     }
 }
 

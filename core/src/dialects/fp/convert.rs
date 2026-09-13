@@ -5,7 +5,7 @@ use super::arithmetic::{
     verify_policy, width_of_float,
 };
 use super::resource::{apply_flags, effect_records, verify_ports};
-use super::{ArithmeticSemantics, IntegerConversionSemantics, Rounding, SubnormalMode};
+use super::{ArithmeticSemantics, Exceptions, IntegerConversionSemantics, Rounding, SubnormalMode};
 use crate::builtin::{FloatType, IntegerType, StateResource};
 use crate::{
     Context, Error, HasResourceSemantics, ResourceAccess, ResourceEffect, ResourceEffects,
@@ -160,7 +160,7 @@ macro_rules! arithmetic_conversion {
             $op {
                 name: $name, dialect: "fp",
                 operands: O { input: $input_type }, attributes: A { semantics: "FpSemantics" },
-                results: R { result: "FloatType" }, interfaces: [ResourceEffects, HasResourceSemantics, crate::interp::Interp],
+                results: R { result: "FloatType" }, interfaces: [ResourceEffects, HasResourceSemantics, crate::Speculatable, crate::interp::Interp],
                 sem: "(set result $value_semantics)",
                 state: "in_out", verifier: "true",
             }
@@ -197,6 +197,12 @@ macro_rules! arithmetic_conversion {
                 verify_arithmetic(context, &self.0, semantics)
             }
         }
+        impl crate::Speculatable for $op {
+            fn is_speculatable(&self) -> bool {
+                self.semantics().arithmetic().is_ok_and(|s| s.exceptions == Exceptions::Ignore)
+            }
+        }
+
         impl ResourceEffects for $op {
             fn resource_effects(&self) -> Vec<ResourceEffect> {
                 let semantics = self.semantics();
@@ -313,7 +319,7 @@ macro_rules! to_integer {
             $op {
                 name: $name, dialect: "fp",
                 operands: O { input: "FloatType" }, attributes: A { semantics: "FpSemantics" },
-                results: R { result: "IntegerType" }, interfaces: [ResourceEffects, HasResourceSemantics, crate::interp::Interp],
+                results: R { result: "IntegerType" }, interfaces: [ResourceEffects, HasResourceSemantics, crate::Speculatable, crate::interp::Interp],
                 sem: "(set result $value_semantics)",
                 state: "in_out", verifier: "true",
             }
@@ -350,6 +356,11 @@ macro_rules! to_integer {
                     ));
                 }
                 verify_ports(&self.0, &integer_effects(semantics))
+            }
+        }
+        impl crate::Speculatable for $op {
+            fn is_speculatable(&self) -> bool {
+                self.semantics().integer_conversion().is_ok_and(|s| s.exceptions == Exceptions::Ignore)
             }
         }
         impl ResourceEffects for $op {

@@ -274,7 +274,12 @@ pub trait Global {
 /// An operation that cannot trap, so it may run whether or not control would
 /// have reached it: a loop cone may hoist it, and a lowering may evaluate it on
 /// a path the source did not take.
-pub trait Speculatable {}
+pub trait Speculatable {
+    /// Whether this instance may execute on a path that did not demand it.
+    fn is_speculatable(&self) -> bool {
+        true
+    }
+}
 
 /// What a non-local exit leaves: the loop or switch nearest around it, or the
 /// enclosing scope carrying `label`.

@@ -403,7 +403,10 @@ impl Driver<'_> {
             return None;
         };
         let source = self.context.get_op(op);
-        if !source.has_interface::<dyn Speculatable>()
+        if !source
+            .clone()
+            .as_interface::<dyn Speculatable>()
+            .is_some_and(|op| op.is_speculatable())
             || !source.regions().is_empty()
             || !source.state_operands().is_empty()
             || source.operands().is_empty()

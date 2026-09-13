@@ -116,7 +116,7 @@ macro_rules! arithmetic_op {
                 operands: O { $($operand: "crate::builtin::FloatType",)+ },
                 attributes: A { semantics: "FpSemantics" },
                 results: R { result: "FloatType" },
-                interfaces: [ResourceEffects, HasResourceSemantics, crate::interp::Interp],
+                interfaces: [ResourceEffects, HasResourceSemantics, crate::Speculatable, crate::interp::Interp],
                 sem: "(set result $value_semantics)",
                 state: "in_out",
                 verifier: "true",
@@ -150,6 +150,12 @@ macro_rules! arithmetic_op {
             fn verify_impl(&self, context: &Context) -> Result<(), Error> {
                 let semantics = self.semantics();
                 verify(context, &self.0, semantics.arithmetic()?)
+            }
+        }
+
+        impl crate::Speculatable for $op {
+            fn is_speculatable(&self) -> bool {
+                self.semantics().arithmetic().is_ok_and(|s| s.exceptions == Exceptions::Ignore)
             }
         }
 
