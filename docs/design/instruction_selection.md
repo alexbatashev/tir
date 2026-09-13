@@ -1281,3 +1281,24 @@ The proof report separates proven rules from unsupported encodings; non-toward-z
 rounded float-to-integer conversions currently need an unsupported bit-blast
 encoding. Failed proofs reject the rule set, and verification mode also rejects
 unsupported proofs.
+
+## Floating-point target coverage
+
+x86-64 and ARM64 require the default floating-point environment. Their function
+entry check rejects a fixed-rounding FP operation together with `fp.set_round`,
+`fp.restore`, `fp.update`, or `fp.hold`, naming both operations. It runs before
+the function's selection graph is built. Observable exceptions, dynamic rounding,
+and environment operations are rejected with the operation named.
+
+| Profile | RISC-V | x86-64 and ARM64 |
+| --- | --- | --- |
+| Scalar fixed rounding | Instruction rounding operands | Existing scalar rules under the default-environment precondition |
+| Observable flags | Single-instruction `Exact` rules | Unsupported |
+| Dynamic rounding | `FRM` field read | Unsupported |
+| Environment fields and snapshots | Fixed CSR instructions and declared hardwired fields | Unsupported |
+| Trapping arithmetic | State-port ordering; native delivery is deferred | Unsupported |
+
+ARM64 FPSR access is deferred to the later target-coverage work. A strict multiply
+followed by an add remains `fp.mul %a, %b : !f64` followed by
+`fp.add %product, %c : !f64`: the default semantics require separate roundings,
+ignore exceptions, and carry no state ports.

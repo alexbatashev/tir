@@ -14,6 +14,7 @@ mod cover;
 mod destruct;
 mod emit;
 mod float_refinement;
+mod fp_environment;
 mod fp_flags;
 mod matches;
 mod node;
@@ -37,6 +38,7 @@ use tir::{
 use tir_adt::APInt;
 use tir_relational::{ClassId as Id, Label as ENode};
 
+pub use fp_environment::check_default_fp_environment;
 pub use rules::{
     CapabilityKind, EmitAttr, EmitSpec, PatternRef, RegOperandSpec, ResultRegSpec, RuleSpec,
     build_rules, emit_with,
@@ -802,6 +804,9 @@ struct ConditionExpr {
 
 pub type OpLowering = Box<dyn Fn(&Context, &OperationRef) -> Result<bool, PassError> + Send + Sync>;
 
+/// Validate a function before instruction selection changes its operations.
+pub type FunctionCheck = fn(&Context, &OperationRef) -> Result<(), PassError>;
+
 pub struct InstructionSelectPass {
     rules: Vec<Rule>,
     compiled_patterns: Vec<CompiledIselPattern>,
@@ -828,6 +833,7 @@ pub struct InstructionSelectPass {
     /// (terminators are then left to the target's op lowerings).
     branch_emitters: Option<BranchEmitters>,
     op_lowerings: Vec<OpLowering>,
+    function_check: Option<FunctionCheck>,
     call_lowering: Option<crate::backend::call_lowering::CallLowering>,
     /// The solved emission plan of every region (or the error explaining why it
     /// cannot be selected), populated up front when the pass visits each function.
@@ -1240,6 +1246,7 @@ impl InstructionSelectPass {
             theory,
             branch_emitters: None,
             op_lowerings: vec![],
+            function_check: None,
             call_lowering: None,
             plans: HashMap::new(),
             emitted_values: HashMap::new(),
@@ -1268,6 +1275,12 @@ impl InstructionSelectPass {
         fields: &[(tir::sem::StateResourceKind, tir::sem::StateFieldKind)],
     ) -> Self {
         self.theory = self.theory.with_hardwired_zero_fields(fields);
+        self
+    }
+
+    /// Check the target's function preconditions before selection begins.
+    pub fn with_function_check(mut self, check: FunctionCheck) -> Self {
+        self.function_check = Some(check);
         self
     }
 
@@ -2803,6 +2816,11 @@ impl Pass for InstructionSelectPass {
         // the condition's *defining op*, which an enclosing region's commit
         // would otherwise have replaced by the time the nested region solves.
         if !op.op().regions().is_empty() {
+            if !self.solved.contains(&op.op().id)
+                && let Some(check) = self.function_check
+            {
+                check(context, op)?;
+            }
             self.begin_function(context, op);
             if let Some(lowering) = &mut self.call_lowering {
                 lowering.prepare_function(context, op)?;

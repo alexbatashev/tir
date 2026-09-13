@@ -1,0 +1,13 @@
+// RUN: not tir mc --march=x86_64 --stage=isel %s 2>&1 | filecheck %s
+// RUN: not tir mc --march=arm64 --stage=isel %s 2>&1 | filecheck %s
+
+module {
+  %main = func.func @main(%a: !f64, %b: !f64) -> !f64 {
+    %env = state.entry_state : !state<fp.env>
+    %value, %next = fp.div %a, %b state(%env) {semantics = {exceptions = "flags"}} : !f64
+    func.return %value state(%next)
+  }
+  module_end
+}
+
+// CHECK: fp.div does not support observable floating-point exceptions
