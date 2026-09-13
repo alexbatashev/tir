@@ -11,8 +11,8 @@ use tir::sem::{ExtendSemBytes, ExtendSemBytesTyped, SymKind};
 use tir::{Context, NewOp, OpHandle, Operation, PassError};
 
 use crate::backend::isel::{
-    EmitRequest, ImmRange, RegisterCapability, RegisterRequirement, Rule, RuleEmitFn, RuleKind,
-    RuleMatch,
+    EmitRequest, ImmRange, RegisterCapability, RegisterRequirement, Rule, RuleKind, RuleMatch,
+    RuleStep, StepResult,
 };
 use crate::backend::regalloc::RegClassId;
 use crate::graph::MetaMutDag;
@@ -24,13 +24,11 @@ pub enum EmitAttr {
     /// `req.results[result]`.
     Result {
         attr: &'static str,
-        result: u16,
         class: RegClassId,
     },
     /// [`EmitAttr::Result`] pinned to one required physical register.
     ResultFixedDef {
         attr: &'static str,
-        result: u16,
         class: RegClassId,
         index: u16,
     },
@@ -112,21 +110,12 @@ pub fn emit_with(
     for entry in spec.attrs {
         let fail = || PassError::RewriteFailed(req.op_id());
         match *entry {
-            EmitAttr::Result {
-                attr,
-                result,
-                class,
-            } => {
-                results.push((port(attr)?, new_result(context, req, result, class)?));
+            EmitAttr::Result { attr, class } => {
+                results.push((port(attr)?, new_result(context, class)));
             }
-            EmitAttr::ResultFixedDef {
-                attr,
-                result,
-                class,
-                index,
-            } => {
+            EmitAttr::ResultFixedDef { attr, class, index } => {
                 pins.insert(attr.to_string(), pin(class, index));
-                results.push((port(attr)?, new_result(context, req, result, class)?));
+                results.push((port(attr)?, new_result(context, class)));
             }
             EmitAttr::Value { attr, symbol } => {
                 operands.push(bind(attr, m.value_binding(symbol).ok_or_else(fail)?)?);
@@ -170,20 +159,16 @@ pub fn emit_with(
     }
     operands.sort_by_key(|(port, _)| *port);
     results.sort_by_key(|(port, _)| *port);
-    let mut operand_values: Vec<tir::ValueId> =
-        operands.into_iter().map(|(_, value)| value).collect();
-    let mut result_values: Vec<tir::ValueId> =
-        results.into_iter().map(|(_, value)| value).collect();
-    // An opcode that touches memory carries the chain of the access it covers,
-    // as its trailing ports: the state the IR access read, and the state it
-    // published, taken over as this instruction's own definition.
-    let effects = spec.info.effects;
-    if effects.reads || effects.writes {
-        let state = req
-            .state
-            .ok_or_else(|| PassError::RewriteFailed(req.op_id()))?;
-        operand_values.push(state.observed);
-        result_values.extend(state.published);
+    let operand_values: Vec<tir::ValueId> = operands.into_iter().map(|(_, value)| value).collect();
+    let result_values: Vec<tir::ValueId> = results.into_iter().map(|(_, value)| value).collect();
+    if spec.info.effects.reads || spec.info.effects.writes {
+        let has_memory_state = req.states.iter().any(|state| {
+            context.state_resource(context.get_value(state.observed).ty())
+                == Some(tir::builtin::StateResource::Memory)
+        });
+        if !has_memory_state {
+            return Err(PassError::RewriteFailed(req.op_id()));
+        }
     }
     let instance = NewOp::new_dynamic(
         spec.op,
@@ -198,17 +183,9 @@ pub fn emit_with(
 
 /// The value a result port defines: a fresh one of the port's class, standing
 /// for the mid-end result the rule covers.
-fn new_result(
-    context: &Context,
-    req: &EmitRequest,
-    result: u16,
-    class: RegClassId,
-) -> Result<tir::ValueId, PassError> {
-    req.results
-        .get(result as usize)
-        .ok_or_else(|| PassError::RewriteFailed(req.op_id()))?;
+fn new_result(context: &Context, class: RegClassId) -> tir::ValueId {
     let ty = crate::backend::RegClassType::new(context, class);
-    Ok(context.create_value(ty, None).id())
+    context.create_value(ty, None).id()
 }
 
 fn pin(class: RegClassId, index: u16) -> AttributeValue {
@@ -253,23 +230,27 @@ pub struct PatternRef {
     pub float_width: Option<u32>,
 }
 
+/// One clause in a selection rule's feature requirement.
+pub enum FeatureClause {
+    /// At least one listed feature must be enabled.
+    Any(&'static [u16]),
+    /// No listed feature may be enabled.
+    None(&'static [u16]),
+}
+
 /// One selection rule, declaratively.
 pub struct RuleSpec {
     pub name: &'static str,
-    /// Feature ids (`Feature as u16`); the rule is available when any is
-    /// enabled.
-    pub features: &'static [u16],
+    /// Feature clauses; every clause must be satisfied.
+    pub features: &'static [FeatureClause],
     pub pattern: PatternRef,
     /// The instructions this rule emits; its cost is the sum over them of
     /// [`crate::backend::InstrInfo::cost`] times
     /// [`crate::backend::isel::LATENCY_COST_SCALE`] plus the encoding size.
     pub emits: &'static [&'static crate::backend::InstrInfo],
     pub kind: RuleKind,
-    /// Emitter for the prelude instruction, when the rule emits a flag-setting
-    /// companion first. Generated as a shim over [`emit_with`].
-    pub prelude_emit: Option<RuleEmitFn>,
-    /// Generated shim over [`emit_with`] with the rule's [`EmitSpec`].
-    pub emit_fn: RuleEmitFn,
+    pub steps: &'static [RuleStep],
+    pub outputs: &'static [StepResult],
     pub constraints: &'static [(u32, OperandConstraint)],
     pub registers: &'static [RegOperandSpec],
     pub result: Option<ResultRegSpec>,
@@ -335,8 +316,14 @@ pub fn build_rules(
 ) -> Vec<Rule> {
     let mut rules = Vec::new();
     for spec in specs {
-        if !spec.features.is_empty() && !spec.features.iter().any(|f| enabled_features.contains(f))
-        {
+        if !spec.features.iter().all(|requirement| match requirement {
+            FeatureClause::Any(features) => features
+                .iter()
+                .any(|feature| enabled_features.contains(feature)),
+            FeatureClause::None(features) => features
+                .iter()
+                .all(|feature| !enabled_features.contains(feature)),
+        }) {
             continue;
         }
         let base_cost = spec
@@ -346,7 +333,7 @@ pub fn build_rules(
                 info.cost * crate::backend::isel::LATENCY_COST_SCALE + u32::from(info.width_bytes.0)
             })
             .sum();
-        let operand_registers = spec
+        let operand_registers: Vec<(u32, RegisterRequirement)> = spec
             .registers
             .iter()
             .filter_map(|r| {
@@ -362,7 +349,8 @@ pub fn build_rules(
             pattern: build_pattern(context, kinds, blob, &spec.pattern),
             base_cost,
             kind: spec.kind,
-            prelude_emit: spec.prelude_emit,
+            steps: spec.steps.to_vec(),
+            outputs: spec.outputs.to_vec(),
             operand_constraints: spec.constraints.to_vec(),
             operand_registers,
             result_register,
@@ -371,7 +359,6 @@ pub fn build_rules(
             guarded_semantics: spec
                 .guarded
                 .map(|g| build_pattern(context, kinds, blob, &g)),
-            emit_fn: spec.emit_fn,
         });
     }
     rules

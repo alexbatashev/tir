@@ -69,13 +69,8 @@ fn emit_fixed_register_rules<'a>(
             &isa_param_values,
         );
 
-        if let Some(definer) = classify_definer(
-            inst,
-            &op_name,
-            &mnemonic,
-            &ops,
-            register_index_map,
-        ) {
+        if let Some(definer) = classify_definer(inst, &op_name, &mnemonic, &ops, register_index_map)
+        {
             definers.push(definer);
         } else if let Some(reader) = classify_reader(
             inst,
@@ -167,7 +162,11 @@ fn emit_division_rules(
 
     // The remainder is the then-arm write to the sibling register (`rdx`); its
     // value is the Euclidean identity, matching the `remsi`/`remui` semantics.
-    if let Some((_, remainder_rhs)) = reader.then_writes.iter().find(|(reg, _)| reg == sibling_reg) {
+    if let Some((_, remainder_rhs)) = reader
+        .then_writes
+        .iter()
+        .find(|(reg, _)| reg == sibling_reg)
+    {
         emit_one_division_rule(
             definer,
             reader,
@@ -361,12 +360,20 @@ fn substitute_symbol_with_subgraph(
     use tir_graph::Dag;
     use tir_symbolic::lang::{SymKind, SymPayload};
     use tir_symbolic::sem::{CopyAction, copy_subgraph_with};
-    copy_subgraph_with(dst, src, node, memo, &mut |dst, node| match src.get_leaf_data(node) {
-        Some(SymPayload::SymbolId(id)) if *id == symbol && *src.get_node(node) == SymKind::Symbol => {
-            CopyAction::Replace(copy_subgraph(dst, src, replacement, &mut HashMap::new()))
-        }
-        _ => CopyAction::Keep,
-    })
+    copy_subgraph_with(
+        dst,
+        src,
+        node,
+        memo,
+        &mut |dst, node| match src.get_leaf_data(node) {
+            Some(SymPayload::SymbolId(id))
+                if *id == symbol && *src.get_node(node) == SymKind::Symbol =>
+            {
+                CopyAction::Replace(copy_subgraph(dst, src, replacement, &mut HashMap::new()))
+            }
+            _ => CopyAction::Keep,
+        },
+    )
 }
 
 /// Emit one division value rule (quotient or remainder) for a (definer, reader)
@@ -412,8 +419,10 @@ fn emit_one_division_rule(
         return;
     };
     // The single register operand is the divisor.
-    let Some((divisor_name, Type::Struct(divisor_class))) =
-        reader.ops.iter().find(|(_, ty)| matches!(ty, Type::Struct(_)))
+    let Some((divisor_name, Type::Struct(divisor_class))) = reader
+        .ops
+        .iter()
+        .find(|(_, ty)| matches!(ty, Type::Struct(_)))
     else {
         return;
     };
@@ -483,25 +492,21 @@ fn emit_one_division_rule(
     let prelude_key = format!("prelude_{}_{}_via_{}", definer_lower, kind, reader_lower);
     let rule_name = format!("{}+{} {}", definer.mnemonic, reader.mnemonic, kind);
 
-    let shared_isas: Vec<String> = reader
-        .inst
-        .for_isas
-        .iter()
-        .filter(|isa| definer.inst.for_isas.contains(isa))
-        .cloned()
-        .collect();
+    let shared_features = RuleFeatures::any(&reader.inst.for_isas)
+        .and(RuleFeatures::any(&definer.inst.for_isas))
+        .expect("positive feature requirements are compatible");
 
     // Whichever register holds this rule's result is defined as the result
     // virtual (`FixedDef`); the other written register is clobbered (`Physical`).
     let dividend_def_attr = if result_is_dividend {
-        emit_attr_result_fixed_def(&dividend_def_slot, 0, &class_id, dividend_index)
+        emit_attr_result_fixed_def(&dividend_def_slot, &class_id, dividend_index)
     } else {
         emit_attr_physical(&dividend_def_slot, &class_id, dividend_index)
     };
     let sibling_def_attr = if result_is_dividend {
         emit_attr_physical(&sibling_def_slot, &sibling_class_id, sibling_index)
     } else {
-        emit_attr_result_fixed_def(&sibling_def_slot, 0, &sibling_class_id, sibling_index)
+        emit_attr_result_fixed_def(&sibling_def_slot, &sibling_class_id, sibling_index)
     };
 
     // A definer that extends the dividend (`cdq`) reads its register and has a
@@ -534,6 +539,7 @@ fn emit_one_division_rule(
         &definer_op_ty,
         &prelude_attrs,
         &definer.inst.name,
+        &quote! {},
     );
 
     let emit_attrs = [
@@ -550,20 +556,35 @@ fn emit_one_division_rule(
         &reader_op_ty,
         &emit_attrs,
         &reader.inst.name,
+        &quote! {},
     );
     let constraints = [
-        constraint_entry(lhs_symbol, quote! { tir::graph::OperandConstraint::Register }),
-        constraint_entry(divisor_symbol, quote! { tir::graph::OperandConstraint::Register }),
+        constraint_entry(
+            lhs_symbol,
+            quote! { tir::graph::OperandConstraint::Register },
+        ),
+        constraint_entry(
+            divisor_symbol,
+            quote! { tir::graph::OperandConstraint::Register },
+        ),
     ];
+    let steps = [
+        emit_rule_step(&prelude_shim, quote! { &[] }, quote! { &[] }),
+        emit_rule_step(&emit_shim, quote! { &[] }, quote! { &[] }),
+    ];
+    let outputs = [emit_step_result(1, 0)];
+    let definer_info = info_ident(&definer.inst.name);
+    let reader_info = info_ident(&reader.inst.name);
+    let emits = [definer_info, reader_info];
     let (rule_ts, rule_ident) = emit_rule_spec(
         &rule_key,
         &rule_name,
-        &shared_isas,
+        &shared_features,
         &pattern_spec,
-        &[&definer.inst.name, &reader.inst.name],
+        &emits,
         quote! { tir::backend::isel::RuleKind::Value },
-        Some(&prelude_shim),
-        &emit_shim,
+        &steps,
+        &outputs,
         &constraints,
         &operand_register_specs,
         None,

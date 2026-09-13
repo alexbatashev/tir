@@ -41,7 +41,7 @@ module {
 }
 
 // CHECK: %{{[0-9]+}} = func.func @sum(%[[N:[0-9]+]]: !i32) -> !i32 {
-// CHECK: %[[ENTRY:[0-9]+]] = state.entry_state
+// CHECK: %[[ENTRY:[0-9]+]] = state.entry_state : !state<memory>
 // CHECK-NEXT: %[[EI:[0-9]+]], %[[ET:[0-9]+]] = state.split state(%[[ENTRY]])
 // CHECK-NEXT: %[[TS:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[T:[0-9]+]] state(%[[ET]])
 // CHECK-NEXT: %[[IS:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[I:[0-9]+]] state(%[[EI]])

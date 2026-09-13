@@ -1250,7 +1250,7 @@ struct StackAlloca {
 
 /// Erase the allocations, keeping the chains they rooted. A slot's memory is its
 /// own — the allocation is what said so — so with the op gone the chain starts at
-/// a `state.entry_state` of its own instead, and the accesses on it stay ordered
+/// a `state.entry_state : !state<memory>` of its own instead, and the accesses on it stay ordered
 /// against each other and against nothing else.
 fn erase_stack_allocas(context: &Context, allocas: &[StackAlloca]) -> Result<(), PassError> {
     for alloca in allocas {
@@ -1260,7 +1260,7 @@ fn erase_stack_allocas(context: &Context, allocas: &[StackAlloca]) -> Result<(),
         let op_ref = op_ref_in(context, alloca.op_id);
         if let Some(published) = op_ref.op().state_results().first().copied() {
             let root = tir::state::EntryStateOpBuilder::new(context)
-                .state_result()
+                .state_result(tir::builtin::StateType::memory(context))
                 .build();
             let root_state = root.result();
             context.insert_op_before(&op_ref, &root)?;
@@ -1328,7 +1328,7 @@ impl SlotChain {
             states => {
                 let join = tir::state::JoinOpBuilder::new(context)
                     .states(states.to_vec())
-                    .state_result()
+                    .state_result(context.get_value(states[0]).ty())
                     .build();
                 let merged = join.result();
                 context.insert_op_before(before, &join)?;
@@ -1340,13 +1340,13 @@ impl SlotChain {
     }
 
     /// The memory the slot holds, opening the block's chain at a
-    /// `state.entry_state` where this is its first access.
+    /// `state.entry_state : !state<memory>` where this is its first access.
     fn root(&mut self, context: &Context, before: &OperationRef) -> Result<ValueId, PassError> {
         if let Some(written) = self.written {
             return Ok(written);
         }
         let root = tir::state::EntryStateOpBuilder::new(context)
-            .state_result()
+            .state_result(tir::builtin::StateType::memory(context))
             .build();
         let state = root.result();
         context.insert_op_before(before, &root)?;

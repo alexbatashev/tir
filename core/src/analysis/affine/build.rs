@@ -367,7 +367,11 @@ impl<'a> Builder<'a> {
         };
         let (args, latched, inits) = (carried.args, carried.latched, carried.inits);
         // A chain the loop carries is memory order, not a recurrence.
-        for port in (0..args.len()).filter(|&port| !self.context.get_value(args[port]).is_state()) {
+        for port in (0..args.len()).filter(|&port| {
+            !self
+                .context
+                .is_state_type(self.context.get_value(args[port]).ty())
+        }) {
             self.ports.push(Port {
                 arg: args[port],
                 recurrence: self.recurrence(args[port], latched[port], inits[port]),

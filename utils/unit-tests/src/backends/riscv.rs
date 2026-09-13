@@ -1,6 +1,9 @@
 //! Unit tests for the `tir-riscv` backend's public API.
 
+use tir::backend::isel::prove_guarded_relaxations;
 use tir::backend::TargetMachine;
+use tir::graph::{Dag, MutDag};
+use tir::sem::{FloatFormat, SemType, SymKind, SymPayload};
 use tir::Context;
 use tir_riscv::{Feature, RegClass, TargetConfig};
 
@@ -261,6 +264,228 @@ fn isel_rules_filter_by_feature_set() {
     assert!(rv64ifd.contains(&"fadddrne"));
     assert!(rv64ifd.contains(&"fmvdx"));
     assert!(rv64ifd.contains(&"fstoredouble"));
+}
+
+#[test]
+fn state_preserving_float_sequences_prove_complete_behavior() {
+    let context = Context::with_default_dialects();
+    for march in ["rv32ifd", "rv64ifd"] {
+        let config = TargetConfig::parse(march, None, None).unwrap();
+        let rules: Vec<_> = tir_riscv::get_isel_rules(&context, config.features())
+            .into_iter()
+            .filter(|rule| rule.steps.len() == 3)
+            .collect();
+
+        assert!(!rules.is_empty(), "{march}");
+        prove_guarded_relaxations(&rules).unwrap();
+    }
+}
+
+#[test]
+fn directed_float_rule_keeps_its_rounding_mode() {
+    let context = Context::with_default_dialects();
+    let rules = tir_riscv::get_isel_rules(
+        &context,
+        &[Feature::RV64I, Feature::F, Feature::F64, Feature::D],
+    );
+    let rule = rules.iter().find(|rule| rule.name == "fadddrup").unwrap();
+    let event = rule.pattern.root().unwrap();
+    assert_eq!(*rule.pattern.get_kind(event), SymKind::StateResult);
+    let value = rule.pattern.children(event).next().unwrap();
+    assert_eq!(*rule.pattern.get_kind(value), SymKind::FPValue);
+    let outcome = rule.pattern.children(value).next().unwrap();
+    assert_eq!(*rule.pattern.get_kind(outcome), SymKind::FAddRound);
+    let rounding = rule.pattern.children(outcome).last().unwrap();
+    assert!(matches!(
+        rule.pattern.get_leaf_data(rounding),
+        Some(SymPayload::Int(value)) if value.width() == 3 && value.to_u64() == 3
+    ));
+}
+
+#[test]
+fn float_comparison_rule_infers_contextual_literal_widths() {
+    let context = Context::with_default_dialects();
+    let rules = tir_riscv::get_isel_rules(
+        &context,
+        &[Feature::RV64I, Feature::F, Feature::F64, Feature::D],
+    );
+    let rule = rules.iter().find(|rule| rule.name == "feqd").unwrap();
+
+    let result = tir::sem::infer_types(&rule.pattern, |_| None);
+    assert!(
+        result.is_ok(),
+        "feqd pattern type inference failed: {result:?}"
+    );
+}
+
+#[test]
+fn double_comparison_rules_accept_float_register_operands() {
+    let context = Context::with_default_dialects();
+    let rules = tir_riscv::get_isel_rules(
+        &context,
+        &[Feature::RV64I, Feature::F, Feature::F64, Feature::D],
+    );
+    let f64 = SemType::Float(FloatFormat::new(11, 52));
+
+    for name in ["feqd", "fltd", "fled"] {
+        let rule = rules.iter().find(|rule| rule.name == name).unwrap();
+        let result = tir::sem::infer_types(&rule.pattern, |node| {
+            let Some(SymPayload::SymbolId(symbol)) = rule.pattern.get_leaf_data(node) else {
+                return None;
+            };
+            let requirement = rule
+                .operand_registers
+                .iter()
+                .find_map(|(operand, requirement)| (operand == symbol).then_some(requirement))?;
+            if requirement.accepts(&f64) && !requirement.accepts(&SemType::bits(64)) {
+                Some(f64.clone())
+            } else {
+                Some(SemType::bits(requirement.width()))
+            }
+        });
+        assert!(
+            result.is_ok(),
+            "{name} pattern rejects its declared register operand types: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn dynamic_float_rule_derives_rounding_and_flag_effects() {
+    let context = Context::with_default_dialects();
+    let rules = tir_riscv::get_isel_rules(
+        &context,
+        &[Feature::RV64I, Feature::F, Feature::F64, Feature::D],
+    );
+    let rule = rules.iter().find(|rule| rule.name == "faddd").unwrap();
+    let kinds: Vec<_> = rule
+        .pattern
+        .preorder(rule.pattern.root().unwrap())
+        .map(|node| *rule.pattern.get_kind(node))
+        .collect();
+    assert!(kinds.contains(&SymKind::StateResult));
+    assert!(kinds.contains(&SymKind::StateAssign));
+    assert!(!kinds.contains(&SymKind::StateIf));
+    assert!(!kinds.contains(&SymKind::StateTrap));
+    assert!(
+        kinds
+            .iter()
+            .filter(|kind| **kind == SymKind::StateRead)
+            .count()
+            >= 2
+    );
+    let guarded = rule
+        .guarded_semantics
+        .as_ref()
+        .expect("dynamic rounding keeps its invalid-mode behavior");
+    let guarded_kinds: Vec<_> = guarded
+        .preorder(guarded.root().unwrap())
+        .map(|node| *guarded.get_kind(node))
+        .collect();
+    assert!(guarded_kinds.contains(&SymKind::StateIf));
+    assert!(guarded_kinds.contains(&SymKind::StateTrap));
+    let fallback =
+        tir_symbolic::lang::selection_fallback(guarded, guarded.root().unwrap()).unwrap();
+    let fallback_kinds: Vec<_> = fallback
+        .preorder(fallback.root().unwrap())
+        .map(|node| *fallback.get_kind(node))
+        .collect();
+    assert!(!fallback_kinds.contains(&SymKind::StateIf));
+    assert!(!fallback_kinds.contains(&SymKind::StateTrap));
+    prove_guarded_relaxations(std::slice::from_ref(rule)).unwrap();
+}
+
+#[test]
+fn dynamic_float_rule_rejects_guard_that_traps_valid_rounding_mode() {
+    let context = Context::with_default_dialects();
+    let mut rules = tir_riscv::get_isel_rules(
+        &context,
+        &[Feature::RV64I, Feature::F, Feature::F64, Feature::D],
+    );
+    let rule = rules.iter_mut().find(|rule| rule.name == "faddd").unwrap();
+    let guarded = rule.guarded_semantics.as_mut().unwrap();
+    let state_if = guarded
+        .preorder(guarded.root().unwrap())
+        .find(|node| *guarded.get_kind(*node) == SymKind::StateIf)
+        .unwrap();
+    let condition = guarded.children(state_if).next().unwrap();
+    assert_eq!(*guarded.get_kind(condition), SymKind::UGt);
+    let threshold = guarded.children(condition).nth(1).unwrap();
+    assert!(matches!(
+        guarded.get_leaf_data(threshold),
+        Some(SymPayload::Int(value))
+            if value.to_u64() == tir_adt::RoundingMode::TiesToAway as u64
+    ));
+    guarded.set_leaf_data(
+        threshold,
+        SymPayload::Int(tir_adt::APInt::new(
+            3,
+            tir_adt::RoundingMode::TowardPositive as u64,
+        )),
+    );
+
+    assert!(prove_guarded_relaxations(std::slice::from_ref(rule)).is_err());
+}
+
+#[test]
+fn fixed_float_rule_rejects_conditional_wrong_flag_update() {
+    let context = Context::with_default_dialects();
+    let mut rules = tir_riscv::get_isel_rules(
+        &context,
+        &[Feature::RV64I, Feature::F, Feature::F64, Feature::D],
+    );
+    let rule_index = rules
+        .iter()
+        .position(|rule| rule.name == "fadddrne")
+        .unwrap();
+    prove_guarded_relaxations(std::slice::from_ref(&rules[rule_index])).unwrap();
+    let rule = &mut rules[rule_index];
+    let guarded = rule.guarded_semantics.as_mut().unwrap();
+    let root = guarded.root().unwrap();
+    let flags_assign = guarded
+        .preorder(root)
+        .find(|node| {
+            *guarded.get_kind(*node) == SymKind::StateAssign
+                && guarded
+                    .children(*node)
+                    .nth(2)
+                    .and_then(|field| guarded.get_leaf_data(field))
+                    .is_some_and(|payload| {
+                        matches!(payload, SymPayload::Int(value)
+                            if value.to_u64() == tir::ResourceField::FpFlags.semantic_code())
+                    })
+        })
+        .unwrap();
+    let assign_children: Vec<_> = guarded.children(flags_assign).collect();
+    let original_flags = *assign_children.last().unwrap();
+    let condition = guarded.add_node(SymKind::Constant);
+    guarded.set_leaf_data(condition, SymPayload::Int(tir_adt::APInt::new(1, 1)));
+    let wrong_flags = guarded.add_node(SymKind::Constant);
+    guarded.set_leaf_data(wrong_flags, SymPayload::Int(tir_adt::APInt::new(5, 0x1f)));
+    let corrupted_flags = guarded.add_node(SymKind::If);
+    for child in [condition, wrong_flags, original_flags] {
+        guarded.add_edge(corrupted_flags, child);
+    }
+    let replacement = guarded.add_node(SymKind::StateAssign);
+    for &child in &assign_children[..assign_children.len() - 1] {
+        guarded.add_edge(replacement, child);
+    }
+    guarded.add_edge(replacement, corrupted_flags);
+    let root_children: Vec<_> = guarded.children(root).collect();
+    assert!(root_children.contains(&flags_assign));
+    let replacement_root = guarded.add_node(SymKind::StateResult);
+    for child in root_children {
+        guarded.add_edge(
+            replacement_root,
+            if child == flags_assign {
+                replacement
+            } else {
+                child
+            },
+        );
+    }
+
+    assert!(prove_guarded_relaxations(std::slice::from_ref(rule)).is_err());
 }
 
 fn features(march: &str, mattr: Option<&str>) -> Vec<Feature> {

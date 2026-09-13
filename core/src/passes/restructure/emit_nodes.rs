@@ -43,21 +43,29 @@ pub fn emit(
     for (parameter, port) in parameters.iter().zip(&ports) {
         env.insert(cfg.value_var[&parameter.id()], port.id());
     }
-    // The memory the function is entered with is one state; the chains it is
-    // threaded on are that state split once, and a function on one chain is
-    // that state itself.
-    if let Some((&first, rest)) = cfg.chains.split_first() {
-        let root = EntryStateOpBuilder::new(context).state_result().build();
+    let mut resource_chains: BTreeMap<crate::builtin::StateResource, Vec<VarId>> = BTreeMap::new();
+    for &chain in &cfg.entry_chains {
+        let resource = context
+            .state_resource(cfg.var_types[chain])
+            .expect("dependency variable has a state type");
+        resource_chains.entry(resource).or_default().push(chain);
+    }
+    for (resource, chains) in resource_chains {
+        let state_type = crate::builtin::StateType::new(context, resource);
+        let root = EntryStateOpBuilder::new(context)
+            .state_result(state_type)
+            .build();
         context.add(body, root.id());
-        if rest.is_empty() {
-            env.insert(first, root.result());
+        if chains.len() == 1 {
+            env.insert(chains[0], root.result());
         } else {
+            debug_assert_eq!(resource, crate::builtin::StateResource::Memory);
             let split = SplitOpBuilder::new(context)
                 .state(root.result())
-                .states(cfg.chains.len())
+                .states(std::iter::repeat_n(state_type, chains.len()))
                 .build();
             context.add(body, split.id());
-            for (&chain, state) in cfg.chains.iter().zip(split.states()) {
+            for (&chain, state) in chains.iter().zip(split.states()) {
                 env.insert(chain, state);
             }
         }
@@ -187,16 +195,38 @@ impl Emitter<'_> {
                     .collect()
             }
         };
-        let is_state = |value: &ValueId| self.context.get_value(*value).is_state();
-        let chains: Vec<ValueId> = results.iter().copied().filter(is_state).collect();
-        if chains.len() > 1 {
+        let is_state = |value: &ValueId| {
+            self.context
+                .is_state_type(self.context.get_value(*value).ty())
+        };
+        let states: Vec<ValueId> = results.iter().copied().filter(is_state).collect();
+        if !states.is_empty() {
             results.retain(|value| !is_state(value));
-            let join = JoinOpBuilder::new(self.context)
-                .states(chains)
-                .state_result()
-                .build();
-            self.context.add(region, join.id());
-            results.push(join.result());
+            let mut by_resource: BTreeMap<crate::builtin::StateResource, Vec<ValueId>> =
+                BTreeMap::new();
+            for state in states {
+                let resource = self
+                    .context
+                    .state_resource(self.context.get_value(state).ty())
+                    .expect("dependency result has a state type");
+                by_resource.entry(resource).or_default().push(state);
+            }
+            for (resource, states) in by_resource {
+                if states.len() == 1 {
+                    results.push(states[0]);
+                    continue;
+                }
+                if resource != crate::builtin::StateResource::Memory {
+                    return Err(unsupported("several environments leave one executed path"));
+                }
+                let state_type = self.context.get_value(states[0]).ty();
+                let join = JoinOpBuilder::new(self.context)
+                    .states(states)
+                    .state_result(state_type)
+                    .build();
+                self.context.add(region, join.id());
+                results.push(join.result());
+            }
         }
         self.context.set_region_results(region, results);
         Ok(())
@@ -281,7 +311,7 @@ impl Emitter<'_> {
     ) -> Result<RegionId, PassError> {
         let state_ports: Vec<Value> = chains
             .iter()
-            .map(|_| self.context.create_value(TypeId::STATE, None))
+            .map(|chain| self.context.create_value(self.cfg.var_types[*chain], None))
             .collect();
         let region = self
             .context

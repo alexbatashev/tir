@@ -345,7 +345,7 @@ fn every_edit_bumps_the_spine() {
             context.append_block_argument(body.id(), i32);
         }),
         ("set block attribute", |_context, body| {
-            body.set_attr("fpmath", tir::attributes::AttributeValue::Bool(true));
+            body.set_attr("tag", tir::attributes::AttributeValue::Bool(true));
         }),
         ("add block to region", |context, body| {
             let region = context.parent_region(body.id()).unwrap();
@@ -613,7 +613,7 @@ fn setting_every_operand_relinks_the_uses() {
 fn use_indices_follow_a_port_into_its_place() {
     let context = Context::with_default_dialects();
     let (_, d, add) = add_fixture(&context);
-    let token = context.create_state();
+    let token = context.create_state(tir::builtin::StateResource::Memory);
 
     context.append_operand(add, token);
     context.append_operand(add, d);

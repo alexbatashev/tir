@@ -14,6 +14,17 @@ struct InstructionSemantics {
     /// The full destination expression before proposing a generalized selection
     /// pattern. Rule validation proves the retained expression refines it.
     guarded_semantics: Option<(tir_symbolic::sem::SemGraph, tir_graph::NodeId)>,
+    /// Present when the pattern itself is an exact logical FP-state transition.
+    fp_state: Option<(
+        tir_symbolic::lang::StateFieldKind,
+        tir_symbolic::lang::StateAccessKind,
+    )>,
+}
+
+#[derive(Default)]
+struct FpRegisterRoles {
+    flags: HashSet<(String, u32)>,
+    rounding: HashSet<(String, u32)>,
 }
 
 /// The selectable semantics of a conditional-branch instruction: the branch
@@ -581,6 +592,8 @@ fn foldable_kind(kind: &tir_symbolic::lang::SymKind) -> bool {
             | K::Extract
             | K::Log2Ceil
             | K::Concat
+            | K::Eq
+            | K::Ne
     )
 }
 
@@ -909,6 +922,7 @@ fn emit_flag_definer_prelude(
         &d_op_ty_ident,
         &prelude_attrs,
         &d.inst.name,
+        &quote! {},
     );
     let emitter_ts = if emitted_preludes.insert(d.inst.name.clone()) {
         emitter_ts

@@ -7,9 +7,9 @@ module {
     %8 = tuple_get %6 {index = 1} : !f64
     %9 = tuple_get %6 {index = 2} : !f64
     %10 = tuple_get %6 {index = 3} : !f64
-    %11 = addf %7, %8 : !f64
-    %12 = addf %9, %10 : !f64
-    %13 = addf %11, %12 : !f64
+    %11 = fp.add %7, %8 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f64
+    %12 = fp.add %9, %10 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f64
+    %13 = fp.add %11, %12 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f64
     func.return %13
   }
   module_end

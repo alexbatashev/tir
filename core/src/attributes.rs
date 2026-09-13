@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 pub use tir_adt::Predicate;
 use tir_adt::Sym;
@@ -16,8 +16,9 @@ pub enum AttributeValue {
     Bool(bool),
     Array(Box<[AttributeValue]>),
     Dict(Box<BTreeMap<String, AttributeValue>>),
+    FpSemantics(Arc<crate::fp::Semantics>),
     Register(RegisterAttr),
-    /// The comparison a `cmpi`, `cmpf` or `ptr.cmp` performs.
+    /// The comparison a `cmpi`, `fp.cmp` or `ptr.cmp` performs.
     Predicate(Predicate),
     /// A reference to an SSA value that is not an operand: the `asm.symbol`
     /// argument list, which names values the ABI places rather than values the
@@ -158,6 +159,7 @@ impl AttributeValue {
                 }
                 fmt.write("}")
             }
+            AttributeValue::FpSemantics(semantics) => semantics.print(fmt),
             AttributeValue::Register(r) => match r {
                 RegisterAttr::Physical { class, index } => {
                     fmt.write(format!("{}[{}]", class.name(), index))

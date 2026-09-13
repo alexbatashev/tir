@@ -236,6 +236,7 @@ struct TargetTables<'a> {
     register_index_map: HashMap<(String, String), u32>,
     pc_classes: HashSet<String>,
     flag_classes: HashSet<String>,
+    fp_register_roles: FpRegisterRoles,
     register_name_map: HashMap<(String, u32), String>,
     register_files: HashMap<String, String>,
     float_classes: HashSet<String>,
@@ -258,20 +259,100 @@ struct InstrEmitCtx<'a> {
     defined_register_operands: &'a [String],
     read_register_operands: &'a HashSet<String>,
     implicit_reads: &'a [(String, u32)],
+    emitter_visibility: proc_macro2::TokenStream,
+}
+
+fn module_fragment_visibility(module_fragment: bool) -> proc_macro2::TokenStream {
+    if module_fragment {
+        quote! { pub(super) }
+    } else {
+        quote! {}
+    }
+}
+
+fn rule_step_states(
+    semantics: &InstructionSemantics,
+    behavior: &ast::Expr,
+) -> proc_macro2::TokenStream {
+    let updates_fp_environment = behavior_updates_fp_environment(behavior);
+    let (reads_memory, writes_memory) = behavior_memory_effects(behavior);
+    let mut step_state_resources = Vec::new();
+    if reads_memory || writes_memory {
+        step_state_resources.push(quote! { tir::builtin::StateResource::Memory });
+    }
+    if semantics.fp_state.is_some() || updates_fp_environment {
+        step_state_resources.push(quote! { tir::builtin::StateResource::FpEnv });
+    }
+    quote! { &[#(#step_state_resources),*] }
+}
+
+fn register_operand_emit_attrs(
+    ctx: &InstrEmitCtx<'_>,
+    semantics: &InstructionSemantics,
+    fixed_operands: Option<&FixedRegisterOperands>,
+) -> Vec<proc_macro2::TokenStream> {
+    let mut attrs = Vec::new();
+    for (op_name, op_ty) in ctx.ops {
+        match op_ty {
+            Type::Struct(class_name) => {
+                let class_id = reg_class_id(class_name);
+                if let Some(index) = fixed_operands.and_then(|fixed| fixed.0.get(op_name)).copied()
+                {
+                    attrs.push(emit_attr_physical(op_name, &class_id, index));
+                    if ctx.defined_register_operands.iter().any(|name| name == op_name)
+                        && ctx.read_register_operands.contains(op_name)
+                    {
+                        attrs.push(emit_attr_physical(
+                            &format!("{op_name}_tied"),
+                            &class_id,
+                            index,
+                        ));
+                    }
+                } else if ctx.defined_register_operands.iter().any(|name| name == op_name) {
+                    attrs.push(emit_attr_result(op_name, &class_id));
+                    if ctx.read_register_operands.contains(op_name)
+                        && let Some(sym) = semantics.variable_symbols.get(op_name)
+                    {
+                        attrs.push(emit_attr_value(&format!("{op_name}_tied"), *sym));
+                    }
+                } else if let Some(sym) = semantics.variable_symbols.get(op_name) {
+                    attrs.push(emit_attr_value(op_name, *sym));
+                } else if let Some(Some(reg_idx)) =
+                    semantics.fixed_register_by_class.get(class_name)
+                {
+                    attrs.push(emit_attr_physical(op_name, &class_id, *reg_idx));
+                }
+            }
+            Type::Integer | Type::Bits(_) => {
+                if let Some(sym) = semantics.variable_symbols.get(op_name) {
+                    attrs.push(emit_attr_int(op_name, *sym));
+                }
+            }
+            Type::String => {}
+            _ => {}
+        }
+    }
+    attrs
 }
 
 fn emit_value_rules(
     tables: &TargetTables<'_>,
     ctx: &InstrEmitCtx<'_>,
     semantics: &InstructionSemantics,
+    fixed_operands: Option<&FixedRegisterOperands>,
+    rule_features: &RuleFeatures,
+    rule_suffix: &str,
     out: &mut InstrOutputs<'_>,
 ) {
-    let rule_key = ctx.inst.name.to_lowercase();
+    let rule_key = format!("{}{}", ctx.inst.name.to_lowercase(), rule_suffix);
 
     // Per-operand constraints: registers must bind to non-constant values,
     // immediates to constants. Keyed by the operand's pattern symbol id.
     let mut operand_constraint_entries: Vec<proc_macro2::TokenStream> = Vec::new();
     for (op_name, op_ty) in ctx.ops {
+        if fixed_operands.is_some_and(|fixed| fixed.0.contains_key(op_name)) {
+            continue;
+        }
         let Some(&symbol) = semantics.variable_symbols.get(op_name) else {
             continue;
         };
@@ -324,42 +405,7 @@ fn emit_value_rules(
         }
     }
 
-    let mut emit_attrs: Vec<proc_macro2::TokenStream> = Vec::new();
-    for (op_name, op_ty) in ctx.ops {
-        match op_ty {
-            Type::Struct(class_name) => {
-                let class_id = reg_class_id(class_name);
-                if let Some(def_pos) = ctx
-                    .defined_register_operands
-                    .iter()
-                    .position(|name| name == op_name)
-                {
-                    emit_attrs.push(emit_attr_result(op_name, def_pos, &class_id));
-                    // A two-address destination also reads a pattern operand:
-                    // record the bound value in a `_tied` attribute so register
-                    // allocation can lower the tie to a copy.
-                    if ctx.read_register_operands.contains(op_name)
-                        && let Some(sym) = semantics.variable_symbols.get(op_name)
-                    {
-                        emit_attrs.push(emit_attr_value(&format!("{op_name}_tied"), *sym));
-                    }
-                } else if let Some(sym) = semantics.variable_symbols.get(op_name) {
-                    emit_attrs.push(emit_attr_value(op_name, *sym));
-                } else if let Some(Some(reg_idx)) =
-                    semantics.fixed_register_by_class.get(class_name)
-                {
-                    emit_attrs.push(emit_attr_physical(op_name, &class_id, *reg_idx));
-                }
-            }
-            Type::Integer | Type::Bits(_) => {
-                if let Some(sym) = semantics.variable_symbols.get(op_name) {
-                    emit_attrs.push(emit_attr_int(op_name, *sym));
-                }
-            }
-            Type::String => {}
-            _ => {}
-        }
-    }
+    let mut emit_attrs = register_operand_emit_attrs(ctx, semantics, fixed_operands);
 
     // Canonicalize the behavior-derived pattern into the form selection
     // matches against (collapse word-op sext/extract wrappers to a typed op,
@@ -388,10 +434,14 @@ fn emit_value_rules(
     // that many bits: type the pattern root at the class width, so the
     // narrow form matches only values of its width instead of tying
     // with the full-width form on every width.
-    let dst_class = ctx
+    let numeric_defs: Vec<_> = ctx
         .defined_register_operands
+        .iter()
+        .filter(|name| fixed_operands.is_none_or(|fixed| !fixed.0.contains_key(*name)))
+        .collect();
+    let dst_class = numeric_defs
         .first()
-        .and_then(|name| ctx.ops_map.get(name))
+        .and_then(|name| ctx.ops_map.get(*name))
         .and_then(|ty| match ty {
             Type::Struct(class) => Some(class.as_str()),
             _ => None,
@@ -471,16 +521,23 @@ fn emit_value_rules(
         ctx.name_ident,
         &emit_attrs,
         &ctx.inst.name,
+        &ctx.emitter_visibility,
     );
+    let step_states = rule_step_states(semantics, &ctx.inst.behavior);
+    let steps = [emit_rule_step(&emit_shim, quote! { &[] }, step_states)];
+    let outputs: Vec<_> = (0..numeric_defs.len())
+        .map(|result| emit_step_result(0, result))
+        .collect();
+    let emits = [info_ident(&ctx.inst.name)];
     let (rule_ts, rule_spec_ident) = emit_rule_spec(
         &rule_key,
         &rule_key,
-        &ctx.inst.for_isas,
+        rule_features,
         &pattern_spec,
-        &[&ctx.inst.name],
+        &emits,
         quote! { tir::backend::isel::RuleKind::Value },
-        None,
-        &emit_shim,
+        &steps,
+        &outputs,
         &operand_constraint_entries,
         &operand_register_specs,
         result_register_spec.clone(),
@@ -492,6 +549,68 @@ fn emit_value_rules(
         #rule_ts
     });
     out.rule_spec_idents.push(rule_spec_ident);
+
+    let (full_semantics, full_root) = semantics
+        .guarded_semantics
+        .as_ref()
+        .map_or((&semantics.pattern, semantics.root), |(graph, root)| {
+            (graph, *root)
+        });
+    if numeric_defs.len() == 1
+        && *tir_graph::Dag::get_node(full_semantics, full_root)
+            == tir_symbolic::lang::SymKind::StateResult
+        && let Some(result_class) = dst_class
+    {
+        let mut owned_semantics = tir_symbolic::sem::SemGraph::new();
+        let owned_root = tir_symbolic::sem::copy_subgraph(
+            &mut owned_semantics,
+            full_semantics,
+            full_root,
+            &mut HashMap::new(),
+        );
+        let register_inputs = ctx
+            .ops
+            .iter()
+            .filter(|(name, _)| !ctx.defined_register_operands.contains(name))
+            .filter(|(name, _)| fixed_operands.is_none_or(|fixed| !fixed.0.contains_key(name)))
+            .filter_map(|(name, ty)| match ty {
+                Type::Struct(class) => semantics
+                    .variable_symbols
+                    .get(name)
+                    .map(|symbol| (*symbol, class.clone())),
+                _ => None,
+            })
+            .collect();
+        let parameters = semantics
+            .variable_symbols
+            .iter()
+            .filter(|(name, _)| !ctx.ops.iter().any(|(operand, _)| operand == *name))
+            .filter(|(name, _)| !isa_param_definers(tables.files, name).is_empty())
+            .filter(|(_, symbol)| {
+                tir_graph::Dag::preorder(&owned_semantics, owned_root).any(|node| {
+                    tir_graph::Dag::get_leaf_data(&owned_semantics, node)
+                        == Some(&tir_symbolic::lang::SymPayload::SymbolId(**symbol))
+                })
+            })
+            .map(|(name, symbol)| (*symbol, name.clone()))
+            .collect();
+        let info = info_ident(&ctx.inst.name);
+        out.state_sequence_candidates.push(StateSequenceCandidate {
+            semantics: owned_semantics,
+            root: owned_root,
+            rule_key: rule_key.clone(),
+            emit_fn: quote! { #emit_shim },
+            info: quote! { #info },
+            features: rule_features.clone(),
+            result_class: result_class.to_string(),
+            parameters,
+            register_inputs,
+            constraints: operand_constraint_entries.clone(),
+            registers: operand_register_specs.clone(),
+            result: result_register_spec.clone(),
+            imm_ranges: imm_range_entries.clone(),
+        });
+    }
 
     // Zero-form constant materializer: when the canonical pattern is
     // `reg + imm` and the source register's class has a hardwired-zero
@@ -587,7 +706,7 @@ fn emit_value_rules(
         );
 
         let zero_emit_attrs = vec![
-            emit_attr_result(rd_name, 0, &rd_class_id),
+            emit_attr_result(rd_name, &rd_class_id),
             emit_attr_physical(&zero_reg_name, &zero_class_id, zero_index),
             emit_attr_int(&imm_name, imm_sym),
         ];
@@ -598,6 +717,7 @@ fn emit_value_rules(
             ctx.name_ident,
             &zero_emit_attrs,
             &ctx.inst.name,
+            &ctx.emitter_visibility,
         );
         let zero_pattern_spec = SpecPattern {
             offset: zero_pattern_offset,
@@ -608,15 +728,18 @@ fn emit_value_rules(
             imm_sym,
             quote! { tir::graph::OperandConstraint::Immediate },
         )];
+        let steps = [emit_rule_step(&zero_emit_shim, quote! { &[] }, quote! { &[] })];
+        let outputs = [emit_step_result(0, 0)];
+        let emits = [info_ident(&ctx.inst.name)];
         let (zero_rule_ts, zero_rule_ident) = emit_rule_spec(
             &zero_rule_key,
             &zero_rule_key,
-            &ctx.inst.for_isas,
+            &RuleFeatures::any(&ctx.inst.for_isas),
             &zero_pattern_spec,
-            &[&ctx.inst.name],
+            &emits,
             quote! { tir::backend::isel::RuleKind::Value },
-            None,
-            &zero_emit_shim,
+            &steps,
+            &outputs,
             &zero_constraints,
             &[],
             result_register_spec.clone(),
@@ -1073,7 +1196,10 @@ fn emit_assembly_template(
     desc_ident
 }
 
-fn collect_target_tables(files: &[ast::File]) -> TargetTables<'_> {
+fn collect_target_tables<'a>(
+    files: &'a [ast::File],
+    item_cache: &HashMap<&str, &ast::Item>,
+) -> TargetTables<'a> {
     // `(class, register-name) -> encoding index` over every register class, so the
     // simulator can lower register paths that carry no numeric index in their name
     // (e.g. status flags `PSTATE::z`) to a stable slot.
@@ -1142,6 +1268,7 @@ fn collect_target_tables(files: &[ast::File]) -> TargetTables<'_> {
         .filter(|rc| rc.has_status_flags())
         .map(|rc| rc.name.clone())
         .collect();
+    let fp_register_roles = infer_fp_register_roles(files, item_cache, &register_index_map);
 
     // Register classes holding floating-point values (`float` registers).
     // Their operands and results constrain selection to float-typed values.
@@ -1189,6 +1316,7 @@ fn collect_target_tables(files: &[ast::File]) -> TargetTables<'_> {
         register_index_map,
         pc_classes,
         flag_classes,
+        fp_register_roles,
         register_name_map,
         register_files,
         float_classes,
@@ -1216,6 +1344,7 @@ struct InstrOutputs<'a> {
     instruction_decoder_impls: &'a mut Vec<proc_macro2::TokenStream>,
     instruction_decoder_dispatch: &'a mut Vec<(u32, proc_macro2::Ident)>,
     asm_syntax_entries: &'a mut Vec<proc_macro2::TokenStream>,
+    state_sequence_candidates: &'a mut Vec<StateSequenceCandidate>,
 }
 
 struct InstrInfoParts<'a> {
@@ -1235,11 +1364,12 @@ struct InstrInfoParts<'a> {
     encode_ident: &'a Option<proc_macro2::Ident>,
 }
 
-fn instr_info_fields(
+fn instruction_info(
     parts: &InstrInfoParts<'_>,
     sched_tables: &SchedTables,
     inst_name: &str,
-) -> Vec<proc_macro2::TokenStream> {
+    visibility: &proc_macro2::TokenStream,
+) -> (proc_macro2::Ident, proc_macro2::TokenStream) {
     let InstrInfoParts {
         op_name_lit,
         mnemonic_lit,
@@ -1294,7 +1424,14 @@ fn instr_info_fields(
     if let Some(sched_ts) = sched_tables.sched(inst_name) {
         info_fields.push(quote! { sched: #sched_ts });
     }
-    info_fields
+    let info_ident = info_ident(inst_name);
+    let tokens = quote! {
+        #visibility static #info_ident: tir::backend::InstrInfo = tir::backend::InstrInfo {
+            #(#info_fields,)*
+            ..tir::backend::InstrInfo::BASE
+        };
+    };
+    (info_ident, tokens)
 }
 
 fn emit_instruction(
@@ -1318,16 +1455,15 @@ fn emit_instruction(
         .and_then(|(_, value)| value.as_ref())
         .and_then(resolve_string);
 
-    let op_name = if let Some(opname) = opname.as_deref() {
-        opname
-    } else if let Some(mnemonic) = mnemonic.as_deref() {
-        mnemonic
-    } else {
-        return Err(TMDLError::Codegen(format!(
+    let op_name = opname
+        .as_deref()
+        .or(mnemonic.as_deref())
+        .ok_or_else(|| {
+            TMDLError::Codegen(format!(
             "Instruction '{}' must define OPNAME or MNEMONIC",
             inst.name
-        )));
-    };
+            ))
+        })?;
 
     let mnemonic_name = mnemonic.as_deref().unwrap_or(op_name);
     let encoding_shapes = get_encoding_shapes(inst, item_cache);
@@ -1382,6 +1518,17 @@ fn emit_instruction(
     // pattern is built from the behavior with its bindings substituted.
     // `execute()` keeps them: that is where single evaluation matters.
     let selection_behavior = inline_let_bindings(&inst.behavior);
+    let fp_rounding_classes: HashSet<_> = tables
+        .fp_register_roles
+        .rounding
+        .iter()
+        .map(|(class, _)| class.clone())
+        .collect();
+    let value_flag_classes: HashSet<String> = tables
+        .flag_classes
+        .difference(&fp_rounding_classes)
+        .cloned()
+        .collect();
 
     // Value-rule semantics, computed ahead of the op declaration so the
     // registers the behavior reads implicitly (e.g. `VCSR::vl`) can surface
@@ -1392,25 +1539,41 @@ fn emit_instruction(
     // selection rule. The same goes for instructions touching the PC
     // (jal/jalr/auipc): their pattern would hide the control-flow effect and
     // match unrelated arithmetic.
-    let semantics = if !uses_todo
-        && defined_register_operands.len() <= 1
-        && !behavior_references_pc(&inst.behavior, &tables.pc_classes)
-        && !behavior_has_atomic_ops(&inst.behavior)
-        && !behavior_has_dynamic_sized_memory_access(&inst.behavior, &const_size_params)
-        && !value_reads_flag_register(&selection_behavior, &tables.flag_classes)
-        && !behavior_writes_fixed_register(&inst.behavior, &tables.flag_classes)
-    {
-        analyze_instruction_semantics(
-            &selection_behavior,
-            &ops,
+    let semantics = if !uses_todo {
+        analyze_fp_instruction_semantics(
+            &inst.behavior,
+            trap_handler,
             &defined_register_operands,
             &numeric_params,
             &isa_param_values,
             &tables.register_index_map,
+            &tables.fp_register_roles,
         )
     } else {
         None
-    };
+    }
+    .or_else(|| {
+        if !uses_todo
+            && defined_register_operands.len() <= 1
+            && !behavior_references_pc(&inst.behavior, &tables.pc_classes)
+            && !behavior_has_atomic_ops(&inst.behavior)
+            && !behavior_has_dynamic_sized_memory_access(&inst.behavior, &const_size_params)
+            && !value_reads_flag_register(&selection_behavior, &value_flag_classes)
+            && !behavior_writes_fixed_register(&inst.behavior, &tables.flag_classes)
+            && !behavior_updates_fp_environment(&inst.behavior)
+        {
+            analyze_instruction_semantics(
+                &selection_behavior,
+                &ops,
+                &defined_register_operands,
+                &numeric_params,
+                &isa_param_values,
+                &tables.register_index_map,
+            )
+        } else {
+            None
+        }
+    });
 
     // The registers the behavior reads by path, resolved to attribute names.
     // Each becomes a demand attribute on the emitted op. Reads from a value
@@ -1423,6 +1586,17 @@ fn emit_instruction(
                 s.register_symbols
                     .iter()
                     .filter_map(|((class, index), sym)| {
+                        if tables
+                            .fp_register_roles
+                            .flags
+                            .contains(&(class.clone(), *index))
+                            || tables
+                                .fp_register_roles
+                                .rounding
+                                .contains(&(class.clone(), *index))
+                        {
+                            return None;
+                        }
                         let name = tables.register_name_map.get(&(class.clone(), *index))?;
                         if ops.iter().any(|(op_name, _)| op_name == name) {
                             return None;
@@ -1435,6 +1609,22 @@ fn emit_instruction(
         reads.sort();
         reads
     };
+    let fp_environment_access = semantics
+        .as_ref()
+        .and_then(|semantics| semantics.fp_state.map(|(_, access)| access))
+        .or_else(|| {
+            behavior_updates_fp_environment(&inst.behavior)
+                .then_some(tir_symbolic::lang::StateAccessKind::Change)
+        });
+    let touches_fp_environment = fp_environment_access.is_some();
+    let fp_environment_access = match fp_environment_access {
+        Some(tir_symbolic::lang::StateAccessKind::Read) => {
+            quote! { tir::ResourceAccess::Read }
+        }
+        Some(tir_symbolic::lang::StateAccessKind::Change) | None => {
+            quote! { tir::ResourceAccess::Change }
+        }
+    };
 
     // The op's register ports, in the order the emitters bind them: the
     // declared register operands (a two-address destination followed by the
@@ -1443,6 +1633,7 @@ fn emit_instruction(
     // operand or result, so this order is also the port order
     // `tir::backend::reg_slots` walks.
     let read_register_operands = infer_read_register_operands(&inst.behavior, &ops);
+    let emitter_visibility = module_fragment_visibility(options.module_fragment);
     let instr_ctx = InstrEmitCtx {
         inst,
         name_ident: &name_ident,
@@ -1456,6 +1647,7 @@ fn emit_instruction(
         defined_register_operands: &defined_register_operands,
         read_register_operands: &read_register_operands,
         implicit_reads: &implicit_reads,
+        emitter_visibility: emitter_visibility.clone(),
     };
     let ports = instruction_ports(tables, &instr_ctx);
     let port_entries = reg_port_entries(&ports);
@@ -1484,7 +1676,7 @@ fn emit_instruction(
     let is_terminator = uncond_pc || cond_pc;
     let (interfaces_list, terminator_impl) = if is_terminator {
         (
-            quote! { [tir::backend::MachineInstruction, tir::MemoryState, tir::Terminator] },
+            quote! { [tir::backend::MachineInstruction, tir::ResourceEffects, tir::Terminator] },
             quote! {
                 impl tir::Terminator for #name_ident {
                     fn successors(&self) -> Vec<tir::BlockId> {
@@ -1495,7 +1687,7 @@ fn emit_instruction(
         )
     } else {
         (
-            quote! { [tir::backend::MachineInstruction, tir::MemoryState] },
+            quote! { [tir::backend::MachineInstruction, tir::ResourceEffects] },
             quote! {},
         )
     };
@@ -1548,10 +1740,17 @@ fn emit_instruction(
         }
     });
 
-    if let Some(semantics) = &semantics {
-        emit_value_rules(tables, &instr_ctx, semantics, out);
+    if !uses_todo {
+        emit_instruction_value_rules(
+            tables,
+            &instr_ctx,
+            semantics.as_ref(),
+            trap_handler,
+            &numeric_params,
+            &isa_param_values,
+            out,
+        );
     }
-
     if !uses_todo && defined_register_operands.is_empty() {
         emit_branch_rules(tables, &instr_ctx, &numeric_params, &isa_param_values, out);
     }
@@ -1634,19 +1833,38 @@ fn emit_instruction(
             }
         }
 
-        // The memory an instruction changes is what its effects say it writes;
-        // a load or a branch carrying the chain along observes it.
-        impl tir::MemoryState for #name_ident {
-            fn observed(&self) -> Vec<tir::ValueId> {
-                self.0.state_operands().to_vec()
-            }
-
-            fn produced(&self) -> Vec<tir::ValueId> {
-                self.0.state_results().to_vec()
-            }
-
-            fn changes_memory(&self) -> bool {
-                #info_ident.effects.writes
+        impl tir::ResourceEffects for #name_ident {
+            fn resource_effects(&self) -> Vec<tir::ResourceEffect> {
+                let effect = |resource, access| tir::ResourceEffect {
+                    resource,
+                    access,
+                    observed: self.0.state_operands().into_iter().filter(|value| {
+                        self.0.context.state_resource(self.0.context.get_value(*value).ty())
+                            == Some(resource)
+                    }).collect(),
+                    produced: self.0.state_results().into_iter().filter(|value| {
+                        self.0.context.state_resource(self.0.context.get_value(*value).ty())
+                            == Some(resource)
+                    }).collect(),
+                };
+                let mut effects = Vec::new();
+                if #reads_memory || #writes_memory {
+                    effects.push(effect(
+                        tir::builtin::StateResource::Memory,
+                        if #writes_memory {
+                            tir::ResourceAccess::Change
+                        } else {
+                            tir::ResourceAccess::Read
+                        },
+                    ));
+                }
+                if #touches_fp_environment {
+                    effects.push(effect(
+                        tir::builtin::StateResource::FpEnv,
+                        #fp_environment_access,
+                    ));
+                }
+                effects
             }
         }
     });
@@ -1686,7 +1904,7 @@ fn emit_instruction(
 
     // One record per opcode, spelling only what departs from
     // `InstrInfo::BASE`.
-    let info_fields = instr_info_fields(
+    let (info_ident, info_tokens) = instruction_info(
         &InstrInfoParts {
             op_name_lit: &op_name_lit,
             mnemonic_lit: &mnemonic_lit,
@@ -1705,13 +1923,9 @@ fn emit_instruction(
         },
         sched_tables,
         &inst.name,
+        &emitter_visibility,
     );
-    out.instruction_infos.push(quote! {
-        static #info_ident: tir::backend::InstrInfo = tir::backend::InstrInfo {
-            #(#info_fields,)*
-            ..tir::backend::InstrInfo::BASE
-        };
-    });
+    out.instruction_infos.push(info_tokens);
     out.instruction_info_idents.push(info_ident);
     Ok(())
 }
@@ -1843,13 +2057,35 @@ fn isel_rules_section(
     }
 }
 
+struct InstructionModule {
+    declarations: proc_macro2::TokenStream,
+    isel_rule_emitters: Vec<proc_macro2::TokenStream>,
+    rule_spec_idents: Vec<proc_macro2::Ident>,
+    state_sequence_candidates: Vec<StateSequenceCandidate>,
+}
+
+impl InstructionModule {
+    fn finish(self, public_visibility: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+        let isel_section = isel_rules_section(
+            &self.isel_rule_emitters,
+            &self.rule_spec_idents,
+            public_visibility,
+        );
+        let declarations = self.declarations;
+        quote! {
+            #declarations
+            #isel_section
+        }
+    }
+}
+
 fn emit_instructions<'a>(
     files: &'a [ast::File],
     instruction_files: &[&'a ast::File],
     item_cache: &HashMap<&'a str, &'a ast::Item>,
     sched_tables: &SchedTables,
     options: InstructionOptions<'_>,
-) -> Result<proc_macro2::TokenStream, TMDLError> {
+) -> Result<InstructionModule, TMDLError> {
     let InstructionOptions {
         dialect,
         text_only,
@@ -1896,6 +2132,7 @@ fn emit_instructions<'a>(
     // Data-driven assembly syntax (text-only targets): one entry per instruction,
     // consumed by a target-specific front-end to parse/print instruction bodies.
     let mut asm_syntax_entries: Vec<proc_macro2::TokenStream> = vec![];
+    let mut state_sequence_candidates = Vec::new();
     let instruction_options = InstructionOptions {
         dialect,
         text_only,
@@ -1903,7 +2140,7 @@ fn emit_instructions<'a>(
         include_global_rules,
         module_fragment,
     };
-    let tables = collect_target_tables(files);
+    let tables = collect_target_tables(files, item_cache);
 
     for inst in instruction_files.iter().flat_map(|f| f.instructions()) {
         let mut out = InstrOutputs {
@@ -1923,6 +2160,7 @@ fn emit_instructions<'a>(
             instruction_decoder_impls: &mut instruction_decoder_impls,
             instruction_decoder_dispatch: &mut instruction_decoder_dispatch,
             asm_syntax_entries: &mut asm_syntax_entries,
+            state_sequence_candidates: &mut state_sequence_candidates,
         };
         emit_instruction(
             &tables,
@@ -2045,10 +2283,7 @@ fn emit_instructions<'a>(
         &decode_spec_idents,
         &public_visibility,
     );
-    let isel_section =
-        isel_rules_section(&isel_rule_emitters, &rule_spec_idents, &public_visibility);
-
-    Ok(quote! {
+    let declarations = quote! {
         #(#instruction_defs)*
         #(#instruction_reg_ports)*
         #(#instruction_custom_format_impls)*
@@ -2064,8 +2299,12 @@ fn emit_instructions<'a>(
         #encoder_section
 
         #decode_section
-
-        #isel_section
+    };
+    Ok(InstructionModule {
+        declarations,
+        isel_rule_emitters,
+        rule_spec_idents,
+        state_sequence_candidates,
     })
 }
 

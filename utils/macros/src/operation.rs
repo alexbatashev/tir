@@ -24,10 +24,9 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
     } = parse_macro_input!(item as Operation);
 
     let builder_name = format_ident!("{}Builder", struct_name.to_string());
-    // `state:` appends an optional `!state` operand and/or result: memory order
-    // is an explicit def-use edge once a threading pass has run, and absent
-    // before. The ports are declared like any other, so the verifier types
-    // them and the text groups them.
+    // `state:` appends optional resource-state ports. Effects are declared by
+    // operation interfaces, independently of whether a threading pass has
+    // supplied those ports.
     let mut operands = operands;
     let mut results = results;
     if state.input {
@@ -37,7 +36,6 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         results.push(ValueSpec::state());
     }
     let mut interfaces = interfaces;
-    let memory_state_impl = make_memory_state_impl(&struct_name, &state, &mut interfaces);
     let binds_code = binds.as_ref().map(|binds| {
         assert!(
             operands.iter().all(|operand| !operand.ty.starts_with('?')),
@@ -263,7 +261,6 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         #opdef_verifier
 
         #(#interface_impls)*
-        #memory_state_impl
         #verifiable_impl
         #binds_impls
         #sem_hooks_impl
@@ -491,6 +488,13 @@ fn attr_accessor(ty: &str) -> Option<AttrAccessor> {
         "Block" => scalar(quote! { tir::BlockId }, "Block"),
         "Value" => scalar(quote! { tir::ValueId }, "Value"),
         "Predicate" => scalar(quote! { tir::attributes::Predicate }, "Predicate"),
+        "FpSemantics" => AttrAccessor {
+            getter_ty: quote! { std::sync::Arc<tir::fp::Semantics> },
+            setter_ty: quote! { std::sync::Arc<tir::fp::Semantics> },
+            variant: format_ident!("FpSemantics"),
+            read: quote! { value },
+            write: quote! { value },
+        },
         _ => return None,
     })
 }
@@ -817,7 +821,28 @@ fn make_operand_pieces(operands: &[ValueSpec]) -> OperandPieces {
 
     for operand in operands {
         let field = format_ident!("{}", operand.name);
-        if operand.variadic {
+        if operand.name == "state" {
+            operand_fields.push(quote! {
+                #field: Vec<tir::ValueId>
+            });
+            operand_defaults.push(quote! {
+                #field: Vec::new()
+            });
+            operand_builders.push(quote! {
+                pub fn state(mut self, value: tir::ValueId) -> Self {
+                    self.#field.push(value);
+                    self
+                }
+
+                pub fn state_operands(
+                    mut self,
+                    values: impl IntoIterator<Item = tir::ValueId>,
+                ) -> Self {
+                    self.#field = values.into_iter().collect();
+                    self
+                }
+            });
+        } else if operand.variadic {
             operand_fields.push(quote! {
                 #field: Vec<tir::ValueId>
             });
@@ -1199,47 +1224,7 @@ impl StatePorts {
     }
 }
 
-/// The `MemoryState` an op declaring `state:` carries: its state ports, and
-/// whether it changes memory. An op writing memory changes it; one that only
-/// reads, or a terminator carrying the state along, observes it; anything
-/// else naming a state — a call, a copy — changes it. An op listing the
-/// interface itself answers by hand.
-fn make_memory_state_impl(
-    struct_name: &Ident,
-    state: &StatePorts,
-    interfaces: &mut Vec<Path>,
-) -> proc_macro2::TokenStream {
-    let lists = |name: &str| {
-        interfaces.iter().any(|path| {
-            path.segments
-                .last()
-                .is_some_and(|segment| segment.ident == name)
-        })
-    };
-    if (!state.input && !state.output) || lists("MemoryState") {
-        return quote! {};
-    }
-    let changes = lists("MemoryWrite") || !(lists("MemoryRead") || lists("Terminator"));
-    interfaces.push(syn::parse_quote!(tir::MemoryState));
-    quote! {
-        impl tir::MemoryState for #struct_name {
-            fn observed(&self) -> Vec<tir::ValueId> {
-                self.0.state_operands().to_vec()
-            }
-
-            fn produced(&self) -> Vec<tir::ValueId> {
-                self.0.state_results().to_vec()
-            }
-
-            fn changes_memory(&self) -> bool {
-                #changes
-            }
-        }
-    }
-}
-
-/// What a declared state result contributes to the builder: a count of the
-/// `!state` results to mint, since a caller never types them.
+/// What declared state results contribute to the builder.
 struct StateResultPieces {
     field: proc_macro2::TokenStream,
     default: proc_macro2::TokenStream,
@@ -1258,17 +1243,41 @@ fn make_state_result_pieces(spec: Option<&ValueSpec>) -> StateResultPieces {
     };
     let build = quote! {
         let mut result_vec = result_vec;
-        result_vec.extend((0..self.state_results).map(|_| self.context.create_state()));
+        result_vec.extend(self.state_result_types.into_iter().map(|ty| {
+            self.context.create_value(ty, None).id()
+        }));
     };
-    if spec.variadic {
+    if spec.name == "state" {
+        StateResultPieces {
+            field: quote! { state_result_types: Vec<tir::TypeId>, },
+            default: quote! { state_result_types: Vec::new(), },
+            method: quote! {
+                pub fn state_result(mut self, ty: tir::TypeId) -> Self {
+                    self.state_result_types.push(ty);
+                    self
+                }
+
+                pub fn state_results(
+                    mut self,
+                    types: impl IntoIterator<Item = tir::TypeId>,
+                ) -> Self {
+                    self.state_result_types = types.into_iter().collect();
+                    self
+                }
+            },
+            build,
+        }
+    } else if spec.variadic {
         let method = format_ident!("{}", spec.name);
         StateResultPieces {
-            field: quote! { state_results: usize, },
-            default: quote! { state_results: 0, },
+            field: quote! { state_result_types: Vec<tir::TypeId>, },
+            default: quote! { state_result_types: Vec::new(), },
             method: quote! {
-                /// Leave `count` memory states behind, one per chain.
-                pub fn #method(mut self, count: usize) -> Self {
-                    self.state_results = count;
+                pub fn #method(
+                    mut self,
+                    types: impl IntoIterator<Item = tir::TypeId>,
+                ) -> Self {
+                    self.state_result_types = types.into_iter().collect();
                     self
                 }
             },
@@ -1276,12 +1285,11 @@ fn make_state_result_pieces(spec: Option<&ValueSpec>) -> StateResultPieces {
         }
     } else {
         StateResultPieces {
-            field: quote! { state_results: usize, },
-            default: quote! { state_results: 0, },
+            field: quote! { state_result_types: Vec<tir::TypeId>, },
+            default: quote! { state_result_types: Vec::new(), },
             method: quote! {
-                /// Leave a memory state behind: the chain this op is ordered before.
-                pub fn state_result(mut self) -> Self {
-                    self.state_results = 1;
+                pub fn state_result(mut self, ty: tir::TypeId) -> Self {
+                    self.state_result_types = vec![ty];
                     self
                 }
             },
@@ -1394,12 +1402,12 @@ struct ValueSpec {
 }
 
 impl ValueSpec {
-    /// The optional trailing port `state:` declares.
+    /// The trailing resource-state group `state:` declares.
     fn state() -> Self {
         Self {
             name: "state".to_string(),
-            ty: "?tir::builtin::StateType".to_string(),
-            variadic: false,
+            ty: "*tir::builtin::StateType".to_string(),
+            variadic: true,
         }
     }
 
@@ -1732,7 +1740,9 @@ fn make_parser(
     );
     let state_parser = state_operands.first().map(|operand| {
         let field = format_ident!("{}", operand.name);
-        if operand.variadic {
+        if operand.name == "state" {
+            quote! { builder = builder.state_operands(parser.parse_state_operands(context)?); }
+        } else if operand.variadic {
             quote! { builder = builder.#field(parser.parse_state_operands(context)?); }
         } else {
             quote! {
@@ -1851,6 +1861,17 @@ fn make_parser(
                                    }
                                    tir::attributes::AttributeValue::Int(_) => { ok = false; break; }
                                    other => other,
+                               };
+                           }
+                           if attr_specs.iter().any(|(attr_name, ty)| *attr_name == name && *ty == "FpSemantics") {
+                               val = match val {
+                                   tir::attributes::AttributeValue::FpSemantics(_) => val,
+                                   other => match tir::fp::Semantics::parse_attribute(&other) {
+                                       Ok(semantics) => tir::attributes::AttributeValue::FpSemantics(
+                                           context.intern_fp_semantics(semantics),
+                                       ),
+                                       Err(error) => return Err((parser.span(), error)),
+                                   },
                                };
                            }
                            parsed_attrs.push(tir::attributes::NamedAttribute::new(context.intern(&name), val));

@@ -11,7 +11,7 @@ module {data_layout = #data_layout} {
     %3 = constant {value = 0} : !i32
     %4 = constant {value = 64} : !i32
     %5 = constant {value = 1} : !i32
-    %6 = state.entry_state
+    %6 = state.entry_state : !state<memory>
     %7, %30, %8 = scf.for %9 = %3 to %4 step %5 (%10 = %1, %11 = %6) {
       %12 = scf.switch %2 {
         -> %5

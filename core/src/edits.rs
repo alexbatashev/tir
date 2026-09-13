@@ -173,7 +173,7 @@ impl Context {
         // Every list keeps its values ahead of its states, so a value joins
         // its range after the last value there.
         let at = |list: &[ValueId], range: std::ops::Range<usize>| {
-            if ty == TypeId::STATE {
+            if self.is_state_type(ty) {
                 range.end
             } else {
                 range.start + self.values_among(&list[range]).len()

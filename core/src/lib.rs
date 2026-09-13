@@ -93,11 +93,15 @@ pub use error::Error;
 pub use interfaces::{
     Apply, Binding, BranchGuard, BranchTerminator, Callable, Commutative, ConstantFold,
     ConstantLike, CountedLoop, ExitScope, ExitScopeKind, ExitTarget, Gamma, Global,
-    IntegerArithmetic, MemoryRead, MemoryState, MemoryWrite, NonLocalExit, OpCost,
-    PromotableAllocation, Pure, SameOperandAndResultType, Speculatable, Symbol, Terminator, Theta,
+    HasResourceSemantics, IntegerArithmetic, MemoryRead, MemoryWrite, NonLocalExit, OpCost,
+    PromotableAllocation, Pure, ResourceAccess, ResourceEffect, ResourceEffects, ResourceField,
+    ResourceSemantics, SameOperandAndResultType, Speculatable, Symbol, Terminator, Theta,
     Visibility,
 };
-pub use interp::{Interp, InterpError, Memory as InterpMemory, Value as InterpValue};
+pub use interp::{
+    ExecutionState, FloatEnvironment, Interp, InterpError, Memory as InterpMemory,
+    Value as InterpValue,
+};
 pub use ir_formatter::IRFormatter;
 pub use layout::{DATA_LAYOUT, DataLayout, Endianness, data_layout_spec};
 pub use operand::Operand;
@@ -128,6 +132,7 @@ pub use value::{Use, Value, ValueId};
 pub use dialects::builtin;
 pub use dialects::builtin::Integer;
 pub use dialects::cfg;
+pub use dialects::fp;
 pub use dialects::func;
 pub use dialects::ptr;
 pub use dialects::scf;

@@ -1,5 +1,4 @@
 mod arith;
-mod float;
 mod fn_type;
 mod global;
 mod module;
@@ -15,7 +14,6 @@ use crate::{Context, Error, IRFormatter, TirType, Type, TypeId, dialect, parse::
 use crate as tir;
 
 pub use arith::*;
-pub use float::*;
 pub use fn_type::*;
 pub use global::*;
 pub use module::*;
@@ -24,7 +22,6 @@ pub use tuple::*;
 
 pub mod ops {
     pub use super::arith::*;
-    pub use super::float::*;
     pub use super::fn_type::*;
     pub use super::global::*;
     pub use super::module::*;
@@ -56,17 +53,6 @@ dialect! {
             ExtUIOp,
             TruncIOp,
             BitcastOp,
-            ConstantFOp,
-            AddFOp,
-            SubFOp,
-            MulFOp,
-            DivFOp,
-            SIToFPOp,
-            UIToFPOp,
-            FPConvertOp,
-            FPToSIOp,
-            FPToUIOp,
-            CmpFOp,
             MakeTupleOp,
             TupleGetOp,
             GlobalOp,

@@ -96,6 +96,7 @@ struct Registry {
     /// Interned type ids bucketed by [`Type::hash`], so [`Context::get_type_id`]
     /// only runs [`Type::eq`] against colliding candidates.
     type_lookup: HashMap<u64, Vec<TypeId>>,
+    fp_semantics: HashMap<crate::fp::Semantics, Arc<crate::fp::Semantics>>,
     /// The names attributes are keyed by, so an op carries four bytes per
     /// attribute name instead of a heap `String` per instance.
     names: Interner,
@@ -242,6 +243,7 @@ impl Context {
                 op_interface_converters: HashMap::new(),
                 type_cache: vec![],
                 type_lookup: HashMap::new(),
+                fp_semantics: HashMap::new(),
                 names,
                 op_names: Vec::new(),
                 op_name_ids: HashMap::new(),
@@ -251,7 +253,7 @@ impl Context {
             versions: RefCell::new(Arc::new(Vec::new())),
             epoch: AtomicU32::new(0),
         }));
-        crate::builtin::StateType::new(&context);
+        crate::builtin::StateType::memory(&context);
         context
     }
 
@@ -262,6 +264,7 @@ impl Context {
         context.register_dialect::<BuiltinDialect>();
         context.register_dialect::<CfgDialect>();
         context.register_dialect::<FuncDialect>();
+        context.register_dialect::<crate::fp::FpDialect>();
         context.register_dialect::<PtrDialect>();
         context.register_dialect::<ScfDialect>();
         context.register_dialect::<StateDialect>();
@@ -299,6 +302,19 @@ impl Context {
     /// The name `sym` was interned from.
     pub fn resolve(&self, sym: Sym) -> String {
         self.registry().names.resolve(sym).to_string()
+    }
+
+    pub fn intern_fp_semantics(
+        &self,
+        semantics: impl Into<crate::fp::Semantics>,
+    ) -> Arc<crate::fp::Semantics> {
+        let semantics = semantics.into();
+        let mut registry = self.registry_mut();
+        registry
+            .fp_semantics
+            .entry(semantics)
+            .or_insert_with(|| Arc::new(semantics))
+            .clone()
     }
 
     /// The dense id of an op identity, minted on first sight.
@@ -689,6 +705,17 @@ impl Context {
             .expect("unknown type id")
     }
 
+    pub fn state_resource(&self, ty: TypeId) -> Option<crate::builtin::StateResource> {
+        let data = self.get_type_data(ty);
+        (data.as_ref() as &dyn Any)
+            .downcast_ref::<crate::builtin::StateType>()
+            .map(crate::builtin::StateType::resource)
+    }
+
+    pub fn is_state_type(&self, ty: TypeId) -> bool {
+        self.state_resource(ty).is_some()
+    }
+
     pub fn type_to_string(&self, ty: TypeId) -> String {
         let mut out = String::new();
         {
@@ -867,7 +894,12 @@ impl Context {
         let (base, delta) = (view.base(), &view.delta);
         ids.iter()
             .copied()
-            .filter(|&id| delta.value(base, id).is_some_and(Value::is_state) == states)
+            .filter(|&id| {
+                delta
+                    .value(base, id)
+                    .is_some_and(|value| self.is_state_type(value.ty()))
+                    == states
+            })
             .collect()
     }
 
@@ -1252,10 +1284,10 @@ impl Context {
         delta.store.value(id).expect("just inserted").clone()
     }
 
-    /// Mint a memory state: a `!state` value whose only meaning is the
-    /// ordering edges that name it.
-    pub fn create_state(&self) -> ValueId {
-        self.create_value(TypeId::STATE, None).id()
+    /// Mint a state value whose only meaning is an ordering dependency.
+    pub fn create_state(&self, resource: crate::builtin::StateResource) -> ValueId {
+        self.create_value(crate::builtin::StateType::new(self, resource), None)
+            .id()
     }
 
     /// Replace every SSA operand use of `old` with `new`.

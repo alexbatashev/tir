@@ -113,6 +113,27 @@ pub fn blast_with_types<V>(
     widths: &[Option<u32>],
     types: &[SemType],
 ) -> Result<Blasted, BitblastError> {
+    let mut projected_outcomes = std::collections::HashSet::new();
+    for index in 0..graph.len() {
+        let parent = NodeId::from_index(index);
+        for child in graph.children(parent) {
+            if crate::lang::rounded_operation(*graph.get_kind(child)).is_none() {
+                continue;
+            }
+            if *graph.get_kind(parent) != SymKind::FPValue {
+                return Err(BitblastError::Unsupported(*graph.get_kind(child)));
+            }
+            projected_outcomes.insert(child);
+        }
+    }
+    for index in 0..graph.len() {
+        let node = NodeId::from_index(index);
+        if crate::lang::rounded_operation(*graph.get_kind(node)).is_some()
+            && !projected_outcomes.contains(&node)
+        {
+            return Err(BitblastError::Unsupported(*graph.get_kind(node)));
+        }
+    }
     let mut b = Blaster::new(graph, widths, types);
     for i in 0..graph.len() {
         let id = NodeId::from_index(i);
@@ -252,6 +273,13 @@ impl<'g, V> Blaster<'g, V> {
                 Ok(out)
             }
             AsFloat | Bitcast => Ok(self.child_bits(id, 0)),
+            FPValue => {
+                let child = self.graph.children(id).next().unwrap();
+                if crate::lang::rounded_operation(*self.graph.get_kind(child)).is_none() {
+                    return Err(BitblastError::Unsupported(FPValue));
+                }
+                Ok(self.child_bits(id, 0))
+            }
             Extract => self.encode_extract(id),
             ZExt => self.encode_extend(id, false),
             SExt => self.encode_extend(id, true),

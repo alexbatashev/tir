@@ -215,7 +215,10 @@ impl Seeder<'_> {
         let boolean =
             type_width(self.context, self.context.get_value(gamma.predicate()).ty()) == Some(1);
         for (index, &result) in results.iter().enumerate() {
-            if self.context.get_value(result).is_state() {
+            if self
+                .context
+                .is_state_type(self.context.get_value(result).ty())
+            {
                 continue;
             }
             let produced: Vec<Id> = arms
@@ -281,7 +284,10 @@ impl Seeder<'_> {
             .map(crate::Value::id)
             .collect();
         for &head in &heads {
-            if !self.context.get_value(head).is_state() {
+            if !self
+                .context
+                .is_state_type(self.context.get_value(head).ty())
+            {
                 self.anchor(head);
             }
         }
@@ -292,7 +298,10 @@ impl Seeder<'_> {
         let finals = instance.results()[binding.results.clone()].to_vec();
         let mut ports = Vec::new();
         for (index, &head_value) in heads.iter().enumerate() {
-            if self.context.get_value(head_value).is_state() {
+            if self
+                .context
+                .is_state_type(self.context.get_value(head_value).ty())
+            {
                 continue;
             }
             let head = self.class_of(head_value);

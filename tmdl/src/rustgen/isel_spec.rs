@@ -3,22 +3,62 @@
 // `RuleSpec` plus a static `EmitSpec` with a shim, interpreted by
 // `tir::backend::isel::build_rules` / `emit_with`.
 
-/// `&[Feature::A as u16, ...]` for a rule's availability set.
-fn feature_id_slice(for_isas: &[String]) -> proc_macro2::TokenStream {
-    let ids = for_isas.iter().map(|name| {
-        let ident = format_ident!("{}", name);
-        quote! { Feature::#ident as u16 }
-    });
-    quote! { &[#(#ids),*] }
+#[derive(Clone, Default)]
+struct RuleFeatures {
+    any: Vec<Vec<String>>,
+    none: Vec<String>,
 }
 
-fn emit_attr_result(name: &str, result: usize, class: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+impl RuleFeatures {
+    fn any(features: &[String]) -> Self {
+        Self {
+            any: (!features.is_empty()).then(|| features.to_vec()).into_iter().collect(),
+            none: vec![],
+        }
+    }
+
+    fn and(mut self, other: Self) -> Option<Self> {
+        self.any.extend(other.any);
+        self.none.extend(other.none);
+        self.none.sort();
+        self.none.dedup();
+        for group in &mut self.any {
+            group.retain(|feature| !self.none.contains(feature));
+            group.sort();
+            group.dedup();
+            if group.is_empty() {
+                return None;
+            }
+        }
+        self.any.sort();
+        self.any.dedup();
+        Some(self)
+    }
+
+    fn tokens(&self) -> proc_macro2::TokenStream {
+        let any = self.any.iter().map(|group| {
+            let ids = group.iter().map(|name| {
+                let ident = format_ident!("{}", name);
+                quote! { Feature::#ident as u16 }
+            });
+            quote! { tir::backend::isel::FeatureClause::Any(&[#(#ids),*]) }
+        });
+        let none = self.none.iter().map(|name| {
+            let ident = format_ident!("{}", name);
+            quote! { Feature::#ident as u16 }
+        });
+        let none = (!self.none.is_empty()).then(|| {
+            quote! { tir::backend::isel::FeatureClause::None(&[#(#none),*]) }
+        });
+        quote! { &[#(#any,)* #none] }
+    }
+}
+
+fn emit_attr_result(name: &str, class: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
     let name_lit = proc_macro2::Literal::string(name);
-    let result_lit = proc_macro2::Literal::u16_unsuffixed(result as u16);
     quote! {
         tir::backend::isel::EmitAttr::Result {
             attr: #name_lit,
-            result: #result_lit,
             class: #class,
         }
     }
@@ -56,24 +96,25 @@ fn emit_attr_fixed_use(
 
 fn emit_attr_result_fixed_def(
     name: &str,
-    result: usize,
     class: &proc_macro2::TokenStream,
     index: u16,
 ) -> proc_macro2::TokenStream {
     let name_lit = proc_macro2::Literal::string(name);
-    let result_lit = proc_macro2::Literal::u16_unsuffixed(result as u16);
     let index_lit = proc_macro2::Literal::u16_unsuffixed(index);
     quote! {
         tir::backend::isel::EmitAttr::ResultFixedDef {
             attr: #name_lit,
-            result: #result_lit,
             class: #class,
             index: #index_lit,
         }
     }
 }
 
-fn emit_attr_physical(name: &str, class: &proc_macro2::TokenStream, index: u16) -> proc_macro2::TokenStream {
+fn emit_attr_physical(
+    name: &str,
+    class: &proc_macro2::TokenStream,
+    index: u16,
+) -> proc_macro2::TokenStream {
     let name_lit = proc_macro2::Literal::string(name);
     let index_lit = proc_macro2::Literal::u16_unsuffixed(index);
     quote! {
@@ -127,6 +168,7 @@ fn emit_emitter_spec(
     op_ty_ident: &proc_macro2::Ident,
     attrs: &[proc_macro2::TokenStream],
     inst_name: &str,
+    visibility: &proc_macro2::TokenStream,
 ) -> (proc_macro2::TokenStream, proc_macro2::Ident) {
     let spec_ident = format_ident!("EMIT_{}", rule_key.to_uppercase());
     let shim_ident = format_ident!("emit_isel_{}", rule_key);
@@ -141,7 +183,7 @@ fn emit_emitter_spec(
             info: &#info,
         };
 
-        fn #shim_ident(
+        #visibility fn #shim_ident(
             context: &tir::Context,
             req: &tir::backend::isel::EmitRequest,
             m: &tir::backend::isel::RuleMatch,
@@ -150,6 +192,24 @@ fn emit_emitter_spec(
         }
     };
     (tokens, shim_ident)
+}
+
+fn emit_rule_step(
+    emit_fn: &impl quote::ToTokens,
+    bindings: proc_macro2::TokenStream,
+    states: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    quote! {
+        tir::backend::isel::RuleStep {
+            bindings: #bindings,
+            states: #states,
+            ..tir::backend::isel::RuleStep::new(#emit_fn)
+        }
+    }
+}
+
+fn emit_step_result(step: usize, result: usize) -> proc_macro2::TokenStream {
+    quote! { tir::backend::isel::StepResult { step: #step, result: #result } }
 }
 
 /// One `RegOperandSpec` entry.
@@ -305,12 +365,12 @@ fn pattern_ref_tokens(pattern: &SpecPattern) -> proc_macro2::TokenStream {
 fn emit_rule_spec(
     rule_key: &str,
     rule_name: &str,
-    for_isas: &[String],
+    features: &RuleFeatures,
     pattern: &SpecPattern,
-    emits: &[&str],
+    emits: &[impl quote::ToTokens],
     kind: proc_macro2::TokenStream,
-    prelude_shim: Option<&proc_macro2::Ident>,
-    emit_shim: &proc_macro2::Ident,
+    steps: &[proc_macro2::TokenStream],
+    outputs: &[proc_macro2::TokenStream],
     constraints: &[proc_macro2::TokenStream],
     registers: &[proc_macro2::TokenStream],
     result: Option<proc_macro2::TokenStream>,
@@ -319,13 +379,8 @@ fn emit_rule_spec(
 ) -> (proc_macro2::TokenStream, proc_macro2::Ident) {
     let spec_ident = format_ident!("RULE_{}", rule_key.to_uppercase());
     let rule_name_lit = proc_macro2::Literal::string(rule_name);
-    let features = feature_id_slice(for_isas);
+    let features = features.tokens();
     let pattern_ts = pattern_ref_tokens(pattern);
-    let emit_infos: Vec<proc_macro2::Ident> = emits.iter().map(|inst| info_ident(inst)).collect();
-    let prelude_ts = match prelude_shim {
-        Some(ident) => quote! { Some(#ident) },
-        None => quote! { None },
-    };
     let result_ts = match result {
         Some(r) => quote! { Some(#r) },
         None => quote! { None },
@@ -342,10 +397,10 @@ fn emit_rule_spec(
             name: #rule_name_lit,
             features: #features,
             pattern: #pattern_ts,
-            emits: &[#(&#emit_infos),*],
+            emits: &[#(&#emits),*],
             kind: #kind,
-            prelude_emit: #prelude_ts,
-            emit_fn: #emit_shim,
+            steps: &[#(#steps),*],
+            outputs: &[#(#outputs),*],
             constraints: &[#(#constraints),*],
             registers: &[#(#registers),*],
             result: #result_ts,

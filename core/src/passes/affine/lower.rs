@@ -191,7 +191,7 @@ fn ports(context: &Context, op: OpId, counter: Option<ValueId>) -> Option<Ports>
     for (port, &argument) in arguments.iter().enumerate() {
         if Some(argument) == counter || counting.contains(&argument) {
             counters.push(port);
-        } else if context.get_value(argument).is_state() {
+        } else if context.is_state_type(context.get_value(argument).ty()) {
             states.push(port);
         } else {
             return None;
@@ -453,12 +453,12 @@ impl<'a> Lowering<'a> {
         ports.extend(
             states
                 .iter()
-                .map(|_| context.create_value(TypeId::STATE, None)),
+                .map(|state| context.create_value(context.get_value(*state).ty(), None)),
         );
         let dep_ports: Vec<ValueId> = ports[1..].iter().map(Value::id).collect();
         let body = context.create_nodes_region(ports, vec![], vec![]).id();
         let mut result_types = vec![ty];
-        result_types.extend(states.iter().map(|_| TypeId::STATE));
+        result_types.extend(states.iter().map(|state| context.get_value(*state).ty()));
         let loop_op = scf::ForOpBuilder::new(context)
             .lb(lower)
             .inits(states)
@@ -545,7 +545,10 @@ impl<'a> Lowering<'a> {
         let original = body.results();
         let left: Vec<ValueId> = binding
             .continue_
-            .filter(|&index| self.context.get_value(original[index]).is_state())
+            .filter(|&index| {
+                self.context
+                    .is_state_type(self.context.get_value(original[index]).ty())
+            })
             .map(|index| results[index])
             .collect();
         // The copy's own comparison and latch count a loop that is gone.

@@ -16,7 +16,7 @@ module {
   module_end
 }
 // CHECK-LABEL: %{{[0-9]+}} = func.func @f(%[[P0:[0-9]+]]: !ptr.p, %[[P1:[0-9]+]]: !ptr.p)
-// CHECK-NEXT: %[[ENTRY:[0-9]+]] = state.entry_state
+// CHECK-NEXT: %[[ENTRY:[0-9]+]] = state.entry_state : !state<memory>
 // CHECK-NEXT: %[[E0:[0-9]+]], %[[E1:[0-9]+]], %[[WORLD:[0-9]+]] = state.split state(%[[ENTRY]])
 // CHECK-NEXT: %[[PTR:[0-9]+]], %[[A:[0-9]+]] = ptr.load %[[P0]] state(%[[E0]]) : !ptr.p
 // CHECK-NEXT: %[[VAL:[0-9]+]], %[[B:[0-9]+]] = ptr.load %[[PTR]] state(%[[WORLD]]) : !i32

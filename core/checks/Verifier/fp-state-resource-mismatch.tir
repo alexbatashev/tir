@@ -1,0 +1,10 @@
+// RUN: not tir opt --verify %s
+
+module {
+  %fn_bad = func.func @bad() {
+    %memory = state.entry_state : !state<memory>
+    %next = fp.clear_flags %memory {flags = 1}
+    func.return state(%next)
+  }
+  module_end
+}

@@ -1,11 +1,14 @@
 mod arithmetic;
+mod compare;
 mod convert;
 mod format;
+
+pub use compare::{ComparisonKind, FloatClass, classify_float, compare_float};
 
 use format::Format;
 
 /// IEEE rounding directions and tie-breaking rules.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RoundingMode {
     TiesToEven,
     TowardZero,

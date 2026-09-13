@@ -570,6 +570,13 @@ an exact exponent/mantissa format. Matching unifies those inferred types with
 the ground types carried by e-classes, so integer and floating expressions do
 not cross-match.
 
+Pattern compilation seeds operands from float-only register classes with that
+class's exact IEEE format. This gives bitcast masks and other literals inside a
+floating pattern their concrete use width. When inference resolves an integer
+literal to a wider bit or raw-bit type, the compiled template extends its stored
+value to that width, preserving signed extension for signed literals. It never
+narrows a literal or assigns a width that inference left unresolved.
+
 This value type is separate from a physical register operand's
 `RegisterCapability`. Integer-only and float-only banks admit their respective
 semantic domains; a TMDL `polymorphic` register class admits both, covering
@@ -702,7 +709,8 @@ instruction of its own is therefore a pair of per-block policies
   says its defining block is B (a cross-block or unselected user, §1), a
   destruction's branch needs it here (the `mm_overlay` of
   [Conditional branches](#conditional-branches)), or it is an effectful root of B,
-  which must be performed whatever reads it;
+  which is recorded in the same base-class demand set and must be performed
+  whatever reads it;
 - **available** — some IR value of the class already sits in a register wherever B
   runs (`available_at`): an argument of a block that has run, a def selection does
   not touch, or a def its own block was itself asked to place (`placed_at`). A
@@ -815,10 +823,14 @@ regions become blocks of the function, and neither the pass walk nor a per-block
 commit can own that. `commit_block_solution` applies one plan through the
 `Rewriter`:
 
-1. Emit each `ScheduledEmit` in order, before its anchor (the terminator when it
-   has none). A rule carrying a `prelude_emit` (a flag definer) emits that
-   adjacently ahead of it. What an earlier tile emitted is remapped into the match
-   first, and each tile's destination values are recorded in `emitted_values`.
+1. Emit each `ScheduledEmit` in order. `Rule.steps` lists the real operations in
+   execution order. Every step starts with the rule's captures; its `bindings`
+   may replace a symbol with another capture or an earlier numeric `StepResult`.
+   Its resource list selects the source state ports that it owns. `Rule.outputs`
+   maps numeric step results, including a middle step's result, onto the source
+   value results. Multi-operation tiles become operation groups, which
+   destruction places as one unit while preserving each member's identity and
+   declared order. Selection records the mapped values in `emitted_values`.
 2. Apply the plan's `value_remaps`, so every use of an erased value reads the
    register now holding it.
 3. Record each `aux` entry (a destruction's branch, counter value, or decided
@@ -890,6 +902,8 @@ operands), and a proved width-1 identity
 `c == If(c, 1, 0)` (any 1-bit `c`) bridges a bare comparison class to the
 `slt`-style `If`-patterns so a compare used as a *value* materializes with no
 hand-written rule.
+Canonicalization observes this identity only at the pattern root; the complete
+target behavior remains attached to the rule for refinement proof.
 
 Instructions that read or write the PC *unconditionally* (`jal`, `jalr`,
 `auipc`) get **no value rule**: their pattern would hide the control-flow
@@ -957,10 +971,9 @@ bit-blasting at the operands' architectural width. Above, the sign/overflow
 formula proves equal to `Lt(rn, rm)` — nothing recognizes the idiom
 syntactically, so any correct flag formulation derives, and a wrong one
 derives *no* rule instead of a miscompiling one. The proved comparison becomes
-the rule's pattern; emission produces **two real instructions** — the rule's
-`prelude_emit` builds the flag definer (binding the compared operands), then
-`emit_fn` builds the branch (binding the taken target) — inserted adjacently
-ahead of the branch it defines the flags for. Everything else (the `Dead`
+the rule's pattern; its ordered steps emit **two real instructions**: the flag
+definer binds the compared operands, then the branch binds the taken target.
+The operation group keeps them together through placement. Everything else (the `Dead`
 alternative consuming the compare, boundary-forced materialization, region
 assumptions) is the same machinery as the fused single-instruction path.
 
@@ -996,11 +1009,10 @@ matched integer `Eq` and dropped its operands). Instead `emit_flag_reader_rules`
 composes each definer with each reader — the definer's per-flag semantics
 substitute into the reader's condition, and when the composite SMT-proves equal
 to one canonical comparison the pair registers an `If`-rooted **value** rule
-whose prelude emits the definer (`cmp`) ahead of the reader. Boolean readers
+whose first step emits the definer (`cmp`) ahead of the reader. Boolean readers
 reuse their constant arms; select readers retain their encoded register arms
 and two-address destination tie, so a gate's `If` can match `cmp` + `cmov`/`csel`. The
-value-commit path honours `prelude_emit` for value rules (`isel/mod.rs`),
-inserting the definer before the reader. For boolean readers, the pattern is the
+shared step emitter handles value and branch rules alike. For boolean readers, the pattern is the
 width-polymorphic `slt`-style `If` the bool-materialize bridge already matches —
 the flag-arch analog of a compare materializing with no hand-written rule. A
 two-register `cmpi` as a value emits `cmp` + `cset.<cc>`.
@@ -1122,7 +1134,7 @@ class (chasing low-bit truncations to the class that owns the register):
      register, but written on the way into its own region, so it holds the class
      only inside it — never in a sibling arm), then
    - a def in an **enclosing region** that has run wherever `R` runs
-     (`has_run_at`) and whose own region was asked to place it (`placed_at`), or
+    (`has_run_at`) and whose own region was asked to place it (`placed_at`), or
      that selection never touched at all — closest enclosing region first, via
      `Scopes::distance`.
 

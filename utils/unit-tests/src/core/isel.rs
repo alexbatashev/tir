@@ -3,6 +3,7 @@
 
 use tir::{
     builtin::{ops, IntegerType, ModuleOp},
+    fp::ops as fp_ops,
     func::FuncOp,
     graph::{MetaMutDag, MutDag, OperandConstraint},
     sem::{SemGraph, SymKind},
@@ -11,8 +12,9 @@ use tir::{
 
 use tir::backend::isel::{
     EmitRequest, ImmRange, InstructionSelectPass, RegisterCapability, RegisterRequirement, Rule,
-    RuleEmitFn, RuleMatch, LATENCY_COST_SCALE,
+    RuleEmitFn, RuleMatch, RuleStep, StepBinding, StepResult, LATENCY_COST_SCALE,
 };
+use tir::ptr::{LoadOpBuilder, StoreOpBuilder};
 use tir::sem::template_node;
 
 use super::fixtures::{self, atomic_pattern, binary, marker_op, nary, symbol};
@@ -184,6 +186,45 @@ fn add_mul_rules() -> Vec<Rule> {
             emit_mul,
         ),
     ]
+}
+
+#[test]
+fn a_rule_sequence_exports_a_middle_result_and_wires_a_temporary() {
+    let (context, module, region) = function(ADD_OF_TWO_ARGUMENTS);
+    let source = context.get_region(region).op_ids()[0];
+
+    let rule = Rule {
+        steps: vec![
+            RuleStep::new(emit_add),
+            RuleStep::new(emit_add),
+            RuleStep {
+                bindings: &[((0, StepBinding::Result(StepResult { step: 0, result: 0 })))],
+                ..RuleStep::new(emit_add)
+            },
+        ],
+        outputs: vec![StepResult { step: 1, result: 0 }],
+        ..Rule::new(
+            "three-adds",
+            atomic_pattern(SymKind::Add),
+            LATENCY_COST_SCALE,
+            emit_add,
+        )
+    };
+
+    select(&context, &module, vec![rule]);
+
+    let emitted = body_ops(&context, region);
+    assert_eq!(emitted.len(), 3);
+    assert!(emitted.iter().all(|op| op.id != source));
+    assert_eq!(emitted[0].operands(), emitted[1].operands());
+    assert_eq!(
+        emitted[2].operands().as_slice(),
+        &[emitted[0].results()[0], emitted[0].operands()[1]]
+    );
+    assert_eq!(
+        context.get_region(region).results(),
+        vec![emitted[1].results()[0]]
+    );
 }
 
 #[test]
@@ -570,7 +611,12 @@ fn emit_float_marker(
     _m: &RuleMatch,
 ) -> Result<Box<dyn Operation>, PassError> {
     let ty = req.result_ty.ok_or(PassError::RewriteFailed(req.op_id()))?;
-    Ok(Box::new(ops::constantf(context, 0.0, ty).build()))
+    Ok(Box::new(
+        fp_ops::ConstantOpBuilder::new(context)
+            .bits(0)
+            .result_type(ty)
+            .build(),
+    ))
 }
 
 #[test]
@@ -578,7 +624,7 @@ fn introduced_integer_materializer_uses_its_class_type_under_float_bitcast() {
     let (context, module, _region) = function(
         r#"module {
 func.func @demo() -> !f32 {
-  %value = constantf {value = 0.0} : !f32
+  %value = fp.constant {bits = 0} : !f32
   func.return %value
 }
 module_end
@@ -820,7 +866,8 @@ fn square_sign_extension_lowers_to_shift_pair() {
 fn introduced_rule_emits_prelude_before_instruction() {
     let slli_rule = Rule {
         operand_constraints: vec![(1, OperandConstraint::Immediate)],
-        prelude_emit: Some(emit_shift_prelude),
+        steps: vec![RuleStep::new(emit_shift_prelude), RuleStep::new(emit_slli)],
+        outputs: vec![StepResult { step: 1, result: 0 }],
         ..Rule::new(
             "slli",
             shift_imm_pattern(SymKind::ShiftLeft),
@@ -863,7 +910,7 @@ fn store_pattern() -> SemGraph {
     g
 }
 
-fn emit_load_marker(
+fn emit_load(
     context: &Context,
     req: &EmitRequest,
     m: &RuleMatch,
@@ -872,30 +919,40 @@ fn emit_load_marker(
         .value_binding(0)
         .ok_or(PassError::RewriteFailed(req.op_id()))?;
     let result_ty = req.result_ty.expect("typed result");
-    Ok(marker!(
-        ShlMarkerOp,
-        ShlMarkerOpBuilder,
-        context,
-        base,
-        result_ty
+    Ok(Box::new(
+        LoadOpBuilder::new(context)
+            .ptr(base)
+            .result_type(result_ty)
+            .build(),
     ))
 }
 
-fn emit_store_marker(
+fn emit_constant_without_states(
+    context: &Context,
+    req: &EmitRequest,
+    _m: &RuleMatch,
+) -> Result<Box<dyn Operation>, PassError> {
+    assert!(
+        req.states.is_empty(),
+        "a pure step receives no source state"
+    );
+    let result_ty = req.result_ty.expect("typed result");
+    Ok(Box::new(ops::constant(context, 0, result_ty).build()))
+}
+
+fn emit_store(
     context: &Context,
     req: &EmitRequest,
     m: &RuleMatch,
 ) -> Result<Box<dyn Operation>, PassError> {
+    let base = m
+        .value_binding(0)
+        .ok_or(PassError::RewriteFailed(req.op_id()))?;
     let value = m
         .value_binding(4)
         .ok_or(PassError::RewriteFailed(req.op_id()))?;
-    let result_ty = context.get_value(value).ty();
-    Ok(marker!(
-        MulMarkerOp,
-        MulMarkerOpBuilder,
-        context,
-        value,
-        result_ty
+    Ok(Box::new(
+        StoreOpBuilder::new(context).value(value).ptr(base).build(),
     ))
 }
 
@@ -920,22 +977,101 @@ func.func @demo(%a: !i32) -> !i32 {
 module_end
 }"#,
     );
-
+    let source_ops = context.get_region(region).op_ids();
+    let source_store = source_ops[1];
+    let source_load = source_ops[2];
     let rules = vec![
-        Rule::new("load", load_pattern(), LATENCY_COST_SCALE, emit_load_marker),
-        Rule::new(
-            "store",
-            store_pattern(),
-            LATENCY_COST_SCALE,
-            emit_store_marker,
-        ),
+        Rule {
+            steps: vec![RuleStep {
+                states: &[tir::builtin::StateResource::Memory],
+                ..RuleStep::new(emit_load)
+            }],
+            ..Rule::new("load", load_pattern(), LATENCY_COST_SCALE, emit_load)
+        },
+        Rule {
+            steps: vec![RuleStep {
+                states: &[tir::builtin::StateResource::Memory],
+                ..RuleStep::new(emit_store)
+            }],
+            outputs: vec![],
+            ..Rule::new("store", store_pattern(), LATENCY_COST_SCALE, emit_store)
+        },
     ];
 
     run_pass(&context, &module, InstructionSelectPass::new(rules))
         .expect("memory ops should select through their interfaces");
 
-    // store -> muli marker, load -> shli marker; the alloca is untouched.
-    assert_eq!(body_names(&context, region), vec!["alloca", "muli", "shli"]);
+    let body = body_ops(&context, region);
+    let argument = context.get_region(region).value_arguments()[0].id();
+    assert_eq!(
+        body_names(&context, region),
+        vec!["alloca", "store", "load"]
+    );
+    assert_ne!(body[1].id, source_store);
+    assert_ne!(body[2].id, source_load);
+    assert_eq!(
+        body[1].value_operands().as_slice(),
+        &[argument, body[0].value_results()[0]]
+    );
+    assert_eq!(
+        body[2].value_operands().as_slice(),
+        &[body[0].value_results()[0]]
+    );
+    assert_eq!(body[1].state_results(), body[2].state_operands());
+}
+
+#[test]
+fn a_rule_output_cannot_export_a_state_result() {
+    let (context, module, _) = function(
+        r#"module {
+func.func @demo() -> !i32 {
+  %slot, %allocated = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+  %loaded, %read = ptr.load %slot state(%allocated) : !i32
+  func.return %loaded
+}
+module_end
+}"#,
+    );
+    let rule = Rule {
+        steps: vec![RuleStep {
+            states: &[tir::builtin::StateResource::Memory],
+            ..RuleStep::new(emit_load)
+        }],
+        outputs: vec![StepResult { step: 0, result: 1 }],
+        ..Rule::new("load", load_pattern(), LATENCY_COST_SCALE, emit_load)
+    };
+
+    let error = run_pass(&context, &module, InstructionSelectPass::new(vec![rule]))
+        .expect_err("a state result is not a numeric rule output");
+    assert!(matches!(error, PassError::InvalidRuleSet(_)), "{error:?}");
+}
+
+#[test]
+fn each_rule_step_receives_only_the_states_it_owns() {
+    let (context, module, _) = function(
+        r#"module {
+func.func @demo() -> !i32 {
+  %slot, %allocated = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
+  %loaded, %read = ptr.load %slot state(%allocated) : !i32
+  func.return %loaded
+}
+module_end
+}"#,
+    );
+    let rule = Rule {
+        steps: vec![
+            RuleStep::new(emit_constant_without_states),
+            RuleStep {
+                states: &[tir::builtin::StateResource::Memory],
+                ..RuleStep::new(emit_load)
+            },
+        ],
+        outputs: vec![StepResult { step: 1, result: 0 }],
+        ..Rule::new("load", load_pattern(), LATENCY_COST_SCALE, emit_load)
+    };
+
+    run_pass(&context, &module, InstructionSelectPass::new(vec![rule]))
+        .expect("each step receives its owned source states");
 }
 
 /// Equivalent definitions extract to one tile.

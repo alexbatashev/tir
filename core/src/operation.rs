@@ -240,15 +240,13 @@ pub fn verify_op_tree(context: &Context, op_id: OpId) -> Result<(), Error> {
     verify_state_forks(context, op_id)
 }
 
-/// Checks the fork/join discipline memory state follows.
+/// Checks the fork/join discipline resource state follows.
 ///
-/// A state names the memory at one point in the program, so at most one
-/// operation may *change* it: a second would describe two futures for one memory.
-/// Everything else naming it observes it — a read, which leaves memory as it found
-/// it, or a [`crate::state::JoinOp`], which names the memory its inputs merge into
-/// — and any number of those may, unordered against each other. One operation
-/// naming a state twice observes it once: joining a memory with itself is that
-/// memory.
+/// Memory permits unordered reads because each leaves memory as it found it, but
+/// at most one unordered operation may change it. Other resources, including the
+/// floating-point environment, describe one executed continuation and do not
+/// permit unordered reads. Mutually exclusive branch arms may consume the same
+/// state. One operation naming a state twice consumes it once.
 ///
 /// The check is structural, so it cannot see chains: that every access of a chain
 /// is in the cone of the state its next write takes is what the insertion-order
@@ -262,8 +260,11 @@ pub(crate) fn verify_state_forks(context: &Context, op_id: OpId) -> Result<(), E
     let mut worklist = vec![op_id];
     while let Some(op_id) = worklist.pop() {
         let instance = context.get_op(op_id);
-        let observes = !changes_memory(&instance);
         for operand in instance.state_operands() {
+            let resource = context
+                .state_resource(context.get_value(operand).ty())
+                .expect("state operand has a state type");
+            let observes = resource_access(&instance, resource) != crate::ResourceAccess::Change;
             let taken = consumers.entry(operand).or_default();
             if !taken.iter().any(|(taker, _)| *taker == op_id) {
                 taken.push((op_id, observes));
@@ -274,9 +275,21 @@ pub(crate) fn verify_state_forks(context: &Context, op_id: OpId) -> Result<(), E
         }
     }
     for (value, taken) in &consumers {
-        if taken.len() > 1 && !taken.iter().all(|(_, observes)| *observes) {
+        let permits_read_forks = context
+            .state_resource(context.get_value(*value).ty())
+            .is_some_and(|resource| resource == crate::builtin::StateResource::Memory);
+        let conflicts = taken
+            .iter()
+            .enumerate()
+            .any(|(index, &(left, left_reads))| {
+                taken[index + 1..].iter().any(|&(right, right_reads)| {
+                    !(permits_read_forks && left_reads && right_reads)
+                        && !mutually_exclusive(context, *value, left, right)
+                })
+            });
+        if conflicts {
             return Err(Error::VerificationError(format!(
-                "state %{} is both observed and changed",
+                "state %{} has incompatible concurrent uses",
                 value.number()
             )));
         }
@@ -284,13 +297,135 @@ pub(crate) fn verify_state_forks(context: &Context, op_id: OpId) -> Result<(), E
     Ok(())
 }
 
-/// Whether `op` changes the memory it names: what its [`crate::MemoryState`]
-/// says, and nothing for an op that only carries states along, such as a
-/// terminator or a loop.
-pub(crate) fn changes_memory(op: &OpHandle) -> bool {
+fn mutually_exclusive(context: &Context, value: crate::ValueId, left: OpId, right: OpId) -> bool {
+    let ancestry = |mut op| {
+        let mut ancestry = Vec::new();
+        while let Some(region) = context.region_of_op(op) {
+            let Some(owner) = context.get_region(region).parent_op() else {
+                break;
+            };
+            ancestry.push((owner, region));
+            op = owner;
+        }
+        ancestry
+    };
+    let left_ancestry = ancestry(left);
+    let right_ancestry = ancestry(right);
+    let exclusive_arms = left_ancestry.iter().any(|&(owner, left_region)| {
+        right_ancestry
+            .iter()
+            .find(|(candidate, _)| *candidate == owner)
+            .is_some_and(|&(_, right_region)| {
+                if left_region == right_region {
+                    return false;
+                }
+                context
+                    .get_op(owner)
+                    .as_interface::<dyn crate::Gamma>()
+                    .is_some_and(|gamma| {
+                        let arms = gamma.arms();
+                        arms.contains(&left_region) && arms.contains(&right_region)
+                    })
+            })
+    });
+    exclusive_arms || mutually_exclusive_cfg(context, value, left, right)
+}
+
+fn mutually_exclusive_cfg(
+    context: &Context,
+    value: crate::ValueId,
+    left: OpId,
+    right: OpId,
+) -> bool {
+    let Some(region) = context.region_of_op(left) else {
+        return false;
+    };
+    if context.region_of_op(right) != Some(region) || context.get_region(region).is_nodes() {
+        return false;
+    }
+    let (definition, definition_block) = match context.get_value(value).defining_op() {
+        Some(op) if context.region_of_op(op) == Some(region) => (Some(op), None),
+        None => match context.block_of_argument(value) {
+            Some(block) if context.parent_region(block) == Some(region) => (None, Some(block)),
+            _ => return false,
+        },
+        _ => return false,
+    };
+    if definition.is_some_and(|op| op == left || op == right) {
+        return false;
+    }
+
+    // A new definition starts another dynamic state lifetime, so paths through it
+    // do not make the two uses concurrent.
+    !path_before_definition(context, region, left, right, definition, definition_block)
+        .unwrap_or(true)
+        && !path_before_definition(context, region, right, left, definition, definition_block)
+            .unwrap_or(true)
+}
+
+fn path_before_definition(
+    context: &Context,
+    region: crate::RegionId,
+    from: OpId,
+    to: OpId,
+    definition: Option<OpId>,
+    definition_block: Option<crate::BlockId>,
+) -> Option<bool> {
+    let mut pending = vec![from];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(op_id) = pending.pop() {
+        if !seen.insert(op_id) {
+            continue;
+        }
+        if op_id != from {
+            if Some(op_id) == definition {
+                continue;
+            }
+            if op_id == to {
+                return Some(true);
+            }
+        }
+        let block = context.parent_block(op_id)?;
+        let ops = context.get_block(block).op_ids();
+        let index = ops.iter().position(|&candidate| candidate == op_id)?;
+        // Keep sequential flow even after a terminator. This may reject a valid
+        // fork, but it cannot mistake two executable uses for exclusive ones.
+        if let Some(&next) = ops.get(index + 1) {
+            pending.push(next);
+        }
+        if let Some(terminator) = context
+            .get_op(op_id)
+            .as_interface::<dyn crate::Terminator>()
+        {
+            for successor in terminator.successors() {
+                if context.parent_region(successor) != Some(region) {
+                    return None;
+                }
+                if Some(successor) == definition_block {
+                    continue;
+                }
+                let first = context.get_block(successor).op_ids().first().copied()?;
+                pending.push(first);
+            }
+        }
+    }
+    Some(false)
+}
+
+fn resource_access(
+    op: &OpHandle,
+    resource: crate::builtin::StateResource,
+) -> crate::ResourceAccess {
     op.clone()
-        .as_interface::<dyn crate::MemoryState>()
-        .is_some_and(|memory| memory.changes_memory())
+        .as_interface::<dyn crate::ResourceEffects>()
+        .and_then(|effects| {
+            effects
+                .resource_effects()
+                .into_iter()
+                .find(|effect| effect.resource == resource)
+                .map(|effect| effect.access)
+        })
+        .unwrap_or(crate::ResourceAccess::Read)
 }
 
 fn verify_op_tree_ops(context: &Context, op_id: OpId) -> Result<(), Error> {
@@ -521,39 +656,44 @@ pub fn verify_opdef_operands(
         }
     }
 
-    let results_len = results.len();
-
-    let variadic_result = result_fields.iter().any(|field| field.variadic);
-    if variadic_result {
-        // A variadic result declares one spec covering every result value.
-    } else if result_fields.iter().any(|field| field.ty.starts_with('?')) {
-        if results_len > result_fields.len() {
+    let mut cursor = 0;
+    for (index, field) in result_fields.iter().enumerate() {
+        let required_after = result_fields[index + 1..]
+            .iter()
+            .filter(|field| !field.variadic && !field.ty.starts_with('?'))
+            .count();
+        let available = results.len().saturating_sub(cursor + required_after);
+        let count = if field.variadic {
+            available
+        } else if field.ty.starts_with('?') {
+            usize::from(available != 0)
+        } else {
+            1
+        };
+        if cursor + count > results.len() {
             return Err(crate::Error::VerificationError(format!(
-                "{op_name} expects at most {} results, got {}",
-                result_fields.len(),
-                results_len
+                "{op_name} missing required result '{}'",
+                field.name
             )));
         }
-    } else if results_len != result_fields.len() {
-        return Err(crate::Error::VerificationError(format!(
-            "{op_name} expects {} results, got {}",
-            result_fields.len(),
-            results_len
-        )));
+        for result in &results[cursor..cursor + count] {
+            verify_def_value(
+                context,
+                op_name,
+                "result",
+                field.name,
+                *result,
+                spec.result_checkers[index],
+                constraint_name(field.ty),
+            )?;
+        }
+        cursor += count;
     }
-
-    for result_index in 0..results_len {
-        let idx = if variadic_result { 0 } else { result_index };
-        let field = &result_fields[idx];
-        verify_def_value(
-            context,
-            op_name,
-            "result",
-            field.name,
-            results[result_index],
-            spec.result_checkers[idx],
-            constraint_name(field.ty),
-        )?;
+    if cursor != results.len() {
+        return Err(crate::Error::VerificationError(format!(
+            "{op_name} expects {cursor} results, got {}",
+            results.len()
+        )));
     }
 
     if spec.same_type {
@@ -618,6 +758,7 @@ fn attr_type_matches(attr_type: &str, value: &crate::attributes::AttributeValue)
         "Bool" => matches!(value, V::Bool(_)),
         "Array" => matches!(value, V::Array(_)),
         "Dict" => matches!(value, V::Dict(_)),
+        "FpSemantics" => matches!(value, V::FpSemantics(_)),
         "Register" => matches!(value, V::Register(_)),
         "Type" => matches!(value, V::Type(_)),
         "Block" => matches!(value, V::Block(_)),

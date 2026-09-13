@@ -133,16 +133,9 @@ fn emit_flag_branch_rules(
             if d_sem.class != b_sem.class {
                 continue;
             }
-            let shared_isas: Vec<String> = b
-                .inst
-                .for_isas
-                .iter()
-                .filter(|isa| d.inst.for_isas.contains(isa))
-                .cloned()
-                .collect();
-            if shared_isas.is_empty() {
-                continue;
-            }
+            let shared_features = RuleFeatures::any(&b.inst.for_isas)
+                .and(RuleFeatures::any(&d.inst.for_isas))
+                .expect("positive feature requirements are compatible");
             if !b_sem
                 .flag_symbols
                 .values()
@@ -175,18 +168,18 @@ fn emit_flag_branch_rules(
             );
             let (composed, _) = fold_constant_subtrees(&spliced, spliced_root);
 
-            let Some((candidate, candidate_root)) =
-                find_equivalent_comparison(&composed, &symbols)
+            let Some((candidate, candidate_root)) = find_equivalent_comparison(&composed, &symbols)
             else {
                 continue;
             };
 
             let immediate_symbols = definer_immediate_symbols(d, d_sem);
-            let (canon_pattern, canon_root, forced_widths) = tir_symbolic::lang::canonicalize_for_selection(
-                &candidate,
-                candidate_root,
-                &immediate_symbols,
-            );
+            let (canon_pattern, canon_root, forced_widths) =
+                tir_symbolic::lang::canonicalize_for_selection(
+                    &candidate,
+                    candidate_root,
+                    &immediate_symbols,
+                );
             let mut pattern_widths = tir_symbolic::lang::infer_widths(&canon_pattern, |_| None);
             for (index, forced) in forced_widths.iter().enumerate() {
                 if forced.is_some() {
@@ -237,20 +230,28 @@ fn emit_flag_branch_rules(
                 &b_op_ty_ident,
                 &emit_attrs,
                 &b.inst.name,
-            );
+        &quote! {},
+    );
+            let steps = [
+                emit_rule_step(&prelude_shim, quote! { &[] }, quote! { &[] }),
+                emit_rule_step(&emit_shim, quote! { &[] }, quote! { &[] }),
+            ];
+            let definer_info = info_ident(&d.inst.name);
+            let emitted_info = info_ident(&b.inst.name);
+            let emits = [definer_info, emitted_info];
             let (rule_ts, rule_ident) = emit_rule_spec(
                 &rule_key,
                 &rule_name,
-                &shared_isas,
+                &shared_features,
                 &pattern_spec,
-                &[&d.inst.name, &b.inst.name],
+                &emits,
                 quote! {
                     tir::backend::isel::RuleKind::CondBranch {
                         target_symbol: #target_symbol_lit,
                     }
                 },
-                Some(&prelude_shim),
-                &emit_shim,
+                &steps,
+                &[],
                 &operand_constraint_entries,
                 &operand_register_specs,
                 None,
@@ -303,8 +304,8 @@ fn zero_equivalent(
     composed: &tir_symbolic::sem::SemGraph,
     symbol_widths: &[u32],
 ) -> Option<tir_symbolic::lang::SymKind> {
-    use tir_symbolic::sem::{EquivalenceOracle, FuzzOracle, SmtOracle};
     use tir_symbolic::lang::SymKind;
+    use tir_symbolic::sem::{EquivalenceOracle, FuzzOracle, SmtOracle};
     let fuzz = FuzzOracle::default();
     for kind in [SymKind::Ne, SymKind::Eq] {
         let (candidate, _) = zero_vs_candidate(kind, symbol_widths[0]);
@@ -363,16 +364,9 @@ fn emit_aliased_zero_branch_rules(
             if d_sem.class != b_sem.class {
                 continue;
             }
-            let shared_isas: Vec<String> = b
-                .inst
-                .for_isas
-                .iter()
-                .filter(|isa| d.inst.for_isas.contains(isa))
-                .cloned()
-                .collect();
-            if shared_isas.is_empty() {
-                continue;
-            }
+            let shared_features = RuleFeatures::any(&b.inst.for_isas)
+                .and(RuleFeatures::any(&d.inst.for_isas))
+                .expect("positive feature requirements are compatible");
             if !b_sem
                 .flag_symbols
                 .values()
@@ -469,10 +463,7 @@ fn emit_aliased_zero_branch_rules(
             let prelude_key = format!("flag_definer_{}_aliased", d.inst.name.to_lowercase());
             let d_op_ty_ident = format_ident!("{}Op", &d.inst.name);
             // Both operands read the same bound value (the aliased pair).
-            let prelude_attrs = [
-                emit_attr_value(name_a, 0),
-                emit_attr_value(name_b, 0),
-            ];
+            let prelude_attrs = [emit_attr_value(name_a, 0), emit_attr_value(name_b, 0)];
             let (prelude_ts, prelude_shim) = emit_emitter_spec(
                 &prelude_key,
                 dialect,
@@ -480,7 +471,8 @@ fn emit_aliased_zero_branch_rules(
                 &d_op_ty_ident,
                 &prelude_attrs,
                 &d.inst.name,
-            );
+        &quote! {},
+    );
             if emitted_preludes.insert(d.inst.name.clone()) {
                 isel_rule_emitters.push(prelude_ts);
             }
@@ -509,22 +501,32 @@ fn emit_aliased_zero_branch_rules(
                 &b_op_ty_ident,
                 &emit_attrs,
                 &b.inst.name,
-            );
-            let constraints =
-                [constraint_entry(0, quote! { tir::graph::OperandConstraint::Register })];
+        &quote! {},
+    );
+            let constraints = [constraint_entry(
+                0,
+                quote! { tir::graph::OperandConstraint::Register },
+            )];
+            let steps = [
+                emit_rule_step(&prelude_shim, quote! { &[] }, quote! { &[] }),
+                emit_rule_step(&emit_shim, quote! { &[] }, quote! { &[] }),
+            ];
+            let definer_info = info_ident(&d.inst.name);
+            let emitted_info = info_ident(&b.inst.name);
+            let emits = [definer_info, emitted_info];
             let (rule_ts, rule_ident) = emit_rule_spec(
                 &rule_key,
                 &rule_name,
-                &shared_isas,
+                &shared_features,
                 &pattern_spec,
-                &[&d.inst.name, &b.inst.name],
+                &emits,
                 quote! {
                     tir::backend::isel::RuleKind::CondBranch {
                         target_symbol: #target_symbol_lit,
                     }
                 },
-                Some(&prelude_shim),
-                &emit_shim,
+                &steps,
+                &[],
                 &constraints,
                 &operand_register_specs,
                 None,
@@ -545,67 +547,6 @@ fn emit_aliased_zero_branch_rules(
 /// the composition is provably one canonical comparison the pair registers an
 /// `If`-rooted rule whose prelude emits the definer and whose emitter is the
 /// reader (`cset`/`setcc` or `csel`/`cmov`).
-/// Each ISA's transitive `requires` set. An instruction tagged with ISA `a`
-/// where `requires[a]` contains `b` can co-occur with an instruction tagged
-/// `b`, even when the two instructions have no shared tag.
-fn isa_requires_closure(files: &[ast::File]) -> HashMap<String, HashSet<String>> {
-    let mut closure: HashMap<String, HashSet<String>> = HashMap::new();
-    for isa in files.iter().flat_map(|f| f.isas()) {
-        let direct = match &isa.requires {
-            Some(ast::IsaRequirement::Single(s)) => vec![s.clone()],
-            // `All` is a conjunction: every listed ISA is guaranteed present.
-            Some(ast::IsaRequirement::All(v)) => v.clone(),
-            // A single-element `Any` (`requires [X86]`) is an exact
-            // requirement. A multi-element `Any` is a disjunction (`[RV32I |
-            // RV64I]`): no single ISA is guaranteed, so it can imply nothing
-            // for the closure — assuming all would falsely pair instructions
-            // that never share a machine.
-            Some(ast::IsaRequirement::Any(v)) if v.len() == 1 => v.clone(),
-            Some(ast::IsaRequirement::Any(_)) => vec![],
-            None => vec![],
-        };
-        closure.entry(isa.name.clone()).or_default().extend(direct);
-    }
-    let names: Vec<String> = closure.keys().cloned().collect();
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for name in &names {
-            for req in closure[name].iter().cloned().collect::<Vec<_>>() {
-                for transitively in closure.get(&req).cloned().unwrap_or_default() {
-                    if closure.get_mut(name).unwrap().insert(transitively) {
-                        changed = true;
-                    }
-                }
-            }
-        }
-    }
-    closure
-}
-
-/// The ISAs a rule composing `reader`- and `definer`-tagged instructions is valid
-/// for: a shared tag, or the more-restrictive tag when one ISA requires the other
-/// (so both are available). Empty when the two can never co-occur.
-fn flag_rule_isas(
-    reader: &[String],
-    definer: &[String],
-    closure: &HashMap<String, HashSet<String>>,
-) -> Vec<String> {
-    let mut out = Vec::new();
-    for ri in reader {
-        for di in definer {
-            if ri == di || closure.get(ri).is_some_and(|c| c.contains(di)) {
-                out.push(ri.clone());
-            } else if closure.get(di).is_some_and(|c| c.contains(ri)) {
-                out.push(di.clone());
-            }
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
 fn emit_flag_reader_rules(
     files: &[ast::File],
     definers: &[(FlagInst<'_>, FlagDefinerSemantics)],
@@ -617,16 +558,14 @@ fn emit_flag_reader_rules(
 ) {
     let (float_classes, polymorphic_classes) = register_class_kinds(files);
     use tir_graph::MutDag;
-    let isa_closure = isa_requires_closure(files);
     for (r, r_sem) in readers {
         for (d, d_sem) in definers {
             if d_sem.class != r_sem.class {
                 continue;
             }
-            let shared_isas = flag_rule_isas(&r.inst.for_isas, &d.inst.for_isas, &isa_closure);
-            if shared_isas.is_empty() {
-                continue;
-            }
+            let shared_features = RuleFeatures::any(&r.inst.for_isas)
+                .and(RuleFeatures::any(&d.inst.for_isas))
+                .expect("positive feature requirements are compatible");
             if !r_sem
                 .flag_symbols
                 .values()
@@ -659,8 +598,7 @@ fn emit_flag_reader_rules(
             );
             let (composed, _) = fold_constant_subtrees(&spliced, spliced_root);
 
-            let Some((candidate, candidate_root)) =
-                find_equivalent_comparison(&composed, &symbols)
+            let Some((candidate, candidate_root)) = find_equivalent_comparison(&composed, &symbols)
             else {
                 continue;
             };
@@ -713,7 +651,11 @@ fn emit_flag_reader_rules(
                     .flatten()
             }));
             let (canon_pattern, canon_root, forced_widths) =
-                tir_symbolic::lang::canonicalize_for_selection(&pattern, if_root, &immediate_symbols);
+                tir_symbolic::lang::canonicalize_for_selection(
+                    &pattern,
+                    if_root,
+                    &immediate_symbols,
+                );
             let mut pattern_widths = tir_symbolic::lang::infer_widths(&canon_pattern, |_| None);
             for (index, forced) in forced_widths.iter().enumerate() {
                 if forced.is_some() {
@@ -753,13 +695,12 @@ fn emit_flag_reader_rules(
                 &float_classes,
                 &polymorphic_classes,
             );
-            let mut immediate_ranges =
-                immediate_operand_ranges(
-                    &d_sem.graph,
-                    &d.ops,
-                    &d_sem.variable_symbols,
-                    &d.constraints,
-                );
+            let mut immediate_ranges = immediate_operand_ranges(
+                &d_sem.graph,
+                &d.ops,
+                &d_sem.variable_symbols,
+                &d.constraints,
+            );
             immediate_ranges.extend(
                 immediate_operand_ranges(
                     &r_sem.graph,
@@ -789,7 +730,8 @@ fn emit_flag_reader_rules(
                 continue;
             };
             let dest_class_id = reg_class_id(&dest_class);
-            let result_spec = result_register_spec(&dest_class, &float_classes, &polymorphic_classes);
+            let result_spec =
+                result_register_spec(&dest_class, &float_classes, &polymorphic_classes);
             let mut reader_constraint_entries = Vec::new();
             let mut reader_attrs: Vec<proc_macro2::TokenStream> = Vec::new();
             for (name, ty) in &r.ops {
@@ -833,7 +775,7 @@ fn emit_flag_reader_rules(
             isel_rule_emitters.push(prelude_ts);
             operand_constraint_entries.extend(reader_constraint_entries);
 
-            let mut emit_attrs = vec![emit_attr_result(&r_sem.dest_operand, 0, &dest_class_id)];
+            let mut emit_attrs = vec![emit_attr_result(&r_sem.dest_operand, &dest_class_id)];
             emit_attrs.extend(reader_attrs);
             let (emitter_ts, emit_shim) = emit_emitter_spec(
                 &rule_key,
@@ -842,16 +784,25 @@ fn emit_flag_reader_rules(
                 &r_op_ty_ident,
                 &emit_attrs,
                 &r.inst.name,
-            );
+        &quote! {},
+    );
+            let steps = [
+                emit_rule_step(&prelude_shim, quote! { &[] }, quote! { &[] }),
+                emit_rule_step(&emit_shim, quote! { &[] }, quote! { &[] }),
+            ];
+            let outputs = [emit_step_result(1, 0)];
+            let definer_info = info_ident(&d.inst.name);
+            let emitted_info = info_ident(&r.inst.name);
+            let emits = [definer_info, emitted_info];
             let (rule_ts, rule_ident) = emit_rule_spec(
                 &rule_key,
                 &rule_name,
-                &shared_isas,
+                &shared_features,
                 &pattern_spec,
-                &[&d.inst.name, &r.inst.name],
+                &emits,
                 quote! { tir::backend::isel::RuleKind::Value },
-                Some(&prelude_shim),
-                &emit_shim,
+                &steps,
+                &outputs,
                 &operand_constraint_entries,
                 &operand_register_specs,
                 Some(result_spec),

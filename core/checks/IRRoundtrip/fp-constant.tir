@@ -1,0 +1,11 @@
+// RUN: tir opt %s | filecheck %s
+
+module {
+  %f = func.func @constant() -> !f64 {
+    %value = fp.constant {bits = 9221120237041090561} : !f64
+    func.return %value
+  }
+  module_end
+}
+
+// CHECK: %{{[0-9]+}} = fp.constant {bits = 9221120237041090561} : !f64

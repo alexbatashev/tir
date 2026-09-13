@@ -123,16 +123,12 @@ fn behavior_has_dynamic_sized_memory_access(
         ast::Expr::Call(c) => c.arguments.iter().any(recurse),
         ast::Expr::Field(f) => recurse(&f.base),
         ast::Expr::If(i) => {
-            recurse(&i.cond)
-                || recurse(&i.then)
-                || i.else_.as_ref().is_some_and(|e| recurse(e))
+            recurse(&i.cond) || recurse(&i.then) || i.else_.as_ref().is_some_and(|e| recurse(e))
         }
         ast::Expr::IndexAccess(i) => recurse(&i.base),
         ast::Expr::Slice(s) => recurse(&s.base),
         ast::Expr::Cast(c) => recurse(&c.x) || recurse(&c.width),
-        ast::Expr::Try(t) => {
-            recurse(&t.body) || t.handlers.iter().any(|h| recurse(&h.body))
-        }
+        ast::Expr::Try(t) => recurse(&t.body) || t.handlers.iter().any(|h| recurse(&h.body)),
         ast::Expr::Lambda(l) => recurse(&l.body),
         ast::Expr::Ident(_)
         | ast::Expr::Lit(_)
@@ -242,7 +238,9 @@ fn emit_behavior_effect(
         }
         // The simulator executes the no-trap path. Handler state is modeled by
         // the SMT printer, while machine exception handling owns trap entry.
-        tir_symbolic::lang::SymKind::StateTry => emit_behavior_effect(behavior, *children.first()?, ctx),
+        tir_symbolic::lang::SymKind::StateTry => {
+            emit_behavior_effect(behavior, *children.first()?, ctx)
+        }
         tir_symbolic::lang::SymKind::StateBlock => {
             let mut steps = Vec::new();
             for effect in children {
@@ -287,7 +285,10 @@ fn emit_binding_value_offset(
 }
 
 fn lowered_value_offset(
-    dag: &impl tir_graph::Dag<Node = tir_symbolic::lang::SymKind, Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>>,
+    dag: &impl tir_graph::Dag<
+        Node = tir_symbolic::lang::SymKind,
+        Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
+    >,
     root: tir_graph::NodeId,
 ) -> proc_macro2::Literal {
     // Behavior value terms carry no type annotations, so no typed nodes.
@@ -463,7 +464,11 @@ fn emit_cond_branch_rule(
             continue;
         }
         if let Some((class_name, index)) = zero_slots.get(op_name) {
-            emit_attrs.push(emit_attr_physical(op_name, &reg_class_id(class_name), *index));
+            emit_attrs.push(emit_attr_physical(
+                op_name,
+                &reg_class_id(class_name),
+                *index,
+            ));
             continue;
         }
         let Some(&symbol) = variable_symbols.get(op_name) else {
@@ -521,22 +526,31 @@ fn emit_cond_branch_rule(
         constraints,
     ));
 
-    let (emitter_ts, emit_shim) =
-        emit_emitter_spec(rule_name, dialect, op_name, op_ty_ident, &emit_attrs, inst_name);
+    let (emitter_ts, emit_shim) = emit_emitter_spec(
+        rule_name,
+        dialect,
+        op_name,
+        op_ty_ident,
+        &emit_attrs,
+        inst_name,
+        &quote! {},
+    );
     let target_symbol_lit = proc_macro2::Literal::u32_unsuffixed(target_symbol);
+    let steps = [emit_rule_step(&emit_shim, quote! { &[] }, quote! { &[] })];
+    let emits = [info_ident(inst_name)];
     let (rule_ts, rule_ident) = emit_rule_spec(
         rule_name,
         rule_name,
-        for_isas,
+        &RuleFeatures::any(for_isas),
         &pattern_spec,
-        &[inst_name],
+        &emits,
         quote! {
             tir::backend::isel::RuleKind::CondBranch {
                 target_symbol: #target_symbol_lit,
             }
         },
-        None,
-        &emit_shim,
+        &steps,
+        &[],
         &operand_constraint_entries,
         &operand_register_specs,
         None,
@@ -589,7 +603,10 @@ fn clone_pattern_with_zero(
         let zero = out.add_node(tir_symbolic::lang::SymKind::Constant);
         out.set_leaf_data(zero, tir_symbolic::sem::int_payload(1, 0, false));
         let width = out.add_node(tir_symbolic::lang::SymKind::Symbol);
-        out.set_leaf_data(width, tir_symbolic::lang::SymPayload::SymbolId(width_symbol));
+        out.set_leaf_data(
+            width,
+            tir_symbolic::lang::SymPayload::SymbolId(width_symbol),
+        );
         let zext = out.add_node(tir_symbolic::lang::SymKind::ZExt);
         out.add_edge(zext, zero);
         out.add_edge(zext, width);
@@ -619,13 +636,17 @@ fn clone_pattern_with_zero(
 /// Serializes `dag` into the sem blob, returning its offset and whether any
 /// node carries a type annotation (requiring the typed loader at use site).
 fn intern_dag(
-    dag: &impl tir_graph::Dag<Node = tir_symbolic::lang::SymKind, Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>>,
+    dag: &impl tir_graph::Dag<
+        Node = tir_symbolic::lang::SymKind,
+        Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
+    >,
     root: tir_graph::NodeId,
     widths: &[Option<u32>],
 ) -> (u32, bool) {
     let mut ops: Vec<tir_symbolic::sem::SemOp> = Vec::new();
     let mut node_indices: HashMap<usize, u32> = HashMap::new();
     let mut has_typed_node = false;
+    let inferred_types = tir_symbolic::lang::infer_types(dag, |_| None).ok();
     for (counter, node_id) in dag.postorder(root).enumerate() {
         ops.push(tir_symbolic::sem::SemOp::Node(*dag.get_node(node_id)));
 
@@ -634,6 +655,11 @@ fn intern_dag(
         }
 
         if !matches!(
+            inferred_types
+                .as_ref()
+                .and_then(|types| types.get(node_id.index())),
+            Some(tir_symbolic::lang::SemType::Pair(_, _) | tir_symbolic::lang::SemType::Float(_))
+        ) && !matches!(
             dag.get_node(node_id),
             tir_symbolic::lang::SymKind::FAdd
                 | tir_symbolic::lang::SymKind::FSub
@@ -667,7 +693,10 @@ fn intern_dag(
 }
 
 fn emit_dag_as_code(
-    dag: &impl tir_graph::Dag<Node = tir_symbolic::lang::SymKind, Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>>,
+    dag: &impl tir_graph::Dag<
+        Node = tir_symbolic::lang::SymKind,
+        Leaf = tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
+    >,
     root: tir_graph::NodeId,
     widths: &[Option<u32>],
 ) -> proc_macro2::TokenStream {
@@ -690,9 +719,11 @@ fn emit_dag_as_code(
     }
 }
 
-fn payload_desc(payload: &tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>) -> tir_symbolic::sem::SemPayloadDesc {
-    use tir_symbolic::sem::SemPayloadDesc;
+fn payload_desc(
+    payload: &tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
+) -> tir_symbolic::sem::SemPayloadDesc {
     use tir_symbolic::lang::SymPayload;
+    use tir_symbolic::sem::SemPayloadDesc;
     match payload {
         SymPayload::SymbolId(id) => SemPayloadDesc::SymbolId(*id),
         SymPayload::Value(value) => SemPayloadDesc::Value(value.number()),
@@ -716,7 +747,6 @@ fn emit_expr_kind_ts(kind: &tir_symbolic::lang::SymKind) -> proc_macro2::TokenSt
     );
     quote! { tir::sem::SymKind::#variant }
 }
-
 
 // ---------------------------------------------------------------------------
 // Instruction encoders

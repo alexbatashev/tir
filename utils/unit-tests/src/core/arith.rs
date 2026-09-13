@@ -239,7 +239,7 @@ mod predicate {
     fn an_unknown_predicate_fails_to_parse() {
         for op in [
             r#"%3 = cmpi %0, %0 {predicate = "bogus"} : !i1"#,
-            r#"%3 = cmpf %1, %1 {predicate = "bogus"} : !i1"#,
+            r#"%3 = fp.cmp %1, %1 {predicate = "bogus", semantics = {kind = "comparison", behavior = "quiet", exceptions = "ignore", subnormals = "gradual"}} : !i1"#,
             r#"%3 = ptr.cmp %2, %2 {predicate = "bogus"} : !i1"#,
         ] {
             let context = Context::with_default_dialects();

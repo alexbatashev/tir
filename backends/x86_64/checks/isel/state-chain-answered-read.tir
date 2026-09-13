@@ -14,7 +14,7 @@ module {
     %2 = constant {value = 0} : !i32
     %3 = constant {value = 1} : !i32
     %4 = constant {value = 4} : !i32
-    %5 = state.entry_state
+    %5 = state.entry_state : !state<memory>
     %6, %7, %8 = scf.for %9 = %2 to %4 step %3 (%10 = %0, %11 = %5) {
       %12 = ptr.store %4, %1 state(%11)
       %13, %14 = ptr.load %1 state(%12) : !i32
@@ -26,6 +26,6 @@ module {
   module_end
 }
 
-// CHECK: ^bb{{[0-9]+}}(%[[ENTERED:[0-9]+]]: !state):
+// CHECK: ^bb{{[0-9]+}}(%[[ENTERED:[0-9]+]]: !state<memory>):
 // CHECK-NEXT: %[[WRITTEN:[0-9]+]] = x86_64.mov_store32 {{.*}} state(%[[ENTERED]])
 // CHECK: asm.vbr {{.*}} %[[WRITTEN]] ^bb1

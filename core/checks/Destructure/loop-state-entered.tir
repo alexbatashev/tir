@@ -25,14 +25,14 @@ module {
   module_end
 }
 
-// CHECK: ^bb1(%[[I:[0-9]+]]: !i32, %[[S:[0-9]+]]: !state):
+// CHECK: ^bb1(%[[I:[0-9]+]]: !i32, %[[S:[0-9]+]]: !state<memory>):
 // CHECK-NEXT: %[[AGAIN:[0-9]+]] = cmpi %[[I]]
-// CHECK-NEXT: cfg.cond_br %[[AGAIN]], ^bb2(%[[S]] : !state), ^bb3(%[[S]] : !state)
-// CHECK-NEXT: ^bb2(%[[CS:[0-9]+]]: !state):
+// CHECK-NEXT: cfg.cond_br %[[AGAIN]], ^bb2(%[[S]] : !state<memory>), ^bb3(%[[S]] : !state<memory>)
+// CHECK-NEXT: ^bb2(%[[CS:[0-9]+]]: !state<memory>):
 // CHECK-NEXT: %[[NEXT:[0-9]+]] = addi %[[I]]
-// CHECK-NEXT: cfg.br ^bb1(%[[NEXT]], %[[CS]] : !i32, !state)
-// CHECK-NEXT: ^bb3(%[[ES:[0-9]+]]: !state):
+// CHECK-NEXT: cfg.br ^bb1(%[[NEXT]], %[[CS]] : !i32, !state<memory>)
+// CHECK-NEXT: ^bb3(%[[ES:[0-9]+]]: !state<memory>):
 // CHECK-NEXT: %[[STORED:[0-9]+]] = ptr.store %{{[0-9]+}}, %{{[0-9]+}} state(%[[ES]])
-// CHECK-NEXT: cfg.br ^bb4(%[[I]], %[[STORED]] : !i32, !state)
+// CHECK-NEXT: cfg.br ^bb4(%[[I]], %[[STORED]] : !i32, !state<memory>)
 
 // VALUE: i32 42

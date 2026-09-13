@@ -1380,9 +1380,17 @@ impl Let {
     ) -> tir_graph::NodeId {
         let node = self.value.lower_with_ctx(ctx);
         let symbol = ctx.alloc_variable_symbol();
-        ctx.let_symbols.insert(node, symbol);
+        let binding = if *ctx.graph.get_kind(node) == tir_symbolic::lang::SymKind::FPValue {
+            ctx.graph
+                .children(node)
+                .next()
+                .expect("fp_value has one operand")
+        } else {
+            node
+        };
+        ctx.let_symbols.insert(binding, symbol);
         ctx.let_bindings.insert(self.name.clone(), node);
-        node
+        binding
     }
 }
 
@@ -2153,13 +2161,21 @@ impl Call {
                     tir_symbolic::lang::SymPayload::Int(tir_adt::APInt::new(3, mode)),
                 );
             }
-            return ctx.add_node(kind, &children);
+            let outcome = ctx.add_node(kind, &children);
+            return ctx.add_node(SymKind::FPValue, &[outcome]);
         }
         match builtin {
             BuiltinFunction::FPFlags => {
                 let input = self.arguments[0].lower_with_ctx(ctx);
+                let Some(outcome) = (*ctx.graph.get_kind(input) == SymKind::FPValue)
+                    .then(|| ctx.graph.children(input).next())
+                    .flatten()
+                else {
+                    ctx.had_error = true;
+                    return ctx.add_node(SymKind::FPFlags, &[input]);
+                };
                 if !matches!(
-                    ctx.graph.get_kind(input),
+                    ctx.graph.get_kind(outcome),
                     SymKind::FAddRound
                         | SymKind::FSubRound
                         | SymKind::FMulRound
@@ -2174,10 +2190,7 @@ impl Call {
                 ) {
                     ctx.had_error = true;
                 }
-                let kind = *ctx.graph.get_kind(input);
-                let operands: Vec<_> = ctx.graph.children(input).collect();
-                let operation = ctx.add_node(kind, &operands);
-                ctx.add_node(SymKind::FPFlags, &[operation])
+                ctx.add_node(SymKind::FPFlags, &[outcome])
             }
             BuiltinFunction::FAdd
             | BuiltinFunction::FSub

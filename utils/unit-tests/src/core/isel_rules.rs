@@ -2,7 +2,7 @@
 //! table-driven rule construction.
 
 use tir::backend::isel::{
-    build_rules, prove_guarded_relaxations, CapabilityKind, EmitRequest, PatternRef,
+    build_rules, prove_guarded_relaxations, CapabilityKind, EmitRequest, FeatureClause, PatternRef,
     RegOperandSpec, RegisterCapability, RegisterRequirement, ResultRegSpec, Rule, RuleKind,
     RuleMatch, RuleSpec, LATENCY_COST_SCALE,
 };
@@ -127,8 +127,9 @@ static EMITTED: tir::backend::InstrInfo = tir::backend::InstrInfo {
 };
 
 static EMITS: &[&tir::backend::InstrInfo] = &[&EMITTED];
+static STEPS: &[tir::backend::isel::RuleStep] = &[tir::backend::isel::RuleStep::new(nop_emit)];
 
-fn rule_spec(offset: u32, features: &'static [u16]) -> RuleSpec {
+fn rule_spec(offset: u32, features: &'static [FeatureClause]) -> RuleSpec {
     RuleSpec {
         name: "inst",
         features,
@@ -139,8 +140,8 @@ fn rule_spec(offset: u32, features: &'static [u16]) -> RuleSpec {
         },
         emits: EMITS,
         kind: RuleKind::Value,
-        prelude_emit: None,
-        emit_fn: nop_emit,
+        steps: STEPS,
+        outputs: &[],
         constraints: &[],
         registers: &[],
         result: None,
@@ -153,7 +154,7 @@ fn rule_spec(offset: u32, features: &'static [u16]) -> RuleSpec {
 fn build_rules_gates_on_any_feature() {
     let context = Context::with_default_dialects();
     let (blob, kinds, offset) = symbol_blob();
-    static BOTH: &[u16] = &[1, 2];
+    static BOTH: &[FeatureClause] = &[FeatureClause::Any(&[1, 2])];
     let gated = rule_spec(offset, BOTH);
     let open = rule_spec(offset, &[]);
     let specs: &[&RuleSpec] = &[&gated, &open];
@@ -163,6 +164,25 @@ fn build_rules_gates_on_any_feature() {
     let rules = build_rules(&context, &[9], &kinds, &blob, &[], specs);
     assert_eq!(rules.len(), 1);
     assert_eq!(rules[0].base_cost, 3 * LATENCY_COST_SCALE + 4);
+}
+
+#[test]
+fn build_rules_requires_every_feature_clause() {
+    let context = Context::with_default_dialects();
+    let (blob, kinds, offset) = symbol_blob();
+    static FEATURES: &[FeatureClause] = &[
+        FeatureClause::Any(&[1, 2]),
+        FeatureClause::Any(&[3]),
+        FeatureClause::None(&[4]),
+    ];
+    let spec = rule_spec(offset, FEATURES);
+
+    assert_eq!(
+        build_rules(&context, &[2, 3], &kinds, &blob, &[], &[&spec]).len(),
+        1
+    );
+    assert!(build_rules(&context, &[2], &kinds, &blob, &[], &[&spec]).is_empty());
+    assert!(build_rules(&context, &[2, 3, 4], &kinds, &blob, &[], &[&spec]).is_empty());
 }
 
 #[test]
@@ -213,6 +233,7 @@ fn expression_conversion_clipping_is_proved_on_the_defined_domain() {
         let width = constant(&mut full, 32, 32);
         let rm = constant(&mut full, 1, 3);
         let converted = nary(&mut full, SymKind::FPToSIRound, &[input, width, rm]);
+        let converted = nary(&mut full, SymKind::FPValue, &[converted]);
         let clip = constant(&mut full, clipped, 32);
         let selected = nary(&mut full, SymKind::If, &[guard, clip, converted]);
         let xlen = symbol(&mut full, 1);

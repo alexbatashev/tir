@@ -9,8 +9,12 @@ mod sexpr;
 mod types;
 
 pub use exec::{Memory, execute, execute_with_memory};
-pub use infer::{canonicalize_for_selection, infer_types, infer_widths, selection_fallback};
+pub use infer::{
+    canonicalize_for_selection, infer_types, infer_widths, selection_fallback,
+    value_observation_fallback,
+};
 pub use ops::{SCALAR_OPS, ScalarOp, SmtTemplate, WidthRule, scalar_op, scalar_op_named};
+pub(crate) use rounded::operation as rounded_operation;
 pub use sexpr::{BuildError, SemBuilderHooks, SemExpr, build, op_kind, op_name, parse};
 pub use types::{FloatFormat, SemType, TypeError, TypeUnifier, TypeVar, Width, WidthVar};
 
@@ -160,6 +164,13 @@ pub enum SymKind {
     StateIf,
     StateTry,
     StateHandler,
+    /// Read one logical field from a typed resource state:
+    /// `[state, resource, field]`.
+    StateRead,
+    /// A value observed from the same execution event as one or more resource
+    /// states: `[value, state, ...]`. The state children keep effectful value
+    /// computations distinct in semantic graphs.
+    StateResult,
     /// `[n, w]`: an iterator of `n` lanes of `w` bits holding the values
     /// 0..n-1 — the lane indices. Gives `map`/`zip` lambdas positional
     /// awareness (RVV `vid.v`, slides, gathers, per-lane addresses).
@@ -188,6 +199,9 @@ pub enum SymKind {
     UIToFPRound,
     FPToSIRound,
     FPToUIRound,
+    /// The numeric result projected from a rounded floating-point outcome.
+    FPValue,
+    /// The exception flags projected from a rounded floating-point outcome.
     FPFlags,
 }
 
@@ -223,6 +237,7 @@ impl SymKind {
             | SymKind::Sqrt
             | SymKind::AsFloat
             | SymKind::Port
+            | SymKind::FPValue
             | SymKind::FPFlags => 1,
             SymKind::IterConcat => 1,
             SymKind::If
@@ -268,7 +283,9 @@ impl SymKind {
             | SymKind::StateBlock
             | SymKind::StateIf
             | SymKind::StateTry
-            | SymKind::StateHandler => true,
+            | SymKind::StateHandler
+            | SymKind::StateRead
+            | SymKind::StateResult => true,
             _ => n == self.arity(),
         }
     }
@@ -287,6 +304,80 @@ pub enum AtomicRmwOp {
     Max = 6,
     MinU = 7,
     MaxU = 8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u64)]
+pub enum StateResourceKind {
+    Memory = 0,
+    FpEnvironment = 1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u64)]
+pub enum StateFieldKind {
+    Whole = 0,
+    FpRounding = 1,
+    FpFlags = 2,
+    FpTraps = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u64)]
+pub enum StateAccessKind {
+    Read = 0,
+    Change = 1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateFieldSchema {
+    pub bit_width: Option<u32>,
+    pub maximum: Option<u64>,
+}
+
+impl StateResourceKind {
+    pub fn field_schema(self, field: StateFieldKind) -> Option<StateFieldSchema> {
+        use StateFieldKind::{FpFlags, FpRounding, FpTraps, Whole};
+        match (self, field) {
+            (Self::Memory, Whole) => Some(StateFieldSchema {
+                bit_width: None,
+                maximum: None,
+            }),
+            (Self::FpEnvironment, Whole) => Some(StateFieldSchema {
+                bit_width: Some(13),
+                maximum: Some(0x1fff),
+            }),
+            (Self::FpEnvironment, FpRounding) => Some(StateFieldSchema {
+                bit_width: Some(3),
+                maximum: Some(4),
+            }),
+            (Self::FpEnvironment, FpFlags | FpTraps) => Some(StateFieldSchema {
+                bit_width: Some(5),
+                maximum: Some(0x1f),
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn from_code(code: u64) -> Option<Self> {
+        match code {
+            0 => Some(Self::Memory),
+            1 => Some(Self::FpEnvironment),
+            _ => None,
+        }
+    }
+}
+
+impl StateFieldKind {
+    pub fn from_code(code: u64) -> Option<Self> {
+        match code {
+            0 => Some(Self::Whole),
+            1 => Some(Self::FpRounding),
+            2 => Some(Self::FpFlags),
+            3 => Some(Self::FpTraps),
+            _ => None,
+        }
+    }
 }
 
 impl AtomicRmwOp {
@@ -391,7 +482,7 @@ impl<C> Matchable<C> for SymKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SymPayload<V> {
     SymbolId(u32),
     Value(V),
@@ -404,6 +495,8 @@ pub enum SymPayload<V> {
 pub enum Value {
     Int(APInt),
     Float(APFloat),
+    /// A correlated result and its IEEE exception flags.
+    Pair(Box<Value>, Box<Value>),
     /// A fixed-size array of values, like a vector.
     Iterator(Vec<Value>),
     /// An untyped bag of bits.
@@ -415,6 +508,7 @@ impl PartialEq for Value {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::Pair(a1, a2), Value::Pair(b1, b2)) => a1 == b1 && a2 == b2,
             (Value::Iterator(a), Value::Iterator(b)) => a == b,
             _ => false,
         }

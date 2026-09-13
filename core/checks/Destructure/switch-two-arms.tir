@@ -29,15 +29,15 @@ module {
 
 // CHECK: %{{[0-9]+}} = func.func @main(%[[P:[0-9]+]]: !i1, %[[X:[0-9]+]]: !i32) -> !i32 {
 // CHECK-NEXT: %[[SLOT:[0-9]+]], %[[D:[0-9]+]] = ptr.alloca
-// CHECK-NEXT: cfg.cond_br %[[P]], ^bb2(%[[X]], %[[D]] : !i32, !state), ^bb1(%[[X]], %[[D]] : !i32, !state)
-// CHECK-NEXT: ^bb1(%[[A:[0-9]+]]: !i32, %[[AD:[0-9]+]]: !state):
+// CHECK-NEXT: cfg.cond_br %[[P]], ^bb2(%[[X]], %[[D]] : !i32, !state<memory>), ^bb1(%[[X]], %[[D]] : !i32, !state<memory>)
+// CHECK-NEXT: ^bb1(%[[A:[0-9]+]]: !i32, %[[AD:[0-9]+]]: !state<memory>):
 // CHECK-NEXT: %[[AS:[0-9]+]] = ptr.store %[[A]], %[[SLOT]] state(%[[AD]])
-// CHECK-NEXT: cfg.br ^bb3(%[[A]], %[[AS]] : !i32, !state)
-// CHECK-NEXT: ^bb2(%[[B:[0-9]+]]: !i32, %[[BD:[0-9]+]]: !state):
+// CHECK-NEXT: cfg.br ^bb3(%[[A]], %[[AS]] : !i32, !state<memory>)
+// CHECK-NEXT: ^bb2(%[[B:[0-9]+]]: !i32, %[[BD:[0-9]+]]: !state<memory>):
 // CHECK-NEXT: %[[T:[0-9]+]] = addi %[[B]], %[[B]] : !i32
 // CHECK-NEXT: %[[BS:[0-9]+]] = ptr.store %[[T]], %[[SLOT]] state(%[[BD]])
-// CHECK-NEXT: cfg.br ^bb3(%[[T]], %[[BS]] : !i32, !state)
-// CHECK-NEXT: ^bb3(%[[R:[0-9]+]]: !i32, %[[RD:[0-9]+]]: !state):
+// CHECK-NEXT: cfg.br ^bb3(%[[T]], %[[BS]] : !i32, !state<memory>)
+// CHECK-NEXT: ^bb3(%[[R:[0-9]+]]: !i32, %[[RD:[0-9]+]]: !state<memory>):
 // CHECK-NEXT: %{{[0-9]+}} = ptr.load %[[SLOT]] state(%[[RD]]) : !i32
 
 // TAKEN: i32 20

@@ -46,15 +46,15 @@ mod isa {
         })
     }
 
-    /// Pre-RA: materialize a `constantf` that survived instruction selection
+    /// Pre-RA: materialize an `fp.constant` that survived instruction selection
     /// into `movabs r64, bits` + `movq xmm, r64`.
     fn lower_float_constant(
         context: &tir::Context,
         op: &tir::OperationRef,
     ) -> Result<bool, tir::PassError> {
-        use tir::builtin::ConstantFOp;
+        use tir::fp::ops::ConstantOp;
 
-        let Some(constant) = op.as_op::<ConstantFOp>() else {
+        let Some(constant) = op.as_op::<ConstantOp>() else {
             return Ok(false);
         };
         let Some(bits) = tir::backend::f64_constant_bits(context, &constant) else {

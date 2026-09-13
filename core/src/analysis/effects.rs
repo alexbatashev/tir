@@ -1,9 +1,7 @@
 //! What an operation does to the memory it names, and where it names it.
 
-use crate::func::CallOp;
-use crate::ptr::MemcpyOp;
-use crate::state::{JoinOp, SplitOp};
-use crate::{MemoryRead, MemoryState, MemoryWrite, OpHandle, ValueId};
+use crate::builtin::StateResource;
+use crate::{MemoryRead, MemoryWrite, OpHandle, ResourceAccess, ResourceEffects, ValueId};
 
 /// What one operation does to the memory it names.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -14,23 +12,20 @@ pub enum Effect {
     Change,
 }
 
-/// What `op` does to memory, or `None` where it names none. Both memory
-/// interfaces are asked before either answers: an operation declaring the two
-/// writes the extent it reads, and is no observer. An operation naming a state
-/// without declaring what it does to it changes it — a call, a copy, an export.
+/// What `op` declares it does to memory.
 pub fn effect_of(op: &OpHandle) -> Option<Effect> {
-    if op.has_interface::<dyn MemoryWrite>() || op.is::<MemcpyOp>() || op.is::<CallOp>() {
-        return Some(Effect::Change);
-    }
-    if op.has_interface::<dyn MemoryRead>() {
-        return Some(Effect::Read);
-    }
-    // A merge and a split only name the chains an effect crosses, and a loop or
-    // a gate only carries them: the effect itself is inside.
-    if op.is::<JoinOp>() || op.is::<SplitOp>() || !op.regions().is_empty() {
-        return None;
-    }
-    (!op.state_operands().is_empty()).then_some(Effect::Change)
+    resource_effect(op, StateResource::Memory).map(|effect| match effect.access {
+        ResourceAccess::Read => Effect::Read,
+        ResourceAccess::Change => Effect::Change,
+    })
+}
+
+pub fn resource_effect(op: &OpHandle, resource: StateResource) -> Option<crate::ResourceEffect> {
+    op.clone()
+        .as_interface::<dyn ResourceEffects>()?
+        .resource_effects()
+        .into_iter()
+        .find(|effect| effect.resource == resource)
 }
 
 /// One declared access: where it lands, the value it names there, the state it
@@ -63,18 +58,16 @@ pub fn access_of(op: &OpHandle) -> Option<Access> {
 
 /// The one state `op` observes, if it has been put on a chain.
 pub fn observed_state(op: &OpHandle) -> Option<ValueId> {
-    op.clone()
-        .as_interface::<dyn MemoryState>()?
-        .observed()
+    resource_effect(op, StateResource::Memory)?
+        .observed
         .first()
         .copied()
 }
 
 /// The one state `op` leaves behind, if it has been put on a chain.
 pub fn produced_state(op: &OpHandle) -> Option<ValueId> {
-    op.clone()
-        .as_interface::<dyn MemoryState>()?
-        .produced()
+    resource_effect(op, StateResource::Memory)?
+        .produced
         .first()
         .copied()
 }

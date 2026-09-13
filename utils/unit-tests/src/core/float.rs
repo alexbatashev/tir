@@ -1,114 +1,210 @@
-//! Float fast-math flags and sem-derived float folding.
-
+use tir::fp::{
+    ops, ArithmeticSemantics, Exceptions, IntegerConversionSemantics, InvalidConversion, NaNPolicy,
+    Rounding, RoundingMode, SubnormalMode, Tininess,
+};
+use tir::graph::Dag;
+use tir::sem::{SemGraph, SymKind, Value};
 use tir::{
-    attributes::AttributeValue,
-    builtin::{fp_math_flags, ops, FastMathFlags, FloatType, UnitType, FPMATH_ATTR},
-    func::ops as func_ops,
-    sem::Value,
+    builtin::{FloatType, IntegerType},
     ConstantFold, Context, Operation,
 };
-use tir_adt::APFloat;
+use tir_adt::{APFloat, APInt};
 
 #[test]
-fn fp_ops_fold_via_sem() {
+fn canonical_nan_arithmetic_folds_to_the_canonical_payload() {
     let context = Context::with_default_dialects();
-    let f32_ty = FloatType::f32(&context);
-    let a = context.create_value(f32_ty, None);
-    let b = context.create_value(f32_ty, None);
-    let op = ops::mulf(&context, a.id(), b.id(), f32_ty).build();
+    let ty = FloatType::f64(&context);
+    let lhs = context.create_value(ty, None);
+    let rhs = context.create_value(ty, None);
+    let op = ops::AddOpBuilder::new(&context)
+        .lhs(lhs.id())
+        .rhs(rhs.id())
+        .semantics(context.intern_fp_semantics(ArithmeticSemantics {
+            rounding: Rounding::Fixed(RoundingMode::TiesToEven),
+            exceptions: Exceptions::Ignore,
+            nan: NaNPolicy::Canonical,
+            subnormals: SubnormalMode::Gradual,
+            tininess: Tininess::AfterRounding,
+        }))
+        .result_type(ty)
+        .build();
 
-    let fold = context
+    let folded = context
         .get_op(op.id())
         .as_interface::<dyn ConstantFold>()
-        .expect("mulf derives ConstantFold from its sem");
-    let folded = fold
+        .expect("FP arithmetic exposes constant folding")
         .fold(&[
-            Value::Float(APFloat::from_f64(3.0)),
-            Value::Float(APFloat::from_f64(0.5)),
+            Value::Float(APFloat::from_bits(11, 52, false, 0x7ff8_0000_0000_1234)),
+            Value::Float(APFloat::from_bits(11, 52, false, 0)),
         ])
-        .expect("folds two constants");
-    match folded {
-        Value::Float(v) => assert_eq!(v.to_f64(), 1.5),
-        other => panic!("expected a float, got {other:?}"),
-    }
+        .expect("folds exact operands");
+
+    let Value::Float(value) = folded else {
+        panic!("expected a floating result")
+    };
+    assert_eq!(value.to_bits(), 0x7ff8_0000_0000_0000);
 }
 
 #[test]
-fn fast_math_flags_parse_and_print() {
-    assert_eq!(FastMathFlags::parse("none"), Some(FastMathFlags::NONE));
-    assert_eq!(FastMathFlags::parse("fast"), Some(FastMathFlags::FAST));
-    let flags = FastMathFlags::parse("contract, nnan").unwrap();
-    assert!(flags.contains(FastMathFlags::CONTRACT));
-    assert!(flags.contains(FastMathFlags::NNAN));
-    assert!(!flags.contains(FastMathFlags::REASSOC));
-    assert_eq!(flags.to_string(), "contract,nnan");
-    assert_eq!(FastMathFlags::parse("wibble"), None);
-    assert_eq!(FastMathFlags::FAST.to_string(), "fast");
-    assert_eq!(
-        FastMathFlags::parse(&FastMathFlags::FAST.to_string()),
-        Some(FastMathFlags::FAST)
-    );
+fn rounded_float_conversion_folds_to_its_numeric_value() {
+    let context = Context::with_default_dialects();
+    let input_type = FloatType::f64(&context);
+    let input = context.create_value(input_type, None);
+    let op = ops::ConvertOpBuilder::new(&context)
+        .input(input.id())
+        .semantics(context.intern_fp_semantics(ArithmeticSemantics::strict(
+            RoundingMode::TowardPositive,
+            Exceptions::Ignore,
+        )))
+        .result_type(FloatType::f32(&context))
+        .build();
+
+    let folded = context
+        .get_op(op.id())
+        .as_interface::<dyn ConstantFold>()
+        .expect("float conversion exposes constant folding")
+        .fold(&[Value::Float(APFloat::from_bits(
+            11,
+            52,
+            false,
+            0x3ff0_0000_1000_0000,
+        ))])
+        .expect("folds exact operand");
+
+    let Value::Float(value) = folded else {
+        panic!("expected a floating result")
+    };
+    assert_eq!(value.to_bits(), 0x3f80_0001);
 }
 
-/// A func with `fpmath` and an op in its body: the op inherits the func's
-/// flags through the region chain; without any attribute the default is
-/// strict.
 #[test]
-fn fp_math_flags_inherited_from_region_owner() {
+fn canonical_nan_float_conversion_folds_to_the_canonical_payload() {
+    let context = Context::with_default_dialects();
+    let input_type = FloatType::f64(&context);
+    let input = context.create_value(input_type, None);
+    let op = ops::ConvertOpBuilder::new(&context)
+        .input(input.id())
+        .semantics(context.intern_fp_semantics(ArithmeticSemantics {
+            rounding: Rounding::Fixed(RoundingMode::TiesToEven),
+            exceptions: Exceptions::Ignore,
+            nan: NaNPolicy::Canonical,
+            subnormals: SubnormalMode::Gradual,
+            tininess: Tininess::AfterRounding,
+        }))
+        .result_type(FloatType::f32(&context))
+        .build();
+
+    let folded = context
+        .get_op(op.id())
+        .as_interface::<dyn ConstantFold>()
+        .expect("float conversion exposes constant folding")
+        .fold(&[Value::Float(APFloat::from_bits(
+            11,
+            52,
+            false,
+            0x7ff8_0000_2000_0000,
+        ))])
+        .expect("folds exact operand");
+
+    let Value::Float(value) = folded else {
+        panic!("expected a floating result")
+    };
+    assert_eq!(value.to_bits(), 0x7fc0_0000);
+}
+
+#[test]
+fn rounded_integer_conversion_folds_to_its_numeric_value() {
+    let context = Context::with_default_dialects();
+    let input_type = FloatType::f64(&context);
+    let input = context.create_value(input_type, None);
+    let op = ops::ToSiOpBuilder::new(&context)
+        .input(input.id())
+        .semantics(
+            context.intern_fp_semantics(tir::fp::Semantics::IntegerConversion(
+                IntegerConversionSemantics {
+                    rounding: Rounding::Fixed(RoundingMode::TiesToEven),
+                    exceptions: Exceptions::Ignore,
+                    subnormals: SubnormalMode::Gradual,
+                    invalid: InvalidConversion::Indeterminate,
+                },
+            )),
+        )
+        .result_type(IntegerType::new(&context, 64))
+        .build();
+
+    let folded = context
+        .get_op(op.id())
+        .as_interface::<dyn ConstantFold>()
+        .expect("integer conversion exposes constant folding")
+        .fold(&[Value::Float(APFloat::from_bits(
+            11,
+            52,
+            false,
+            0x3ff8_0000_0000_0000,
+        ))])
+        .expect("folds exact operand");
+
+    assert_eq!(folded, Value::Int(APInt::new(64, 2)));
+}
+
+#[test]
+fn fixed_fp_ops_fold_via_exact_semantics() {
     let context = Context::with_default_dialects();
     let f32_ty = FloatType::f32(&context);
-    let unit = UnitType::new(&context);
-    let func = func_ops::func(
-        &context,
-        "fma_candidate",
-        unit,
-        tir::builtin::FnType::new(&context, &[], unit),
-        None,
-    )
-    .attr(FPMATH_ATTR, AttributeValue::Str("contract".into()))
-    .build();
-    let a = context.create_value(f32_ty, None);
-    let b = context.create_value(f32_ty, None);
-    let add = ops::addf(&context, a.id(), b.id(), f32_ty).build();
-    func.body().insert(0, add.id());
+    let lhs = context.create_value(f32_ty, None);
+    let rhs = context.create_value(f32_ty, None);
+    let op = ops::MulOpBuilder::new(&context)
+        .lhs(lhs.id())
+        .rhs(rhs.id())
+        .semantics(context.intern_fp_semantics(ArithmeticSemantics::strict(
+            RoundingMode::TowardPositive,
+            Exceptions::Ignore,
+        )))
+        .result_type(f32_ty)
+        .build();
 
-    assert_eq!(fp_math_flags(&context, add.id()), FastMathFlags::CONTRACT);
+    let folded = context
+        .get_op(op.id())
+        .as_interface::<dyn ConstantFold>()
+        .expect("fixed fp operation exposes constant folding")
+        .fold(&[
+            Value::Float(APFloat::from_bits(8, 23, false, 0x3f80_0001)),
+            Value::Float(APFloat::from_bits(8, 23, false, 0x3f7f_fffe)),
+        ])
+        .expect("folds exact operands");
 
-    // Detached op: no enclosing scope, strict by default.
-    let stray = ops::addf(&context, a.id(), b.id(), f32_ty).build();
-    assert_eq!(fp_math_flags(&context, stray.id()), FastMathFlags::NONE);
+    let Value::Float(value) = folded else {
+        panic!("expected a floating result")
+    };
+    assert_eq!(value.to_bits(), 0x3f80_0000);
 }
 
-/// A block-level `fpmath` shadows the flags the block would inherit, which is
-/// what restores strictness inside a fast region.
 #[test]
-fn fp_math_flags_block_overrides_owner() {
+fn preserve_payload_arithmetic_exposes_an_exact_bit_observation() {
     let context = Context::with_default_dialects();
-    let f32_ty = FloatType::f32(&context);
-    let unit = UnitType::new(&context);
-    let func = func_ops::func(
-        &context,
-        "scoped",
-        unit,
-        tir::builtin::FnType::new(&context, &[], unit),
-        None,
-    )
-    .attr(FPMATH_ATTR, AttributeValue::Str("fast".into()))
-    .build();
-    let a = context.create_value(f32_ty, None);
-    let b = context.create_value(f32_ty, None);
+    let ty = FloatType::f64(&context);
+    let lhs = context.create_value(ty, None);
+    let rhs = context.create_value(ty, None);
+    let op = ops::AddOpBuilder::new(&context)
+        .lhs(lhs.id())
+        .rhs(rhs.id())
+        .semantics(context.intern_fp_semantics(ArithmeticSemantics {
+            rounding: Rounding::Fixed(RoundingMode::TiesToEven),
+            exceptions: Exceptions::Ignore,
+            nan: NaNPolicy::PreservePayload,
+            subnormals: SubnormalMode::Gradual,
+            tininess: Tininess::AfterRounding,
+        }))
+        .result_type(ty)
+        .build();
 
-    // An op one region deeper than the func that carries the attribute.
-    let nested = context.create_region();
-    let nested_block = context.create_block(vec![]);
-    nested.add_block(nested_block.id());
-    func.body()
-        .append_op(func_ops::lambda(&context, "inner", unit, &nested).build());
-    let add = ops::addf(&context, a.id(), b.id(), f32_ty).build();
-    nested_block.append(add.id());
-
-    // Before the override the inner block inherits `fast` through the nesting.
-    assert_eq!(fp_math_flags(&context, add.id()), FastMathFlags::FAST);
-    nested_block.set_attr(FPMATH_ATTR, AttributeValue::Str("none".into()));
-    assert_eq!(fp_math_flags(&context, add.id()), FastMathFlags::NONE);
+    let mut graph = SemGraph::new();
+    let root = context
+        .get_op(op.id())
+        .as_dyn_op()
+        .semantic_expr(&mut graph)
+        .unwrap();
+    assert_eq!(*graph.get_kind(root), SymKind::AsFloat);
+    let bits = graph.children(root).next().unwrap();
+    assert_eq!(*graph.get_kind(bits), SymKind::Bitcast);
 }

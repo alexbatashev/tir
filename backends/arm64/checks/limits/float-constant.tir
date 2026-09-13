@@ -3,7 +3,7 @@
 
 module {
   %fn_f = func.func @f() -> !f64 {
-    %0 = constantf {value = 1.5} : !f64
+    %0 = fp.constant {bits = 4609434218613702656} : !f64
     func.return %0
   }
   module_end
@@ -12,8 +12,8 @@ module {
 // CHECK: arm64.movz
 // CHECK: arm64.movk_lsl48
 // CHECK: arm64.fmov_d_x
-// CHECK-NOT: constantf
+// CHECK-NOT: fp.constant
 // ISEL: arm64.movz
 // ISEL: arm64.movk_lsl48
 // ISEL: arm64.fmov_d_x
-// ISEL-NOT: constantf
+// ISEL-NOT: fp.constant

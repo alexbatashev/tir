@@ -1,4 +1,5 @@
 use super::*;
+use crate::Predicate;
 
 #[test]
 fn unsigned_conversion_avoids_double_rounding() {
@@ -15,6 +16,72 @@ fn unsigned_conversion_avoids_double_rounding() {
             flags: 1
         }
     );
+}
+
+#[test]
+fn signaling_comparison_raises_invalid_for_quiet_nan() {
+    let result = compare_float(
+        FloatWidth::W32,
+        0x7fc0_0000,
+        0x3f80_0000,
+        Predicate::Oeq,
+        ComparisonKind::Signaling,
+    );
+
+    assert_eq!(
+        result,
+        FloatResult {
+            bits: 0,
+            flags: 0x10
+        }
+    );
+}
+
+#[test]
+fn quiet_comparison_only_raises_invalid_for_signaling_nan() {
+    let quiet = compare_float(
+        FloatWidth::W64,
+        0x7ff8_0000_0000_0000,
+        0x3ff0_0000_0000_0000,
+        Predicate::Une,
+        ComparisonKind::Quiet,
+    );
+    let signaling = compare_float(
+        FloatWidth::W64,
+        0x7ff0_0000_0000_0001,
+        0x3ff0_0000_0000_0000,
+        Predicate::Une,
+        ComparisonKind::Quiet,
+    );
+
+    assert_eq!(quiet, FloatResult { bits: 1, flags: 0 });
+    assert_eq!(
+        signaling,
+        FloatResult {
+            bits: 1,
+            flags: 0x10
+        }
+    );
+}
+
+#[test]
+fn classification_distinguishes_all_binary_classes() {
+    let cases = [
+        (0xffc0_0000, FloatClass::QuietNaN),
+        (0x7f80_0001, FloatClass::SignalingNaN),
+        (0xff80_0000, FloatClass::NegativeInfinity),
+        (0xbf80_0000, FloatClass::NegativeNormal),
+        (0x8000_0001, FloatClass::NegativeSubnormal),
+        (0x8000_0000, FloatClass::NegativeZero),
+        (0x0000_0000, FloatClass::PositiveZero),
+        (0x0000_0001, FloatClass::PositiveSubnormal),
+        (0x3f80_0000, FloatClass::PositiveNormal),
+        (0x7f80_0000, FloatClass::PositiveInfinity),
+    ];
+
+    for (bits, class) in cases {
+        assert_eq!(classify_float(FloatWidth::W32, bits), class);
+    }
 }
 
 #[test]

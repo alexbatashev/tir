@@ -6,8 +6,8 @@
 
 module {
   %fn_scale = func.func @scale(%0: !f32) -> !f32 {
-    %1 = constantf {value = 2.5} : !f32
-    %2 = mulf %0, %1 : !f32
+    %1 = fp.constant {bits = 1075838976} : !f32
+    %2 = fp.mul %0, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
     func.return %2
   }
   module_end

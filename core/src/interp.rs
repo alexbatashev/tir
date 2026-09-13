@@ -8,12 +8,12 @@
 
 use std::collections::HashMap;
 
-use tir_adt::{APFloat, APInt};
+use tir_adt::{APFloat, APInt, RoundingMode};
 
 use crate::{
     BlockId, ConstantLike, Context, CountedLoop, DataLayout, Gamma, OpId, Operation, RegionId,
     Symbol, Theta, ValueId,
-    builtin::{ConstantFOp, ConstantOp, FloatType, IntegerType, MakeTupleOp, TupleGetOp, UnitType},
+    builtin::{ConstantOp, FloatType, IntegerType, MakeTupleOp, TupleGetOp, UnitType},
     func::{CallOp, FuncOp, ReturnOp},
     ptr::{AllocaOp, LoadOp, MemcpyOp, MemsetOp, PtrType, StoreOp},
     scf::{OrderedForOp, YieldOp},
@@ -32,6 +32,8 @@ pub enum Value {
     Ptr(u64),
     /// A λ node: what a call takes as its callee.
     Function(OpId),
+    Rounding(RoundingMode),
+    FpEnvironment(FloatEnvironment),
     Unit,
 }
 
@@ -93,6 +95,14 @@ pub struct Memory {
     bytes: Vec<u8>,
     written: Vec<bool>,
     next: u64,
+}
+
+pub use crate::fp::FloatEnvironment;
+
+#[derive(Default)]
+pub struct ExecutionState {
+    pub memory: Memory,
+    pub fp_environment: FloatEnvironment,
 }
 
 const MEMORY_BASE: u64 = 1 << 20;
@@ -170,7 +180,7 @@ impl Memory {
 /// value operand `i`; the returned values bind to the op's value results in
 /// order. Dependencies carry nothing and are neither passed nor returned.
 pub trait Interp {
-    fn evaluate(&self, operands: &[Value], memory: &mut Memory) -> Result<Vec<Value>>;
+    fn evaluate(&self, operands: &[Value], state: &mut ExecutionState) -> Result<Vec<Value>>;
 }
 
 /// Interpret `function` (a `func.func`) over `arguments` and return the values
@@ -192,13 +202,29 @@ pub fn run_function_within(
     arguments: Vec<Value>,
     steps: Option<u64>,
 ) -> Result<Vec<Value>> {
-    let mut interp = Interpreter {
+    run_function_in_state(
         context,
-        memory: Memory::default(),
+        function,
+        arguments,
+        &mut ExecutionState::default(),
+        steps,
+    )
+}
+
+pub fn run_function_in_state(
+    context: &Context,
+    function: OpId,
+    arguments: Vec<Value>,
+    state: &mut ExecutionState,
+    steps: Option<u64>,
+) -> Result<Vec<Value>> {
+    Interpreter {
+        context,
+        state,
         env: HashMap::new(),
         steps_left: steps,
-    };
-    interp.call_function(function, arguments)
+    }
+    .call_function(function, arguments)
 }
 
 fn function_region(context: &Context, function: OpId, index: usize) -> RegionId {
@@ -214,9 +240,9 @@ fn region_arguments(context: &Context, region: RegionId) -> Vec<ValueId> {
         .collect()
 }
 
-struct Interpreter<'c> {
+struct Interpreter<'c, 's> {
     context: &'c Context,
-    memory: Memory,
+    state: &'s mut ExecutionState,
     env: HashMap<ValueId, Value>,
     /// Operations this run may still execute, where a limit was set.
     steps_left: Option<u64>,
@@ -231,7 +257,7 @@ enum Flow {
     Goto(BlockId, Vec<Value>),
 }
 
-impl Interpreter<'_> {
+impl Interpreter<'_, '_> {
     fn exec_region(&mut self, region: RegionId) -> Result<Flow> {
         if self.context.get_region(region).is_nodes() {
             return self.exec_nodes_region(region);
@@ -400,7 +426,7 @@ impl Interpreter<'_> {
         // A dependency names no value: the edge carries it, nothing binds it.
         let args = arg_ids
             .iter()
-            .filter(|&&id| !self.context.get_value(id).is_state())
+            .filter(|&&id| !self.context.is_state_type(self.context.get_value(id).ty()))
             .map(|&id| self.value_of(id))
             .collect::<Result<Vec<_>>>()?;
         Ok(Flow::Goto(dest, args))
@@ -473,7 +499,11 @@ impl Interpreter<'_> {
         let ports: Vec<ValueId> = sides
             .iter()
             .map(|side| side.port)
-            .filter(|&port| !self.context.get_value(port).is_state())
+            .filter(|&port| {
+                !self
+                    .context
+                    .is_state_type(self.context.get_value(port).ty())
+            })
             .collect();
         let predicate = theta.predicate();
         let continue_cone: Vec<ValueId> = sides.iter().map(|side| side.next).collect();
@@ -531,7 +561,7 @@ impl Interpreter<'_> {
             .iter()
             .zip(&inputs[binding.operands.clone()])
         {
-            if port.is_state() {
+            if self.context.is_state_type(port.ty()) {
                 continue;
             }
             let value = self.value_of(input)?;
@@ -623,7 +653,7 @@ impl Interpreter<'_> {
         let instance = self.context.get_op(op_id);
         let operands = self.operand_values(&instance)?;
         if let Some(interp) = instance.clone().as_interface::<dyn Interp>() {
-            return interp.evaluate(&operands, &mut self.memory);
+            return interp.evaluate(&operands, self.state);
         }
         self.eval_semantic(&instance, &operands)
     }
@@ -681,7 +711,11 @@ fn to_sem_value(value: &Value, pointer_width: u32) -> Result<sem::Value> {
         Value::Int(int) => sem::Value::Int(int.clone()),
         Value::Float(float) => sem::Value::Float(float.clone()),
         Value::Ptr(address) => sem::Value::Int(APInt::new(pointer_width, *address)),
-        Value::Tuple(_) | Value::Function(_) | Value::Unit => {
+        Value::Tuple(_)
+        | Value::Function(_)
+        | Value::Rounding(_)
+        | Value::FpEnvironment(_)
+        | Value::Unit => {
             return Err(InterpError::Message(
                 "value kind has no semantic-expression form".into(),
             ));
@@ -779,41 +813,19 @@ fn widen_int_to_type(
 // ── Leaf op implementations ────────────────────────────────────────────────
 
 impl Interp for ConstantOp {
-    fn evaluate(&self, _operands: &[Value], _memory: &mut Memory) -> Result<Vec<Value>> {
+    fn evaluate(&self, _operands: &[Value], _state: &mut ExecutionState) -> Result<Vec<Value>> {
         Ok(vec![Value::Int(self.constant_value())])
     }
 }
 
-impl Interp for ConstantFOp {
-    fn evaluate(&self, _operands: &[Value], _memory: &mut Memory) -> Result<Vec<Value>> {
-        let context = self.handle().context.clone();
-        let value = match self.attr("value") {
-            Some(crate::attributes::AttributeValue::F64(value)) => value,
-            _ => {
-                return Err(InterpError::Message(
-                    "constantf must carry an F64 value".into(),
-                ));
-            }
-        };
-        let ty = context.get_value(self.result()).ty();
-        let ty_data = context.get_type_data(ty);
-        let float = (ty_data.as_ref() as &dyn std::any::Any)
-            .downcast_ref::<FloatType>()
-            .expect("constantf result must be a float");
-        let converted =
-            APFloat::from_f64(value).convert(float.exp_width(), float.mant_width(), false);
-        Ok(vec![Value::Float(converted)])
-    }
-}
-
 impl Interp for MakeTupleOp {
-    fn evaluate(&self, operands: &[Value], _memory: &mut Memory) -> Result<Vec<Value>> {
+    fn evaluate(&self, operands: &[Value], _state: &mut ExecutionState) -> Result<Vec<Value>> {
         Ok(vec![Value::Tuple(operands.to_vec())])
     }
 }
 
 impl Interp for TupleGetOp {
-    fn evaluate(&self, operands: &[Value], _memory: &mut Memory) -> Result<Vec<Value>> {
+    fn evaluate(&self, operands: &[Value], _state: &mut ExecutionState) -> Result<Vec<Value>> {
         let Value::Tuple(elements) = &operands[0] else {
             return Err(InterpError::Message(
                 "tuple_get operand must be a tuple".into(),
@@ -827,32 +839,32 @@ impl Interp for TupleGetOp {
 }
 
 impl Interp for EntryStateOp {
-    fn evaluate(&self, _operands: &[Value], _memory: &mut Memory) -> Result<Vec<Value>> {
+    fn evaluate(&self, _operands: &[Value], _state: &mut ExecutionState) -> Result<Vec<Value>> {
         Ok(Vec::new())
     }
 }
 
 impl Interp for JoinOp {
-    fn evaluate(&self, _operands: &[Value], _memory: &mut Memory) -> Result<Vec<Value>> {
+    fn evaluate(&self, _operands: &[Value], _state: &mut ExecutionState) -> Result<Vec<Value>> {
         Ok(Vec::new())
     }
 }
 
 impl Interp for SplitOp {
-    fn evaluate(&self, _operands: &[Value], _memory: &mut Memory) -> Result<Vec<Value>> {
+    fn evaluate(&self, _operands: &[Value], _state: &mut ExecutionState) -> Result<Vec<Value>> {
         Ok(Vec::new())
     }
 }
 
 impl Interp for AllocaOp {
-    fn evaluate(&self, _operands: &[Value], memory: &mut Memory) -> Result<Vec<Value>> {
-        let address = memory.alloc(self.size(), self.align());
+    fn evaluate(&self, _operands: &[Value], state: &mut ExecutionState) -> Result<Vec<Value>> {
+        let address = state.memory.alloc(self.size(), self.align());
         Ok(vec![Value::Ptr(address)])
     }
 }
 
 impl Interp for LoadOp {
-    fn evaluate(&self, operands: &[Value], memory: &mut Memory) -> Result<Vec<Value>> {
+    fn evaluate(&self, operands: &[Value], state: &mut ExecutionState) -> Result<Vec<Value>> {
         let context = self.handle().context.clone();
         let Value::Ptr(address) = &operands[0] else {
             return Err(InterpError::Message(
@@ -860,13 +872,13 @@ impl Interp for LoadOp {
             ));
         };
         let ty = context.get_value(self.result()).ty();
-        let value = read_typed(memory, context.get_type_data(ty).as_ref(), *address)?;
+        let value = read_typed(&state.memory, context.get_type_data(ty).as_ref(), *address)?;
         Ok(vec![value])
     }
 }
 
 impl Interp for StoreOp {
-    fn evaluate(&self, operands: &[Value], memory: &mut Memory) -> Result<Vec<Value>> {
+    fn evaluate(&self, operands: &[Value], state: &mut ExecutionState) -> Result<Vec<Value>> {
         let context = self.handle().context.clone();
         let Value::Ptr(address) = &operands[1] else {
             return Err(InterpError::Message(
@@ -875,7 +887,7 @@ impl Interp for StoreOp {
         };
         let ty = context.get_value(self.operands()[0]).ty();
         write_typed(
-            memory,
+            &mut state.memory,
             context.get_type_data(ty).as_ref(),
             *address,
             &operands[0],
@@ -885,7 +897,7 @@ impl Interp for StoreOp {
 }
 
 impl Interp for MemcpyOp {
-    fn evaluate(&self, operands: &[Value], memory: &mut Memory) -> Result<Vec<Value>> {
+    fn evaluate(&self, operands: &[Value], state: &mut ExecutionState) -> Result<Vec<Value>> {
         let Value::Ptr(destination) = &operands[0] else {
             return Err(InterpError::Message(
                 "memcpy destination must be a pointer".into(),
@@ -897,14 +909,14 @@ impl Interp for MemcpyOp {
             ));
         };
         let size = operands[2].to_i64().unwrap_or_default() as u64;
-        let bytes = memory.read(*source, size)?;
-        memory.write(*destination, &bytes)?;
+        let bytes = state.memory.read(*source, size)?;
+        state.memory.write(*destination, &bytes)?;
         Ok(Vec::new())
     }
 }
 
 impl Interp for MemsetOp {
-    fn evaluate(&self, operands: &[Value], memory: &mut Memory) -> Result<Vec<Value>> {
+    fn evaluate(&self, operands: &[Value], state: &mut ExecutionState) -> Result<Vec<Value>> {
         let Value::Ptr(destination) = &operands[0] else {
             return Err(InterpError::Message(
                 "memset destination must be a pointer".into(),
@@ -912,7 +924,9 @@ impl Interp for MemsetOp {
         };
         let fill = operands[1].to_i64().unwrap_or_default() as u8;
         let size = operands[2].to_i64().unwrap_or_default() as u64;
-        memory.write(*destination, &vec![fill; size as usize])?;
+        state
+            .memory
+            .write(*destination, &vec![fill; size as usize])?;
         Ok(Vec::new())
     }
 }

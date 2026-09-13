@@ -78,6 +78,16 @@ pub(crate) fn kind_is_pure(kind: SymKind) -> bool {
             | SymKind::StoreConditional
             | SymKind::AtomicRmw
             | SymKind::Fence
+            | SymKind::StateAssign
+            | SymKind::StateStore
+            | SymKind::StateStoreConditional
+            | SymKind::StateFence
+            | SymKind::StateTrap
+            | SymKind::StateBlock
+            | SymKind::StateIf
+            | SymKind::StateTry
+            | SymKind::StateHandler
+            | SymKind::StateResult
     )
 }
 
@@ -96,7 +106,7 @@ pub(crate) fn class_register_type(
             .nodes(class)
             .any(|node| {
                 node.ty
-                    .filter(|ty| *ty != tir::TypeId::STATE)
+                    .filter(|ty| !ctx.is_state_type(*ty))
                     .is_some_and(|ty| {
                         let data = ctx.get_type_data(ty);
                         (data.as_ref() as &dyn std::any::Any)

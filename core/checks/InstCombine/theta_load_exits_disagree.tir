@@ -12,7 +12,7 @@ module {
     %2 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
     %3 = constant {value = 0} : !i32
     %4 = constant {value = 1} : !i32
-    %5 = state.entry_state
+    %5 = state.entry_state : !state<memory>
     %6 = ptr.store %3, %2 state(%5)
     %7 = scf.loop (%8 = %6) {
       %9, %10 = scf.switch %0 args(%8) (%11) {

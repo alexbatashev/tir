@@ -226,6 +226,7 @@ impl<'a> Writer<'a> {
             &tir::passes::CfgEdges {
                 context: self.context,
             },
+            &[],
         )
         .map_err(|error| format!("cannot destructure {name}: {error}"))?;
         let written = self.write_blocks(&copy, &structure, debug, out);

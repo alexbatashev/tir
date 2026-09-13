@@ -14,11 +14,17 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use tir::attributes::{AttributeValue, Predicate};
 use tir::backend::abi::{Overflow, ValueKind, type_kind};
 use tir::builtin::{FloatType, FnType, IntegerType, ModuleOp, TupleType, UnitType, ops as b};
 use tir::cfg::ops as cb;
+use tir::fp::{
+    ArithmeticSemantics, ComparisonBehavior, ComparisonSemantics, Exceptions,
+    IntegerConversionSemantics, InvalidConversion, Rounding, RoundingMode, SubnormalMode,
+    ops as fp,
+};
 use tir::func::ops as func_ops;
 use tir::graph::{Dag, NodeId};
 use tir::ptr::{PtrType, ops as p};
@@ -1616,6 +1622,64 @@ impl FnCodegen<'_> {
         self.builder.append_op(op)
     }
 
+    fn arithmetic_semantics(&self) -> Arc<tir::fp::Semantics> {
+        self.context
+            .intern_fp_semantics(ArithmeticSemantics::strict(
+                RoundingMode::TiesToEven,
+                Exceptions::Ignore,
+            ))
+    }
+
+    fn comparison_semantics(&self) -> Arc<tir::fp::Semantics> {
+        self.context
+            .intern_fp_semantics(tir::fp::Semantics::Comparison(ComparisonSemantics {
+                behavior: ComparisonBehavior::Quiet,
+                exceptions: Exceptions::Ignore,
+                subnormals: SubnormalMode::Gradual,
+            }))
+    }
+
+    fn integer_conversion_semantics(&self) -> Arc<tir::fp::Semantics> {
+        self.context
+            .intern_fp_semantics(tir::fp::Semantics::IntegerConversion(
+                IntegerConversionSemantics {
+                    rounding: Rounding::Fixed(RoundingMode::TowardZero),
+                    exceptions: Exceptions::Ignore,
+                    subnormals: SubnormalMode::Gradual,
+                    invalid: InvalidConversion::Indeterminate,
+                },
+            ))
+    }
+
+    fn float_constant(&self, bits: u64, ty: TypeId) -> ValueId {
+        self.emit(
+            fp::ConstantOpBuilder::new(self.context)
+                .bits(bits)
+                .result_type(ty)
+                .build(),
+        )
+        .result()
+    }
+
+    fn float_zero(&self, ty: TypeId) -> ValueId {
+        self.float_constant(0, ty)
+    }
+
+    fn float_one(&self, ty: TypeId) -> ValueId {
+        let data = self.context.get_type_data(ty);
+        let float = (data.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<FloatType>()
+            .expect("floating constant type");
+        self.float_constant(
+            match float.bit_width() {
+                32 => 0x3f80_0000,
+                64 => 0x3ff0_0000_0000_0000,
+                _ => unreachable!("fcc supports binary32 and binary64"),
+            },
+            ty,
+        )
+    }
+
     fn alloca(&mut self, elem: TypeId, size: u64, align: u64) -> Slot {
         let ptr_ty = PtrType::opaque(self.context);
         let op = self.emit(p::alloca(self.context, size, align, ptr_ty).build());
@@ -1664,31 +1728,61 @@ impl FnCodegen<'_> {
         if self.typed.integer_width(source).is_some() && target_floating {
             let target_ty = lower_type(self.context, self.typed, target);
             return if self.typed.integer_is_signed(source) == Some(true) {
-                self.emit(b::sitofp(self.context, value, target_ty).build())
-                    .result()
+                self.emit(
+                    fp::FromSiOpBuilder::new(self.context)
+                        .input(value)
+                        .semantics(self.arithmetic_semantics())
+                        .result_type(target_ty)
+                        .build(),
+                )
+                .result()
             } else {
-                self.emit(b::uitofp(self.context, value, target_ty).build())
-                    .result()
+                self.emit(
+                    fp::FromUiOpBuilder::new(self.context)
+                        .input(value)
+                        .semantics(self.arithmetic_semantics())
+                        .result_type(target_ty)
+                        .build(),
+                )
+                .result()
             };
         }
         if source_floating && let Some(target_width) = self.typed.integer_width(target) {
             let target_ty = lower_type(self.context, self.typed, target);
             return if self.typed.integer_is_signed(target) == Some(true) {
-                self.emit(b::fptosi(self.context, value, target_ty).build())
-                    .result()
+                self.emit(
+                    fp::ToSiOpBuilder::new(self.context)
+                        .input(value)
+                        .semantics(self.integer_conversion_semantics())
+                        .result_type(target_ty)
+                        .build(),
+                )
+                .result()
             } else if target_width < 64 {
                 // Every value an unsigned type narrower than 64 bits can hold is
                 // also representable as a signed 64-bit integer, so the truncated
-                // signed conversion is exact and avoids a narrow `fptoui`.
+                // signed conversion is exact and avoids a narrow unsigned conversion.
                 let wide = IntegerType::new(self.context, 64);
                 let converted = self
-                    .emit(b::fptosi(self.context, value, wide).build())
+                    .emit(
+                        fp::ToSiOpBuilder::new(self.context)
+                            .input(value)
+                            .semantics(self.integer_conversion_semantics())
+                            .result_type(wide)
+                            .build(),
+                    )
                     .result();
                 self.emit(b::trunci(self.context, converted, target_ty).build())
                     .result()
             } else {
-                self.emit(b::fptoui(self.context, value, target_ty).build())
-                    .result()
+                self.emit(
+                    fp::ToUiOpBuilder::new(self.context)
+                        .input(value)
+                        .semantics(self.integer_conversion_semantics())
+                        .result_type(target_ty)
+                        .build(),
+                )
+                .result()
             };
         }
         if source_floating && target_floating {
@@ -1696,8 +1790,14 @@ impl FnCodegen<'_> {
             return if self.context.get_value(value).ty() == target_ty {
                 value
             } else {
-                self.emit(b::fcvt(self.context, value, target_ty).build())
-                    .result()
+                self.emit(
+                    fp::ConvertOpBuilder::new(self.context)
+                        .input(value)
+                        .semantics(self.arithmetic_semantics())
+                        .result_type(target_ty)
+                        .build(),
+                )
+                .result()
             };
         }
         if let Some(source_width) = self.typed.integer_width(source)
@@ -1863,10 +1963,11 @@ impl FnCodegen<'_> {
             _ => unreachable!(),
         };
         self.emit(
-            b::CmpFOpBuilder::new(self.context)
+            fp::CmpOpBuilder::new(self.context)
                 .lhs(lhs)
                 .rhs(rhs)
                 .predicate(predicate)
+                .semantics(self.comparison_semantics())
                 .result_type(IntegerType::new(self.context, 1))
                 .build(),
         )
@@ -1881,16 +1982,48 @@ impl FnCodegen<'_> {
         source_ty: QualType,
     ) -> ValueId {
         let ty = lower_type(self.context, self.typed, source_ty);
-        macro_rules! bin {
-            ($op:path) => {
-                self.emit($op(self.context, lhs, rhs, ty).build()).result()
-            };
-        }
+        let semantics = self.arithmetic_semantics();
         match kind {
-            AstKind::Add | AstKind::AddAssign => bin!(b::addf),
-            AstKind::Sub | AstKind::SubAssign => bin!(b::subf),
-            AstKind::Mul | AstKind::MulAssign => bin!(b::mulf),
-            AstKind::Div | AstKind::DivAssign => bin!(b::divf),
+            AstKind::Add | AstKind::AddAssign => self
+                .emit(
+                    fp::AddOpBuilder::new(self.context)
+                        .lhs(lhs)
+                        .rhs(rhs)
+                        .semantics(semantics)
+                        .result_type(ty)
+                        .build(),
+                )
+                .result(),
+            AstKind::Sub | AstKind::SubAssign => self
+                .emit(
+                    fp::SubOpBuilder::new(self.context)
+                        .lhs(lhs)
+                        .rhs(rhs)
+                        .semantics(semantics)
+                        .result_type(ty)
+                        .build(),
+                )
+                .result(),
+            AstKind::Mul | AstKind::MulAssign => self
+                .emit(
+                    fp::MulOpBuilder::new(self.context)
+                        .lhs(lhs)
+                        .rhs(rhs)
+                        .semantics(semantics)
+                        .result_type(ty)
+                        .build(),
+                )
+                .result(),
+            AstKind::Div | AstKind::DivAssign => self
+                .emit(
+                    fp::DivOpBuilder::new(self.context)
+                        .lhs(lhs)
+                        .rhs(rhs)
+                        .semantics(semantics)
+                        .result_type(ty)
+                        .build(),
+                )
+                .result(),
             _ => unreachable!(),
         }
     }
@@ -2127,9 +2260,7 @@ impl FnCodegen<'_> {
         }
         let ir_type = lower_type(self.context, self.typed, target);
         let value = match self.typed.types().kind(target) {
-            TypeKind::Float | TypeKind::Double => self
-                .emit(b::constantf(self.context, 0.0, ir_type).build())
-                .result(),
+            TypeKind::Float | TypeKind::Double => self.float_zero(ir_type),
             TypeKind::Integer(_) | TypeKind::Enum(_) => self
                 .emit(b::constant(self.context, 0, ir_type).build())
                 .result(),
@@ -2915,9 +3046,7 @@ impl FnCodegen<'_> {
                 .is_some()
         };
         if is_float {
-            let zero = self
-                .emit(b::constantf(self.context, 0.0, ty).build())
-                .result();
+            let zero = self.float_zero(ty);
             let predicate = match predicate {
                 Predicate::Eq => Predicate::Oeq,
                 Predicate::Ne => Predicate::Une,
@@ -2925,10 +3054,11 @@ impl FnCodegen<'_> {
             };
             return self
                 .emit(
-                    b::CmpFOpBuilder::new(self.context)
+                    fp::CmpOpBuilder::new(self.context)
                         .lhs(value)
                         .rhs(zero)
                         .predicate(predicate)
+                        .semantics(self.comparison_semantics())
                         .result_type(IntegerType::new(self.context, 1))
                         .build(),
                 )
@@ -3117,9 +3247,7 @@ impl FnCodegen<'_> {
             .result();
         for piece in pieces {
             let zero = match type_kind(self.context, piece.ty) {
-                ValueKind::Float => self
-                    .emit(b::constantf(self.context, 0.0, piece.ty).build())
-                    .result(),
+                ValueKind::Float => self.float_zero(piece.ty),
                 ValueKind::Int => self
                     .emit(b::constant(self.context, 0, piece.ty).build())
                     .result(),
@@ -3304,17 +3432,10 @@ impl FnCodegen<'_> {
                     let AstLeaf::Float(n) = ast.get_leaf_data(node).unwrap() else {
                         unreachable!("floating literal node carries a floating payload");
                     };
-                    LoweredExpr::Value(
-                        self.emit(
-                            b::constantf(
-                                self.context,
-                                n.value.to_f64(),
-                                lower_type(self.context, self.typed, node_type(self.typed, node)),
-                            )
-                            .build(),
-                        )
-                        .result(),
-                    )
+                    LoweredExpr::Value(self.float_constant(
+                        n.value.to_bits() as u64,
+                        lower_type(self.context, self.typed, node_type(self.typed, node)),
+                    ))
                 }
                 AstKind::Character => {
                     let AstLeaf::Character(spelling) = ast.get_leaf_data(node).unwrap() else {
@@ -3827,15 +3948,28 @@ impl FnCodegen<'_> {
             self.typed.types().kind(operand_ty),
             TypeKind::Float | TypeKind::Double
         ) {
-            let one = self
-                .emit(b::constantf(self.context, 1.0, elem).build())
-                .result();
+            let one = self.float_one(elem);
+            let semantics = self.arithmetic_semantics();
             if increment {
-                self.emit(b::addf(self.context, old, one, elem).build())
-                    .result()
+                self.emit(
+                    fp::AddOpBuilder::new(self.context)
+                        .lhs(old)
+                        .rhs(one)
+                        .semantics(semantics)
+                        .result_type(elem)
+                        .build(),
+                )
+                .result()
             } else {
-                self.emit(b::subf(self.context, old, one, elem).build())
-                    .result()
+                self.emit(
+                    fp::SubOpBuilder::new(self.context)
+                        .lhs(old)
+                        .rhs(one)
+                        .semantics(semantics)
+                        .result_type(elem)
+                        .build(),
+                )
+                .result()
             }
         } else {
             let one = self

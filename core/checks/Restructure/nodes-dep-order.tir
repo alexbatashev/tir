@@ -28,7 +28,7 @@ module {
 
 // CHECK: %{{[0-9]+}} = func.func @main() -> !i32 {
 // CHECK-NEXT: %[[P:[0-9]+]] = ptr.alloca
-// CHECK: %[[E:[0-9]+]] = state.entry_state
+// CHECK: %[[E:[0-9]+]] = state.entry_state : !state<memory>
 // CHECK-NEXT: %[[S1:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[P]] state(%[[E]])
 // CHECK-NEXT: %[[X:[0-9]+]], %[[R1:[0-9]+]] = ptr.load %[[P]] state(%[[S1]]) : !i32
 // CHECK-NEXT: %[[S2:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[P]] state(%[[R1]])

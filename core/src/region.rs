@@ -237,17 +237,22 @@ impl RegionHandle {
         }
     }
 
-    /// The arguments that are not memory states.
+    /// The arguments that are not resource states.
     pub fn value_arguments(&self) -> Vec<Value> {
+        let context = self.context();
         self.ports()
             .into_iter()
-            .filter(|port| !port.is_state())
+            .filter(|port| !context.is_state_type(port.ty()))
             .collect()
     }
 
-    /// The arguments that are memory states.
+    /// The resource states carried into the region.
     pub fn state_arguments(&self) -> Vec<Value> {
-        self.ports().into_iter().filter(Value::is_state).collect()
+        let context = self.context();
+        self.ports()
+            .into_iter()
+            .filter(|port| context.is_state_type(port.ty()))
+            .collect()
     }
 
     /// The values an unordered region produces; empty for an ordered one,

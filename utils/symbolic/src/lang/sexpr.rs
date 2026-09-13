@@ -23,6 +23,7 @@ const OP_VOCABULARY: &[(&str, SymKind)] = &[
     ("fptosi_round", SymKind::FPToSIRound),
     ("fptoui_round", SymKind::FPToUIRound),
     ("fp_flags", SymKind::FPFlags),
+    ("fp_value", SymKind::FPValue),
     ("fadd", SymKind::FAdd),
     ("fsub", SymKind::FSub),
     ("fmul", SymKind::FMul),

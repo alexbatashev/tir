@@ -6,25 +6,53 @@ use crate::{Context, Error, IRFormatter, Type, TypeId, parse::Span};
 
 use crate as tir;
 
-/// The memory state token, written `!state`.
-///
-/// A `!state` value names the state of memory at a point in the program. Ops
-/// that touch memory consume the state they observe and produce the state they
-/// leave behind, so memory dependences are explicit def-use edges rather than an
-/// implicit side channel. A state is read by any number of operations that leave
-/// memory as they found it, or changed by exactly one that does not: a rewrite
-/// that drops one, or hands it to a second operation that changes memory, changes
-/// the program's memory order.
-pub struct StateType;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum StateResource {
+    Memory,
+    FpEnv,
+}
+
+impl StateResource {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::FpEnv => "fp.env",
+        }
+    }
+
+    pub fn semantic_code(self) -> u64 {
+        match self {
+            Self::Memory => tir_symbolic::lang::StateResourceKind::Memory as u64,
+            Self::FpEnv => tir_symbolic::lang::StateResourceKind::FpEnvironment as u64,
+        }
+    }
+}
+
+/// An execution dependency for one resource, written `!state<resource>`.
+pub struct StateType {
+    resource: StateResource,
+}
 
 impl StateType {
-    /// The one `!state` id: the context interns this type first, so the id is
-    /// [`TypeId::STATE`] in every context.
     #[allow(clippy::new_ret_no_self)]
-    pub fn new(context: &Context) -> TypeId {
-        let id = context.get_type_id(Arc::new(Self));
-        debug_assert_eq!(id, TypeId::STATE);
+    pub fn new(context: &Context, resource: StateResource) -> TypeId {
+        let id = context.get_type_id(Arc::new(Self { resource }));
+        if resource == StateResource::Memory {
+            debug_assert_eq!(id, TypeId::STATE);
+        }
         id
+    }
+
+    pub fn memory(context: &Context) -> TypeId {
+        Self::new(context, StateResource::Memory)
+    }
+
+    pub fn fp_env(context: &Context) -> TypeId {
+        Self::new(context, StateResource::FpEnv)
+    }
+
+    pub fn resource(&self) -> StateResource {
+        self.resource
     }
 }
 
@@ -41,19 +69,35 @@ impl Type for StateType {
 
     fn parse<'src>(
         _mnemonic: &str,
-        _parser: &mut tir::parse::text::Parser<'src>,
+        parser: &mut tir::parse::text::Parser<'src>,
         context: &Context,
     ) -> Result<TypeId, (Span, Error)> {
-        Ok(Self::new(context))
+        use tir::parse::common::Cursor;
+
+        if !parser.parse_token("<") {
+            return Err((parser.span(), Error::ExpectedToken("<")));
+        }
+        let resource = [StateResource::Memory, StateResource::FpEnv]
+            .into_iter()
+            .find(|resource| parser.parse_token(resource.name()))
+            .ok_or_else(|| (parser.span(), Error::ExpectedToken("state resource")))?;
+        if !parser.parse_token(">") {
+            return Err((parser.span(), Error::ExpectedToken(">")));
+        }
+        Ok(Self::new(context, resource))
     }
 
     fn print(&self, fmt: &mut IRFormatter<'_>) -> Result<(), std::fmt::Error> {
-        fmt.write("state")
+        fmt.write(format!("state<{}>", self.resource.name()))
     }
 
     fn eq(&self, other: &dyn Type) -> bool {
-        (other as &dyn Any).downcast_ref::<StateType>().is_some()
+        (other as &dyn Any)
+            .downcast_ref::<StateType>()
+            .is_some_and(|other| other.resource == self.resource)
     }
 
-    fn hash(&self, _state: &mut dyn std::hash::Hasher) {}
+    fn hash(&self, state: &mut dyn std::hash::Hasher) {
+        state.write_u8(self.resource as u8);
+    }
 }

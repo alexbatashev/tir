@@ -1,0 +1,21 @@
+// RUN: tir opt --pass restructure-nodes,verify-deps --verify %s | filecheck %s
+
+module {
+  %fn_external = func.declare @external() -> !unit
+  %fn_main = func.func @main() -> !i5 {
+    %env0 = state.entry_state : !state<fp.env>
+    %mask = constant {value = 31} : !i5
+    %env1 = fp.clear_flags %mask state(%env0)
+    func.call %fn_external()
+    %flags, %env2 = fp.get_flags state(%env1) : !i5
+    func.return %flags state(%env2)
+  }
+  module_end
+}
+
+// CHECK:      %[[ENV0:[0-9]+]] = state.entry_state : !state<fp.env>
+// CHECK-NEXT: %{{[0-9]+}} = constant {value = 31} : !i5
+// CHECK-NEXT: %[[ENV1:[0-9]+]] = fp.clear_flags %{{[0-9]+}} state(%[[ENV0]])
+// CHECK-NEXT: %[[MEM:[0-9]+]] = state.entry_state : !state<memory>
+// CHECK-NEXT: %[[MEM1:[0-9]+]], %[[ENV2:[0-9]+]] = func.call %{{[0-9]+}}() state(%[[MEM]], %[[ENV1]])
+// CHECK-NEXT: %{{[0-9]+}}, %{{[0-9]+}} = fp.get_flags state(%[[ENV2]]) : !i5

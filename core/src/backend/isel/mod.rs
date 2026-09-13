@@ -37,8 +37,8 @@ use tir_adt::APInt;
 use tir_relational::{ClassId as Id, Label as ENode};
 
 pub use rules::{
-    CapabilityKind, EmitAttr, EmitSpec, PatternRef, RegOperandSpec, ResultRegSpec, RuleSpec,
-    build_rules, emit_with,
+    CapabilityKind, EmitAttr, EmitSpec, FeatureClause, PatternRef, RegOperandSpec, ResultRegSpec,
+    RuleSpec, build_rules, emit_with,
 };
 pub use tir::sem::{SaturationLimits, SemEGraph, SemNode, SemPayload, Theory};
 pub use tir_relational::Match as IselMatch;
@@ -144,6 +144,56 @@ impl RuleMatch {
             .find(|(sym, _)| *sym == symbol)
             .map(|(_, b)| *b)
     }
+
+    fn for_step(
+        &self,
+        bindings: &[(u32, StepBinding)],
+        emitted: &[OpId],
+        context: &Context,
+        op: OpId,
+    ) -> Result<Self, PassError> {
+        let mut step = self.clone();
+        for (symbol, binding) in bindings {
+            step.int_bindings
+                .retain(|(candidate, _)| candidate != symbol);
+            step.value_bindings
+                .retain(|(candidate, _)| candidate != symbol);
+            step.block_bindings
+                .retain(|(candidate, _)| candidate != symbol);
+            match binding {
+                StepBinding::Capture(capture) => {
+                    step.int_bindings.extend(
+                        self.int_bindings
+                            .iter()
+                            .filter(|(candidate, _)| candidate == capture)
+                            .map(|(_, value)| (*symbol, value.clone())),
+                    );
+                    step.value_bindings.extend(
+                        self.value_bindings
+                            .iter()
+                            .filter(|(candidate, _)| candidate == capture)
+                            .map(|(_, value)| (*symbol, *value)),
+                    );
+                    step.block_bindings.extend(
+                        self.block_bindings
+                            .iter()
+                            .filter(|(candidate, _)| candidate == capture)
+                            .map(|(_, block)| (*symbol, *block)),
+                    );
+                }
+                StepBinding::Result(result) => {
+                    let value = result.resolve(context, emitted).ok_or_else(|| {
+                        PassError::InvalidRuleSet(format!(
+                            "step result {}:{} is unavailable for operation {op:?}",
+                            result.step, result.result
+                        ))
+                    })?;
+                    step.value_bindings.push((*symbol, value));
+                }
+            }
+        }
+        Ok(step)
+    }
 }
 
 /// The destination an emitter writes into: the original op being replaced, or
@@ -152,14 +202,11 @@ impl RuleMatch {
 pub struct EmitRequest<'a> {
     /// The op being replaced; `None` for an introduced instruction.
     pub op: Option<&'a OperationRef>,
-    /// Destination values, in result order.
-    pub results: &'a [ValueId],
     /// The type of the first result, when known.
     pub result_ty: Option<TypeId>,
-    /// The memory chain the covered access reads and the state it publishes,
-    /// taken from the IR operation the tile covers. An opcode that touches
-    /// memory carries them as its trailing ports.
-    pub state: Option<StatePorts>,
+    /// The source resource chains owned by this step. The emitter receives only
+    /// these ports, which the step's operation takes over after construction.
+    pub states: &'a [StatePorts],
 }
 
 /// The dependencies an emitted instruction takes over from the IR access it
@@ -179,6 +226,47 @@ impl<'a> EmitRequest<'a> {
 
 pub type RuleEmitFn =
     fn(&Context, &EmitRequest, &RuleMatch) -> Result<Box<dyn Operation>, PassError>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StepResult {
+    pub step: usize,
+    pub result: usize,
+}
+
+impl StepResult {
+    fn resolve(self, context: &Context, emitted: &[OpId]) -> Option<ValueId> {
+        emitted.get(self.step).and_then(|op| {
+            context
+                .get_op(*op)
+                .value_results()
+                .get(self.result)
+                .copied()
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepBinding {
+    Capture(u32),
+    Result(StepResult),
+}
+
+#[derive(Clone, Copy)]
+pub struct RuleStep {
+    pub emit_fn: RuleEmitFn,
+    pub bindings: &'static [(u32, StepBinding)],
+    pub states: &'static [tir::builtin::StateResource],
+}
+
+impl RuleStep {
+    pub const fn new(emit_fn: RuleEmitFn) -> Self {
+        Self {
+            emit_fn,
+            bindings: &[],
+            states: &[],
+        }
+    }
+}
 
 /// An immediate operand's encoding range: the field's bit width, whether the
 /// instruction sign-extends it, and the `#[align]`/`#[nonzero]` constraints the
@@ -215,6 +303,22 @@ pub struct RegisterRequirement {
 }
 
 impl RegisterRequirement {
+    fn exclusive_float_type(&self) -> Result<Option<tir::sem::SemType>, ()> {
+        use tir::sem::{FloatFormat, SemType};
+
+        if !self.capability.float || self.capability.integer {
+            return Ok(None);
+        }
+        let (exponent, mantissa) = match self.capability.width {
+            16 => (5, 10),
+            32 => (8, 23),
+            64 => (11, 52),
+            128 => (15, 112),
+            _ => return Err(()),
+        };
+        Ok(Some(SemType::Float(FloatFormat::new(exponent, mantissa))))
+    }
+
     pub fn low_bits(capability: RegisterCapability) -> Self {
         Self {
             capability,
@@ -381,12 +485,10 @@ pub struct Rule {
     pub pattern: SemGraph,
     pub base_cost: u32,
     pub kind: RuleKind,
-    /// A companion instruction emitted immediately before the rule's own — a
-    /// flag-setting compare (`cmp`, x86 `cmp`/`test`) whose status-register
-    /// writes the branch instruction's condition reads. TMDL derives such rules
-    /// by composing the definer's flag semantics into the branch guard, so the
-    /// pair selects as one condition pattern but emits two real instructions.
-    pub prelude_emit: Option<RuleEmitFn>,
+    /// The real instructions this tile emits, in execution order.
+    pub steps: Vec<RuleStep>,
+    /// Numeric step results replacing the source operation's value results.
+    pub outputs: Vec<StepResult>,
     /// Per-operand-symbol constraint (register vs immediate). Symbols absent here
     /// are unconstrained, so hand-written and synthesized rules keep matching any
     /// value.
@@ -406,7 +508,6 @@ pub struct Rule {
     /// proves that it refines [`Rule::pattern`] on the source's defined domain,
     /// including the permitted NaN results of floating-point arithmetic.
     pub guarded_semantics: Option<SemGraph>,
-    pub emit_fn: RuleEmitFn,
 }
 
 impl Rule {
@@ -416,16 +517,80 @@ impl Rule {
             pattern,
             base_cost,
             kind: RuleKind::Value,
-            prelude_emit: None,
+            steps: vec![RuleStep::new(emit_fn)],
+            outputs: vec![StepResult { step: 0, result: 0 }],
             operand_constraints: Vec::new(),
             operand_registers: Vec::new(),
             result_register: None,
             float_constant_width: None,
             operand_imm_ranges: Vec::new(),
             guarded_semantics: None,
-            emit_fn,
         }
     }
+}
+
+fn emit_rule_steps(
+    context: &Context,
+    rule: &Rule,
+    request: &EmitRequest,
+    captures: &RuleMatch,
+) -> Result<(Vec<OpId>, Vec<ValueId>), PassError> {
+    for state in request.states {
+        let resource = context
+            .state_resource(context.get_value(state.observed).ty())
+            .ok_or_else(|| PassError::InvalidRuleSet("state port has no resource".to_string()))?;
+        let owners = rule
+            .steps
+            .iter()
+            .filter(|step| step.states.contains(&resource))
+            .count();
+        if owners != 1 {
+            return Err(PassError::InvalidRuleSet(format!(
+                "rule '{}' has {owners} owners for source resource {resource:?}",
+                rule.name
+            )));
+        }
+    }
+    let mut emitted = Vec::with_capacity(rule.steps.len());
+    for step in &rule.steps {
+        let m = captures.for_step(step.bindings, &emitted, context, request.op_id())?;
+        let states: Vec<StatePorts> = request
+            .states
+            .iter()
+            .copied()
+            .filter(|state| {
+                context
+                    .state_resource(context.get_value(state.observed).ty())
+                    .is_some_and(|resource| step.states.contains(&resource))
+            })
+            .collect();
+        let step_request = EmitRequest {
+            op: request.op,
+            result_ty: request.result_ty,
+            states: &states,
+        };
+        let op = (step.emit_fn)(context, &step_request, &m)?;
+        for state in &states {
+            context.append_operand(op.id(), state.observed);
+            if let Some(published) = state.published {
+                context.adopt_result(op.id(), published);
+            }
+        }
+        emitted.push(op.id());
+    }
+    let outputs = rule
+        .outputs
+        .iter()
+        .map(|output| {
+            output.resolve(context, &emitted).ok_or_else(|| {
+                PassError::InvalidRuleSet(format!(
+                    "rule '{}' exports unavailable step result {}:{}",
+                    rule.name, output.step, output.result
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((emitted, outputs))
 }
 
 /// Target hooks for lowering control-flow terminators, enabling rule-driven
@@ -556,6 +721,12 @@ impl FunctionSelection {
             .any(|m| self.class_values.contains_key(&m))
     }
 
+    fn class_for_value(&self, value: ValueId) -> Option<Id> {
+        self.class_values
+            .iter()
+            .find_map(|(&class, values)| values.contains(&value).then(|| self.egraph.find(class)))
+    }
+
     /// Whether any IR value carried by a base member of `class` satisfies `pred`.
     fn any_class_value(&self, class: Id, pred: impl Fn(&ValueId) -> bool) -> bool {
         self.base_members(class).any(|m| {
@@ -590,7 +761,7 @@ impl FunctionSelection {
                 return true;
             };
             if !self.op_root.contains_key(&def) {
-                if op.is::<crate::builtin::ConstantOp>() || op.is::<crate::builtin::ConstantFOp>() {
+                if op.is::<crate::builtin::ConstantOp>() || op.is::<crate::fp::ops::ConstantOp>() {
                     return false;
                 }
                 // A structured operation's result is a name adopted from the
@@ -747,7 +918,7 @@ impl FunctionSelection {
                         // survives with its original value.
                         let survives = !self.op_root.contains_key(&def)
                             && !context.get_op(def).is::<crate::builtin::ConstantOp>()
-                            && !context.get_op(def).is::<crate::builtin::ConstantFOp>();
+                            && !context.get_op(def).is::<crate::fp::ops::ConstantOp>();
                         // Demand is what says a tile was placed for the value —
                         // and it is asked of the member the value belongs to,
                         // not of the whole class: a scope may merge a class the
@@ -811,9 +982,7 @@ pub struct InstructionSelectPass {
     /// Where each structured operation's destruction reads its tests, filled as
     /// the regions holding them commit.
     region_values: HashMap<(OpId, AuxSlot), AuxEmit>,
-    /// The instruction a rule put ahead of each tile it emitted, defining a
-    /// register the tile reads implicitly.
-    preludes: HashMap<OpId, OpId>,
+    operation_groups: Vec<crate::passes::destructure::OperationGroup>,
     /// Function roots already solved, so a re-visit does not rebuild the graph.
     solved: HashSet<OpId>,
 }
@@ -842,26 +1011,32 @@ fn relaxation_error(rule: &Rule, why: &str) -> String {
 
 /// Prove result refinement on the selection pattern's defined domain.
 fn prove_relaxation(rule: &Rule, guarded: &SemGraph) -> Result<(), String> {
-    use tir::sem::{FloatFormat, SemType};
+    use tir::sem::SemType;
     let full_root = guarded
         .root()
         .ok_or_else(|| relaxation_error(rule, "empty guarded semantics"))?;
-    let candidate = tir_symbolic::lang::selection_fallback(guarded, full_root)
-        .or_else(|| {
-            if *guarded.get_kind(full_root) != SymKind::If {
-                return None;
-            }
-            let else_arm = guarded.children(full_root).nth(2)?;
-            let mut candidate = SemGraph::new();
-            tir_symbolic::sem::copy_subgraph(
-                &mut candidate,
-                guarded,
-                else_arm,
-                &mut HashMap::new(),
-            );
-            Some(candidate)
-        })
-        .ok_or_else(|| relaxation_error(rule, "guarded semantics has no selection fallback"))?;
+    let pattern_root = rule
+        .pattern
+        .root()
+        .ok_or_else(|| relaxation_error(rule, "empty selection pattern"))?;
+    let projected_value = *guarded.get_kind(full_root) == SymKind::StateResult
+        && *rule.pattern.get_kind(pattern_root) != SymKind::StateResult;
+    let numeric_pattern = *rule.pattern.get_kind(pattern_root) != SymKind::StateResult;
+    let candidate = if numeric_pattern {
+        tir_symbolic::lang::value_observation_fallback(guarded, full_root)
+    } else {
+        tir_symbolic::lang::selection_fallback(guarded, full_root)
+    }
+    .or_else(|| {
+        if *guarded.get_kind(full_root) != SymKind::If {
+            return None;
+        }
+        let else_arm = guarded.children(full_root).nth(2)?;
+        let mut candidate = SemGraph::new();
+        tir_symbolic::sem::copy_subgraph(&mut candidate, guarded, else_arm, &mut HashMap::new());
+        Some(candidate)
+    })
+    .ok_or_else(|| relaxation_error(rule, "guarded semantics has no selection fallback"))?;
     let candidate_root = candidate.root().unwrap();
     let immediate_symbols: HashSet<u32> = rule
         .operand_constraints
@@ -871,10 +1046,6 @@ fn prove_relaxation(rule: &Rule, guarded: &SemGraph) -> Result<(), String> {
         .collect();
     let (canonical, canonical_root, _) =
         canonicalize_for_selection(&candidate, candidate_root, &immediate_symbols);
-    let pattern_root = rule
-        .pattern
-        .root()
-        .ok_or_else(|| relaxation_error(rule, "empty selection pattern"))?;
     if !subgraphs_equal(&canonical, canonical_root, &rule.pattern, pattern_root) {
         return Err(relaxation_error(
             rule,
@@ -899,23 +1070,30 @@ fn prove_relaxation(rule: &Rule, guarded: &SemGraph) -> Result<(), String> {
         .max()
         .map_or(0, |id| id + 1) as usize;
     let mut symbol_types = vec![SemType::bits(register_width); symbol_count];
+    let mut symbol_type_seeds = vec![None; symbol_count];
     for (symbol, requirement) in &rule.operand_registers {
         let width = requirement.width();
-        let ty = if requirement.capability.float && !requirement.capability.integer {
-            let (exponent, mantissa) = match width {
-                16 => (5, 10),
-                32 => (8, 23),
-                64 => (11, 52),
-                128 => (15, 112),
-                _ => return Err(relaxation_error(rule, "unsupported float register format")),
-            };
-            SemType::Float(FloatFormat::new(exponent, mantissa))
-        } else {
-            SemType::bits(width)
-        };
+        let ty = requirement
+            .exclusive_float_type()
+            .map_err(|()| relaxation_error(rule, "unsupported float register format"))?
+            .unwrap_or_else(|| SemType::bits(width));
         if let Some(slot) = symbol_types.get_mut(*symbol as usize) {
-            *slot = ty;
+            *slot = ty.clone();
         }
+        if let Some(slot) = symbol_type_seeds.get_mut(*symbol as usize) {
+            *slot = Some(ty);
+        }
+    }
+    for symbol in &immediate_symbols {
+        if let Some(slot) = symbol_type_seeds.get_mut(*symbol as usize) {
+            *slot = Some(SemType::bits(register_width));
+        }
+    }
+    if projected_value && !float_refinement::states_preserved(guarded, full_root, &symbol_types) {
+        return Err(relaxation_error(
+            rule,
+            "projected value does not prove every target state unchanged",
+        ));
     }
     let floating = candidate.postorder(candidate_root).any(|node| {
         matches!(
@@ -931,41 +1109,24 @@ fn prove_relaxation(rule: &Rule, guarded: &SemGraph) -> Result<(), String> {
                 | SymKind::FCvt
                 | SymKind::Sqrt
                 | SymKind::Fma
+                | SymKind::FAddRound
+                | SymKind::FSubRound
+                | SymKind::FMulRound
+                | SymKind::FDivRound
+                | SymKind::FCvtRound
+                | SymKind::SqrtRound
+                | SymKind::FmaRound
         )
     });
-    let mut proof_candidate_root = candidate_root;
-    let mut proof_guarded_root = full_root;
-    if matches!(
-        candidate.get_kind(candidate_root),
-        SymKind::SExt | SymKind::ZExt
-    ) && candidate.get_kind(candidate_root) == guarded.get_kind(full_root)
-        && subgraphs_equal(
-            &candidate,
-            candidate.children(candidate_root).nth(1).unwrap(),
-            guarded,
-            guarded.children(full_root).nth(1).unwrap(),
-        )
+    let event = *rule.pattern.get_kind(pattern_root) == SymKind::StateResult;
+    if event
+        && float_refinement::event_refines(guarded, &candidate, &symbol_types, &symbol_type_seeds)
     {
-        proof_candidate_root = candidate.children(candidate_root).next().unwrap();
-        proof_guarded_root = guarded.children(full_root).next().unwrap();
+        return Ok(());
     }
-    let mut proof_candidate = SemGraph::new();
-    tir_symbolic::sem::copy_subgraph(
-        &mut proof_candidate,
-        &candidate,
-        proof_candidate_root,
-        &mut HashMap::new(),
-    );
-    let mut proof_guarded = SemGraph::new();
-    tir_symbolic::sem::copy_subgraph(
-        &mut proof_guarded,
-        guarded,
-        proof_guarded_root,
-        &mut HashMap::new(),
-    );
-    if floating
-        && (SmtOracle.refines_typed(&proof_candidate, &proof_guarded, &symbol_types)
-            || float_refinement::ieee_arithmetic_refines(guarded, &candidate, &symbol_types))
+    if !event
+        && (projected_value || floating)
+        && float_refinement::value_refines(guarded, &candidate, &symbol_types, &symbol_type_seeds)
     {
         return Ok(());
     }
@@ -1144,7 +1305,7 @@ impl InstructionSelectPass {
             plans: HashMap::new(),
             emitted_values: HashMap::new(),
             region_values: HashMap::new(),
-            preludes: HashMap::new(),
+            operation_groups: Vec::new(),
             solved: HashSet::new(),
         }
     }
@@ -1221,7 +1382,7 @@ impl InstructionSelectPass {
         }
         self.solved.clear();
         self.plans.clear();
-        self.preludes.clear();
+        self.operation_groups.clear();
         self.emitted_values.clear();
         self.region_values.clear();
         if let Some(lowering) = &mut self.call_lowering {
@@ -1390,7 +1551,7 @@ impl InstructionSelectPass {
         // remat special case), and a port / entry input stays an `Input` leaf.
         let mut value_to_def = HashMap::new();
         for &op_id in scopes.op_region.keys() {
-            for result in context.get_op(op_id).results() {
+            for result in context.get_op(op_id).value_results() {
                 value_to_def.insert(result, op_id);
             }
         }
@@ -1419,7 +1580,7 @@ impl InstructionSelectPass {
         // describe a matching materializer, their operand-built class becomes
         // the op root so the cover can select the materializing instructions.
         lowering.constant_candidates.retain(|(op, class)| {
-            context.get_op(*op).is::<crate::builtin::ConstantFOp>()
+            context.get_op(*op).is::<crate::fp::ops::ConstantOp>()
                 || class_int_binding(&egraph, *class).is_some()
         });
         for &(op_id, class) in &lowering.constant_candidates {
@@ -1460,8 +1621,7 @@ impl InstructionSelectPass {
             }
         }
 
-        let demand = self.register_demand(context, &egraph, &lowering, &scopes, &operand_uses);
-
+        let demand = self.placement_demand(context, &egraph, &lowering, &scopes, &operand_uses);
         for aux in lowering.region_control.aux.values_mut() {
             for (.., class) in aux.iter_mut() {
                 *class = egraph.find(*class);
@@ -1542,9 +1702,9 @@ impl InstructionSelectPass {
         }
     }
 
-    /// The (class, region) pairs a tile must leave in a register: a use no tile
-    /// covers, a use in another region, or a region result.
-    fn register_demand(
+    /// The (class, region) pairs selection must place: register uses no tile
+    /// covers or crosses a region, region results, and mandatory non-pure roots.
+    fn placement_demand(
         &self,
         context: &Context,
         egraph: &SemEGraph,
@@ -1588,7 +1748,11 @@ impl InstructionSelectPass {
         let mut demand = HashSet::new();
         for (&op_id, &class) in roots_by_op {
             let def_region = scopes.op_region[&op_id];
-            for result in context.get_op(op_id).results() {
+            let root = egraph.find(class);
+            if !node::class_is_pure(egraph, root) {
+                demand.insert((root, def_region));
+            }
+            for result in context.get_op(op_id).value_results() {
                 if needs_register(result, class, def_region) {
                     demand.insert((chase_low_extract(egraph, class), def_region));
                 }
@@ -1621,14 +1785,11 @@ impl InstructionSelectPass {
         let Some(&region) = op.op().regions().first() else {
             return Ok(());
         };
-        let mut implicit = self
+        let implicit = self
             .call_lowering
             .as_ref()
             .map(|lowering| lowering.implicit_inputs(context))
             .unwrap_or_default();
-        for (&tile, &prelude) in &self.preludes {
-            implicit.entry(tile).or_default().push(prelude);
-        }
         let edges = destruct::MachineEdges {
             context,
             emitters,
@@ -1637,7 +1798,7 @@ impl InstructionSelectPass {
             implicit: &implicit,
             rules: &self.rules,
         };
-        crate::passes::destructure(context, region, &edges)?;
+        crate::passes::destructure(context, region, &edges, &self.operation_groups)?;
         for block in context.get_region(region).block_ids() {
             let block = context.get_block(block);
             let graph = crate::backend::Dependences::of_ops(
@@ -1709,9 +1870,8 @@ impl InstructionSelectPass {
             m.remap_values(&self.emitted_values);
             let request = EmitRequest {
                 op: source.as_ref(),
-                results: &scheduled.results,
                 result_ty: scheduled.result_ty,
-                state: scheduled.state,
+                states: &scheduled.states,
             };
             let rule = &self.rules[scheduled.rule_index];
             cursor = cursor.max(
@@ -1720,30 +1880,28 @@ impl InstructionSelectPass {
                     .and_then(|op| position.get(&op).copied())
                     .unwrap_or(0),
             );
-            let prelude = match rule.prelude_emit {
-                Some(prelude) => {
-                    let op = prelude(context, &request, &m)?;
-                    context.add(region, op.id());
-                    emitted.push((op.id(), cursor));
-                    Some(op.id())
-                }
-                None => None,
-            };
-            let op = (rule.emit_fn)(context, &request, &m)?;
-            context.add(region, op.id());
-            emitted.push((op.id(), cursor));
-            if let Some(prelude) = prelude {
-                self.preludes.insert(op.id(), prelude);
+            let (ops, outputs) = emit_rule_steps(context, rule, &request, &m)?;
+            if outputs.len() != scheduled.results.len() {
+                return Err(PassError::InvalidRuleSet(format!(
+                    "rule '{}' exports {} results for {} source results",
+                    rule.name,
+                    outputs.len(),
+                    scheduled.results.len()
+                )));
+            }
+            for &op in &ops {
+                context.add(region, op);
+                emitted.push((op, cursor));
+            }
+            if ops.len() > 1 {
+                self.operation_groups
+                    .push(crate::passes::destructure::OperationGroup { members: ops });
             }
             // The tile's results are born register-class-typed; the mid-end
             // values they stand for are replaced by them.
-            for (&old, new) in scheduled
-                .results
-                .iter()
-                .zip(context.get_op(op.id()).results().iter())
-            {
-                self.emitted_values.insert(old, *new);
-                context.replace_value_uses(old, *new);
+            for (&old, new) in scheduled.results.iter().zip(outputs) {
+                self.emitted_values.insert(old, new);
+                context.replace_value_uses(old, new);
             }
         }
         for (old, new) in &plan.value_remaps {
@@ -1775,7 +1933,8 @@ impl InstructionSelectPass {
         let claimed: HashSet<ValueId> = plan
             .schedule
             .iter()
-            .filter_map(|scheduled| scheduled.state?.published)
+            .flat_map(|scheduled| &scheduled.states)
+            .filter_map(|state| state.published)
             .collect();
 
         // The cover replaces a whole group of operations at once, and region
@@ -1789,14 +1948,13 @@ impl InstructionSelectPass {
             // that one left it: its readers take the state it observed. Only a
             // read is ever answered this way — a write's term is a state
             // nothing before it names, so no other access can stand for it.
-            if let (Some(&published), Some(&observed)) = (
-                instance.state_results().first(),
-                instance.state_operands().first(),
-            ) && !claimed.contains(&published)
-                && instance
-                    .clone()
-                    .as_interface::<dyn tir::MemoryWrite>()
-                    .is_none()
+            if let Some(effect) = crate::analysis::effects::resource_effect(
+                &instance,
+                tir::builtin::StateResource::Memory,
+            ) && effect.access == tir::ResourceAccess::Read
+                && let (Some(&published), Some(&observed)) =
+                    (effect.produced.first(), effect.observed.first())
+                && !claimed.contains(&published)
             {
                 context.replace_value_uses(published, observed);
                 answered.push((published, observed));
@@ -1869,8 +2027,6 @@ impl InstructionSelectPass {
                 .entry(fs.egraph.find(root))
                 .or_insert(op_id);
         }
-        let region_roots: HashSet<Id> = region_op_by_root.keys().copied().collect();
-
         let guard_classes: HashSet<Id> = fs.aux_classes(region).collect();
 
         let (matches, covered) = self.collect_region_matches(
@@ -1935,10 +2091,7 @@ impl InstructionSelectPass {
         let demanded: HashSet<Id> = covered
             .iter()
             .copied()
-            .filter(|class| {
-                fs.demanded_at(*class, region, &mm_overlay)
-                    || (region_roots.contains(class) && !node::class_is_pure(&fs.egraph, *class))
-            })
+            .filter(|class| fs.demanded_at(*class, region, &mm_overlay))
             .collect();
         let available = |class| {
             // A low-extract view owns no register of its own: it re-views its
@@ -1980,9 +2133,16 @@ impl InstructionSelectPass {
         })?;
 
         let mut root_match: HashMap<Id, usize> = HashMap::new();
+        let mut provided_classes = HashSet::new();
         for (node, choice) in cover.choices.iter().enumerate() {
-            if let PbqpIselAlternative::Tile { match_id } = choice {
-                root_match.insert(cover.classes[node], *match_id);
+            match choice {
+                PbqpIselAlternative::Tile { match_id } => {
+                    root_match.insert(cover.classes[node], *match_id);
+                }
+                PbqpIselAlternative::Provided { .. } => {
+                    provided_classes.insert(cover.classes[node]);
+                }
+                PbqpIselAlternative::NotDemanded => {}
             }
         }
         let required_available: HashSet<Id> = root_match
@@ -1990,7 +2150,7 @@ impl InstructionSelectPass {
             .flat_map(|match_id| &matches[*match_id].bindings.pattern_nodes)
             .filter(|binding| binding.is_boundary && binding.demand == BoundaryDemand::Register)
             .map(|binding| fs.egraph.find(binding.class))
-            .filter(|class| !root_match.contains_key(class))
+            .filter(|class| !root_match.contains_key(class) && !provided_classes.contains(class))
             .collect();
         let tiles = order_tiles(&fs.egraph, &matches, &root_match, |class| {
             region_op_by_root
@@ -2002,26 +2162,34 @@ impl InstructionSelectPass {
         // The state ports of every access this region holds, by the class the
         // access is rooted at: what a tile covering it must read and publish.
         // The order visits the earliest op of a class first, as `source_op` does.
-        let mut state_by_class: HashMap<Id, StatePorts> = HashMap::new();
+        let mut state_by_class: HashMap<Id, Vec<StatePorts>> = HashMap::new();
         for &op_id in &op_ids {
             let Some(&root) = fs.op_root.get(&op_id) else {
                 continue;
             };
             let op = context.get_op(op_id);
-            let Some(&observed) = op.state_operands().first() else {
+            let Some(effects) = op
+                .clone()
+                .as_interface::<dyn tir::ResourceEffects>()
+                .map(|effects| effects.resource_effects())
+            else {
                 continue;
             };
+            let states = effects.into_iter().filter_map(|effect| {
+                Some(StatePorts {
+                    observed: *effect.observed.first()?,
+                    published: effect.produced.first().copied(),
+                })
+            });
             state_by_class
                 .entry(fs.egraph.find(root))
-                .or_insert(StatePorts {
-                    observed,
-                    published: op.state_results().first().copied(),
-                });
+                .or_default()
+                .extend(states);
         }
 
         let mut destinations = HashMap::new();
         let mut tile_results = HashMap::new();
-        for &(class, _) in &tiles {
+        for &(class, match_id) in &tiles {
             let source_op = region_op_by_root.get(&class).copied();
             // A state result is a port, not a destination: the emitted
             // instruction takes it over as its own, so it is not one of the
@@ -2037,7 +2205,12 @@ impl InstructionSelectPass {
                 results.push(context.create_value(ty, None).id());
                 result_ty = Some(ty);
             }
-            if let Some(&result) = results.first() {
+            for (&result_class, &result) in matches[match_id].result_classes.iter().zip(&results) {
+                destinations.insert(fs.egraph.find(result_class), result);
+            }
+            if matches[match_id].result_classes.is_empty()
+                && let Some(&result) = results.first()
+            {
                 destinations.insert(class, result);
             }
             tile_results.insert(class, (source_op, results, result_ty));
@@ -2050,13 +2223,27 @@ impl InstructionSelectPass {
                 // A tile covering an access — at its root, or fused into it —
                 // carries that access's chain: the instruction reads the memory
                 // the IR said it does and publishes the state the IR named.
-                let state = matches[match_id]
-                    .bindings
-                    .pattern_nodes
-                    .iter()
-                    .filter(|binding| !binding.is_boundary && !binding.is_state)
-                    .find_map(|binding| state_by_class.get(&fs.egraph.find(binding.class)))
-                    .copied();
+                let mut states: Vec<StatePorts> = state_by_class
+                    .get(&class)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .chain(
+                        matches[match_id]
+                            .bindings
+                            .pattern_nodes
+                            .iter()
+                            .filter(|binding| !binding.is_boundary && !binding.is_state)
+                            .flat_map(|binding| {
+                                state_by_class
+                                    .get(&fs.egraph.find(binding.class))
+                                    .into_iter()
+                                    .flatten()
+                                    .copied()
+                            }),
+                    )
+                    .collect();
+                states.dedup_by_key(|state| (state.observed, state.published));
                 ScheduledEmit {
                     rule_index: matches[match_id].rule_index,
                     m: resolve_match(
@@ -2068,7 +2255,7 @@ impl InstructionSelectPass {
                         &destinations,
                     ),
                     source_op,
-                    state,
+                    states,
                     results,
                     result_ty,
                 }
@@ -2368,6 +2555,12 @@ impl InstructionSelectPass {
             );
             prune_dominated_matches(&self.specificity, &mut at_class);
             for matched in &at_class {
+                for &result in &matched.result_classes {
+                    let result = fs.egraph.find(result);
+                    if covered.insert(result) {
+                        work.push(result);
+                    }
+                }
                 for binding in &matched.bindings.pattern_nodes {
                     if binding.is_state {
                         continue;
@@ -2400,7 +2593,6 @@ impl InstructionSelectPass {
     ) -> Vec<PbqpIselMatch> {
         value_matches.ensure(class, || self.value_matches_at(fs, context, class));
         let at_class: Vec<MatchRef<'_>> = value_matches.at(class).collect();
-
         let mut matches = Vec::new();
         for m in at_class {
             let pattern_index = m.pattern;
@@ -2429,7 +2621,10 @@ impl InstructionSelectPass {
             // (boundary constraints were already enforced during the search).
             let interior_ok = (0..compiled.nodes.len()).all(|index| {
                 let node = Id::from_raw(index as u32);
-                if node == pattern_root || compiled.node_meta[node.index()].duplicable {
+                if node == pattern_root
+                    || compiled.node_meta[node.index()].is_state
+                    || compiled.node_meta[node.index()].duplicable
+                {
                     return true;
                 }
                 let class = fs.egraph.find(m.bindings[node.index()]);
@@ -2508,6 +2703,12 @@ impl InstructionSelectPass {
                 pattern_nodes,
             };
 
+            let result_classes = region_op
+                .into_iter()
+                .flat_map(|op| context.get_op(op).value_results().to_vec())
+                .filter_map(|result| fs.class_for_value(result))
+                .collect();
+
             let cost = rule.base_cost as u64;
             matches.push(PbqpIselMatch {
                 pattern_index,
@@ -2515,6 +2716,7 @@ impl InstructionSelectPass {
                 root,
                 pattern_root,
                 bindings,
+                result_classes,
                 cost,
                 result_view_offset,
                 result_width,
@@ -2559,7 +2761,7 @@ fn value_match_allowed(
     let Some(meta) = compiled.node_meta.get(pattern_node.index()) else {
         return true;
     };
-    if pattern_node == pattern_root || meta.duplicable {
+    if pattern_node == pattern_root || meta.is_state || meta.duplicable {
         return true;
     }
     let class = fs.egraph.find(class);
@@ -2695,7 +2897,7 @@ fn class_value_tables(
 ) {
     let mut class_values: HashMap<Id, Vec<ValueId>> = HashMap::new();
     for (&value, &class) in value_to_class {
-        if context.get_value(value).is_state() {
+        if context.is_state_type(context.get_value(value).ty()) {
             continue;
         }
         class_values

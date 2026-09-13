@@ -176,7 +176,7 @@ pub fn state_chains(context: &Context, op: &OpHandle) -> Vec<StateChain> {
     if op.has_interface::<dyn crate::Theta>() {
         return carried(context, op)
             .into_iter()
-            .filter(|value| context.get_value(value.port).is_state())
+            .filter(|value| context.is_state_type(context.get_value(value.port).ty()))
             .map(|value| StateChain {
                 entered: value.init,
                 ports: vec![value.port],
@@ -198,10 +198,10 @@ pub fn state_chains(context: &Context, op: &OpHandle) -> Vec<StateChain> {
     let (operands, results) = (op.operands(), op.results());
     let forwarded = (0..binding.operands.len())
         .map(|index| binding.operands.start + index)
-        .filter(|&at| context.get_value(operands[at]).is_state());
+        .filter(|&at| context.is_state_type(context.get_value(operands[at]).ty()));
     let joined = (0..binding.results.len())
         .map(|index| binding.results.start + index)
-        .filter(|&at| context.get_value(results[at]).is_state());
+        .filter(|&at| context.is_state_type(context.get_value(results[at]).ty()));
     forwarded
         .zip(joined)
         .map(|(entered, left)| StateChain {

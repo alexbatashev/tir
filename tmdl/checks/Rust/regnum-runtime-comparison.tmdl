@@ -1,0 +1,35 @@
+// RUN: tmdlc --action=emit-rust --dialect=test --output=- %s | filecheck %s
+
+isa Test {
+    param XLEN: Integer = 32;
+}
+
+register_class GPR for [Test] {
+    param ENCODING_LEN: Integer = 2;
+    param WIDTH: Integer = self.XLEN;
+
+    registers { r0..r3 => { } }
+}
+
+instruction SelectSameRegister for [Test] {
+    param MNEMONIC: String = "select_same";
+
+    operands {
+        rd: GPR,
+        a: GPR,
+        b: GPR,
+    }
+
+    encoding { b, a, rd, 0b00 }
+    asm { "{self.MNEMONIC} {rd}, {a}, {b}" }
+
+    behavior {
+        if regnum(a) == regnum(b) {
+            rd = a;
+        } else {
+            rd = b;
+        }
+    }
+}
+
+// CHECK: static INFO_SELECTSAMEREGISTER

@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 
+use tir_adt::APInt;
 use tir_graph::{Dag, NodeId};
 use tir_symbolic::lang::{
-    canonicalize_for_selection, infer_types, FloatFormat, SemType, SymKind, SymPayload,
-    TypeUnifier, Width,
+    canonicalize_for_selection, execute, infer_types, FloatFormat, SemType, StateAccessKind,
+    StateFieldKind, StateResourceKind, SymKind, SymPayload, TypeUnifier, Value, Width,
 };
 
 use super::support::{con, op, sym, Graph};
@@ -91,6 +92,56 @@ fn raw_memory_bits_admit_a_float_interpretation() {
 }
 
 #[test]
+fn fp_state_field_reads_have_intrinsic_types() {
+    let mut graph = Graph::new();
+    let state = sym(&mut graph, 0);
+    let resource = con(&mut graph, 2, StateResourceKind::FpEnvironment as u64);
+    let rounding_field = con(&mut graph, 2, StateFieldKind::FpRounding as u64);
+    let flags_field = con(&mut graph, 2, StateFieldKind::FpFlags as u64);
+    let rounding = op(
+        &mut graph,
+        SymKind::StateRead,
+        &[state, resource, rounding_field],
+    );
+    let flags = op(
+        &mut graph,
+        SymKind::StateRead,
+        &[state, resource, flags_field],
+    );
+
+    let types = infer_types(&graph, |node| (node == state).then_some(SemType::State)).unwrap();
+
+    assert_eq!(types[rounding.index()], SemType::bits(3));
+    assert_eq!(types[flags.index()], SemType::bits(5));
+}
+
+#[test]
+fn fp_state_assignment_rejects_the_wrong_field_type() {
+    let mut graph = Graph::new();
+    let state = sym(&mut graph, 0);
+    let resource = con(&mut graph, 2, StateResourceKind::FpEnvironment as u64);
+    let field = con(&mut graph, 2, StateFieldKind::FpRounding as u64);
+    let access = con(&mut graph, 1, StateAccessKind::Change as u64);
+    let flags = sym(&mut graph, 1);
+    op(
+        &mut graph,
+        SymKind::StateAssign,
+        &[state, resource, field, access, flags],
+    );
+
+    assert!(infer_types(&graph, |node| {
+        if node == state {
+            Some(SemType::State)
+        } else if node == flags {
+            Some(SemType::bits(5))
+        } else {
+            None
+        }
+    })
+    .is_err());
+}
+
+#[test]
 fn selection_drops_extension_of_narrow_division_result() {
     let mut graph = Graph::new();
     let lhs = sym(&mut graph, 0);
@@ -126,6 +177,36 @@ fn selection_drops_addition_of_zero_extended_zero() {
         canonical.get_leaf_data(root),
         Some(&SymPayload::SymbolId(1))
     );
+}
+
+#[test]
+fn selection_observes_wide_boolean_result_as_its_low_bit() {
+    for width in [8, 32, 64] {
+        for bit in [0, 1] {
+            let mut graph = Graph::new();
+            let input = sym(&mut graph, 0);
+            let bit_one = con(&mut graph, 1, 1);
+            let condition = op(&mut graph, SymKind::Eq, &[input, bit_one]);
+            let one = con(&mut graph, width, 1);
+            let zero = con(&mut graph, width, 0);
+            let root = op(&mut graph, SymKind::If, &[condition, one, zero]);
+            let input = Value::Int(APInt::new(1, bit));
+            let Value::Int(original) = execute(&graph, std::slice::from_ref(&input)) else {
+                panic!("conditional must return an integer");
+            };
+
+            let (mut canonical, root, _) =
+                canonicalize_for_selection(&graph, root, &HashSet::new());
+            let true_value = con(&mut canonical, 1, 1);
+            op(&mut canonical, SymKind::If, &[true_value, root, root]);
+            let Value::Int(observed) = execute(&canonical, &[input]) else {
+                panic!("canonical observation must return an integer");
+            };
+
+            assert_eq!(observed.width(), 1);
+            assert_eq!(observed.to_u64(), original.to_u64() & 1);
+        }
+    }
 }
 
 // riscv `remw` = sext(x_w32 - (x_w32 / y_w32) * y_w32, 64): the extension wraps a

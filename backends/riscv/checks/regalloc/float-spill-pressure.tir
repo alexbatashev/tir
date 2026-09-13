@@ -7,85 +7,85 @@
 
 module {
   %fn_fspill = func.func @fspill(%0: !f32, %1: !f32) -> !f32 {
-    %2 = addf %0, %1 : !f32
-    %3 = addf %2, %0 : !f32
-    %4 = addf %3, %1 : !f32
-    %5 = addf %4, %0 : !f32
-    %6 = addf %5, %1 : !f32
-    %7 = addf %6, %0 : !f32
-    %8 = addf %7, %1 : !f32
-    %9 = addf %8, %0 : !f32
-    %10 = addf %9, %1 : !f32
-    %11 = addf %10, %0 : !f32
-    %12 = addf %11, %1 : !f32
-    %13 = addf %12, %0 : !f32
-    %14 = addf %13, %1 : !f32
-    %15 = addf %14, %0 : !f32
-    %16 = addf %15, %1 : !f32
-    %17 = addf %16, %0 : !f32
-    %18 = addf %17, %1 : !f32
-    %19 = addf %18, %0 : !f32
-    %20 = addf %19, %1 : !f32
-    %21 = addf %20, %0 : !f32
-    %22 = addf %21, %1 : !f32
-    %23 = addf %22, %0 : !f32
-    %24 = addf %23, %1 : !f32
-    %25 = addf %24, %0 : !f32
-    %26 = addf %25, %1 : !f32
-    %27 = addf %26, %0 : !f32
-    %28 = addf %27, %1 : !f32
-    %29 = addf %28, %0 : !f32
-    %30 = addf %29, %1 : !f32
-    %31 = addf %30, %0 : !f32
-    %32 = addf %31, %1 : !f32
-    %33 = addf %32, %0 : !f32
-    %34 = addf %33, %1 : !f32
-    %35 = addf %34, %0 : !f32
-    %36 = addf %35, %1 : !f32
-    %37 = addf %36, %0 : !f32
-    %38 = addf %37, %1 : !f32
-    %39 = addf %38, %0 : !f32
-    %40 = addf %39, %1 : !f32
-    %41 = addf %40, %0 : !f32
-    %42 = addf %2, %3 : !f32
-    %43 = addf %42, %4 : !f32
-    %44 = addf %43, %5 : !f32
-    %45 = addf %44, %6 : !f32
-    %46 = addf %45, %7 : !f32
-    %47 = addf %46, %8 : !f32
-    %48 = addf %47, %9 : !f32
-    %49 = addf %48, %10 : !f32
-    %50 = addf %49, %11 : !f32
-    %51 = addf %50, %12 : !f32
-    %52 = addf %51, %13 : !f32
-    %53 = addf %52, %14 : !f32
-    %54 = addf %53, %15 : !f32
-    %55 = addf %54, %16 : !f32
-    %56 = addf %55, %17 : !f32
-    %57 = addf %56, %18 : !f32
-    %58 = addf %57, %19 : !f32
-    %59 = addf %58, %20 : !f32
-    %60 = addf %59, %21 : !f32
-    %61 = addf %60, %22 : !f32
-    %62 = addf %61, %23 : !f32
-    %63 = addf %62, %24 : !f32
-    %64 = addf %63, %25 : !f32
-    %65 = addf %64, %26 : !f32
-    %66 = addf %65, %27 : !f32
-    %67 = addf %66, %28 : !f32
-    %68 = addf %67, %29 : !f32
-    %69 = addf %68, %30 : !f32
-    %70 = addf %69, %31 : !f32
-    %71 = addf %70, %32 : !f32
-    %72 = addf %71, %33 : !f32
-    %73 = addf %72, %34 : !f32
-    %74 = addf %73, %35 : !f32
-    %75 = addf %74, %36 : !f32
-    %76 = addf %75, %37 : !f32
-    %77 = addf %76, %38 : !f32
-    %78 = addf %77, %39 : !f32
-    %79 = addf %78, %40 : !f32
-    %80 = addf %79, %41 : !f32
+    %2 = fp.add %0, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %3 = fp.add %2, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %4 = fp.add %3, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %5 = fp.add %4, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %6 = fp.add %5, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %7 = fp.add %6, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %8 = fp.add %7, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %9 = fp.add %8, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %10 = fp.add %9, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %11 = fp.add %10, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %12 = fp.add %11, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %13 = fp.add %12, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %14 = fp.add %13, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %15 = fp.add %14, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %16 = fp.add %15, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %17 = fp.add %16, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %18 = fp.add %17, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %19 = fp.add %18, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %20 = fp.add %19, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %21 = fp.add %20, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %22 = fp.add %21, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %23 = fp.add %22, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %24 = fp.add %23, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %25 = fp.add %24, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %26 = fp.add %25, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %27 = fp.add %26, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %28 = fp.add %27, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %29 = fp.add %28, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %30 = fp.add %29, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %31 = fp.add %30, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %32 = fp.add %31, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %33 = fp.add %32, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %34 = fp.add %33, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %35 = fp.add %34, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %36 = fp.add %35, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %37 = fp.add %36, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %38 = fp.add %37, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %39 = fp.add %38, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %40 = fp.add %39, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %41 = fp.add %40, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %42 = fp.add %2, %3 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %43 = fp.add %42, %4 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %44 = fp.add %43, %5 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %45 = fp.add %44, %6 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %46 = fp.add %45, %7 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %47 = fp.add %46, %8 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %48 = fp.add %47, %9 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %49 = fp.add %48, %10 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %50 = fp.add %49, %11 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %51 = fp.add %50, %12 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %52 = fp.add %51, %13 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %53 = fp.add %52, %14 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %54 = fp.add %53, %15 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %55 = fp.add %54, %16 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %56 = fp.add %55, %17 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %57 = fp.add %56, %18 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %58 = fp.add %57, %19 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %59 = fp.add %58, %20 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %60 = fp.add %59, %21 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %61 = fp.add %60, %22 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %62 = fp.add %61, %23 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %63 = fp.add %62, %24 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %64 = fp.add %63, %25 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %65 = fp.add %64, %26 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %66 = fp.add %65, %27 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %67 = fp.add %66, %28 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %68 = fp.add %67, %29 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %69 = fp.add %68, %30 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %70 = fp.add %69, %31 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %71 = fp.add %70, %32 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %72 = fp.add %71, %33 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %73 = fp.add %72, %34 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %74 = fp.add %73, %35 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %75 = fp.add %74, %36 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %76 = fp.add %75, %37 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %77 = fp.add %76, %38 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %78 = fp.add %77, %39 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %79 = fp.add %78, %40 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %80 = fp.add %79, %41 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
     func.return %80
   }
   module_end

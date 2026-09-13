@@ -14,9 +14,9 @@ module {data_layout = #data_layout} {
   %fn_g = func.declare @g() -> !unit
   %fn_scale = func.func @scale(%p: !ptr.p) {
     %slot = ptr.alloca {size = 1, align = 1} : !ptr.p
-    %s_slot = state.entry_state
-    %s_param = state.entry_state
-    %s_world = state.entry_state
+    %s_slot = state.entry_state : !state<memory>
+    %s_param = state.entry_state : !state<memory>
+    %s_world = state.entry_state : !state<memory>
     %ptr, %r_param = ptr.load %p state(%s_param) : !ptr.p
     %byte, %r_world = ptr.load %ptr state(%s_world) : !i8
     %w_slot = ptr.store %byte, %slot state(%s_slot)

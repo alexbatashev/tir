@@ -153,7 +153,9 @@ fn threaded_call(
         .args(args)
         .result_type(result_type);
     if let Some(state) = state {
-        builder = builder.state(state).state_result();
+        builder = builder
+            .state(state)
+            .state_result(context.get_value(state).ty());
     }
     builder.build()
 }

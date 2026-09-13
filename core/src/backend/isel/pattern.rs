@@ -8,7 +8,7 @@ use tir::{
     Context,
     graph::{Dag, MetaDag, NodeId, OperandConstraint},
     sem::{
-        SemGraph, SemNode, SemType, SymKind, SymPayload, TypeUnifier,
+        SemGraph, SemNode, SemType, SymKind, SymPayload, TypeUnifier, Width,
         egraph::{SemEGraph, class_int_binding, class_semantic_type},
         infer_types, template_node,
     },
@@ -314,7 +314,26 @@ pub(crate) fn compile_isel_pattern(
     result_register: Option<RegisterRequirement>,
 ) -> Option<CompiledIselPattern> {
     let root = canonical_pattern_root(expr, expr.root()?);
-    let inferred_types = infer_types(expr, |_| None).ok()?;
+    if operand_registers
+        .iter()
+        .any(|(_, requirement)| requirement.exclusive_float_type().is_err())
+    {
+        return None;
+    }
+    let inferred_types = infer_types(expr, |node| {
+        let Some(SymPayload::SymbolId(symbol)) = expr.get_leaf_data(node) else {
+            return None;
+        };
+        operand_registers
+            .iter()
+            .find(|(candidate, _)| candidate == symbol)
+            .and_then(|(_, requirement)| {
+                requirement
+                    .exclusive_float_type()
+                    .expect("float register formats were validated")
+            })
+    })
+    .ok()?;
     let mut nodes: Vec<PatternNode> = Vec::new();
     let mut node_meta = Vec::new();
     let mut memo = HashMap::new();
@@ -586,9 +605,11 @@ fn compile_isel_pattern_node(
             let Some(SymPayload::SymbolId(symbol)) = expr.get_leaf_data(node) else {
                 return None;
             };
+            let is_state = inferred_types[node.index()] == SemType::State;
             let compiled = push(nodes, PatternNode::Capture(*symbol));
             node_meta.push(PatternNodeMeta {
-                is_boundary: true,
+                is_boundary: !is_state,
+                is_state,
                 duplicable: true,
                 constraint: operand_constraints
                     .iter()
@@ -609,11 +630,12 @@ fn compile_isel_pattern_node(
         }
         SymKind::Constant => match expr.get_leaf_data(node) {
             Some(SymPayload::Int(value)) => {
+                let value = widen_pattern_literal(value, &inferred_types[node.index()]);
                 let compiled = push(
                     nodes,
                     PatternNode::Template(template_node(
                         SymKind::Constant,
-                        Some(SymPayload::Int(value.clone())),
+                        Some(SymPayload::Int(value)),
                         expr.get_actual_type(node),
                     )),
                 );
@@ -661,10 +683,14 @@ fn compile_isel_pattern_node(
                 });
                 children.push(state);
             }
-            let mut compiled = template_node(*kind, None, expr.get_actual_type(node));
+            let pattern_type = (*kind != SymKind::StateRead)
+                .then(|| expr.get_actual_type(node))
+                .flatten();
+            let mut compiled = template_node(*kind, None, pattern_type);
             compiled.children = children;
             let compiled = push(nodes, PatternNode::Template(compiled));
             node_meta.push(PatternNodeMeta {
+                is_state: inferred_types[node.index()] == SemType::State,
                 semantic_type: Some(inferred_types[node.index()].clone()),
                 ..Default::default()
             });
@@ -674,4 +700,19 @@ fn compile_isel_pattern_node(
 
     memo.insert(key, compiled);
     Some(compiled)
+}
+
+fn widen_pattern_literal(value: &tir::utils::APInt, ty: &SemType) -> tir::utils::APInt {
+    let width = match ty {
+        SemType::Bits(Width::Const(width)) | SemType::RawBits(Width::Const(width)) => *width,
+        _ => return value.clone(),
+    };
+    if width <= value.width() || width > 64 {
+        return value.clone();
+    }
+    if value.is_signed() {
+        value.sign_extend(width)
+    } else {
+        value.zero_extend(width)
+    }
 }

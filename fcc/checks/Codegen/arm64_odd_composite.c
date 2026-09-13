@@ -31,7 +31,8 @@ struct Three make_three(struct Three *value) {
 // CHECK: %[[CLEAR:[0-9]+]] = ptr.store %[[ZERO]], %[[SLOT:[0-9]+]]
 // CHECK-NEXT: %[[COPY:[0-9]+]] = ptr.memcpy %[[SLOT]], %{{[0-9]+}}, %[[SIZE]] state(%[[CLEAR]])
 // CHECK-NEXT: %[[WORD:[0-9]+]], %[[LOAD:[0-9]+]] = ptr.load %[[SLOT]] state(%[[COPY]]) : !i64
-// CHECK-NEXT: %{{[0-9]+}}, %{{[0-9]+}} = func.call %{{[0-9]+}}(%[[WORD]] : !i64) -> !i64 state(%[[LOAD]])
+// CHECK-NEXT: %[[FP:[0-9]+]] = state.entry_state : !state<fp.env>
+// CHECK-NEXT: %{{[0-9]+}}, %{{[0-9]+}}, %{{[0-9]+}} = func.call %{{[0-9]+}}(%[[WORD]] : !i64) -> !i64 state(%[[LOAD]], %[[FP]])
 // CHECK-LABEL: %{{[0-9]+}} = func.func @make_three(
 // CHECK-SAME: ) -> !i64 {
 // CHECK: ptr.alloca {size = 8, align = 8}

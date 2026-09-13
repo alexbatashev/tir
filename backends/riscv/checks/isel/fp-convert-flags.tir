@@ -1,0 +1,27 @@
+// RUN: tir interp %s | filecheck %s --check-prefix=INTERP
+// RUN: tir mc --march=rv64ifd --filetype=asm -o /tmp/tir-riscv-fp-convert-flags.s %s
+// RUN: isasim --march=rv64ifd --entry=main --until-pc=0 --trace-registers-end /tmp/tir-riscv-fp-convert-flags.s | filecheck %s --check-prefix=EXEC
+// RUN: tir mc --march=rv64ifd --filetype=asm --shuffle-machine-order -o /tmp/tir-riscv-fp-convert-flags.s %s
+// RUN: isasim --march=rv64ifd --entry=main --until-pc=0 --trace-registers-end /tmp/tir-riscv-fp-convert-flags.s | filecheck %s --check-prefix=EXEC
+
+module {
+  %fn_main = func.func @main() -> !i64 {
+    %env0 = state.entry_state : !state<fp.env>
+    %all_flags = constant {value = 31} : !i5
+    %env1 = fp.clear_flags %all_flags state(%env0)
+    %value = fp.constant {bits = 4609434218613702656} : !f64
+    %integer, %env2 = fp.to_si %value state(%env1) {semantics = {kind = "to_integer", rounding = "toward_zero", exceptions = "flags", subnormals = "gradual", invalid = "indeterminate"}} : !i64
+    %flags, %env3 = fp.get_flags state(%env2) : !i5
+    %shift = constant {value = 8} : !i64
+    %shifted = shli %integer, %shift : !i64
+    %wide_flags = extui %flags : !i64
+    %observed = ori %shifted, %wide_flags : !i64
+    func.return %observed state(%env3)
+  }
+  module_end
+}
+
+// INTERP: i64 257
+// EXEC: final registers:
+// EXEC-DAG: GPR[10] = 0x101
+// EXEC-DAG: CSR[1] = 0x1

@@ -6,8 +6,8 @@
 
 module {
   %fn_zero = func.func @zero(%0: !f64) -> !f64 {
-    %1 = constantf {value = 0.0} : !f64
-    %2 = addf %0, %1 : !f64
+    %1 = fp.constant {bits = 0} : !f64
+    %2 = fp.add %0, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f64
     func.return %2
   }
   module_end

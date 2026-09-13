@@ -1,0 +1,12 @@
+// RUN: not tir mc --march=rv64ifd --stage=isel %s 2>&1 | filecheck %s
+
+module {
+  %fn = func.func @preserve_payload(%lhs: !f64, %rhs: !f64) -> !f64 {
+    %env0 = state.entry_state : !state<fp.env>
+    %sum, %env1 = fp.add %lhs, %rhs state(%env0) {semantics = {kind = "arithmetic", rounding = "nearest_even", exceptions = "flags", nan = "preserve_payload", subnormals = "gradual", tininess = "after_rounding"}} : !f64
+    func.return %sum state(%env1)
+  }
+  module_end
+}
+
+// CHECK: missing atomic materializer rule for semantic kind StateResult

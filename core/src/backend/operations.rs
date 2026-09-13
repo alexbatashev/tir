@@ -1,5 +1,8 @@
 use tir::helpers::operation;
-use tir::{Any, Operation, Terminator};
+use tir::{
+    Any, Operation, ResourceAccess, ResourceEffect, ResourceEffects, Terminator,
+    builtin::StateResource,
+};
 
 use super::{ControlFlow, InstrInfo, MachineInstruction};
 
@@ -229,7 +232,7 @@ operation! {
             callee: "Str",
             outgoing_stack_size: "UInt",
         },
-        interfaces: [tir::backend::MachineInstruction],
+        interfaces: [tir::backend::MachineInstruction, ResourceEffects],
         state: "in_out",
     }
 }
@@ -255,7 +258,7 @@ operation! {
         attributes: A {
             outgoing_stack_size: "UInt",
         },
-        interfaces: [tir::backend::MachineInstruction],
+        interfaces: [tir::backend::MachineInstruction, ResourceEffects],
         state: "in_out",
     }
 }
@@ -268,5 +271,41 @@ impl MachineInstruction for VirtualIndirectCallOp {
 
     fn instance(&self) -> &tir::OpHandle {
         &self.0
+    }
+}
+
+fn call_effects(op: &tir::OpHandle) -> Vec<ResourceEffect> {
+    [StateResource::Memory, StateResource::FpEnv]
+        .into_iter()
+        .map(|resource| ResourceEffect {
+            resource,
+            access: ResourceAccess::Change,
+            observed: op
+                .state_operands()
+                .into_iter()
+                .filter(|value| {
+                    op.context.state_resource(op.context.get_value(*value).ty()) == Some(resource)
+                })
+                .collect(),
+            produced: op
+                .state_results()
+                .into_iter()
+                .filter(|value| {
+                    op.context.state_resource(op.context.get_value(*value).ty()) == Some(resource)
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+impl ResourceEffects for VirtualCallOp {
+    fn resource_effects(&self) -> Vec<ResourceEffect> {
+        call_effects(&self.0)
+    }
+}
+
+impl ResourceEffects for VirtualIndirectCallOp {
+    fn resource_effects(&self) -> Vec<ResourceEffect> {
+        call_effects(&self.0)
     }
 }

@@ -11,6 +11,6 @@ module {
   module_end
 }
 // CHECK-LABEL: %{{[0-9]+}} = func.func @pure
-// CHECK-NOT: state.entry_state
+// CHECK-NOT: state.entry_state : !state<memory>
 // CHECK-NOT: state(
 // CHECK: -> %1

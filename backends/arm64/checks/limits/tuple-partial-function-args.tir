@@ -4,7 +4,7 @@ module {
   %fn_repeat_first = func.func @repeat_first(%0: !tuple<!f64, !f64>) -> !f64 {
     %1 = tuple_get %0 {index = 0} : !f64
     %2 = tuple_get %0 {index = 0} : !f64
-    %3 = addf %1, %2 : !f64
+    %3 = fp.add %1, %2 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f64
     func.return %3
   }
   module_end

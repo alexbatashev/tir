@@ -8,8 +8,8 @@ module {
     %p, %d0 = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
     %one = constant {value = 1} : !i32
     %d1 = ptr.store %one, %p state(%d0)
-    cfg.br ^a(%d0 : !state)
-  ^a(%d2: !state):
+    cfg.br ^a(%d0 : !state<memory>)
+  ^a(%d2: !state<memory>):
     %x, %d3 = ptr.load %p state(%d2) : !i32
     func.return %x state(%d3)
   }

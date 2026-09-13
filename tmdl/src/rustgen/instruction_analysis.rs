@@ -31,6 +31,706 @@ fn instruction_names(
     Some((mnemonic, op_name))
 }
 
+fn infer_fp_register_roles(
+    files: &[ast::File],
+    item_cache: &HashMap<&str, &ast::Item>,
+    register_index_map: &HashMap<(String, String), u32>,
+) -> FpRegisterRoles {
+    use tir_graph::Dag;
+
+    fn rounded(kind: tir_symbolic::lang::SymKind) -> bool {
+        use tir_symbolic::lang::SymKind;
+        matches!(
+            kind,
+            SymKind::FAddRound
+                | SymKind::FSubRound
+                | SymKind::FMulRound
+                | SymKind::FDivRound
+                | SymKind::FmaRound
+                | SymKind::SqrtRound
+                | SymKind::FCvtRound
+                | SymKind::SIToFPRound
+                | SymKind::UIToFPRound
+                | SymKind::FPToSIRound
+                | SymKind::FPToUIRound
+        )
+    }
+
+    let mut roles = FpRegisterRoles::default();
+    for inst in files.iter().flat_map(|file| file.instructions()) {
+        let numeric_params = resolve_params_for_instruction(inst, item_cache)
+            .into_iter()
+            .filter_map(|(name, (_, value))| match value {
+                Some(ast::Expr::Lit(ast::Lit::Int(value))) => {
+                    Some((name, parse_literal_value(&value) as i64))
+                }
+                _ => None,
+            })
+            .collect();
+        let isa_params = resolve_isa_param_values(inst, item_cache);
+        let trap_handler = inst
+            .for_isas
+            .iter()
+            .find_map(|isa| find_trap_handler(isa, item_cache));
+        let Some(behavior) = sem_expr_state::lower_behavior(
+            &inst.behavior,
+            trap_handler,
+            &numeric_params,
+            &isa_params,
+            register_index_map,
+        ) else {
+            continue;
+        };
+
+        let by_symbol: HashMap<_, _> = behavior
+            .register_symbols
+            .iter()
+            .map(|(register, symbol)| (*symbol, register.clone()))
+            .collect();
+        for node in behavior.effect_nodes() {
+            if let Some(sem_expr_state::EffectPayload::Assign {
+                destination: sem_expr_state::Destination::FixedRegister { class, index, .. },
+            }) = behavior.effect_payload(node)
+            {
+                let Some(value) = behavior.graph.children(node).next() else {
+                    continue;
+                };
+                let old = behavior.register_symbols.get(&(class.clone(), *index));
+                let has_old = old.is_some_and(|old| {
+                    behavior.graph.preorder(value).any(|candidate| {
+                        matches!(
+                            behavior.graph.get_leaf_data(candidate),
+                            Some(sem_expr_state::BehaviorPayload::Value(
+                                tir_symbolic::lang::SymPayload::SymbolId(symbol)
+                            )) if symbol == old
+                        )
+                    })
+                });
+                let has_flags = behavior.graph.preorder(value).any(|candidate| {
+                    *behavior.graph.get_node(candidate) == tir_symbolic::lang::SymKind::FPFlags
+                });
+                if has_old && has_flags {
+                    roles.flags.insert((class.clone(), *index));
+                }
+            }
+        }
+        for node in behavior.graph.preorder(behavior.root) {
+            if !rounded(*behavior.graph.get_node(node)) {
+                continue;
+            }
+            let Some(mode) = behavior.graph.children(node).last() else {
+                continue;
+            };
+            let Some(sem_expr_state::BehaviorPayload::Value(
+                tir_symbolic::lang::SymPayload::SymbolId(symbol),
+            )) = behavior.graph.get_leaf_data(mode)
+            else {
+                continue;
+            };
+            if let Some(register) = by_symbol.get(symbol) {
+                roles.rounding.insert(register.clone());
+            }
+        }
+    }
+    roles
+}
+
+#[derive(Clone)]
+struct FpBehaviorState {
+    state: tir_graph::NodeId,
+    field_states: HashMap<tir_symbolic::lang::StateFieldKind, tir_graph::NodeId>,
+    outputs: HashMap<String, tir_graph::NodeId>,
+    bindings: HashMap<u32, tir_graph::NodeId>,
+    reads: HashSet<tir_symbolic::lang::StateFieldKind>,
+    changed: Option<tir_symbolic::lang::StateFieldKind>,
+    invalid_path: bool,
+}
+
+type FpValueKey = (
+    tir_symbolic::lang::SymKind,
+    Option<tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>>,
+    Vec<usize>,
+);
+
+struct FpBehaviorEmitter<'a> {
+    behavior: &'a sem_expr_state::BehaviorGraph,
+    roles: &'a FpRegisterRoles,
+    defined: &'a [String],
+    graph: std::cell::RefCell<tir_symbolic::sem::SemGraph>,
+    values: std::cell::RefCell<HashMap<FpValueKey, tir_graph::NodeId>>,
+    supported: std::cell::Cell<bool>,
+}
+
+impl FpBehaviorEmitter<'_> {
+    fn field_for(&self, class: &str, index: u32) -> Option<tir_symbolic::lang::StateFieldKind> {
+        let register = (class.to_string(), index);
+        if self.roles.flags.contains(&register) {
+            Some(tir_symbolic::lang::StateFieldKind::FpFlags)
+        } else if self.roles.rounding.contains(&register) {
+            Some(tir_symbolic::lang::StateFieldKind::FpRounding)
+        } else {
+            None
+        }
+    }
+
+    fn constant(
+        graph: &mut tir_symbolic::sem::SemGraph,
+        width: u32,
+        value: u64,
+    ) -> tir_graph::NodeId {
+        use tir_graph::MutDag;
+        let node = graph.add_node(tir_symbolic::lang::SymKind::Constant);
+        graph.set_leaf_data(node, tir_symbolic::sem::int_payload(width, value, false));
+        node
+    }
+
+    fn state_read(
+        &self,
+        graph: &mut tir_symbolic::sem::SemGraph,
+        state: tir_graph::NodeId,
+        field: tir_symbolic::lang::StateFieldKind,
+    ) -> tir_graph::NodeId {
+        let resource = self.intern_value(
+            graph,
+            tir_symbolic::lang::SymKind::Constant,
+            Some(tir_symbolic::sem::int_payload(
+                2,
+                tir_symbolic::lang::StateResourceKind::FpEnvironment as u64,
+                false,
+            )),
+            &[],
+        );
+        let field = self.intern_value(
+            graph,
+            tir_symbolic::lang::SymKind::Constant,
+            Some(tir_symbolic::sem::int_payload(2, field as u64, false)),
+            &[],
+        );
+        self.intern_value(
+            graph,
+            tir_symbolic::lang::SymKind::StateRead,
+            None,
+            &[state, resource, field],
+        )
+    }
+
+    fn intern_value(
+        &self,
+        graph: &mut tir_symbolic::sem::SemGraph,
+        kind: tir_symbolic::lang::SymKind,
+        payload: Option<tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>>,
+        children: &[tir_graph::NodeId],
+    ) -> tir_graph::NodeId {
+        use tir_graph::MutDag;
+        let key = (
+            kind,
+            payload.clone(),
+            children.iter().map(|child| child.index()).collect(),
+        );
+        if let Some(&node) = self.values.borrow().get(&key) {
+            return node;
+        }
+        let node = graph.add_node(kind);
+        if let Some(payload) = payload {
+            graph.set_leaf_data(node, payload);
+        }
+        for &child in children {
+            graph.add_edge(node, child);
+        }
+        self.values.borrow_mut().insert(key, node);
+        node
+    }
+
+    fn clone_value(
+        &self,
+        source_graph: &sem_expr_state::ValueGraph,
+        root: tir_graph::NodeId,
+        state: &mut FpBehaviorState,
+    ) -> tir_graph::NodeId {
+        use tir_graph::Dag;
+
+        fn recurse(
+            emitter: &FpBehaviorEmitter<'_>,
+            source_graph: &sem_expr_state::ValueGraph,
+            source: tir_graph::NodeId,
+            state: &mut FpBehaviorState,
+            graph: &mut tir_symbolic::sem::SemGraph,
+            memo: &mut HashMap<usize, tir_graph::NodeId>,
+        ) -> tir_graph::NodeId {
+            use tir_graph::MutDag;
+            use tir_symbolic::lang::{SymKind, SymPayload};
+            if let Some(&node) = memo.get(&source.index()) {
+                return node;
+            }
+            let kind = *source_graph.get_node(source);
+            if kind == SymKind::Symbol
+                && let Some(SymPayload::SymbolId(symbol)) = source_graph.get_leaf_data(source)
+            {
+                if let Some(node) = state.bindings.get(symbol).copied() {
+                    memo.insert(source.index(), node);
+                    return node;
+                }
+                if let Some((register, _)) = emitter
+                    .behavior
+                    .register_symbols
+                    .iter()
+                    .find(|(_, candidate)| *candidate == symbol)
+                    && let Some(field) = emitter.field_for(&register.0, register.1)
+                {
+                    state.reads.insert(field);
+                    let field_state = state
+                        .field_states
+                        .get(&field)
+                        .copied()
+                        .unwrap_or(state.state);
+                    let node = emitter.state_read(graph, field_state, field);
+                    memo.insert(source.index(), node);
+                    return node;
+                }
+            }
+
+            let children = source_graph
+                .children(source)
+                .map(|child| recurse(emitter, source_graph, child, state, graph, memo))
+                .collect::<Vec<_>>();
+            let payload = source_graph.get_leaf_data(source).cloned();
+            let node = if kind == SymKind::Constant {
+                let node = graph.add_node(kind);
+                if let Some(payload) = payload {
+                    graph.set_leaf_data(node, payload);
+                }
+                node
+            } else {
+                emitter.intern_value(graph, kind, payload, &children)
+            };
+            memo.insert(source.index(), node);
+            node
+        }
+
+        let mut graph = self.graph.borrow_mut();
+        recurse(
+            self,
+            source_graph,
+            root,
+            state,
+            &mut graph,
+            &mut HashMap::new(),
+        )
+    }
+
+    fn clone_bound_value(
+        &self,
+        root: tir_graph::NodeId,
+        state: &mut FpBehaviorState,
+    ) -> Option<tir_graph::NodeId> {
+        let (graph, root) = self.behavior.bound_value_graph(root)?;
+        Some(self.clone_value(&graph, root, state))
+    }
+
+    fn state_assign(
+        &self,
+        state: tir_graph::NodeId,
+        field: tir_symbolic::lang::StateFieldKind,
+        access: tir_symbolic::lang::StateAccessKind,
+        value: tir_graph::NodeId,
+    ) -> tir_graph::NodeId {
+        use tir_graph::MutDag;
+        let mut graph = self.graph.borrow_mut();
+        let resource = Self::constant(
+            &mut graph,
+            2,
+            tir_symbolic::lang::StateResourceKind::FpEnvironment as u64,
+        );
+        let field = Self::constant(&mut graph, 2, field as u64);
+        let access = Self::constant(&mut graph, 1, access as u64);
+        let event = graph.add_node(tir_symbolic::lang::SymKind::StateAssign);
+        for child in [state, resource, field, access, value] {
+            graph.add_edge(event, child);
+        }
+        event
+    }
+
+    fn select(
+        &self,
+        condition: tir_graph::NodeId,
+        then_value: tir_graph::NodeId,
+        else_value: tir_graph::NodeId,
+    ) -> tir_graph::NodeId {
+        if then_value == else_value {
+            return then_value;
+        }
+        let mut graph = self.graph.borrow_mut();
+        self.intern_value(
+            &mut graph,
+            tir_symbolic::lang::SymKind::If,
+            None,
+            &[condition, then_value, else_value],
+        )
+    }
+
+    fn merge_maps<K: Eq + std::hash::Hash + Clone>(
+        &self,
+        condition: tir_graph::NodeId,
+        then_values: &HashMap<K, tir_graph::NodeId>,
+        else_values: &HashMap<K, tir_graph::NodeId>,
+    ) -> Option<HashMap<K, tir_graph::NodeId>> {
+        if then_values.len() != else_values.len() {
+            return None;
+        }
+        then_values
+            .iter()
+            .map(|(key, &then_value)| {
+                let &else_value = else_values.get(key)?;
+                Some((key.clone(), self.select(condition, then_value, else_value)))
+            })
+            .collect()
+    }
+}
+
+impl sem_expr_state::BehaviorEmitter for FpBehaviorEmitter<'_> {
+    type State = FpBehaviorState;
+
+    fn assign(
+        &self,
+        destination: &sem_expr_state::Destination,
+        value: tir_graph::NodeId,
+        entry: &Self::State,
+    ) -> Option<Self::State> {
+        let mut state = entry.clone();
+        match destination {
+            sem_expr_state::Destination::FixedRegister { class, index, .. } => {
+                let Some(field) = self.field_for(class, *index) else {
+                    self.supported.set(false);
+                    return Some(state);
+                };
+                let value = self.clone_bound_value(value, &mut state)?;
+                state.state = self.state_assign(
+                    state.state,
+                    field,
+                    tir_symbolic::lang::StateAccessKind::Change,
+                    value,
+                );
+                state.field_states.insert(field, state.state);
+                state.changed = Some(field);
+            }
+            sem_expr_state::Destination::Ident(name) if self.defined.contains(name) => {
+                let value = self.clone_bound_value(value, &mut state)?;
+                state.outputs.insert(name.clone(), value);
+            }
+            sem_expr_state::Destination::Ident(_) => {}
+            _ => self.supported.set(false),
+        }
+        Some(state)
+    }
+
+    fn value_effect(
+        &self,
+        _kind: tir_symbolic::lang::SymKind,
+        _value: tir_graph::NodeId,
+        state: &Self::State,
+    ) -> Option<Self::State> {
+        self.supported.set(false);
+        Some(state.clone())
+    }
+
+    fn bind(&self, value: tir_graph::NodeId, entry: &Self::State) -> Option<Self::State> {
+        let mut state = entry.clone();
+        let symbol = *self.behavior.let_symbols.get(&value)?;
+        let (graph, root) = self.behavior.binding_value_graph(value)?;
+        let node = self.clone_value(&graph, root, &mut state);
+        state.bindings.insert(symbol, node);
+        Some(state)
+    }
+
+    fn trap(
+        &self,
+        arguments: &[tir_graph::NodeId],
+        _params: &[String],
+        _handler: Option<tir_graph::NodeId>,
+        state: &Self::State,
+        _fold: &dyn Fn(tir_graph::NodeId, &Self::State) -> Self::State,
+    ) -> Option<Self::State> {
+        let mut state = state.clone();
+        let arguments = arguments
+            .iter()
+            .map(|&argument| self.clone_bound_value(argument, &mut state))
+            .collect::<Option<Vec<_>>>()?;
+        let mut children = Vec::with_capacity(arguments.len() + 1);
+        children.push(state.state);
+        children.extend(arguments);
+        state.state = {
+            let mut graph = self.graph.borrow_mut();
+            self.intern_value(
+                &mut graph,
+                tir_symbolic::lang::SymKind::StateTrap,
+                None,
+                &children,
+            )
+        };
+        state.invalid_path = true;
+        Some(state)
+    }
+
+    fn branch(
+        &self,
+        condition: tir_graph::NodeId,
+        entry: &Self::State,
+        then_state: &Self::State,
+        else_state: &Self::State,
+    ) -> Self::State {
+        if !then_state.invalid_path
+            && !else_state.invalid_path
+            && then_state.state == else_state.state
+            && then_state.changed == else_state.changed
+            && then_state.outputs == else_state.outputs
+            && then_state.bindings == else_state.bindings
+        {
+            return else_state.clone();
+        }
+
+        let mut condition_state = entry.clone();
+        let Some(condition) = self.clone_bound_value(condition, &mut condition_state) else {
+            self.supported.set(false);
+            return else_state.clone();
+        };
+        let (outputs, bindings, changed) = match (then_state.invalid_path, else_state.invalid_path)
+        {
+            (true, false) => (
+                else_state.outputs.clone(),
+                else_state.bindings.clone(),
+                else_state.changed,
+            ),
+            (false, true) => (
+                then_state.outputs.clone(),
+                then_state.bindings.clone(),
+                then_state.changed,
+            ),
+            (false, false) => {
+                let Some(outputs) =
+                    self.merge_maps(condition, &then_state.outputs, &else_state.outputs)
+                else {
+                    self.supported.set(false);
+                    return else_state.clone();
+                };
+                let Some(bindings) =
+                    self.merge_maps(condition, &then_state.bindings, &else_state.bindings)
+                else {
+                    self.supported.set(false);
+                    return else_state.clone();
+                };
+                if then_state.changed != else_state.changed {
+                    self.supported.set(false);
+                    return else_state.clone();
+                }
+                (outputs, bindings, then_state.changed)
+            }
+            (true, true) => (HashMap::new(), HashMap::new(), None),
+        };
+        let state = {
+            let mut graph = self.graph.borrow_mut();
+            self.intern_value(
+                &mut graph,
+                tir_symbolic::lang::SymKind::StateIf,
+                None,
+                &[condition, then_state.state, else_state.state],
+            )
+        };
+        let reads = condition_state
+            .reads
+            .iter()
+            .chain(&then_state.reads)
+            .chain(&else_state.reads)
+            .copied()
+            .collect();
+        let field_states = [
+            tir_symbolic::lang::StateFieldKind::FpRounding,
+            tir_symbolic::lang::StateFieldKind::FpFlags,
+            tir_symbolic::lang::StateFieldKind::FpTraps,
+        ]
+        .into_iter()
+        .map(|field| (field, state))
+        .collect();
+        if !self.supported.get() {
+            self.supported.set(false);
+            return else_state.clone();
+        }
+        FpBehaviorState {
+            state,
+            field_states,
+            outputs,
+            bindings,
+            reads,
+            changed,
+            invalid_path: then_state.invalid_path && else_state.invalid_path,
+        }
+    }
+
+    fn try_except(
+        &self,
+        _body: tir_graph::NodeId,
+        _handlers: &[tir_graph::NodeId],
+        state: &Self::State,
+        _fold: &dyn Fn(tir_graph::NodeId, &Self::State) -> Self::State,
+    ) -> Option<Self::State> {
+        self.supported.set(false);
+        Some(state.clone())
+    }
+
+    fn unsupported(&self) {
+        self.supported.set(false);
+    }
+}
+
+fn analyze_fp_instruction_semantics(
+    behavior: &ast::Expr,
+    trap_handler: Option<&ast::TrapHandler>,
+    defined_register_operands: &[String],
+    numeric_params: &HashMap<String, i64>,
+    isa_param_values: &HashMap<String, i64>,
+    register_index_map: &HashMap<(String, String), u32>,
+    roles: &FpRegisterRoles,
+) -> Option<InstructionSemantics> {
+    let behavior = sem_expr_state::lower_behavior(
+        behavior,
+        trap_handler,
+        numeric_params,
+        isa_param_values,
+        register_index_map,
+    )?;
+    analyze_fp_behavior_semantics(behavior, defined_register_operands, roles)
+}
+
+fn analyze_fp_behavior_semantics(
+    behavior: sem_expr_state::BehaviorGraph,
+    defined_register_operands: &[String],
+    roles: &FpRegisterRoles,
+) -> Option<InstructionSemantics> {
+    use tir_graph::{Dag, MutDag};
+    use tir_symbolic::lang::{StateAccessKind, SymKind, SymPayload};
+
+    let touches_fp = behavior
+        .register_symbols
+        .keys()
+        .any(|register| roles.flags.contains(register) || roles.rounding.contains(register))
+        || behavior.effect_nodes().any(|node| {
+            matches!(
+                behavior.effect_payload(node),
+                Some(sem_expr_state::EffectPayload::Assign {
+                    destination: sem_expr_state::Destination::FixedRegister { class, index, .. }
+                }) if roles.flags.contains(&(class.clone(), *index))
+                    || roles.rounding.contains(&(class.clone(), *index))
+            )
+        });
+    if !touches_fp {
+        return None;
+    }
+
+    let next_symbol = behavior
+        .variable_symbols
+        .values()
+        .chain(behavior.register_symbols.values())
+        .chain(behavior.regnum_symbols.values())
+        .chain(behavior.let_symbols.values())
+        .copied()
+        .max()
+        .map_or(0, |symbol| symbol + 1);
+    let mut graph = tir_symbolic::sem::SemGraph::new();
+    let state = graph.add_node(SymKind::Symbol);
+    graph.set_leaf_data(state, SymPayload::SymbolId(next_symbol));
+    let emitter = FpBehaviorEmitter {
+        behavior: &behavior,
+        roles,
+        defined: defined_register_operands,
+        graph: std::cell::RefCell::new(graph),
+        values: std::cell::RefCell::new(HashMap::new()),
+        supported: std::cell::Cell::new(true),
+    };
+    let entry = FpBehaviorState {
+        state,
+        field_states: [
+            (tir_symbolic::lang::StateFieldKind::FpRounding, state),
+            (tir_symbolic::lang::StateFieldKind::FpFlags, state),
+            (tir_symbolic::lang::StateFieldKind::FpTraps, state),
+        ]
+        .into_iter()
+        .collect(),
+        outputs: HashMap::new(),
+        bindings: HashMap::new(),
+        reads: HashSet::new(),
+        changed: None,
+        invalid_path: false,
+    };
+    let mut result = sem_expr_state::fold_behavior(&behavior, &entry, &emitter);
+    if !emitter.supported.get() || result.invalid_path {
+        return None;
+    }
+
+    if result.changed.is_none() {
+        for field in result.reads.iter().copied() {
+            let value = {
+                let mut graph = emitter.graph.borrow_mut();
+                emitter.state_read(&mut graph, result.state, field)
+            };
+            result.state = emitter.state_assign(result.state, field, StateAccessKind::Read, value);
+        }
+    }
+    let value = match defined_register_operands {
+        [name] => Some(*result.outputs.get(name)?),
+        [] => None,
+        _ => return None,
+    };
+    let root = if let Some(value) = value {
+        let mut graph = emitter.graph.borrow_mut();
+        let root = graph.add_node(SymKind::StateResult);
+        graph.add_edge(root, value);
+        graph.add_edge(root, result.state);
+        root
+    } else {
+        result.state
+    };
+    let graph = emitter.graph.into_inner();
+    let (pattern, root, guarded_semantics) =
+        if let Some(candidate) = tir_symbolic::lang::selection_fallback(&graph, root) {
+            let candidate_root = candidate.root()?;
+            (candidate, candidate_root, Some((graph, root)))
+        } else {
+            (graph, root, None)
+        };
+    let live_symbols: HashSet<u32> = pattern
+        .preorder(root)
+        .filter_map(|node| match pattern.get_leaf_data(node) {
+            Some(SymPayload::SymbolId(symbol)) => Some(*symbol),
+            _ => None,
+        })
+        .collect();
+    let mut register_symbols = behavior.register_symbols;
+    register_symbols.retain(|register, symbol| {
+        !roles.flags.contains(register)
+            && !roles.rounding.contains(register)
+            && live_symbols.contains(symbol)
+    });
+    let fp_state = result
+        .changed
+        .map(|field| (field, StateAccessKind::Change))
+        .or_else(|| {
+            result
+                .reads
+                .iter()
+                .next()
+                .copied()
+                .map(|field| (field, StateAccessKind::Read))
+        });
+    Some(InstructionSemantics {
+        pattern,
+        root,
+        variable_symbols: behavior.variable_symbols,
+        fixed_register_by_class: split_fixed_registers(&register_symbols),
+        register_symbols,
+        guarded_semantics,
+        fp_state,
+    })
+}
+
 fn analyze_instruction_semantics(
     behavior: &ast::Expr,
     operands: &[(String, Type)],
@@ -40,14 +740,20 @@ fn analyze_instruction_semantics(
     register_index_map: &HashMap<(String, String), u32>,
 ) -> Option<InstructionSemantics> {
     let rhs = resolve_behavior_rhs(behavior, operands, defined_register_operands)?;
-    let mut pattern = tir_symbolic::sem::SemGraph::new();
+    let mut pattern = tir_symbolic::sem::SemGraph::<()>::new();
     let lowering = rhs.lower_to_sema_with_isa(
         &mut pattern,
         numeric_params,
         isa_param_values,
         register_index_map,
     )?;
-    let fixed_register_by_class = split_fixed_registers(&lowering.register_symbols);
+    let mut original_value_pattern = tir_symbolic::sem::SemGraph::new();
+    let original_value_root = copy_subgraph(
+        &mut original_value_pattern,
+        &pattern,
+        lowering.root,
+        &mut HashMap::new(),
+    );
 
     let guarded_semantics = defined_register_operands.first().and_then(|dst| {
         analyze_guarded_semantics(
@@ -59,22 +765,34 @@ fn analyze_instruction_semantics(
         )
     });
 
-    let (pattern, root, guarded_semantics) =
-        if let Some(candidate) = tir_symbolic::lang::selection_fallback(&pattern, lowering.root) {
-            use tir_graph::Dag;
-            let root = candidate.root()?;
-            (candidate, root, Some((pattern, lowering.root)))
-        } else {
-            (pattern, lowering.root, guarded_semantics)
-        };
+    let (value_pattern, value_root, guarded_semantics) = if let Some(candidate) =
+        tir_symbolic::lang::selection_fallback(&original_value_pattern, original_value_root)
+    {
+        use tir_graph::Dag;
+        let root = candidate.root()?;
+        (
+            candidate,
+            root,
+            Some((original_value_pattern, original_value_root)),
+        )
+    } else {
+        (
+            original_value_pattern,
+            original_value_root,
+            guarded_semantics,
+        )
+    };
+
+    let fixed_register_by_class = split_fixed_registers(&lowering.register_symbols);
 
     Some(InstructionSemantics {
-        pattern,
-        root,
+        pattern: value_pattern,
+        root: value_root,
         variable_symbols: lowering.variable_symbols,
         fixed_register_by_class,
         register_symbols: lowering.register_symbols,
         guarded_semantics,
+        fp_state: None,
     })
 }
 
@@ -580,6 +1298,17 @@ fn behavior_reads_flag_register(expr: &ast::Expr, flag_classes: &HashSet<String>
         _ => {}
     });
     mentions > writes
+}
+
+fn behavior_updates_fp_environment(expr: &ast::Expr) -> bool {
+    let mut updates = false;
+    crate::utils::visit_exprs(expr, &mut |expr| {
+        updates |= matches!(
+            expr,
+            ast::Expr::BuiltinFunction(ast::BuiltinFunction::FPFlags)
+        );
+    });
+    updates
 }
 
 /// Whether the *value* a behavior defines reads a status-flag register. Only

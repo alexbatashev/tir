@@ -13,11 +13,12 @@ module {
     %zero = constant {value = 0} : !i32
     %inner_set = cmpi %inner, %zero {predicate = "ne"} : !i1
     %outer_set = cmpi %outer, %zero {predicate = "ne"} : !i1
-    %entry = state.entry_state
-    %after = scf.switch %outer_set args(%entry) (%skipped) {
-      -> %skipped
+    %entry = state.entry_state : !state<memory>
+    %env = state.entry_state : !state<fp.env>
+    %after, %after_env = scf.switch %outer_set args(%entry, %env) (%skipped, %skipped_env) {
+      -> %skipped, %skipped_env
     }
-    (%taken) {
+    (%taken, %taken_env) {
       %picked, %tested = scf.switch %inner_set args(%taken) (%yes) {
         -> %outer, %yes
       }
@@ -25,11 +26,11 @@ module {
         -> %inner, %no
       }
       %init = constant {value = 0} : !i32
-      %called = func.call %use(%init : !i32) state(%tested)
-      %left = func.call %use(%picked : !i32) state(%called)
-      -> %left
+      %called, %called_env = func.call %use(%init : !i32) state(%tested, %taken_env)
+      %left, %left_env = func.call %use(%picked : !i32) state(%called, %called_env)
+      -> %left, %left_env
     }
-    -> %after
+    -> %after, %after_env
   }
   module_end
 }
@@ -37,7 +38,7 @@ module {
 // CHECK:      asm.symbol {name = "f", arg_regs = [%[[OUTER:[0-9]+]]:GPR, %[[INNER:[0-9]+]]:GPR]}
 // CHECK:      x86_64.test32 {dst = %[[OUTER]]:GPR, src = %[[OUTER]]:GPR}
 // CHECK-NEXT: x86_64.jne {imm = ^[[ARM:bb[0-9]+]]}
-// CHECK:      ^[[ARM]](%{{[0-9]+}}: !state):
+// CHECK:      ^[[ARM]](%{{[0-9]+}}: !state<memory>, %{{[0-9]+}}: !state<fp.env>):
 // CHECK-NEXT: x86_64.test32 {dst = %[[INNER]]:GPR, src = %[[INNER]]:GPR}
 // CHECK-NEXT: x86_64.jne
 // CHECK:      x86_64.mov_imm32 {dst = %{{[0-9]+}}:GPR32, imm = 0}

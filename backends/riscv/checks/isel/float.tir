@@ -2,64 +2,64 @@
 // RUN: tir mc --march=rv32ifd --stage=isel %s | filecheck %s
 // RUN: not tir mc --march=rv64i --stage=isel %s
 
-// Builtin float arithmetic selects the F/D instructions: f32 values live in
+// Scalar fp arithmetic selects the F/D instructions: f32 values live in
 // FPR32 and pick the .s forms, f64 values in FPR64 and pick the .d forms,
 // identically on rv32 and rv64. Without the F extension selection fails
 // loudly instead of miscompiling through integer rules.
 
 module {
   %fn_fp32 = func.func @fp32(%0: !f32, %1: !f32) -> !f32 {
-    %2 = addf %0, %1 : !f32
-    %3 = subf %2, %1 : !f32
-    %4 = mulf %3, %0 : !f32
-    %5 = divf %4, %1 : !f32
+    %2 = fp.add %0, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %3 = fp.sub %2, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %4 = fp.mul %3, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %5 = fp.div %4, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
     func.return %5
   }
   %fn_fp64 = func.func @fp64(%0: !f64, %1: !f64) -> !f64 {
-    %2 = addf %0, %1 : !f64
-    %3 = subf %2, %1 : !f64
-    %4 = mulf %3, %0 : !f64
-    %5 = divf %4, %1 : !f64
+    %2 = fp.add %0, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f64
+    %3 = fp.sub %2, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f64
+    %4 = fp.mul %3, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f64
+    %5 = fp.div %4, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f64
     func.return %5
   }
   %fn_convert = func.func @convert(%0: !i32) -> !f64 {
-    %1 = sitofp %0 : !f64
+    %1 = fp.from_si %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f64
     func.return %1
   }
   %fn_convert_unsigned = func.func @convert_unsigned(%0: !i32) -> !f64 {
-    %1 = uitofp %0 : !f64
+    %1 = fp.from_ui %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f64
     func.return %1
   }
   %fn_convert_to_signed = func.func @convert_to_signed(%0: !f64) -> !i32 {
-    %1 = fptosi %0 : !i32
+    %1 = fp.to_si %0 {semantics = {exceptions = "ignore", invalid = "indeterminate", kind = "to_integer", rounding = "toward_zero", subnormals = "gradual"}} : !i32
     func.return %1
   }
   %fn_convert_to_unsigned = func.func @convert_to_unsigned(%0: !f64) -> !i32 {
-    %1 = fptoui %0 : !i32
+    %1 = fp.to_ui %0 {semantics = {exceptions = "ignore", invalid = "indeterminate", kind = "to_integer", rounding = "toward_zero", subnormals = "gradual"}} : !i32
     func.return %1
   }
   %fn_less = func.func @less(%0: !f64, %1: !f64) -> !i1 {
-    %2 = cmpf %0, %1 {predicate = "olt"} : !i1
+    %2 = fp.cmp %0, %1 {predicate = "olt", semantics = {behavior = "quiet", exceptions = "ignore", kind = "comparison", subnormals = "gradual"}} : !i1
     func.return %2
   }
   %fn_less_equal = func.func @less_equal(%0: !f64, %1: !f64) -> !i1 {
-    %2 = cmpf %0, %1 {predicate = "ole"} : !i1
+    %2 = fp.cmp %0, %1 {predicate = "ole", semantics = {behavior = "quiet", exceptions = "ignore", kind = "comparison", subnormals = "gradual"}} : !i1
     func.return %2
   }
   %fn_greater = func.func @greater(%0: !f64, %1: !f64) -> !i1 {
-    %2 = cmpf %0, %1 {predicate = "ogt"} : !i1
+    %2 = fp.cmp %0, %1 {predicate = "ogt", semantics = {behavior = "quiet", exceptions = "ignore", kind = "comparison", subnormals = "gradual"}} : !i1
     func.return %2
   }
   %fn_greater_equal = func.func @greater_equal(%0: !f64, %1: !f64) -> !i1 {
-    %2 = cmpf %0, %1 {predicate = "oge"} : !i1
+    %2 = fp.cmp %0, %1 {predicate = "oge", semantics = {behavior = "quiet", exceptions = "ignore", kind = "comparison", subnormals = "gradual"}} : !i1
     func.return %2
   }
   %fn_equal = func.func @equal(%0: !f64, %1: !f64) -> !i1 {
-    %2 = cmpf %0, %1 {predicate = "oeq"} : !i1
+    %2 = fp.cmp %0, %1 {predicate = "oeq", semantics = {behavior = "quiet", exceptions = "ignore", kind = "comparison", subnormals = "gradual"}} : !i1
     func.return %2
   }
   %fn_not_equal = func.func @not_equal(%0: !f64, %1: !f64) -> !i1 {
-    %2 = cmpf %0, %1 {predicate = "une"} : !i1
+    %2 = fp.cmp %0, %1 {predicate = "une", semantics = {behavior = "quiet", exceptions = "ignore", kind = "comparison", subnormals = "gradual"}} : !i1
     func.return %2
   }
   module_end

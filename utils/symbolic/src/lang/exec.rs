@@ -162,6 +162,7 @@ macro_rules! as_int {
             Value::Float(_) => panic!("{} requires integer operands", $op),
             Value::Iterator(_) => panic!("{} requires scalar operands", $op),
             Value::RawBits(_) => panic!("{} requires integer operands", $op),
+            Value::Pair(_, _) => panic!("{} requires a scalar projection", $op),
         }
     };
 }
@@ -173,6 +174,7 @@ macro_rules! as_float {
             Value::Int(_) => panic!("{} requires float operands", $op),
             Value::Iterator(_) => panic!("{} requires scalar operands", $op),
             Value::RawBits(_) => panic!("{} requires float operands", $op),
+            Value::Pair(_, _) => panic!("{} requires a scalar projection", $op),
         }
     };
 }
@@ -212,6 +214,14 @@ fn coerce_ints(a: APInt, b: APInt) -> (APInt, APInt) {
     (widen(a, width), widen(b, width))
 }
 
+fn integer_view(value: Value) -> Option<APInt> {
+    match value {
+        Value::Int(value) => Some(value),
+        Value::RawBits(bits) => Some(bits.to_apint()),
+        Value::Float(_) | Value::Iterator(_) | Value::Pair(_, _) => None,
+    }
+}
+
 fn scalar_equal(lhs: Value, rhs: Value) -> bool {
     match (lhs, rhs) {
         (Value::Int(lhs), Value::Int(rhs)) => {
@@ -239,7 +249,7 @@ fn eval_divrem(kind: SymKind, c: &impl Fn(usize) -> Value) -> Option<Value> {
         SymKind::URem => (false, false),
         _ => return None,
     };
-    let (Value::Int(a), Value::Int(b)) = (c(0), c(1)) else {
+    let (Some(a), Some(b)) = (integer_view(c(0)), integer_view(c(1))) else {
         return None;
     };
     let (a, b) = coerce_ints(a, b);
@@ -368,6 +378,7 @@ fn as_raw_bits(value: Value) -> RawBits {
         Value::Int(i) => RawBits::from_apint(&i),
         Value::Float(f) => RawBits::from_apfloat(&f),
         Value::Iterator(_) => panic!("split requires a raw-bits operand"),
+        Value::Pair(_, _) => panic!("split requires a scalar projection"),
     }
 }
 
@@ -428,6 +439,7 @@ fn concat_lanes(value: Value) -> Value {
             ),
             Value::RawBits(b) => (b.width(), b.bytes().to_vec()),
             Value::Iterator(_) => panic!("concat lanes must be scalar"),
+            Value::Pair(_, _) => panic!("concat lanes must be scalar"),
         })
         .collect();
     if lanes.iter().all(|(width, _)| width.is_multiple_of(8)) {
@@ -500,10 +512,7 @@ fn eval_node<V, M: Memory>(
 
     if let Some(op) = scalar_op(*graph.get_kind(node)) {
         let operands = (0..op.arity)
-            .map(|index| match c(index) {
-                Value::Int(value) => Some(value),
-                _ => None,
-            })
+            .map(|index| integer_view(c(index)))
             .collect::<Option<Vec<_>>>();
         if let Some(operands) = operands {
             let result = Value::Int(op.eval_int(&operands));
@@ -513,14 +522,21 @@ fn eval_node<V, M: Memory>(
     }
 
     let result = match *graph.get_kind(node) {
-        kind if super::rounded::operation(kind).is_some() => super::rounded::evaluate(kind, &c).0,
-        SymKind::FPFlags => {
-            let operation = graph.children(node).next().unwrap();
-            let kind = *graph.get_kind(operation);
-            let (_, flags) =
-                super::rounded::evaluate(kind, &|index| child_val(graph, operation, index, cache));
-            Value::Int(APInt::new(5, u64::from(flags)))
+        kind if super::rounded::operation(kind).is_some() => {
+            let (value, flags) = super::rounded::evaluate(kind, &c);
+            Value::Pair(
+                Box::new(value),
+                Box::new(Value::Int(APInt::new(5, u64::from(flags)))),
+            )
         }
+        SymKind::FPValue => match c(0) {
+            Value::Pair(value, _) => *value,
+            _ => panic!("fp_value requires a rounded floating-point outcome"),
+        },
+        SymKind::FPFlags => match c(0) {
+            Value::Pair(_, flags) => *flags,
+            _ => panic!("fp_flags requires a rounded floating-point outcome"),
+        },
         SymKind::Map | SymKind::Reduce => {
             unreachable!("map/reduce handled before child pre-evaluation")
         }
@@ -790,7 +806,9 @@ fn eval_control(kind: SymKind, c: &impl Fn(usize) -> Value) -> Value {
             let cond_zero = match c(0) {
                 Value::Int(i) => i.is_zero(),
                 Value::Float(f) => f.is_zero(),
-                Value::Iterator(_) | Value::RawBits(_) => panic!("if condition must be scalar"),
+                Value::Iterator(_) | Value::RawBits(_) | Value::Pair(_, _) => {
+                    panic!("if condition must be scalar")
+                }
             };
             if cond_zero { c(2) } else { c(1) }
         }
@@ -840,7 +858,9 @@ fn eval_math<V>(
             Value::Float(a) => {
                 Value::Float(a.fma(&as_float!(c(1), "fma"), &as_float!(c(2), "fma")))
             }
-            Value::Iterator(_) | Value::RawBits(_) => panic!("fma requires scalar operands"),
+            Value::Iterator(_) | Value::RawBits(_) | Value::Pair(_, _) => {
+                panic!("fma requires scalar operands")
+            }
         },
         SymKind::Sqrt => match c(0) {
             Value::Int(a) => {
@@ -848,7 +868,9 @@ fn eval_math<V>(
                 Value::Int(APInt::new(a.width(), (v as f64).sqrt() as u64))
             }
             Value::Float(a) => Value::Float(a.sqrt()),
-            Value::Iterator(_) | Value::RawBits(_) => panic!("sqrt requires a scalar operand"),
+            Value::Iterator(_) | Value::RawBits(_) | Value::Pair(_, _) => {
+                panic!("sqrt requires a scalar operand")
+            }
         },
         SymKind::Log2Ceil => {
             let a = as_int!(c(0), "log2ceil");

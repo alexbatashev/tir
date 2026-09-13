@@ -1,0 +1,13 @@
+// RUN: tir mc --march=rv64ifd --stage=isel %s | filecheck %s
+
+module {
+  %fn = func.func @signaling(%lhs: !f64, %rhs: !f64) -> !i1 {
+    %env0 = state.entry_state : !state<fp.env>
+    %result, %env1 = fp.cmp %lhs, %rhs state(%env0) {predicate = "olt", semantics = {kind = "comparison", behavior = "signaling", exceptions = "flags", subnormals = "gradual"}} : !i1
+    func.return %result state(%env1)
+  }
+  module_end
+}
+
+// CHECK-LABEL: asm.symbol {name = "signaling"
+// CHECK: riscv.flt.d

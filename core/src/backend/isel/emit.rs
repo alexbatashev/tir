@@ -37,8 +37,8 @@ pub(crate) struct ScheduledEmit {
     pub(crate) rule_index: usize,
     pub(crate) m: RuleMatch,
     pub(crate) source_op: Option<OpId>,
-    /// The state ports of the access this tile covers, where it covers one.
-    pub(crate) state: Option<super::StatePorts>,
+    /// The resource state ports of the operations this tile covers.
+    pub(crate) states: Vec<super::StatePorts>,
     pub(crate) results: Vec<ValueId>,
     pub(crate) result_ty: Option<TypeId>,
 }
@@ -67,16 +67,27 @@ pub(crate) fn order_tiles(
     selected: &HashMap<Id, usize>,
     rank: impl Fn(Id) -> Option<usize>,
 ) -> Option<Vec<(Id, usize)>> {
+    let providers: HashMap<Id, Id> = selected
+        .iter()
+        .flat_map(|(&root, &match_id)| {
+            matches[match_id]
+                .result_classes
+                .iter()
+                .copied()
+                .map(move |result| (egraph.find(result), root))
+        })
+        .collect();
     let mut dependencies: HashMap<Id, HashSet<Id>> = HashMap::new();
     for (&class, &match_id) in selected {
         for binding in &matches[match_id].bindings.pattern_nodes {
             let child = egraph.find(binding.class);
+            let provider = providers.get(&child).copied().unwrap_or(child);
             if child != class
                 && binding.is_boundary
                 && binding.demand == BoundaryDemand::Register
-                && selected.contains_key(&child)
+                && selected.contains_key(&provider)
             {
-                dependencies.entry(class).or_default().insert(child);
+                dependencies.entry(class).or_default().insert(provider);
             }
         }
     }

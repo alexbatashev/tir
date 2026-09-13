@@ -196,7 +196,7 @@ fn strip_mining_an_unordered_loop_keeps_its_sum() {
     %5 = constant {value = 4} : !i64
     %20 = constant {value = 60} : !i64
     %21 = constant {value = 0} : !i8
-    %22 = state.entry_state
+    %22 = state.entry_state : !state<memory>
     %23 = ptr.memset %1, %21, %20 state(%22)
     %6, %24 = scf.for %7 = %2 to %n step %4 (%25 = %23) {
       %8 = extsi %7 : !i64

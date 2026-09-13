@@ -9,19 +9,34 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::analysis::access_of;
 use crate::analysis::objects::{Base, accessed_only, object_base};
-use crate::analysis::{Effect, access_of, effect_of};
 use crate::state::{JoinOpBuilder, SplitOpBuilder};
-use crate::{BlockId, Context, OpHandle, OpId, Operation, PassError, RegionId, TypeId, ValueId};
+use crate::{
+    BlockId, Context, OpHandle, OpId, Operation, PassError, RegionId, ResourceAccess,
+    ResourceEffects, ValueId,
+    builtin::{StateResource, StateType},
+};
 
 use super::cfg::unsupported;
+
+type EffectChains = BTreeMap<(OpId, StateResource), Vec<usize>>;
 
 /// The memory one chain stands for: an object the analysis can name, or
 /// everything whose provenance it cannot.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum ChainKey {
     Object(Base),
-    World,
+    World(StateResource),
+}
+
+impl ChainKey {
+    fn resource(self) -> StateResource {
+        match self {
+            Self::Object(_) => StateResource::Memory,
+            Self::World(resource) => resource,
+        }
+    }
 }
 
 /// The chains a region's memory is threaded on, and the chains each effect
@@ -29,7 +44,9 @@ enum ChainKey {
 /// at index zero of the join it takes and of the split it leaves.
 pub struct Plan {
     keys: Vec<ChainKey>,
-    touched: BTreeMap<OpId, Vec<usize>>,
+    touched: EffectChains,
+    loop_touched: BTreeMap<OpId, Vec<usize>>,
+    roots: BTreeMap<usize, ValueId>,
 }
 
 impl Plan {
@@ -42,10 +59,18 @@ impl Plan {
     /// which is rarely every chain the function is threaded on.
     pub fn carried(&self, ops: &[OpId]) -> BTreeSet<usize> {
         ops.iter()
-            .filter_map(|op| self.touched.get(op))
+            .filter_map(|op| self.loop_touched.get(op))
             .flatten()
             .copied()
             .collect()
+    }
+
+    pub fn state_type(&self, context: &Context, chain: usize) -> crate::TypeId {
+        StateType::new(context, self.keys[chain].resource())
+    }
+
+    pub fn root(&self, chain: usize) -> Option<ValueId> {
+        self.roots.get(&chain).copied()
     }
 }
 
@@ -53,35 +78,75 @@ impl Plan {
 /// world where anything reaches memory the analysis cannot read back.
 pub fn plan(context: &Context, region: RegionId) -> Plan {
     let ops = crate::analysis::regions::region_ops(context, region);
-    let effects: Vec<(OpId, Option<Base>)> = ops
+    let declared: Vec<(OpId, crate::ResourceEffect, Option<Base>)> = ops
         .iter()
         .map(|&op| (op, context.get_op(op)))
-        .filter(|(_, handle)| effect_of(handle).is_some())
-        .map(|(op, handle)| {
+        .flat_map(|(op, handle)| {
             let base = access_of(&handle).and_then(|access| object_base(context, access.location));
-            (op, base)
+            resource_effects(&handle).into_iter().map(move |effect| {
+                let base = (effect.resource == StateResource::Memory)
+                    .then_some(base)
+                    .flatten();
+                (op, effect, base)
+            })
         })
         .collect();
-    let objects: BTreeSet<Base> = effects.iter().filter_map(|&(_, base)| base).collect();
-    let world = effects.iter().any(|(_, base)| base.is_none());
+    let incomplete: BTreeSet<StateResource> = declared
+        .iter()
+        .filter_map(|(_, effect, _)| {
+            (effect.observed.is_empty() || effect.produced.is_empty()).then_some(effect.resource)
+        })
+        .collect();
+    let effects: Vec<(OpId, StateResource, ResourceAccess, Option<Base>)> = declared
+        .into_iter()
+        .filter(|(_, effect, _)| incomplete.contains(&effect.resource))
+        .map(|(op, effect, base)| (op, effect.resource, effect.access, base))
+        .collect();
+    let objects: BTreeSet<Base> = effects.iter().filter_map(|&(_, _, _, base)| base).collect();
+    let worlds: BTreeSet<StateResource> = effects
+        .iter()
+        .filter_map(|&(_, resource, _, base)| base.is_none().then_some(resource))
+        .collect();
     let keys: Vec<ChainKey> = objects
         .into_iter()
         .map(ChainKey::Object)
-        .chain(world.then_some(ChainKey::World))
+        .chain(worlds.into_iter().map(ChainKey::World))
         .collect();
 
     let private: Vec<bool> = keys
         .iter()
         .map(|key| match key {
             ChainKey::Object(base) => is_private(context, *base),
-            ChainKey::World => false,
+            ChainKey::World(_) => false,
         })
         .collect();
-    let touched: BTreeMap<OpId, Vec<usize>> = effects
-        .into_iter()
-        .map(|(op, base)| (op, touched_chains(&keys, &private, base)))
+    let touched: EffectChains = effects
+        .iter()
+        .map(|&(op, resource, _, base)| {
+            (
+                (op, resource),
+                touched_chains(&keys, &private, resource, base),
+            )
+        })
         .collect();
-    let (keys, mut touched) = merge_indistinguishable(keys, touched);
+    let (keys, touched) = merge_indistinguishable(keys, touched);
+    let declared: BTreeMap<OpId, Vec<(StateResource, ResourceAccess)>> = effects.into_iter().fold(
+        BTreeMap::new(),
+        |mut declared, (op, resource, access, _)| {
+            declared.entry(op).or_default().push((resource, access));
+            declared
+        },
+    );
+    let mut loop_touched: BTreeMap<OpId, Vec<usize>> = declared
+        .keys()
+        .map(|&op| {
+            let chains = declared[&op]
+                .iter()
+                .flat_map(|(resource, _)| touched[&(op, *resource)].iter().copied())
+                .collect();
+            (op, chains)
+        })
+        .collect();
     for &op in &ops {
         let handle = context.get_op(op);
         if !super::is_ordered_counted_loop(&handle) {
@@ -89,13 +154,41 @@ pub fn plan(context: &Context, region: RegionId) -> Plan {
         }
         let carried: BTreeSet<usize> = crate::analysis::regions::subtree_ops(context, &handle)
             .into_iter()
-            .filter_map(|inner| touched.get(&inner))
+            .filter_map(|inner| loop_touched.get(&inner))
             .flatten()
             .copied()
             .collect();
-        touched.insert(op, carried.into_iter().collect());
+        loop_touched.insert(op, carried.into_iter().collect());
     }
-    Plan { keys, touched }
+    let roots = keys
+        .iter()
+        .enumerate()
+        .filter_map(|(chain, key)| {
+            let ChainKey::World(resource) = key else {
+                return None;
+            };
+            let roots: Vec<ValueId> = ops
+                .iter()
+                .filter_map(|op| {
+                    let handle = context.get_op(*op);
+                    handle
+                        .is::<crate::state::EntryStateOp>()
+                        .then(|| handle.state_results().first().copied())
+                        .flatten()
+                })
+                .filter(|state| {
+                    context.state_resource(context.get_value(*state).ty()) == Some(*resource)
+                })
+                .collect();
+            (roots.len() == 1).then(|| (chain, roots[0]))
+        })
+        .collect();
+    Plan {
+        keys,
+        touched,
+        loop_touched,
+        roots,
+    }
 }
 
 /// Two chains no effect ever tells apart are one chain. Every effect that
@@ -105,8 +198,8 @@ pub fn plan(context: &Context, region: RegionId) -> Plan {
 /// allocation and the world are the pair this is usually about.
 fn merge_indistinguishable(
     keys: Vec<ChainKey>,
-    touched: BTreeMap<OpId, Vec<usize>>,
-) -> (Vec<ChainKey>, BTreeMap<OpId, Vec<usize>>) {
+    touched: EffectChains,
+) -> (Vec<ChainKey>, EffectChains) {
     // One bit per effect per chain: which effects name a chain is what tells it
     // apart from another, and a bitset says that in a word rather than a tree.
     let words = touched.len().div_ceil(64);
@@ -122,7 +215,9 @@ fn merge_indistinguishable(
     for chain in 0..keys.len() {
         merged.push(
             kept.iter()
-                .position(|&other| names(other) == names(chain))
+                .position(|&other| {
+                    keys[other].resource() == keys[chain].resource() && names(other) == names(chain)
+                })
                 .unwrap_or_else(|| {
                     kept.push(chain);
                     kept.len() - 1
@@ -167,18 +262,28 @@ fn is_private(context: &Context, base: Base) -> bool {
 /// object it may alias. An effect naming no object reaches the world and every
 /// object the world can reach; an effect on a private object reaches nothing
 /// else, and nothing else reaches it.
-fn touched_chains(keys: &[ChainKey], private: &[bool], base: Option<Base>) -> Vec<usize> {
+fn touched_chains(
+    keys: &[ChainKey],
+    private: &[bool],
+    resource: StateResource,
+    base: Option<Base>,
+) -> Vec<usize> {
     let own = keys.iter().position(|key| match (base, key) {
         (Some(base), ChainKey::Object(object)) => base == *object,
-        (None, ChainKey::World) => true,
+        (None, ChainKey::World(candidate)) => resource == *candidate,
         _ => false,
     });
+    if resource != StateResource::Memory {
+        return own.into_iter().collect();
+    }
     let owned_private = own.is_some_and(|own| private[own]);
     let rest = (0..keys.len()).filter(|&index| {
         Some(index) != own
+            && keys[index].resource() == resource
             && match (base, keys[index]) {
                 (Some(base), ChainKey::Object(object)) => !base.distinct(object),
-                (Some(_), ChainKey::World) => !owned_private,
+                (Some(_), ChainKey::World(StateResource::Memory)) => !owned_private,
+                (Some(_), ChainKey::World(_)) => false,
                 (None, _) => !private[index],
             }
     });
@@ -189,17 +294,7 @@ fn touched_chains(keys: &[ChainKey], private: &[bool], base: Option<Base>) -> Ve
 /// and nothing already names a dependency, which would make a second order
 /// over the one that is there.
 pub fn wants_chain(context: &Context, region: RegionId) -> bool {
-    let ops: Vec<OpHandle> = crate::analysis::regions::region_ops(context, region)
-        .into_iter()
-        .map(|op| context.get_op(op))
-        .collect();
-    let threaded = ops
-        .iter()
-        .any(|op| !op.state_operands().is_empty() || !op.state_results().is_empty());
-    !threaded
-        && ops
-            .iter()
-            .any(|op| !matches!(effect(context, op), Ok(None)))
+    plan(context, region).chains() != 0
 }
 
 /// Thread `block`'s operations, its terminator excluded, off the state each
@@ -238,7 +333,7 @@ pub fn thread_block(
         // chain its body touches, so it takes one dependency operand per chain
         // rather than the one state a change merges them into.
         if super::is_ordered_counted_loop(&handle) {
-            let touched = plan.touched[&op].clone();
+            let touched = plan.loop_touched[&op].clone();
             if touched.is_empty() {
                 continue;
             }
@@ -256,7 +351,7 @@ pub fn thread_block(
                     (
                         chain,
                         context
-                            .append_block_argument(body_block, TypeId::STATE)
+                            .append_block_argument(body_block, plan.state_type(context, chain))
                             .id(),
                     )
                 })
@@ -274,26 +369,49 @@ pub fn thread_block(
                 context.insert_operand_at(op, end, state, end);
             }
             for &chain in &touched {
-                let published = context.append_result(op, TypeId::STATE);
+                let published = context.append_result(op, plan.state_type(context, chain));
                 chains.state(chain)?.written = published;
             }
             continue;
         }
-        match effect(context, &handle)? {
-            None => {}
-            Some(Effect::Read) => {
-                let own = plan.touched[&op][0];
-                let state = chains.state(own)?;
-                context.append_operand(op, state.written);
-                let left = context.append_result(op, TypeId::STATE);
-                chains.state(own)?.reads.push(left);
-            }
-            Some(Effect::Change) => {
-                let touched = plan.touched[&op].clone();
-                let observed = chains.settle(&touched, op)?;
+        let declared = resource_effects(&handle);
+        if declared.is_empty() {
+            effects(context, &handle)?;
+        }
+        for effect in declared {
+            let resource = effect.resource;
+            let access = effect.access;
+            let Some(touched) = plan.touched.get(&(op, resource)).cloned() else {
+                continue;
+            };
+            let observed = match access {
+                ResourceAccess::Read => chains.state(touched[0])?.written,
+                ResourceAccess::Change => chains.settle(&touched, op)?,
+            };
+            if effect.observed.is_empty() {
                 context.append_operand(op, observed);
-                let published = context.append_result(op, TypeId::STATE);
-                chains.split(&touched, op, published)?;
+            } else {
+                let operands = context.get_op(op).operands();
+                for previous in effect.observed {
+                    let index = operands
+                        .iter()
+                        .position(|operand| *operand == previous)
+                        .ok_or_else(|| {
+                            unsupported("an effect whose dependency is not an operand")
+                        })?;
+                    context.set_op_operand(op, index, observed);
+                }
+            }
+            let published =
+                effect.produced.first().copied().unwrap_or_else(|| {
+                    context.append_result(op, plan.state_type(context, touched[0]))
+                });
+            match access {
+                ResourceAccess::Read if resource == StateResource::Memory => {
+                    chains.state(touched[0])?.reads.push(published);
+                }
+                ResourceAccess::Read => chains.state(touched[0])?.written = published,
+                ResourceAccess::Change => chains.split(&touched, op, published)?,
             }
         }
     }
@@ -310,23 +428,37 @@ fn same_chains(held: &[usize], wanted: &[usize]) -> bool {
     held.len() == wanted.len() && wanted.iter().all(|chain| held.contains(chain))
 }
 
-/// What `op` does to memory, refusing an effect nested where the conversion
+fn resource_effects(op: &OpHandle) -> Vec<crate::ResourceEffect> {
+    op.clone()
+        .as_interface::<dyn ResourceEffects>()
+        .map(|effects| effects.resource_effects())
+        .unwrap_or_default()
+}
+
+/// What `op` does to execution resources, refusing an effect nested where the conversion
 /// has no port to carry it through.
-fn effect(context: &Context, op: &OpHandle) -> Result<Option<Effect>, PassError> {
-    if let Some(effect) = effect_of(op) {
-        return Ok(Some(effect));
+fn effects(
+    context: &Context,
+    op: &OpHandle,
+) -> Result<Vec<(StateResource, ResourceAccess)>, PassError> {
+    let effects: Vec<_> = resource_effects(op)
+        .into_iter()
+        .map(|effect| (effect.resource, effect.access))
+        .collect();
+    if !effects.is_empty() {
+        return Ok(effects);
     }
     let nested = crate::analysis::regions::subtree_ops(context, op)
         .into_iter()
-        .any(|inner| effect_of(&context.get_op(inner)).is_some());
+        .any(|inner| !resource_effects(&context.get_op(inner)).is_empty());
     if nested {
         return Err(unsupported(&format!(
-            "memory effects inside {}.{}",
+            "resource effects inside {}.{}",
             op.dialect(),
             op.name()
         )));
     }
-    Ok(None)
+    Ok(Vec::new())
 }
 
 struct ChainState {
@@ -350,7 +482,24 @@ struct Chains<'a> {
 
 impl Chains<'_> {
     fn state(&mut self, chain: usize) -> Result<&mut ChainState, PassError> {
-        self.name_shared()?;
+        let written = self
+            .states
+            .get(&chain)
+            .ok_or_else(|| unsupported("an effect on a chain its region does not carry"))?
+            .written;
+        let name_shared = self.shared.as_ref().is_some_and(|shared| {
+            let resource = |state| {
+                self.context
+                    .state_resource(self.context.get_value(state).ty())
+            };
+            match (resource(written), resource(shared.published)) {
+                (Some(written), Some(shared)) => written == shared,
+                _ => true,
+            }
+        });
+        if name_shared {
+            self.name_shared()?;
+        }
         self.states
             .get_mut(&chain)
             .ok_or_else(|| unsupported("an effect on a chain its region does not carry"))
@@ -363,9 +512,10 @@ impl Chains<'_> {
         let Some(shared) = self.shared.take() else {
             return Ok(());
         };
+        let state_type = self.context.get_value(shared.published).ty();
         let split = SplitOpBuilder::new(self.context)
             .state(shared.published)
-            .states(shared.chains.len())
+            .states(std::iter::repeat_n(state_type, shared.chains.len()))
             .build();
         self.insert(split.id(), shared.after, 1);
         for (&chain, &state) in shared.chains.iter().zip(&split.states()) {
@@ -421,7 +571,7 @@ impl Chains<'_> {
     fn merge(&self, states: &[ValueId], before: OpId) -> ValueId {
         let join = JoinOpBuilder::new(self.context)
             .states(states.to_vec())
-            .state_result()
+            .state_result(self.context.get_value(states[0]).ty())
             .build();
         self.insert(join.id(), before, 0);
         join.result()
