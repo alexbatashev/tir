@@ -67,27 +67,16 @@ pub(crate) fn order_tiles(
     selected: &HashMap<Id, usize>,
     rank: impl Fn(Id) -> Option<usize>,
 ) -> Option<Vec<(Id, usize)>> {
-    let providers: HashMap<Id, Id> = selected
-        .iter()
-        .flat_map(|(&root, &match_id)| {
-            matches[match_id]
-                .result_classes
-                .iter()
-                .copied()
-                .map(move |result| (egraph.find(result), root))
-        })
-        .collect();
     let mut dependencies: HashMap<Id, HashSet<Id>> = HashMap::new();
     for (&class, &match_id) in selected {
         for binding in &matches[match_id].bindings.pattern_nodes {
             let child = egraph.find(binding.class);
-            let provider = providers.get(&child).copied().unwrap_or(child);
             if child != class
                 && binding.is_boundary
                 && binding.demand == BoundaryDemand::Register
-                && selected.contains_key(&provider)
+                && selected.contains_key(&child)
             {
-                dependencies.entry(class).or_default().insert(provider);
+                dependencies.entry(class).or_default().insert(child);
             }
         }
     }

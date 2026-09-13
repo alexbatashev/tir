@@ -533,24 +533,21 @@ fn emit_cond_branch_rule(
         op_ty_ident,
         &emit_attrs,
         inst_name,
-        &quote! {},
     );
     let target_symbol_lit = proc_macro2::Literal::u32_unsuffixed(target_symbol);
-    let steps = [emit_rule_step(&emit_shim, quote! { &[] }, quote! { &[] })];
-    let emits = [info_ident(inst_name)];
     let (rule_ts, rule_ident) = emit_rule_spec(
         rule_name,
         rule_name,
-        &RuleFeatures::any(for_isas),
+        for_isas,
         &pattern_spec,
-        &emits,
+        &[inst_name],
         quote! {
             tir::backend::isel::RuleKind::CondBranch {
                 target_symbol: #target_symbol_lit,
             }
         },
-        &steps,
-        &[],
+        None,
+        &emit_shim,
         &operand_constraint_entries,
         &operand_register_specs,
         None,
@@ -658,7 +655,7 @@ fn intern_dag(
             inferred_types
                 .as_ref()
                 .and_then(|types| types.get(node_id.index())),
-            Some(tir_symbolic::lang::SemType::Pair(_, _) | tir_symbolic::lang::SemType::Float(_))
+            Some(tir_symbolic::lang::SemType::Float(_))
         ) && !matches!(
             dag.get_node(node_id),
             tir_symbolic::lang::SymKind::FAdd

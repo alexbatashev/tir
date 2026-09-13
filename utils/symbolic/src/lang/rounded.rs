@@ -3,7 +3,7 @@ use tir_adt::{FloatOp, FloatWidth, RoundingMode, eval_float};
 
 use super::{SymKind, Value};
 
-pub(crate) fn operation(kind: SymKind) -> Option<FloatOp> {
+pub(super) fn operation(kind: SymKind) -> Option<FloatOp> {
     Some(match kind {
         SymKind::FAddRound => FloatOp::Add,
         SymKind::FSubRound => FloatOp::Sub,

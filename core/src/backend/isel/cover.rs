@@ -74,7 +74,6 @@ pub(crate) struct FullMatchBindings {
 pub(crate) enum PbqpIselAlternative {
     NotDemanded,
     Tile { match_id: usize },
-    Provided { match_id: usize },
 }
 
 #[derive(Clone, Debug)]
@@ -84,10 +83,6 @@ pub(crate) struct PbqpIselMatch {
     pub(crate) root: Id,
     pub(crate) pattern_root: Id,
     pub(crate) bindings: FullMatchBindings,
-    /// Value classes defined by the same instruction as this match's event
-    /// root. Resource-event roots stay distinct from their ordinary results;
-    /// the cover selects the event once and records these as provided outputs.
-    pub(crate) result_classes: Vec<Id>,
     pub(crate) cost: u64,
     /// Where the rule's destination class views its storage element. A value
     /// crosses a boundary for free only between equal offsets: no instruction
@@ -131,14 +126,6 @@ pub(crate) fn build_eclass_cover(
             continue;
         };
         alternatives_by_node[root_index].push(PbqpIselAlternative::Tile { match_id });
-        for &result in &m.result_classes {
-            let Some(result_index) = class_index(result) else {
-                continue;
-            };
-            if result_index != root_index {
-                alternatives_by_node[result_index].push(PbqpIselAlternative::Provided { match_id });
-            }
-        }
     }
 
     if alternatives_by_node.iter().any(Vec::is_empty) {
@@ -160,7 +147,6 @@ pub(crate) fn build_eclass_cover(
             .iter()
             .map(|alternative| match alternative {
                 PbqpIselAlternative::Tile { match_id } => matches[*match_id].cost,
-                PbqpIselAlternative::Provided { .. } => 0,
                 PbqpIselAlternative::NotDemanded => 0,
             })
             .collect();
@@ -172,13 +158,6 @@ pub(crate) fn build_eclass_cover(
         let Some(ri) = class_index(m.root) else {
             continue;
         };
-        for &result in &m.result_classes {
-            if let Some(ci) = class_index(result)
-                && ri != ci
-            {
-                edge_pairs.insert(ordered_pair(ri, ci));
-            }
-        }
         for binding in &m.bindings.pattern_nodes {
             if binding.is_state {
                 continue;
@@ -251,14 +230,7 @@ pub(crate) fn build_eclass_cover(
         for (left_idx, left_alt) in left_alts.iter().enumerate() {
             for (right_idx, right_alt) in right_alts.iter().enumerate() {
                 let compatible =
-                    provided_output_compatible(
-                        egraph,
-                        left_class,
-                        right_class,
-                        left_alt,
-                        right_alt,
-                        matches,
-                    ) && alternatives_compatible(
+                    alternatives_compatible(
                         egraph,
                         right_class,
                         left_alt,
@@ -321,35 +293,6 @@ fn effect_tiles_conflict(
     lhs.iter().any(|class| rhs.binary_search(class).is_ok())
 }
 
-fn provided_output_compatible(
-    egraph: &SemEGraph,
-    left_class: Id,
-    right_class: Id,
-    left: &PbqpIselAlternative,
-    right: &PbqpIselAlternative,
-    matches: &[PbqpIselMatch],
-) -> bool {
-    let owner_matches = |provided_class: Id,
-                         other_class: Id,
-                         provided: &PbqpIselAlternative,
-                         other: &PbqpIselAlternative| {
-        let PbqpIselAlternative::Provided { match_id } = provided else {
-            return true;
-        };
-        let matched = &matches[*match_id];
-        if egraph.find(matched.root) != egraph.find(other_class) {
-            return true;
-        }
-        matched
-            .result_classes
-            .iter()
-            .any(|class| egraph.find(*class) == egraph.find(provided_class))
-            && matches!(other, PbqpIselAlternative::Tile { match_id: owner } if owner == match_id)
-    };
-    owner_matches(left_class, right_class, left, right)
-        && owner_matches(right_class, left_class, right, left)
-}
-
 /// Drop matches dominated by an interchangeable alternative: same root class,
 /// same internal-class coverage, same boundary operands, but no cheaper, no
 /// more specific, and no less demanding of its boundaries. Specificity (the
@@ -379,14 +322,7 @@ pub(crate) fn prune_dominated_matches(specificity: &[usize], matches: &mut Vec<P
             .into_iter()
             .map(|(class, offset, demand)| ((class, offset), demand))
             .unzip();
-        (
-            m.root,
-            m.result_classes.clone(),
-            m.result_view_offset,
-            classes,
-            demands,
-            internals,
-        )
+        (m.root, m.result_view_offset, classes, demands, internals)
     };
     let footprints: Vec<_> = matches.iter().map(footprint).collect();
 
@@ -394,11 +330,9 @@ pub(crate) fn prune_dominated_matches(specificity: &[usize], matches: &mut Vec<P
     // interchangeable — a value at one bit offset is not the value at another —
     // so the view offsets join the grouping key rather than the comparison.
     let mut groups: HashMap<_, Vec<usize>> = HashMap::new();
-    for (index, (root, results, result_offset, classes, _, internals)) in
-        footprints.iter().enumerate()
-    {
+    for (index, (root, result_offset, classes, _, internals)) in footprints.iter().enumerate() {
         groups
-            .entry((*root, results.clone(), *result_offset, classes, internals))
+            .entry((*root, *result_offset, classes, internals))
             .or_default()
             .push(index);
     }
@@ -407,7 +341,7 @@ pub(crate) fn prune_dominated_matches(specificity: &[usize], matches: &mut Vec<P
         (
             matches[index].cost,
             specificity[matches[index].pattern_index],
-            &footprints[index].4,
+            &footprints[index].3,
         )
     };
     let dominates = |a: usize, b: usize| {
@@ -510,10 +444,7 @@ pub(crate) fn completeness_error(
 ) -> Option<String> {
     let rooted: HashSet<Id> = matches
         .iter()
-        .flat_map(|matched| {
-            std::iter::once(matched.root).chain(matched.result_classes.iter().copied())
-        })
-        .map(|class| egraph.find(class))
+        .map(|matched| egraph.find(matched.root))
         .collect();
 
     let mut missing: Vec<SymKind> = Vec::new();
@@ -551,9 +482,7 @@ pub(crate) fn completeness_error(
 /// value lives in an ordinary offset-0 register.
 fn produced_view_offset(alternative: &PbqpIselAlternative, matches: &[PbqpIselMatch]) -> u32 {
     match alternative {
-        PbqpIselAlternative::Tile { match_id } | PbqpIselAlternative::Provided { match_id } => {
-            matches[*match_id].result_view_offset
-        }
+        PbqpIselAlternative::Tile { match_id } => matches[*match_id].result_view_offset,
         PbqpIselAlternative::NotDemanded => 0,
     }
 }
@@ -563,9 +492,7 @@ fn produced_view_offset(alternative: &PbqpIselAlternative, matches: &[PbqpIselMa
 /// the operand's [`super::RegisterRequirement::accepts`] is what checks it.
 fn produced_width(alternative: &PbqpIselAlternative, matches: &[PbqpIselMatch]) -> Option<u32> {
     match alternative {
-        PbqpIselAlternative::Tile { match_id } | PbqpIselAlternative::Provided { match_id } => {
-            matches[*match_id].result_width
-        }
+        PbqpIselAlternative::Tile { match_id } => matches[*match_id].result_width,
         PbqpIselAlternative::NotDemanded => None,
     }
 }
@@ -628,7 +555,7 @@ pub(crate) fn alternatives_compatible(
             return false;
         }
         match child_alt {
-            PbqpIselAlternative::Tile { .. } | PbqpIselAlternative::Provided { .. } => true,
+            PbqpIselAlternative::Tile { .. } => true,
             PbqpIselAlternative::NotDemanded => available(child),
         }
     } else if immediate {

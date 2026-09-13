@@ -390,6 +390,14 @@ impl<'a> SemDagBuilder<'a> {
         if let Some(class) = self.build_memory_effect(op) {
             return Some(class);
         }
+        if op.has_interface::<dyn tir::HasResourceSemantics>()
+            && op
+                .clone()
+                .as_interface::<dyn tir::ResourceEffects>()
+                .is_some_and(|effects| !effects.resource_effects().is_empty())
+        {
+            return None;
+        }
         if let Some(semantics) = op
             .clone()
             .as_interface::<dyn tir::HasResourceSemantics>()

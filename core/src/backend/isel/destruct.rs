@@ -25,7 +25,7 @@ pub(crate) struct MachineEdges<'a> {
     pub(crate) emitted: &'a HashMap<ValueId, ValueId>,
     pub(crate) region_values: &'a HashMap<(OpId, AuxSlot), AuxEmit>,
     /// The operations each instruction runs after besides those defining its
-    /// operands, such as a call's tuple extractions.
+    /// operands: a rule's prelude, a call's tuple extractions.
     pub(crate) implicit: &'a HashMap<OpId, Vec<OpId>>,
     pub(crate) rules: &'a [Rule],
 }
@@ -141,19 +141,14 @@ impl Edges for MachineEdges<'_> {
                 m.rebind_block(target_symbol, target);
                 let request = super::EmitRequest {
                     op: None,
+                    results: &[],
                     result_ty: None,
                     states: &[],
                 };
-                let (ops, outputs) = super::emit_rule_steps(self.context, rule, &request, &m)?;
-                if !outputs.is_empty() {
-                    return Err(PassError::InvalidRuleSet(format!(
-                        "fused branch rule '{}' exports values",
-                        rule.name
-                    )));
+                if let Some(prelude) = rule.prelude_emit {
+                    holder.append(prelude(self.context, &request, &m)?.id());
                 }
-                for op in ops {
-                    holder.append(op);
-                }
+                holder.append((rule.emit_fn)(self.context, &request, &m)?.id());
             }
         }
         self.emit_jump(block, fallthrough.dest, &fallthrough_args);

@@ -9,12 +9,8 @@ mod sexpr;
 mod types;
 
 pub use exec::{Memory, execute, execute_with_memory};
-pub use infer::{
-    canonicalize_for_selection, infer_types, infer_widths, selection_fallback,
-    value_observation_fallback,
-};
+pub use infer::{canonicalize_for_selection, infer_types, infer_widths, selection_fallback};
 pub use ops::{SCALAR_OPS, ScalarOp, SmtTemplate, WidthRule, scalar_op, scalar_op_named};
-pub(crate) use rounded::operation as rounded_operation;
 pub use sexpr::{BuildError, SemBuilderHooks, SemExpr, build, op_kind, op_name, parse};
 pub use types::{FloatFormat, SemType, TypeError, TypeUnifier, TypeVar, Width, WidthVar};
 
@@ -167,10 +163,6 @@ pub enum SymKind {
     /// Read one logical field from a typed resource state:
     /// `[state, resource, field]`.
     StateRead,
-    /// A value observed from the same execution event as one or more resource
-    /// states: `[value, state, ...]`. The state children keep effectful value
-    /// computations distinct in semantic graphs.
-    StateResult,
     /// `[n, w]`: an iterator of `n` lanes of `w` bits holding the values
     /// 0..n-1 — the lane indices. Gives `map`/`zip` lambdas positional
     /// awareness (RVV `vid.v`, slides, gathers, per-lane addresses).
@@ -199,9 +191,6 @@ pub enum SymKind {
     UIToFPRound,
     FPToSIRound,
     FPToUIRound,
-    /// The numeric result projected from a rounded floating-point outcome.
-    FPValue,
-    /// The exception flags projected from a rounded floating-point outcome.
     FPFlags,
 }
 
@@ -237,7 +226,6 @@ impl SymKind {
             | SymKind::Sqrt
             | SymKind::AsFloat
             | SymKind::Port
-            | SymKind::FPValue
             | SymKind::FPFlags => 1,
             SymKind::IterConcat => 1,
             SymKind::If
@@ -284,8 +272,7 @@ impl SymKind {
             | SymKind::StateIf
             | SymKind::StateTry
             | SymKind::StateHandler
-            | SymKind::StateRead
-            | SymKind::StateResult => true,
+            | SymKind::StateRead => true,
             _ => n == self.arity(),
         }
     }
@@ -495,8 +482,6 @@ pub enum SymPayload<V> {
 pub enum Value {
     Int(APInt),
     Float(APFloat),
-    /// A correlated result and its IEEE exception flags.
-    Pair(Box<Value>, Box<Value>),
     /// A fixed-size array of values, like a vector.
     Iterator(Vec<Value>),
     /// An untyped bag of bits.
@@ -508,7 +493,6 @@ impl PartialEq for Value {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
-            (Value::Pair(a1, a2), Value::Pair(b1, b2)) => a1 == b1 && a2 == b2,
             (Value::Iterator(a), Value::Iterator(b)) => a == b,
             _ => false,
         }

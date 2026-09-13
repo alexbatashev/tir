@@ -1380,17 +1380,9 @@ impl Let {
     ) -> tir_graph::NodeId {
         let node = self.value.lower_with_ctx(ctx);
         let symbol = ctx.alloc_variable_symbol();
-        let binding = if *ctx.graph.get_kind(node) == tir_symbolic::lang::SymKind::FPValue {
-            ctx.graph
-                .children(node)
-                .next()
-                .expect("fp_value has one operand")
-        } else {
-            node
-        };
-        ctx.let_symbols.insert(binding, symbol);
+        ctx.let_symbols.insert(node, symbol);
         ctx.let_bindings.insert(self.name.clone(), node);
-        binding
+        node
     }
 }
 
@@ -2161,19 +2153,11 @@ impl Call {
                     tir_symbolic::lang::SymPayload::Int(tir_adt::APInt::new(3, mode)),
                 );
             }
-            let outcome = ctx.add_node(kind, &children);
-            return ctx.add_node(SymKind::FPValue, &[outcome]);
+            return ctx.add_node(kind, &children);
         }
         match builtin {
             BuiltinFunction::FPFlags => {
-                let input = self.arguments[0].lower_with_ctx(ctx);
-                let Some(outcome) = (*ctx.graph.get_kind(input) == SymKind::FPValue)
-                    .then(|| ctx.graph.children(input).next())
-                    .flatten()
-                else {
-                    ctx.had_error = true;
-                    return ctx.add_node(SymKind::FPFlags, &[input]);
-                };
+                let outcome = self.arguments[0].lower_with_ctx(ctx);
                 if !matches!(
                     ctx.graph.get_kind(outcome),
                     SymKind::FAddRound

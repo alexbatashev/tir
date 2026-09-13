@@ -15,7 +15,7 @@ pub use tir_symbolic::lang::{
     StateFieldSchema, StateResourceKind, SymKind, SymPayload, TypeError, TypeUnifier, TypeVar,
     Value, Width, WidthRule, WidthVar, build, canonicalize_for_selection, execute,
     execute_with_memory, infer_types, infer_widths, op_kind, op_name, parse, scalar_op,
-    scalar_op_named, value_observation_fallback,
+    scalar_op_named,
 };
 
 pub use tir_symbolic::sem::{

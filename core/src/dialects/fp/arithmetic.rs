@@ -344,9 +344,7 @@ pub(super) fn value_operation(
         return operation;
     };
     graph.add_edge(operation, rounding);
-    let value = graph.add_node(tir::sem::SymKind::FPValue);
-    graph.add_edge(value, operation);
-    value
+    operation
 }
 
 pub(crate) fn preserve_payload_observation(

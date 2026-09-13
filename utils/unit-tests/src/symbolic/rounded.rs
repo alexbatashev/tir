@@ -3,69 +3,6 @@ use tir_graph::{GenericDag, MutDag};
 use tir_symbolic::lang::{execute, SymKind, SymPayload, Value};
 
 #[test]
-fn equal_float_values_keep_distinct_exception_outcomes() {
-    fn add(rhs: u64) -> GenericDag<SymKind, SymPayload<()>> {
-        let mut graph = GenericDag::new();
-        let lhs = graph.add_node(SymKind::Constant);
-        graph.set_leaf_data(
-            lhs,
-            SymPayload::Float(APFloat::from_bits(11, 52, false, 0x3ff0_0000_0000_0000)),
-        );
-        let rhs_node = graph.add_node(SymKind::Constant);
-        graph.set_leaf_data(
-            rhs_node,
-            SymPayload::Float(APFloat::from_bits(11, 52, false, rhs.into())),
-        );
-        let rounding = graph.add_node(SymKind::Constant);
-        graph.set_leaf_data(rounding, SymPayload::Int(APInt::new(3, 0)));
-        let outcome = graph.add_node(SymKind::FAddRound);
-        for child in [lhs, rhs_node, rounding] {
-            graph.add_edge(outcome, child);
-        }
-        graph
-    }
-
-    let exact = execute(&add(0), &[]);
-    let inexact = execute(&add(0x3c90_0000_0000_0000), &[]);
-    assert_ne!(exact, inexact);
-    let Value::Pair(exact_value, exact_flags) = exact else {
-        panic!("rounded arithmetic must return a correlated outcome")
-    };
-    let Value::Pair(inexact_value, inexact_flags) = inexact else {
-        panic!("rounded arithmetic must return a correlated outcome")
-    };
-    assert_eq!(exact_value, inexact_value);
-    assert_ne!(exact_flags, inexact_flags);
-}
-
-#[test]
-fn rounded_conversion_outcomes_compare_exception_flags() {
-    use tir_symbolic::sem::{EquivalenceOracle, SemGraph, SmtOracle};
-
-    let conversion = |bits| {
-        let mut graph = SemGraph::<()>::new();
-        let input_bits = graph.add_node(SymKind::Constant);
-        graph.set_leaf_data(input_bits, SymPayload::Int(APInt::new(64, bits)));
-        let input = graph.add_node(SymKind::AsFloat);
-        graph.add_edge(input, input_bits);
-        let width = graph.add_node(SymKind::Constant);
-        graph.set_leaf_data(width, SymPayload::Int(APInt::new(32, 32)));
-        let rounding = graph.add_node(SymKind::Constant);
-        graph.set_leaf_data(rounding, SymPayload::Int(APInt::new(3, 1)));
-        let outcome = graph.add_node(SymKind::FPToSIRound);
-        for child in [input, width, rounding] {
-            graph.add_edge(outcome, child);
-        }
-        graph
-    };
-
-    let inexact = conversion(0x3fe0_0000_0000_0000);
-    let exact = conversion(0);
-    assert!(!SmtOracle.equivalent(&inexact, &exact, &[]));
-    assert!(!SmtOracle.equivalent_typed(&inexact, &exact, &[]));
-}
-
-#[test]
 fn rounded_add_and_flags() {
     for (rounding, expected) in [(0, 0x3f800000), (3, 0x3f800001)] {
         let mut graph = GenericDag::<SymKind, SymPayload<()>>::new();
@@ -79,8 +16,6 @@ fn rounded_add_and_flags() {
         for child in [a, b, rm] {
             graph.add_edge(add, child);
         }
-        let value = graph.add_node(SymKind::FPValue);
-        graph.add_edge(value, add);
         let values = [
             Value::Float(APFloat::from_bits(8, 23, false, 0x3f800000)),
             Value::Float(APFloat::from_bits(8, 23, false, 0x33800000)),
@@ -93,82 +28,6 @@ fn rounded_add_and_flags() {
         graph.add_edge(flags, add);
         assert_eq!(execute(&graph, &values), Value::Int(APInt::new(5, 1)));
     }
-}
-
-#[test]
-fn selection_canonicalization_preserves_rounded_outcomes() {
-    use std::collections::HashSet;
-    use tir_graph::Dag;
-    use tir_symbolic::lang::canonicalize_for_selection;
-
-    for rounded in [
-        SymKind::FCvtRound,
-        SymKind::SIToFPRound,
-        SymKind::UIToFPRound,
-    ] {
-        for rounding in [0, 1] {
-            let mut graph = GenericDag::<SymKind, SymPayload<()>>::new();
-            let operands: Vec<_> = (0..rounded.arity() - 1)
-                .map(|i| {
-                    let leaf = graph.add_node(SymKind::Symbol);
-                    graph.set_leaf_data(leaf, SymPayload::SymbolId(i as u32));
-                    leaf
-                })
-                .collect();
-            let rm = graph.add_node(SymKind::Constant);
-            graph.set_leaf_data(rm, SymPayload::Int(APInt::new(3, rounding)));
-            let outcome = graph.add_node(rounded);
-            for operand in operands.into_iter().chain([rm]) {
-                graph.add_edge(outcome, operand);
-            }
-            let value = graph.add_node(SymKind::FPValue);
-            graph.add_edge(value, outcome);
-            let (canonical, root, _) = canonicalize_for_selection(&graph, value, &HashSet::new());
-            assert_eq!(*canonical.get_kind(root), SymKind::FPValue);
-            let operation = canonical.children(root).next().unwrap();
-            assert_eq!(*canonical.get_kind(operation), rounded);
-            let flags = graph.add_node(SymKind::FPFlags);
-            graph.add_edge(flags, outcome);
-            let (canonical, root, _) = canonicalize_for_selection(&graph, flags, &HashSet::new());
-            let operation = canonical.children(root).next().unwrap();
-            assert_eq!(*canonical.get_kind(operation), rounded);
-        }
-    }
-}
-
-#[test]
-fn selection_canonicalization_shares_rounded_outcome_between_projections() {
-    use std::collections::HashSet;
-    use tir_graph::Dag;
-    use tir_symbolic::lang::canonicalize_for_selection;
-
-    let mut graph = GenericDag::<SymKind, SymPayload<()>>::new();
-    let input = graph.add_node(SymKind::Symbol);
-    graph.set_leaf_data(input, SymPayload::SymbolId(0));
-    let width = graph.add_node(SymKind::Constant);
-    graph.set_leaf_data(width, SymPayload::Int(APInt::new(32, 32)));
-    let rounding = graph.add_node(SymKind::Constant);
-    graph.set_leaf_data(rounding, SymPayload::Int(APInt::new(3, 1)));
-    let outcome = graph.add_node(SymKind::FPToSIRound);
-    for child in [input, width, rounding] {
-        graph.add_edge(outcome, child);
-    }
-    let value = graph.add_node(SymKind::FPValue);
-    graph.add_edge(value, outcome);
-    let flags = graph.add_node(SymKind::FPFlags);
-    graph.add_edge(flags, outcome);
-    let observed = graph.add_node(SymKind::Concat);
-    graph.add_edge(observed, value);
-    graph.add_edge(observed, flags);
-
-    let (canonical, root, _) = canonicalize_for_selection(&graph, observed, &HashSet::new());
-    let projections: Vec<_> = canonical.children(root).collect();
-    assert_eq!(*canonical.get_kind(projections[0]), SymKind::FPValue);
-    assert_eq!(*canonical.get_kind(projections[1]), SymKind::FPFlags);
-    assert_eq!(
-        canonical.children(projections[0]).next(),
-        canonical.children(projections[1]).next()
-    );
 }
 
 #[test]
@@ -209,8 +68,6 @@ fn rounded_rtz_conversion_refines_partial_conversion() {
         graph.add_edge(result, width);
         if kind.arity() == 3 {
             graph.add_edge(result, rm);
-            let value = graph.add_node(SymKind::FPValue);
-            graph.add_edge(value, result);
         }
         graph
     };
@@ -245,8 +102,7 @@ fn selection_fallback_preserves_conversion_width_wrapper() {
     for child in [input, width, rm] {
         graph.add_edge(outcome, child);
     }
-    let value = graph.add_node(SymKind::FPValue);
-    graph.add_edge(value, outcome);
+    let value = outcome;
     let guard = graph.add_node(SymKind::Symbol);
     graph.set_leaf_data(guard, SymPayload::SymbolId(1));
     let select = graph.add_node(SymKind::If);

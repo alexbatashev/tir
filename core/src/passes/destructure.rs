@@ -255,11 +255,6 @@ pub struct Destructured {
     pub gates: Vec<GateBlocks>,
 }
 
-/// Real operations emitted by one selection tile, in execution order.
-pub struct OperationGroup {
-    pub members: Vec<OpId>,
-}
-
 /// Turn `region`, a callable's body, into blocks joined by `edges`. An
 /// unordered region becomes blocks outright, the first entered on its ports;
 /// an ordered one keeps its blocks, each structured operation in them
@@ -268,12 +263,10 @@ pub fn destructure(
     context: &Context,
     region: RegionId,
     edges: &dyn Edges,
-    groups: &[OperationGroup],
 ) -> Result<Destructured, PassError> {
     let mut lowering = Lowering {
         context,
         edges,
-        groups,
         blocks: Vec::new(),
         record: Destructured::default(),
     };
@@ -299,7 +292,6 @@ pub fn destructure(
 struct Lowering<'a> {
     context: &'a Context,
     edges: &'a dyn Edges,
-    groups: &'a [OperationGroup],
     blocks: Vec<BlockId>,
     record: Destructured,
 }
@@ -372,81 +364,59 @@ impl Lowering<'_> {
     fn order(&self, region: RegionId) -> Result<Vec<OpId>, PassError> {
         let ops = self.context.get_region(region).op_ids();
         let held: HashSet<OpId> = ops.iter().copied().collect();
-        let mut units: Vec<&[OpId]> = Vec::new();
-        let mut unit_of = HashMap::new();
-        for op in &ops {
-            if unit_of.contains_key(op) {
-                continue;
-            }
-            let members = self
-                .groups
-                .iter()
-                .find(|group| group.members.contains(op))
-                .map(|group| group.members.as_slice())
-                .unwrap_or_else(|| std::slice::from_ref(op));
-            if members.iter().any(|member| !held.contains(member)) {
-                return Err(PassError::InvalidRuleSet(
-                    "an operation group crosses region boundaries".to_string(),
-                ));
-            }
-            let unit = units.len();
-            for &member in members {
-                if unit_of.insert(member, unit).is_some() {
-                    return Err(PassError::InvalidRuleSet(
-                        "an operation belongs to more than one group".to_string(),
-                    ));
-                }
-            }
-            units.push(members);
-        }
-
-        let mut unit_inputs = vec![HashSet::new(); units.len()];
-        let mut readers: Vec<Vec<usize>> = vec![Vec::new(); units.len()];
-        for (unit, members) in units.iter().enumerate() {
-            unit_inputs[unit] = members
-                .iter()
-                .flat_map(|&member| self.inputs(member))
-                .filter_map(|input| unit_of.get(&input).copied())
-                .filter(|input| *input != unit)
+        let mut pending: HashMap<OpId, usize> = HashMap::new();
+        let mut readers: HashMap<OpId, Vec<OpId>> = HashMap::new();
+        for &op in &ops {
+            let inputs: HashSet<OpId> = self
+                .inputs(op)
+                .into_iter()
+                .filter(|input| held.contains(input))
                 .collect();
-            for &input in &unit_inputs[unit] {
-                readers[input].push(unit);
+            for &input in &inputs {
+                readers.entry(input).or_default().push(op);
             }
+            pending.insert(op, inputs.len());
         }
-        let mut pending: Vec<usize> = unit_inputs.iter().map(HashSet::len).collect();
-        let mut unit_order = Vec::with_capacity(units.len());
-        let mut ready: Vec<usize> = (0..units.len())
+        let mut order = Vec::with_capacity(ops.len());
+        let mut ready: Vec<OpId> = ops
+            .iter()
             .rev()
-            .filter(|unit| pending[*unit] == 0)
+            .copied()
+            .filter(|op| pending[op] == 0)
             .collect();
-        while let Some(unit) = ready.pop() {
-            unit_order.push(unit);
-            for &reader in &readers[unit] {
-                let count = &mut pending[reader];
+        while let Some(op) = ready.pop() {
+            order.push(op);
+            for &reader in readers.get(&op).into_iter().flatten() {
+                let count = pending.get_mut(&reader).expect("a reader of a region op");
                 *count -= 1;
                 if *count == 0 {
                     ready.push(reader);
-                    ready.sort_by_key(|unit| std::cmp::Reverse(*unit));
+                    ready.sort_by_key(|op| {
+                        std::cmp::Reverse(ops.iter().position(|held| held == op))
+                    });
                 }
             }
         }
-        if unit_order.len() == units.len() {
-            self.sink_leaves(&units, &unit_of, &unit_inputs, &mut unit_order);
-            abut_implicit_inputs(self.edges, &units, &unit_of, &mut unit_order);
+        if order.len() == ops.len() {
+            self.sink_leaves(&mut order);
+            abut_implicit_inputs(self.edges, &mut order);
         }
-        if unit_order.len() != units.len() {
-            let stuck: Vec<String> = units
+        if order.len() != ops.len() {
+            let stuck: Vec<String> = ops
                 .iter()
-                .enumerate()
-                .filter(|(unit, _)| pending[*unit] > 0)
-                .map(|(unit, members)| {
-                    let op = self.context.get_op(members[0]);
-                    let dependencies: Vec<String> = unit_inputs[unit]
-                        .iter()
-                        .filter(|input| pending[**input] > 0)
-                        .map(|input| self.context.get_op(units[*input][0]).name().to_string())
-                        .collect();
-                    format!("{}.{} -> {dependencies:?}", op.dialect(), op.name())
+                .filter(|op| pending[op] > 0)
+                .map(|&op| {
+                    let instance = self.context.get_op(op);
+                    format!(
+                        "{}.{} -> {:?}",
+                        instance.dialect(),
+                        instance.name(),
+                        self.inputs(op)
+                            .iter()
+                            .filter(|input| pending.get(input).is_some_and(|left| *left > 0))
+                            .map(|input| self.context.get_op(*input).name().to_string())
+                            .collect::<Vec<_>>()
+                    )
                 })
                 .collect();
             return Err(PassError::InvalidRuleSet(format!(
@@ -454,10 +424,7 @@ impl Lowering<'_> {
                 stuck.join("; ")
             )));
         }
-        Ok(unit_order
-            .into_iter()
-            .flat_map(|unit| units[unit].iter().copied())
-            .collect())
+        Ok(order)
     }
 
     /// The operations of `region` that computing `roots` demands.
@@ -472,9 +439,6 @@ impl Lowering<'_> {
                 continue;
             }
             pending.extend(self.inputs(op));
-            if let Some(group) = self.groups.iter().find(|group| group.members.contains(&op)) {
-                pending.extend(group.members.iter().copied());
-            }
         }
         cone
     }
@@ -779,50 +743,41 @@ impl Lowering<'_> {
     /// the leaf, the tests of nested gates included. Order inside a block is a
     /// scheduling matter the backend derives later; this is the one choice the
     /// derivation keeps.
-    fn sink_leaves(
-        &self,
-        units: &[&[OpId]],
-        unit_of: &HashMap<OpId, usize>,
-        inputs: &[HashSet<usize>],
-        order: &mut Vec<usize>,
-    ) {
+    fn sink_leaves(&self, order: &mut Vec<OpId>) {
         let edges = self.edges;
         // What an instruction implicitly reads is placed by that instruction.
-        let implicit: HashSet<usize> = order
+        let implicit: HashSet<OpId> = order
             .iter()
-            .flat_map(|&unit| units[unit].iter().copied())
-            .flat_map(|op| edges.implicit_inputs(op))
-            .filter_map(|op| unit_of.get(&op).copied())
+            .flat_map(|&op| edges.implicit_inputs(op))
+            .collect();
+        let inputs: Vec<HashSet<OpId>> = order
+            .iter()
+            .map(|&op| self.inputs(op).into_iter().collect())
             .collect();
         let place: Vec<(usize, usize)> = order
             .iter()
             .enumerate()
-            .map(|(index, &unit)| {
-                if units[unit].len() != 1 {
-                    return (index, 1);
-                }
-                let op = units[unit][0];
+            .map(|(index, &op)| {
                 let instance = self.context.get_op(op);
                 let leaf = instance.operands().is_empty()
                     && instance.regions().is_empty()
                     && instance.state_results().is_empty()
-                    && !implicit.contains(&unit);
+                    && !implicit.contains(&op);
                 if !leaf {
                     return (index, 1);
                 }
-                let reader = order[index + 1..]
+                let reader = inputs[index + 1..]
                     .iter()
-                    .position(|later| inputs[*later].contains(&unit));
+                    .position(|later| later.contains(&op));
                 match reader {
                     Some(distance) => {
                         // What the reader implicitly reads sits right ahead of
                         // it and stays there.
                         let reader = index + 1 + distance;
-                        let ahead = units[order[reader]]
+                        let ahead = edges
+                            .implicit_inputs(order[reader])
                             .iter()
-                            .flat_map(|op| edges.implicit_inputs(*op))
-                            .filter_map(|input| unit_of.get(&input))
-                            .filter_map(|input| order.iter().position(|unit| unit == input))
+                            .filter_map(|input| order.iter().position(|op| op == input))
                             .min()
                             .unwrap_or(reader);
                         (ahead.min(reader), 0)
@@ -831,7 +786,7 @@ impl Lowering<'_> {
                 }
             })
             .collect();
-        let mut placed: Vec<(usize, usize)> = order
+        let mut placed: Vec<(usize, OpId)> = order
             .iter()
             .copied()
             .zip(place)
@@ -845,36 +800,24 @@ impl Lowering<'_> {
 /// Put what an instruction implicitly reads right ahead of it: a rule's
 /// prelude defines a register nothing names, and the order the block ends up
 /// with pairs a register's reader with the latest writer ahead of it.
-fn abut_implicit_inputs(
-    edges: &dyn Edges,
-    units: &[&[OpId]],
-    unit_of: &HashMap<OpId, usize>,
-    order: &mut Vec<usize>,
-) {
+fn abut_implicit_inputs(edges: &dyn Edges, order: &mut Vec<OpId>) {
     let mut index = 0;
     while index < order.len() {
-        let unit = order[index];
-        for input in units[unit]
-            .iter()
-            .flat_map(|op| edges.implicit_inputs(*op))
-            .filter_map(|op| unit_of.get(&op).copied())
-        {
-            if input == unit {
-                continue;
-            }
+        let op = order[index];
+        for input in edges.implicit_inputs(op) {
             let Some(at) = order.iter().position(|held| *held == input) else {
                 continue;
             };
             order.remove(at);
             let target = order
                 .iter()
-                .position(|held| *held == unit)
+                .position(|held| *held == op)
                 .expect("still held");
             order.insert(target, input);
         }
         index = order
             .iter()
-            .position(|held| *held == unit)
+            .position(|held| *held == op)
             .expect("still held")
             + 1;
     }
@@ -951,7 +894,7 @@ impl Pass for DestructurePass {
         let Some(&body) = op.op().regions().first() else {
             return Ok(());
         };
-        destructure(context, body, &CfgEdges { context }, &[])?;
+        destructure(context, body, &CfgEdges { context })?;
         Ok(())
     }
 }

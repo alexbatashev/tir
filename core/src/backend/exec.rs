@@ -121,13 +121,11 @@ pub fn eval(
         // register's storage keeps the bit pattern.
         tir::sem::Value::Float(f) => Ok(RegisterValue::Bits(tir::utils::RawBits::from_apfloat(&f))),
         tir::sem::Value::RawBits(b) => Ok(RegisterValue::Bits(b)),
-        tir::sem::Value::Iterator(_) | tir::sem::Value::Pair(_, _) => {
-            Err(SimTrap::InvalidInstruction {
-                op: mnemonic,
-                reason: "instruction semantic expression did not evaluate to a register value"
-                    .to_string(),
-            })
-        }
+        tir::sem::Value::Iterator(_) => Err(SimTrap::InvalidInstruction {
+            op: mnemonic,
+            reason: "instruction semantic expression did not evaluate to a register value"
+                .to_string(),
+        }),
     }
 }
 

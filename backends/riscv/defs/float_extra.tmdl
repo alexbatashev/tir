@@ -14,36 +14,6 @@ register_class FRM for [F] {
     registers { frm => { index = 2, traits = [status_flag] }, }
 }
 
-template FFlagsClearType for [F] {
-    operands { rs1: GPR, }
-    encoding { 0b000000000001, rs1, 0b011, 0b00000, 0b1110011, }
-    asm { "csrrc zero, fflags, {rs1}" }
-}
-
-template FRoundWriteType for [F] {
-    operands { rs1: GPR, }
-    encoding { 0b000000000010, rs1, 0b001, 0b00000, 0b1110011, }
-    asm { "csrrw zero, frm, {rs1}" }
-}
-
-instruction WriteFRound for [F] : FRoundWriteType {
-    param MNEMONIC: String = "csrrw";
-    param OPNAME: String = "csrrw.frm";
-
-    behavior {
-        FRM::frm = extract(rs1, 2, 0);
-    }
-}
-
-instruction ClearFFlags for [F] : FFlagsClearType {
-    param MNEMONIC: String = "csrrc";
-    param OPNAME: String = "csrrc.fflags";
-
-    behavior {
-        FFLAGS::fflags = FFLAGS::fflags & (extract(rs1, 4, 0) ^ 0b11111);
-    }
-}
-
 fn scalar_snan32(a) {
     ((a & 0x7FFFFFFF) ~> 0x7F800000) & (extract(a, 22, 22) == 0b0)
 }

@@ -100,7 +100,6 @@ pub fn eval_bits_width(expr: &ast::Expr, params: &HashMap<String, i64>) -> Optio
         tir_symbolic::lang::Value::Int(v) => u16::try_from(v.to_u64()).ok(),
         tir_symbolic::lang::Value::Float(_)
         | tir_symbolic::lang::Value::Iterator(_)
-        | tir_symbolic::lang::Value::Pair(_, _)
         | tir_symbolic::lang::Value::RawBits(_) => None,
     }
 }

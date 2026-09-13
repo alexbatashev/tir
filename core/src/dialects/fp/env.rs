@@ -212,11 +212,9 @@ fn read_field_semantics(op: &tir::OpHandle, field_kind: ResourceField) -> Resour
         SymKind::StateAssign,
         &[state, resource, field, access, value],
     );
-    let root = resource::operation(&mut graph, SymKind::StateResult, &[value, observation]);
-    graph.set_actual_type(root, value_ty);
     ResourceSemantics {
         graph,
-        root,
+        root: value,
         value_results: vec![value],
         state_results: vec![observation],
     }

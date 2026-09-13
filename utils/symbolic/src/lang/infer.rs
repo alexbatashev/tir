@@ -49,13 +49,11 @@ pub fn infer_types<V>(
         let inferred = match kind {
             SymKind::Symbol | SymKind::Arg => inference.fresh_type(),
             SymKind::Constant => inference.fresh_bits(),
-            SymKind::FAddRound | SymKind::FSubRound | SymKind::FMulRound | SymKind::FDivRound => {
-                let ty = inference.fresh_float();
-                inference.unify(&child(0), &ty)?;
-                inference.unify(&child(1), &ty)?;
-                SemType::Pair(Box::new(ty), Box::new(SemType::bits(5)))
-            }
-            SymKind::FAdd
+            SymKind::FAddRound
+            | SymKind::FSubRound
+            | SymKind::FMulRound
+            | SymKind::FDivRound
+            | SymKind::FAdd
             | SymKind::FSub
             | SymKind::FMul
             | SymKind::FDiv
@@ -73,16 +71,11 @@ pub fn infer_types<V>(
                     let width = inference.fresh_bits();
                     inference.unify(&child(slot), &width)?;
                 }
-                let result = match (const_u64(graph, children[1]), const_u64(graph, children[2])) {
+                match (const_u64(graph, children[1]), const_u64(graph, children[2])) {
                     (Some(exponent), Some(mantissa)) => SemType::Float(
                         crate::lang::FloatFormat::new(exponent as u32, mantissa as u32),
                     ),
                     _ => inference.fresh_float(),
-                };
-                if matches!(kind, SymKind::SIToFPRound | SymKind::UIToFPRound) {
-                    SemType::Pair(Box::new(result), Box::new(SemType::bits(5)))
-                } else {
-                    result
                 }
             }
             SymKind::FPToSI | SymKind::FPToUI | SymKind::FPToSIRound | SymKind::FPToUIRound => {
@@ -90,14 +83,9 @@ pub fn infer_types<V>(
                 inference.unify(&child(0), &operand)?;
                 let width = inference.fresh_bits();
                 inference.unify(&child(1), &width)?;
-                let result = const_u64(graph, children[1])
+                const_u64(graph, children[1])
                     .map(|width| SemType::bits(width as u32))
-                    .unwrap_or_else(|| inference.fresh_bits());
-                if matches!(kind, SymKind::FPToSIRound | SymKind::FPToUIRound) {
-                    SemType::Pair(Box::new(result), Box::new(SemType::bits(5)))
-                } else {
-                    result
-                }
+                    .unwrap_or_else(|| inference.fresh_bits())
             }
             SymKind::AsFloat => inference.fresh_float(),
             SymKind::FCvt | SymKind::FCvtRound => {
@@ -107,16 +95,11 @@ pub fn infer_types<V>(
                     let width = inference.fresh_bits();
                     inference.unify(&child(slot), &width)?;
                 }
-                let result = match (const_u64(graph, children[1]), const_u64(graph, children[2])) {
+                match (const_u64(graph, children[1]), const_u64(graph, children[2])) {
                     (Some(exponent), Some(mantissa)) => SemType::Float(
                         crate::lang::FloatFormat::new(exponent as u32, mantissa as u32),
                     ),
                     _ => inference.fresh_float(),
-                };
-                if kind == SymKind::FCvtRound {
-                    SemType::Pair(Box::new(result), Box::new(SemType::bits(5)))
-                } else {
-                    result
                 }
             }
             SymKind::Eq | SymKind::Ne | SymKind::Lt | SymKind::Le | SymKind::Gt | SymKind::Ge => {
@@ -227,33 +210,15 @@ pub fn infer_types<V>(
             SymKind::SqrtRound => {
                 let ty = inference.fresh_float();
                 inference.unify(&child(0), &ty)?;
-                SemType::Pair(Box::new(ty), Box::new(SemType::bits(5)))
+                ty
             }
-            SymKind::FPValue | SymKind::FPFlags => {
-                let result = inference.fresh_type();
-                inference.unify(
-                    &child(0),
-                    &SemType::Pair(Box::new(result.clone()), Box::new(SemType::bits(5))),
-                )?;
-                if kind == SymKind::FPValue {
-                    result
-                } else {
-                    SemType::bits(5)
-                }
-            }
-            SymKind::Fma => {
+            SymKind::FPFlags => SemType::bits(5),
+            SymKind::Fma | SymKind::FmaRound => {
                 let ty = inference.fresh_float();
                 for slot in 0..3 {
                     inference.unify(&child(slot), &ty)?;
                 }
                 ty
-            }
-            SymKind::FmaRound => {
-                let ty = inference.fresh_float();
-                for slot in 0..3 {
-                    inference.unify(&child(slot), &ty)?;
-                }
-                SemType::Pair(Box::new(ty), Box::new(SemType::bits(5)))
             }
             SymKind::LoadMemory | SymKind::LoadReserved => const_u64(graph, children[1])
                 .map(|bytes| SemType::RawBits(Width::Const(bytes as u32 * 8)))
@@ -320,12 +285,6 @@ pub fn infer_types<V>(
                 state_field_type_at(graph, children[1], children[2])?
                     .unwrap_or_else(|| inference.fresh_bits())
             }
-            SymKind::StateResult => {
-                for slot in 1..children.len() {
-                    inference.unify(&child(slot), &SemType::State)?;
-                }
-                child(0)
-            }
         };
         if let Some(expected) = seed(node) {
             inference.unify(&inferred, &expected)?;
@@ -370,7 +329,6 @@ pub fn infer_widths<V>(
                 },
 
                 SymKind::FPFlags => Some(5),
-                SymKind::FPValue => child_width(0),
                 SymKind::FAddRound
                 | SymKind::FSubRound
                 | SymKind::FMulRound
@@ -465,7 +423,6 @@ pub fn infer_widths<V>(
                         SemType::Bits(Width::Const(width)) => Some(width),
                         _ => None,
                     }),
-                SymKind::StateResult => child_width(0),
                 SymKind::StateAssign
                 | SymKind::StateStore
                 | SymKind::StateStoreConditional
@@ -854,7 +811,34 @@ fn canon_rebuild<V: Clone>(
         return new_node;
     }
 
-    let children = children.as_slice();
+    if kind == SymKind::FPFlags {
+        let operation = children[0];
+        let operands: Vec<_> = graph
+            .children(operation)
+            .map(|child| canon_rebuild(graph, child, immediate_symbols, out, memo, forced))
+            .collect();
+        let rounded = out.add_node(*graph.get_kind(operation));
+        for operand in operands {
+            out.add_edge(rounded, operand);
+        }
+        let flags = out.add_node(kind);
+        out.add_edge(flags, rounded);
+        memo.insert(node.index(), flags);
+        return flags;
+    }
+
+    let generic = match kind {
+        SymKind::SIToFPRound => Some((SymKind::SIToFP, 0)),
+        SymKind::UIToFPRound => Some((SymKind::UIToFP, 0)),
+        _ => None,
+    };
+    let (kind, children) = if let Some((generic, rounding)) = generic
+        && children.last().and_then(|&rm| const_u64(graph, rm)) == Some(rounding)
+    {
+        (generic, &children[..children.len() - 1])
+    } else {
+        (kind, children.as_slice())
+    };
 
     // Default: copy leaves, rebuild operations from canonicalized children.
     let new_node = if children.is_empty() {
@@ -901,10 +885,11 @@ fn selection_default_kind<A>(graph: &crate::sem::SemGraph<A>, node: NodeId) -> O
     .then_some(kind)
 }
 
-fn selection_fallback_impl<A: Clone>(
+/// Propose an unguarded selection pattern. The caller must prove that the full
+/// expression refines this candidate on the candidate's defined domain.
+pub fn selection_fallback<A: Clone>(
     graph: &crate::sem::SemGraph<A>,
     root: NodeId,
-    project_values: bool,
 ) -> Option<crate::sem::SemGraph<A>> {
     fn rounded_kind<A>(graph: &crate::sem::SemGraph<A>, node: NodeId) -> bool {
         matches!(
@@ -950,47 +935,12 @@ fn selection_fallback_impl<A: Clone>(
         out: &mut crate::sem::SemGraph<A>,
         memo: &mut HashMap<usize, NodeId>,
         changed: &mut bool,
-        project_values: bool,
     ) -> NodeId {
         if let Some(&existing) = memo.get(&node.index()) {
             return existing;
         }
         let mut kind = *graph.get_kind(node);
-        if kind == SymKind::FPFlags {
-            let child = graph.children(node).next().expect("fp_flags has one child");
-            let child = rebuild_outcome(graph, child, out, memo, changed, project_values);
-            let result = out.add_node(SymKind::FPFlags);
-            out.add_edge(result, child);
-            memo.insert(node.index(), result);
-            return result;
-        }
-        if kind == SymKind::FPValue {
-            let outcome = graph.children(node).next().expect("fp_value has one child");
-            if let Some(generic) = selection_default_kind(graph, outcome)
-                && (project_values || matches!(generic, SymKind::FPToSI | SymKind::FPToUI))
-            {
-                *changed = true;
-                let mut children: Vec<_> = graph.children(outcome).collect();
-                children.pop();
-                let children: Vec<_> = children
-                    .into_iter()
-                    .map(|child| rebuild(graph, child, out, memo, changed, project_values))
-                    .collect();
-                let result = out.add_node(generic);
-                for child in children {
-                    out.add_edge(result, child);
-                }
-                memo.insert(node.index(), result);
-                return result;
-            }
-            let copied_outcome =
-                rebuild_outcome(graph, outcome, out, memo, changed, project_values);
-            let result = out.add_node(SymKind::FPValue);
-            out.add_edge(result, copied_outcome);
-            memo.insert(node.index(), result);
-            return result;
-        }
-        if kind == SymKind::StateAssign {
+        if matches!(kind, SymKind::FPFlags | SymKind::StateAssign) {
             let result = crate::sem::copy_subgraph(out, graph, node, &mut HashMap::new());
             memo.insert(node.index(), result);
             return result;
@@ -1029,7 +979,7 @@ fn selection_fallback_impl<A: Clone>(
                 .or_else(|| (kind == SymKind::StateIf).then_some(children[2]));
             if let Some(branch) = branch {
                 *changed = true;
-                let result = rebuild(graph, branch, out, memo, changed, project_values);
+                let result = rebuild(graph, branch, out, memo, changed);
                 memo.insert(node.index(), result);
                 return result;
             }
@@ -1041,7 +991,7 @@ fn selection_fallback_impl<A: Clone>(
         }
         let children: Vec<_> = children
             .into_iter()
-            .map(|child| rebuild(graph, child, out, memo, changed, project_values))
+            .map(|child| rebuild(graph, child, out, memo, changed))
             .collect();
         let result = out.add_node(kind);
         if let Some(payload) = graph.get_leaf_data(node) {
@@ -1054,74 +1004,8 @@ fn selection_fallback_impl<A: Clone>(
         result
     }
 
-    fn rebuild_outcome<A: Clone>(
-        graph: &crate::sem::SemGraph<A>,
-        node: NodeId,
-        out: &mut crate::sem::SemGraph<A>,
-        memo: &mut HashMap<usize, NodeId>,
-        changed: &mut bool,
-        project_values: bool,
-    ) -> NodeId {
-        if let Some(&existing) = memo.get(&node.index()) {
-            return existing;
-        }
-        let children = graph
-            .children(node)
-            .map(|child| rebuild(graph, child, out, memo, changed, project_values))
-            .collect::<Vec<_>>();
-        let result = out.add_node(*graph.get_kind(node));
-        if let Some(payload) = graph.get_leaf_data(node) {
-            out.set_leaf_data(result, payload.clone());
-        }
-        for child in children {
-            out.add_edge(result, child);
-        }
-        memo.insert(node.index(), result);
-        result
-    }
     let mut out = crate::sem::SemGraph::new();
     let mut changed = false;
-    rebuild(
-        graph,
-        root,
-        &mut out,
-        &mut HashMap::new(),
-        &mut changed,
-        project_values,
-    );
+    rebuild(graph, root, &mut out, &mut HashMap::new(), &mut changed);
     changed.then_some(out)
-}
-
-/// Propose an unguarded selection pattern. The caller must prove that the full
-/// expression refines this candidate on the candidate's defined domain.
-pub fn selection_fallback<A: Clone>(
-    graph: &crate::sem::SemGraph<A>,
-    root: NodeId,
-) -> Option<crate::sem::SemGraph<A>> {
-    selection_fallback_impl(graph, root, false)
-}
-
-/// Propose the numeric observation of a value or resource event. For an event,
-/// the caller must separately prove that discarding its state outputs is sound.
-/// Supported default-mode rounded outcomes collapse to the existing generic
-/// scalar operator after value projection; other rounding modes remain explicit.
-pub fn value_observation_fallback<A: Clone>(
-    graph: &crate::sem::SemGraph<A>,
-    root: NodeId,
-) -> Option<crate::sem::SemGraph<A>> {
-    let projected_state = *graph.get_kind(root) == SymKind::StateResult;
-    let root = if projected_state {
-        graph.children(root).next()?
-    } else {
-        root
-    };
-    if let Some(selected) = selection_fallback_impl(graph, root, true) {
-        return Some(selected);
-    }
-    if !projected_state && *graph.get_kind(root) != SymKind::FPValue {
-        return None;
-    }
-    let mut out = crate::sem::SemGraph::new();
-    crate::sem::copy_subgraph(&mut out, graph, root, &mut HashMap::new());
-    Some(out)
 }

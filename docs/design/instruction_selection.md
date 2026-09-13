@@ -823,14 +823,10 @@ regions become blocks of the function, and neither the pass walk nor a per-block
 commit can own that. `commit_block_solution` applies one plan through the
 `Rewriter`:
 
-1. Emit each `ScheduledEmit` in order. `Rule.steps` lists the real operations in
-   execution order. Every step starts with the rule's captures; its `bindings`
-   may replace a symbol with another capture or an earlier numeric `StepResult`.
-   Its resource list selects the source state ports that it owns. `Rule.outputs`
-   maps numeric step results, including a middle step's result, onto the source
-   value results. Multi-operation tiles become operation groups, which
-   destruction places as one unit while preserving each member's identity and
-   declared order. Selection records the mapped values in `emitted_values`.
+1. Emit each `ScheduledEmit` in order using the rule's emitter and captures.
+   The instruction takes over the covered operation's resource ports.
+   A branch prelude remains an implicit input of its consumer. Selection maps
+   the emitted value results to the source results in `emitted_values`.
 2. Apply the plan's `value_remaps`, so every use of an erased value reads the
    register now holding it.
 3. Record each `aux` entry (a destruction's branch, counter value, or decided
@@ -1223,6 +1219,13 @@ instruction names is a register, which the machine-IR verifier checks.
 | `EmitRequest` | what an emitter writes into: backing op (if any) + destination values |
 
 ## IEEE arithmetic result refinement
+
+An `fp` operation with fixed rounding and `exceptions = ignore` selects by its
+value pattern. The instruction may set hardware sticky flags; its physical
+register effects carry those dependences without saving and restoring the FP
+environment. A rounded symbolic node is the value, and `FPFlags(node)` computes
+its correlated flags. Neither needs an outcome projection or an instruction
+sequence.
 
 Strict floating-point arithmetic requires the exact non-NaN result, including
 signed zero and infinity. An arithmetic NaN result permits any quiet NaN payload

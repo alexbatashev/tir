@@ -204,12 +204,7 @@ fn arithmetic_value(
         if uses_generic { generic } else { rounded },
         &operands,
     );
-    let rounded_value = if uses_generic {
-        evaluation
-    } else {
-        operation(graph, SymKind::FPValue, &[evaluation])
-    };
-    graph.set_actual_type(rounded_value, result_ty);
+    graph.set_actual_type(evaluation, result_ty);
     let result = match semantics.nan {
         NaNPolicy::Canonical => {
             let width = super::arithmetic::float_width(&op.context, result_ty)
@@ -218,12 +213,12 @@ fn arithmetic_value(
             let bit_width = 1 + exponent + mantissa;
             let bits = constant(graph, bit_width, super::arithmetic::canonical_nan(width));
             graph.set_actual_type(bits, IntegerType::new(&op.context, bit_width));
-            canonicalize_nan(graph, rounded_value, bits)
+            canonicalize_nan(graph, evaluation, bits)
         }
         NaNPolicy::PreservePayload => {
-            super::arithmetic::preserve_payload_observation(graph, rounded_value)
+            super::arithmetic::preserve_payload_observation(graph, evaluation)
         }
-        NaNPolicy::AnyQuiet => rounded_value,
+        NaNPolicy::AnyQuiet => evaluation,
     };
     graph.set_actual_type(result, result_ty);
     (result, evaluation, rounding)
@@ -247,20 +242,7 @@ pub(super) fn transition_semantics(
     mut graph: SemGraph,
 ) -> ResourceSemantics {
     let root = match (value_result, memory) {
-        (Some(value), Some(memory)) => {
-            let root = operation(
-                &mut graph,
-                SymKind::StateResult,
-                &[value, environment, memory],
-            );
-            graph.set_actual_type(root, op.context.get_value(op.value_results()[0]).ty());
-            root
-        }
-        (Some(value), None) => {
-            let root = operation(&mut graph, SymKind::StateResult, &[value, environment]);
-            graph.set_actual_type(root, op.context.get_value(op.value_results()[0]).ty());
-            root
-        }
+        (Some(value), _) => value,
         (None, Some(memory)) => operation(&mut graph, SymKind::StateBlock, &[environment, memory]),
         (None, None) => environment,
     };
@@ -356,16 +338,9 @@ fn finish_rounded(
             op.context.get_value(environment_value).ty(),
         )
     });
-    let root = if let Some(environment) = environment_out {
-        let root = operation(&mut graph, SymKind::StateResult, &[result, environment]);
-        graph.set_actual_type(root, op.context.get_value(op.value_results()[0]).ty());
-        root
-    } else {
-        result
-    };
     ResourceSemantics {
         graph,
-        root,
+        root: result,
         value_results: vec![result],
         state_results: environment_out.into_iter().collect(),
     }
@@ -448,7 +423,7 @@ pub(super) fn integer_conversion(
     let result = if semantics.rounding == Rounding::Fixed(tir_adt::RoundingMode::TowardZero) {
         operation(&mut graph, generic, &[input, width_node])
     } else {
-        operation(&mut graph, SymKind::FPValue, &[outcome])
+        outcome
     };
     graph.set_actual_type(result, result_ty);
     finish_rounded(

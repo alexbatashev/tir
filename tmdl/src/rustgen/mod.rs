@@ -58,7 +58,7 @@ pub fn generate_rust_modules<'a>(
         })
         .collect();
 
-    let mut root_instructions = emit_instructions(
+    let instructions = emit_instructions(
         files,
         &root_files,
         item_cache,
@@ -75,6 +75,21 @@ pub fn generate_rust_modules<'a>(
     let mut modules = Vec::new();
     let mut module_idents = Vec::new();
     let mut module_sections = Vec::new();
+    if has_split {
+        let root_ident = format_ident!("__root_instructions");
+        let root_reexport = root_files
+            .iter()
+            .any(|file| file.instructions().next().is_some())
+            .then(|| quote! { pub use #root_ident::*; });
+        module_sections.push(quote! {
+            mod #root_ident {
+                use super::*;
+                #instructions
+            }
+            #root_reexport
+        });
+        module_idents.push(root_ident);
+    }
     for file in split_files {
         let stem = std::path::Path::new(&file.file_name)
             .file_stem()
@@ -92,7 +107,7 @@ pub fn generate_rust_modules<'a>(
                 "multiple split inputs produce '{file_name}'"
             )));
         }
-        let mut module_instructions = emit_instructions(
+        let module_instructions = emit_instructions(
             files,
             &[file],
             item_cache,
@@ -105,13 +120,6 @@ pub fn generate_rust_modules<'a>(
                 module_fragment: true,
             },
         )?;
-        for candidate in &mut module_instructions.state_sequence_candidates {
-            candidate.qualify(&module_ident);
-        }
-        root_instructions
-            .state_sequence_candidates
-            .append(&mut module_instructions.state_sequence_candidates);
-        let module_instructions = module_instructions.finish(&quote! { pub(super) });
         let child = format_rust(quote! {
             use super::*;
             #module_instructions
@@ -126,43 +134,10 @@ pub fn generate_rust_modules<'a>(
         modules.push((file_name, child));
     }
 
-    let state_sequence_candidates =
-        std::mem::take(&mut root_instructions.state_sequence_candidates);
-    emit_state_sequence_rules(
-        files,
-        state_sequence_candidates,
-        &mut root_instructions.isel_rule_emitters,
-        &mut root_instructions.rule_spec_idents,
-    );
-
-    let root_instructions = root_instructions.finish(&if has_split {
-        quote! { pub(super) }
-    } else {
-        quote! { pub }
-    });
-    if has_split {
-        let root_ident = format_ident!("__root_instructions");
-        let root_reexport = root_files
-            .iter()
-            .any(|file| file.instructions().next().is_some())
-            .then(|| quote! { pub use #root_ident::*; });
-        module_sections.insert(
-            0,
-            quote! {
-                mod #root_ident {
-                    use super::*;
-                    #root_instructions
-                }
-                #root_reexport
-            },
-        );
-        module_idents.insert(0, root_ident);
-    }
-
     let module_aggregation =
         (!modules.is_empty()).then(|| emit_module_aggregation(&module_idents, text_only));
     let instruction_section = if modules.is_empty() {
-        root_instructions
+        instructions
     } else {
         quote! { #(#module_sections)* }
     };
@@ -337,8 +312,6 @@ include!("register_traits.rs");
 include!("flag_analysis.rs");
 include!("flag_emission.rs");
 include!("fixed_register_emission.rs");
-include!("register_operand_specialization.rs");
-include!("state_sequences.rs");
 include!("implicit_registers.rs");
 include!("instruction_analysis.rs");
 include!("assembly.rs");

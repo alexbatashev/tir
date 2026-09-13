@@ -87,7 +87,6 @@ pub(crate) fn kind_is_pure(kind: SymKind) -> bool {
             | SymKind::StateIf
             | SymKind::StateTry
             | SymKind::StateHandler
-            | SymKind::StateResult
     )
 }
 
