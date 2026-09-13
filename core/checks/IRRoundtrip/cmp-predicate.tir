@@ -14,5 +14,5 @@ module {data_layout = #data_layout} {
 
 // CHECK: %{{[0-9]+}} = func.func @compare(%{{[0-9]+}}: !i32, %{{[0-9]+}}: !f32, %{{[0-9]+}}: !ptr.p) -> !i1 {
 // CHECK-NEXT: %{{[0-9]+}} = cmpi %{{[0-9]+}}, %{{[0-9]+}} {predicate = "slt"} : !i1
-// CHECK-NEXT: %{{[0-9]+}} = fp.cmp %{{[0-9]+}}, %{{[0-9]+}} {predicate = "olt", semantics = {behavior = "quiet", exceptions = "ignore", kind = "comparison", subnormals = "gradual"}} : !i1
+// CHECK-NEXT: %{{[0-9]+}} = fp.cmp %{{[0-9]+}}, %{{[0-9]+}} {predicate = "olt"} : !i1
 // CHECK-NEXT: %{{[0-9]+}} = ptr.cmp %{{[0-9]+}}, %{{[0-9]+}} {predicate = "ule"} : !i1

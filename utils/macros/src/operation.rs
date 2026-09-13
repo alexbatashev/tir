@@ -115,6 +115,7 @@ pub fn construct_operation(item: TokenStream) -> TokenStream {
         Some(parser) => parser,
         None if custom_format => make_custom_parser(),
         None => make_parser(
+            &name,
             &builder_name,
             &regions,
             &operands,
@@ -1717,6 +1718,7 @@ fn make_generic_printer(dialect: &str, name: &str) -> proc_macro2::TokenStream {
 }
 
 fn make_parser(
+    name: &str,
     builder_name: &Ident,
     regions: &[Region],
     operands: &[ValueSpec],
@@ -1866,7 +1868,7 @@ fn make_parser(
                            if attr_specs.iter().any(|(attr_name, ty)| *attr_name == name && *ty == "FpSemantics") {
                                val = match val {
                                    tir::attributes::AttributeValue::FpSemantics(_) => val,
-                                   other => match tir::fp::Semantics::parse_attribute(&other) {
+                                   other => match tir::fp::Semantics::parse_for_operation(&other, #name) {
                                        Ok(semantics) => tir::attributes::AttributeValue::FpSemantics(
                                            context.intern_fp_semantics(semantics),
                                        ),
@@ -1890,6 +1892,15 @@ fn make_parser(
 
            #region_parsers
 
+            for &(attr_name, ty) in attr_specs {
+                if ty == "FpSemantics"
+                    && !parsed_attrs.iter().any(|attr| attr.name == context.intern(attr_name))
+                {
+                    builder = builder.attr(attr_name, tir::attributes::AttributeValue::FpSemantics(
+                        context.intern_fp_semantics(tir::fp::Semantics::default_for_operation(#name)),
+                    ));
+                }
+            }
             for a in parsed_attrs { builder = builder.attr_sym(a.name, a.value); }
 
             let op = builder

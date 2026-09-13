@@ -20,10 +20,10 @@ module {
 // CHECK: module {
 // CHECK-NEXT: %{{[0-9]+}} = func.func @scoped(%{{[0-9]+}}: !f64, %{{[0-9]+}}: !i1) -> !f64 {
 // CHECK-NEXT: ^bb0(%{{[0-9]+}}: !f64, %{{[0-9]+}}: !i1) {tag = "outer"}:
-// CHECK-NEXT: %{{[0-9]+}} = fp.mul %{{[0-9]+}}, %{{[0-9]+}} {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f64
+// CHECK-NEXT: %{{[0-9]+}} = fp.mul %{{[0-9]+}}, %{{[0-9]+}} : !f64
 // CHECK-NEXT: cfg.cond_br %{{[0-9]+}}, ^bb1, ^bb2
 // CHECK-NEXT: ^bb1 {tag = "inner"}:
-// CHECK-NEXT: %{{[0-9]+}} = fp.add %{{[0-9]+}}, %{{[0-9]+}} {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f64
+// CHECK-NEXT: %{{[0-9]+}} = fp.add %{{[0-9]+}}, %{{[0-9]+}} : !f64
 // CHECK-NEXT: func.return %{{[0-9]+}}
 // CHECK-NEXT: ^bb2:
 // CHECK-NEXT: func.return %{{[0-9]+}}

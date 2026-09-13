@@ -2,7 +2,7 @@
 // RUN: fcc compile --march x86_64 --stage asm -o - %S/../Inputs/codegen_variadic_float_promotion.c | filecheck %s --check-prefix=ASM
 
 // CHECK: func.func @print_float({{%[0-9]+}}: !f32) -> !i32
-// CHECK: fp.convert {{%[0-9]+}} {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f64
+// CHECK: fp.convert {{%[0-9]+}} : !f64
 // CHECK: func.call {{%[0-9]+}}({{%[0-9]+}}, {{%[0-9]+}} : !ptr.p, !f64)
 
 // ASM-LABEL: print_float:

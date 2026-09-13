@@ -93,6 +93,41 @@ impl ArithmeticSemantics {
 }
 
 impl Semantics {
+    /// Resolved semantics used when an FP operation omits its attribute.
+    pub fn default_for_operation(name: &str) -> Self {
+        match name {
+            "cmp" => Self::Comparison(ComparisonSemantics {
+                behavior: ComparisonBehavior::Quiet,
+                exceptions: Exceptions::Ignore,
+                subnormals: SubnormalMode::Gradual,
+            }),
+            "to_si" | "to_ui" => Self::IntegerConversion(IntegerConversionSemantics {
+                rounding: Rounding::Fixed(RoundingMode::TowardZero),
+                exceptions: Exceptions::Ignore,
+                subnormals: SubnormalMode::Gradual,
+                invalid: InvalidConversion::Indeterminate,
+            }),
+            _ => Self::Arithmetic(ArithmeticSemantics::strict(
+                RoundingMode::TiesToEven,
+                Exceptions::Ignore,
+            )),
+        }
+    }
+
+    /// Parse full or default-eliding semantics for an FP operation.
+    pub fn parse_for_operation(value: &AttributeValue, name: &str) -> Result<Self, Error> {
+        let AttributeValue::Dict(fields) = value else {
+            return Err(invalid("semantics must be a dictionary"));
+        };
+        let mut complete: BTreeMap<_, _> = Self::default_for_operation(name)
+            .fields()
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), AttributeValue::Str(value.into())))
+            .collect();
+        complete.extend(*fields.clone());
+        Self::parse_attribute(&AttributeValue::Dict(Box::new(complete)))
+    }
+
     pub fn parse_attribute(value: &AttributeValue) -> Result<Self, Error> {
         let AttributeValue::Dict(fields) = value else {
             return Err(invalid("semantics must be a dictionary"));
@@ -180,7 +215,7 @@ impl Semantics {
     }
 
     pub(crate) fn print(&self, fmt: &mut crate::IRFormatter<'_>) -> Result<(), std::fmt::Error> {
-        let fields = self.fields();
+        let fields = self.nondefault_fields();
         fmt.write("{")?;
         for (index, (name, value)) in fields.iter().enumerate() {
             if index != 0 {
@@ -189,6 +224,26 @@ impl Semantics {
             fmt.write(format!("{name} = \"{value}\""))?;
         }
         fmt.write("}")
+    }
+
+    pub(crate) fn is_default(&self) -> bool {
+        *self == self.defaults()
+    }
+
+    fn defaults(self) -> Self {
+        let operation = match self {
+            Self::Arithmetic(_) => "add",
+            Self::Comparison(_) => "cmp",
+            Self::IntegerConversion(_) => "to_si",
+        };
+        Self::default_for_operation(operation)
+    }
+
+    fn nondefault_fields(self) -> BTreeMap<&'static str, &'static str> {
+        let defaults = self.defaults().fields();
+        let mut fields = self.fields();
+        fields.retain(|name, value| defaults.get(name) != Some(value));
+        fields
     }
 
     fn fields(self) -> BTreeMap<&'static str, &'static str> {

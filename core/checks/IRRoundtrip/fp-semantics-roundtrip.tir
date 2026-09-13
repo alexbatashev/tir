@@ -1,0 +1,21 @@
+// RUN: tir opt --verify %s | tir opt --verify - | filecheck %s
+
+module {
+  %f = func.func @directed(%a: !f64, %b: !f64) -> !f64 {
+    %sum = fp.add %a, %b {semantics = {rounding = "toward_positive", nan = "canonical"}} : !f64
+    -> %sum
+  }
+  %c = func.func @compare(%a: !f64, %b: !f64) -> !i1 {
+    %less = fp.cmp %a, %b {predicate = "olt"} : !i1
+    -> %less
+  }
+  %i = func.func @convert(%a: !f64) -> !i64 {
+    %result = fp.to_si %a : !i64
+    -> %result
+  }
+  module_end
+}
+
+// CHECK: fp.add %{{[0-9]+}}, %{{[0-9]+}} {semantics = {nan = "canonical", rounding = "toward_positive"}} : !f64
+// CHECK: fp.cmp %{{[0-9]+}}, %{{[0-9]+}} {predicate = "olt"} : !i1
+// CHECK: fp.to_si %{{[0-9]+}} : !i64
