@@ -9,6 +9,9 @@ use crate::{Diagnostic, Span};
 struct RustOperation {
     path: TokenStream,
     emitter: Option<Ident>,
+    /// Metadata of the supported attribute-free op, matching its core interfaces.
+    commutative: bool,
+    cost: u32,
 }
 
 fn rust_operation(operator: &Operator) -> Option<RustOperation> {
@@ -18,19 +21,99 @@ fn rust_operation(operator: &Operator) -> Option<RustOperation> {
     match (dialect.as_str(), name.as_str()) {
         ("builtin", "addi") => Some(RustOperation {
             path: quote! { crate::builtin::AddIOp },
-            emitter: None,
+            emitter: Some(format_ident!("emit_add")),
+            commutative: true,
+            cost: 1,
         }),
         ("builtin", "muli") => Some(RustOperation {
             path: quote! { crate::builtin::MulIOp },
-            emitter: None,
+            emitter: Some(format_ident!("emit_mul")),
+            commutative: true,
+            cost: 4,
         }),
         ("builtin", "subi") => Some(RustOperation {
             path: quote! { crate::builtin::SubIOp },
+            emitter: Some(format_ident!("emit_sub")),
+            commutative: false,
+            cost: 1,
+        }),
+        ("builtin", "divui") => Some(RustOperation {
+            path: quote! { crate::builtin::DivUIOp },
             emitter: None,
+            commutative: false,
+            cost: 1,
+        }),
+        ("builtin", "divsi") => Some(RustOperation {
+            path: quote! { crate::builtin::DivSIOp },
+            emitter: None,
+            commutative: false,
+            cost: 1,
+        }),
+        ("builtin", "remui") => Some(RustOperation {
+            path: quote! { crate::builtin::RemUIOp },
+            emitter: None,
+            commutative: false,
+            cost: 1,
+        }),
+        ("builtin", "remsi") => Some(RustOperation {
+            path: quote! { crate::builtin::RemSIOp },
+            emitter: None,
+            commutative: false,
+            cost: 1,
         }),
         ("builtin", "shli") => Some(RustOperation {
             path: quote! { crate::builtin::ShlIOp },
             emitter: Some(format_ident!("emit_shl")),
+            commutative: false,
+            cost: 1,
+        }),
+        ("builtin", "andi") => Some(RustOperation {
+            path: quote! { crate::builtin::AndIOp },
+            emitter: None,
+            commutative: true,
+            cost: 1,
+        }),
+        ("builtin", "ori") => Some(RustOperation {
+            path: quote! { crate::builtin::OrIOp },
+            emitter: Some(format_ident!("emit_or")),
+            commutative: true,
+            cost: 1,
+        }),
+        ("builtin", "xori") => Some(RustOperation {
+            path: quote! { crate::builtin::XOrIOp },
+            emitter: Some(format_ident!("emit_xor")),
+            commutative: true,
+            cost: 1,
+        }),
+        ("builtin", "shrui") => Some(RustOperation {
+            path: quote! { crate::builtin::ShrUIOp },
+            emitter: None,
+            commutative: false,
+            cost: 1,
+        }),
+        ("builtin", "shrsi") => Some(RustOperation {
+            path: quote! { crate::builtin::ShrSIOp },
+            emitter: None,
+            commutative: false,
+            cost: 1,
+        }),
+        ("fp", "neg") => Some(RustOperation {
+            path: quote! { crate::fp::ops::NegOp },
+            emitter: Some(format_ident!("emit_fp_neg")),
+            commutative: false,
+            cost: 1,
+        }),
+        ("fp", "abs") => Some(RustOperation {
+            path: quote! { crate::fp::ops::AbsOp },
+            emitter: Some(format_ident!("emit_fp_abs")),
+            commutative: false,
+            cost: 1,
+        }),
+        ("fp", "copysign") => Some(RustOperation {
+            path: quote! { crate::fp::ops::CopySignOp },
+            emitter: Some(format_ident!("emit_fp_copysign")),
+            commutative: false,
+            cost: 1,
         }),
         _ => None,
     }
@@ -462,6 +545,7 @@ fn generate_rule(rule: &Rule, function: Ident, base: u32) -> Option<TokenStream>
     let (vars, scalars) = (pattern.vars, build.scalars);
     let head_vars = build.vars - pattern.vars;
     let (atoms, guards, head) = (&build.atoms, &build.guards, &build.head);
+    let post_saturation = rule.post_saturation;
     let externs = build.externs.iter().enumerate().map(|(id, body)| {
         let id = id as u32;
         quote! { #id => #body, }
@@ -482,7 +566,7 @@ fn generate_rule(rule: &Rule, function: Ident, base: u32) -> Option<TokenStream>
                 }),
                 head: vec![#(#head),*],
                 head_vars: #head_vars,
-                post_saturation: false,
+                post_saturation: #post_saturation,
             }
         }
 
@@ -751,7 +835,10 @@ fn generate_rhs(
         TermKind::Operation {
             operator, operands, ..
         } => {
-            let path = rust_operation(operator)?.path;
+            let operation = rust_operation(operator)?;
+            let path = operation.path;
+            let commutative = operation.commutative;
+            let cost = operation.cost;
             let operands: Vec<u32> = operands
                 .iter()
                 .map(|operand| rhs_operand(operand, binders, build))
@@ -768,7 +855,8 @@ fn generate_rhs(
                     label: LabelFill {
                         template: Node::introduced::<#path>(
                             TypeId::from_number(0),
-                            1,
+                            #commutative,
+                            #cost,
                             index,
                             vec![#(#children),*],
                         ),
@@ -799,7 +887,7 @@ fn rhs_operand(
             build.call(
                 quote! {{
                     let width = #width_body;
-                    if !(1..=64).contains(&(width as u32)) {
+                    if !(1..=64).contains(&width) {
                         return false;
                     }
                     out[0] = width as u64;
@@ -807,11 +895,12 @@ fn rhs_operand(
                 }},
                 Some(bits),
             );
-            let value_body = number_expr(value, binders, build)?;
+            let width = build.word(bits);
+            let value_body = modular_number_expr(value, width, binders, build)?;
             let literal = build.scalar();
             build.call(
                 quote! {{
-                    out[0] = (#value_body) as u64;
+                    out[0] = (#value_body).to_u64();
                     true
                 }},
                 Some(literal),
@@ -925,19 +1014,65 @@ fn number_expr(
             value,
         } => {
             let value = number_expr(value, binders, build)?;
-            Some(quote! { -(#value) })
+            Some(quote! {{
+                let Some(value) = (#value).checked_neg() else {
+                    return false;
+                };
+                value
+            }})
         }
         ExprKind::Binary { op, lhs, rhs } => {
             let lhs = number_expr(lhs, binders, build)?;
             let rhs = number_expr(rhs, binders, build)?;
             match op {
-                BinaryOp::Multiply => Some(quote! { (#lhs) * (#rhs) }),
-                BinaryOp::Divide => Some(quote! { (#lhs) / (#rhs) }),
-                BinaryOp::Remainder => Some(quote! { (#lhs) % (#rhs) }),
-                BinaryOp::Add => Some(quote! { (#lhs) + (#rhs) }),
-                BinaryOp::Subtract => Some(quote! { (#lhs) - (#rhs) }),
-                BinaryOp::ShiftLeft => Some(quote! { (#lhs) << (#rhs) }),
-                BinaryOp::ShiftRight => Some(quote! { (#lhs) >> (#rhs) }),
+                BinaryOp::Multiply => Some(quote! {{
+                    let Some(value) = (#lhs).checked_mul(#rhs) else {
+                        return false;
+                    };
+                    value
+                }}),
+                BinaryOp::Divide => Some(quote! {{
+                    let Some(value) = (#lhs).checked_div(#rhs) else {
+                        return false;
+                    };
+                    value
+                }}),
+                BinaryOp::Remainder => Some(quote! {{
+                    let Some(value) = (#lhs).checked_rem(#rhs) else {
+                        return false;
+                    };
+                    value
+                }}),
+                BinaryOp::Add => Some(quote! {{
+                    let Some(value) = (#lhs).checked_add(#rhs) else {
+                        return false;
+                    };
+                    value
+                }}),
+                BinaryOp::Subtract => Some(quote! {{
+                    let Some(value) = (#lhs).checked_sub(#rhs) else {
+                        return false;
+                    };
+                    value
+                }}),
+                BinaryOp::ShiftLeft => Some(quote! {{
+                    let Ok(shift) = u32::try_from(#rhs) else {
+                        return false;
+                    };
+                    let Some(value) = (#lhs).checked_shl(shift) else {
+                        return false;
+                    };
+                    value
+                }}),
+                BinaryOp::ShiftRight => Some(quote! {{
+                    let Ok(shift) = u32::try_from(#rhs) else {
+                        return false;
+                    };
+                    let Some(value) = (#lhs).checked_shr(shift) else {
+                        return false;
+                    };
+                    value
+                }}),
                 BinaryOp::BitAnd => Some(quote! { (#lhs) & (#rhs) }),
                 BinaryOp::BitXor => Some(quote! { (#lhs) ^ (#rhs) }),
                 BinaryOp::BitOr => Some(quote! { (#lhs) | (#rhs) }),
@@ -946,6 +1081,33 @@ fn number_expr(
         }
         _ => None,
     }
+}
+
+/// Lowers the polynomial parts of a RHS `const<W>` through `APInt`, so `+`,
+/// `-`, and `*` wrap at `W`. Other operators retain checked host arithmetic;
+/// an expression rooted at one of them does not make nested arithmetic modular.
+fn modular_number_expr(
+    expr: &Expr,
+    width: TokenStream,
+    binders: &BTreeMap<String, u32>,
+    build: &mut RuleBuilder,
+) -> Option<TokenStream> {
+    let ExprKind::Binary { op, lhs, rhs } = &expr.kind else {
+        let value = number_expr(expr, binders, build)?;
+        return Some(quote! { APInt::new((#width) as u32, (#value) as u64) });
+    };
+    let operation = match op {
+        BinaryOp::Add => Ident::new("add", proc_macro2::Span::call_site()),
+        BinaryOp::Subtract => Ident::new("sub", proc_macro2::Span::call_site()),
+        BinaryOp::Multiply => Ident::new("mul", proc_macro2::Span::call_site()),
+        _ => {
+            let value = number_expr(expr, binders, build)?;
+            return Some(quote! { APInt::new((#width) as u32, (#value) as u64) });
+        }
+    };
+    let lhs = modular_number_expr(lhs, width.clone(), binders, build)?;
+    let rhs = modular_number_expr(rhs, width, binders, build)?;
+    Some(quote! { (#lhs).#operation(&(#rhs)) })
 }
 
 fn function_name(index: usize) -> Ident {

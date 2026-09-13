@@ -3,6 +3,7 @@
 //! on stderr under `TIR_TIME_PASSES`, alongside the pass-timing table.
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,11 @@ use crate::{Engine, Label as ENode, Stats};
 pub fn enabled() -> bool {
     static FROM_ENV: OnceLock<bool> = OnceLock::new();
     *FROM_ENV.get_or_init(|| std::env::var_os("TIR_TIME_PASSES").is_some_and(|value| value != "0"))
+}
+
+fn rule_stats_enabled() -> bool {
+    static FROM_ENV: OnceLock<bool> = OnceLock::new();
+    *FROM_ENV.get_or_init(|| std::env::var_os("TIR_RULE_STATS").is_some_and(|value| value != "0"))
 }
 
 #[derive(Default, Clone, Copy)]
@@ -27,9 +33,48 @@ struct Round {
 }
 
 thread_local! {
+    static RULES: RefCell<BTreeMap<String, RuleCounts>> = const { RefCell::new(BTreeMap::new()) };
     static ROUNDS: RefCell<Vec<Round>> = const { RefCell::new(Vec::new()) };
     static ELAPSED: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static EXTRACTED: Cell<(usize, Duration)> = const { Cell::new((0, Duration::ZERO)) };
+}
+
+#[derive(Default)]
+struct RuleCounts {
+    applications: usize,
+    changed: usize,
+}
+
+pub(super) fn register_rules<L: ENode>(rules: &[crate::Rule<L>]) {
+    if rule_stats_enabled() {
+        RULES.with(|counts| {
+            let mut counts = counts.borrow_mut();
+            for rule in rules {
+                counts.entry(rule.name.clone()).or_default();
+            }
+        });
+    }
+}
+
+pub(super) fn apply_rule<L: ENode>(
+    name: &str,
+    eg: &mut Engine<L>,
+    apply: impl FnOnce(&mut Engine<L>),
+) {
+    if !rule_stats_enabled() {
+        return apply(eg);
+    }
+    let before = eg.stats();
+    apply(eg);
+    let after = eg.stats();
+    RULES.with(|counts| {
+        let mut counts = counts.borrow_mut();
+        let count = counts.get_mut(name).expect("registered saturation rule");
+        count.applications += 1;
+        count.changed += usize::from(
+            (after.merges, after.adds, after.raises) != (before.merges, before.adds, before.raises),
+        );
+    });
 }
 
 /// Record one [`Engine::extract_best`](super::Engine::extract_best): it costs a
@@ -119,9 +164,20 @@ impl RoundStats {
     }
 }
 
-/// Print and reset the rounds recorded since the last call, one `tir-sat:` line
-/// per reporting caller. A no-op unless `TIR_TIME_PASSES` is set.
+/// Print and reset the telemetry recorded since the last call.
 pub fn report_saturation(pass: &str) {
+    if rule_stats_enabled() {
+        RULES.with(|counts| {
+            for (name, count) in std::mem::take(&mut *counts.borrow_mut()) {
+                eprintln!(
+                    "tir-rule: pass={pass} rule={name} applications={} changed={} noop={}",
+                    count.applications,
+                    count.changed,
+                    count.applications - count.changed,
+                );
+            }
+        });
+    }
     if !enabled() {
         return;
     }
