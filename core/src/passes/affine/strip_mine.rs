@@ -19,7 +19,7 @@
 use crate::attributes::Predicate;
 use crate::builtin::ops as b;
 use crate::{
-    Context, CountedLoop, OpId, Operation, OperationRef, PassError, RegionId, Theta, TypeId, Value,
+    Context, CountedLoop, OpId, Operation, OperationRef, PassError, RegionId, Theta, Value,
     ValueId, scf,
 };
 
@@ -65,7 +65,7 @@ pub fn strip_mine(context: &Context, op: OpId, tile: i128) -> Result<(OpId, OpId
     let counted_loop =
         |body: RegionId, lower: ValueId, upper: ValueId, step: ValueId, states: &[ValueId]| {
             let mut result_types = vec![ty];
-            result_types.extend(states.iter().map(|_| TypeId::STATE));
+            result_types.extend(states.iter().map(|state| context.get_value(*state).ty()));
             scf::ForOpBuilder::new(context)
                 .lb(lower)
                 .inits(states.to_vec())
@@ -81,7 +81,7 @@ pub fn strip_mine(context: &Context, op: OpId, tile: i128) -> Result<(OpId, OpId
     ports.extend(
         states
             .iter()
-            .map(|_| context.create_value(TypeId::STATE, None)),
+            .map(|state| context.create_value(context.get_value(state.entered).ty(), None)),
     );
     let dep_ports: Vec<ValueId> = ports[1..].iter().map(Value::id).collect();
     let tile_body = context.create_nodes_region(ports, vec![], vec![]).id();

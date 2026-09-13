@@ -82,15 +82,23 @@ fn erase_dead_with(
         // the memory it observed: erasing the read hands its readers that one,
         // and the reads it hands over move to the state they now name — a write
         // whose state a forwarded reader took is still read.
-        if let (Some(published), Some(observed)) = (
-            instance.state_results().first(),
-            instance.state_operands().first(),
-        ) {
-            context.replace_value_uses(*published, *observed);
-            if named.remove(published) {
-                named.insert(*observed);
-                for &region in regions {
-                    context.rename_region_results(region, *published, *observed, &[]);
+        if let Some(effects) = instance
+            .clone()
+            .as_interface::<dyn crate::ResourceEffects>()
+        {
+            for effect in effects
+                .resource_effects()
+                .into_iter()
+                .filter(|effect| effect.access == crate::ResourceAccess::Read)
+            {
+                for (published, observed) in effect.produced.iter().zip(&effect.observed) {
+                    context.replace_value_uses(*published, *observed);
+                    if named.remove(published) {
+                        named.insert(*observed);
+                        for &region in regions {
+                            context.rename_region_results(region, *published, *observed, &[]);
+                        }
+                    }
                 }
             }
         }
@@ -144,11 +152,18 @@ fn is_erasable(context: &Context, instance: &OpHandle, named: &HashSet<ValueId>)
     // and erasing it hands its readers the state it took. Read off the declared
     // effects, not off the absence of a write interface — a call writes memory
     // and declares no location for it.
-    let reads_only = match &machine {
-        Some(mi) => mi.info().effects.reads && !mi.info().effects.writes,
-        None => instance.has_interface::<dyn crate::MemoryRead>() && !writes_memory,
-    };
+    let declared = instance
+        .clone()
+        .as_interface::<dyn crate::ResourceEffects>()
+        .map(|effects| effects.resource_effects())
+        .unwrap_or_default();
+    let reads_only = !declared.is_empty()
+        && declared
+            .iter()
+            .all(|effect| effect.access == crate::ResourceAccess::Read);
     let forwards_state = reads_only && !instance.state_operands().is_empty();
+    let publishes_effects =
+        !declared.is_empty() && declared.iter().all(|effect| !effect.produced.is_empty());
     // An allocation is the object its state names. With neither its address nor
     // that state read, the object is one nothing in the function can tell exists
     // — the slot sweep the chains make an ordinary def-use question.
@@ -156,6 +171,7 @@ fn is_erasable(context: &Context, instance: &OpHandle, named: &HashSet<ValueId>)
     match &machine {
         Some(mi) if mi.info().effects.writes => return false,
         None if !instance.results().is_empty()
+            && !publishes_effects
             && !writes_memory
             && !forwards_state
             && !allocation

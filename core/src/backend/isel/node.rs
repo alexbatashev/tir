@@ -60,6 +60,13 @@ pub(crate) fn class_is_pure(egraph: &SemEGraph, class: Id) -> bool {
     })
 }
 
+pub(crate) fn is_identity_effect(egraph: &SemEGraph, class: Id) -> bool {
+    egraph.nodes(class).any(|node| {
+        node.kind == SymKind::FPEffect
+            && egraph.find(node.children[0]) == egraph.find(node.children[1])
+    })
+}
+
 /// Whether a term of this kind names an access to memory, and therefore carries
 /// the state chain it reads as its last operand — the arity
 /// `super::builder::SemDagBuilder::build_memory_effect` spells and the one
@@ -72,12 +79,22 @@ pub(crate) fn is_memory_kind(kind: SymKind) -> bool {
 pub(crate) fn kind_is_pure(kind: SymKind) -> bool {
     !matches!(
         kind,
-        SymKind::LoadMemory
+        SymKind::FPEffect
+            | SymKind::LoadMemory
             | SymKind::StoreMemory
             | SymKind::LoadReserved
             | SymKind::StoreConditional
             | SymKind::AtomicRmw
             | SymKind::Fence
+            | SymKind::StateAssign
+            | SymKind::StateStore
+            | SymKind::StateStoreConditional
+            | SymKind::StateFence
+            | SymKind::StateTrap
+            | SymKind::StateBlock
+            | SymKind::StateIf
+            | SymKind::StateTry
+            | SymKind::StateHandler
     )
 }
 
@@ -96,7 +113,7 @@ pub(crate) fn class_register_type(
             .nodes(class)
             .any(|node| {
                 node.ty
-                    .filter(|ty| *ty != tir::TypeId::STATE)
+                    .filter(|ty| !ctx.is_state_type(*ty))
                     .is_some_and(|ty| {
                         let data = ctx.get_type_data(ty);
                         (data.as_ref() as &dyn std::any::Any)

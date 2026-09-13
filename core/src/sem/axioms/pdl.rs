@@ -211,16 +211,10 @@ fn node(term: &Term, side: Side, scope: &Scope) -> Result<AxNode, String> {
                 Side::Rhs => AxNode::Const(value, ConstWidth::Register),
             })
         }
-        TermKind::Constant { width, value } => {
-            let ExprKind::Integer(width) = width.kind else {
-                return Err("a constant's width must be an integer".into());
-            };
-            let width = u32::try_from(width).map_err(|_| "constant width is out of range")?;
-            Ok(AxNode::Const(
-                width_expr(value, scope)?,
-                ConstWidth::Fixed(width),
-            ))
-        }
+        TermKind::Constant { width, value } => Ok(AxNode::Const(
+            width_expr(value, scope)?,
+            ConstWidth::Explicit(width_expr(width, scope)?),
+        )),
         TermKind::Operation {
             operator,
             operands,

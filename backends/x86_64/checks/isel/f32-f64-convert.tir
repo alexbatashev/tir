@@ -3,11 +3,11 @@
 
 module {
   %fn_widen = func.func @widen(%0: !f32) -> !f64 {
-    %1 = fcvt %0 : !f64
+    %1 = fp.convert %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f64
     func.return %1
   }
   %fn_narrow = func.func @narrow(%2: !f64) -> !f32 {
-    %3 = fcvt %2 : !f32
+    %3 = fp.convert %2 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
     func.return %3
   }
   module_end

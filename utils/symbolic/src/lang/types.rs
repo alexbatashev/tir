@@ -63,6 +63,7 @@ pub enum TypeError {
     WidthMismatch(Width, Width),
     Infinite(TypeVar, SemType),
     InfiniteWidth(WidthVar, Width),
+    InvalidStateField { resource: u64, field: u64 },
 }
 
 impl fmt::Display for TypeError {
@@ -75,6 +76,9 @@ impl fmt::Display for TypeError {
             TypeError::Infinite(var, ty) => write!(f, "infinite type: {var:?} occurs in {ty:?}"),
             TypeError::InfiniteWidth(var, width) => {
                 write!(f, "infinite width: {var:?} occurs in {width:?}")
+            }
+            TypeError::InvalidStateField { resource, field } => {
+                write!(f, "state resource {resource} has no field {field}")
             }
         }
     }

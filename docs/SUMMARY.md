@@ -2,6 +2,7 @@
 
 - [Introduction](./intro.md)
 - [Developer's Guide](./dev_guide.md)
+- [Floating-point reference checks](./fp_check.md)
 - [TIR Internals](./design/index.md)
   - [The Core IR](./design/ir.md)
   - [Defining Dialects](./design/defining_dialects.md)

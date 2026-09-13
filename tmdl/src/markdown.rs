@@ -430,6 +430,9 @@ fn format_register_traits(traits: &[RegisterTrait]) -> String {
             RegisterTrait::HardwiredZero => "hardwired zero",
             RegisterTrait::ProgramCounter => "program counter",
             RegisterTrait::StatusFlag => "status flag",
+            RegisterTrait::FpFlags => "floating-point flags",
+            RegisterTrait::FpRounding => "floating-point rounding",
+            RegisterTrait::FpTraps => "floating-point traps",
             RegisterTrait::Float => "floating point",
             RegisterTrait::Polymorphic => "polymorphic",
         })

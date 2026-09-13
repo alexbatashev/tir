@@ -12,7 +12,7 @@ id_newtype!(BlockId);
 pub struct Block {
     arguments: Vec<Value>,
     operations: Vec<OpId>,
-    /// Discardable metadata scoped to this block (e.g. `fpmath`), printed in the
+    /// Discardable metadata scoped to this block, printed in the
     /// block label.
     attributes: Vec<NamedAttribute>,
 }
@@ -121,19 +121,21 @@ impl BlockHandle {
             .with_block(self.id, |block| block.arguments().to_vec())
     }
 
-    /// The arguments that are not memory states.
+    /// The arguments that are not resource states.
     pub fn value_arguments(&self) -> Vec<Value> {
+        let context = self.context();
         self.arguments()
             .into_iter()
-            .filter(|argument| !argument.is_state())
+            .filter(|argument| !context.is_state_type(argument.ty()))
             .collect()
     }
 
-    /// The arguments that are memory states: the chains the block is entered on.
+    /// The resource states that carry execution dependencies into the block.
     pub fn state_arguments(&self) -> Vec<Value> {
+        let context = self.context();
         self.arguments()
             .into_iter()
-            .filter(Value::is_state)
+            .filter(|argument| context.is_state_type(argument.ty()))
             .collect()
     }
 

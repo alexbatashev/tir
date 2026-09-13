@@ -130,7 +130,7 @@ impl<'a> SemDagBuilder<'a> {
                 .then(|| self.build_from_value(op.results()[0]))
         }) {
             seeds.roots_by_op.insert(op_id, root);
-        } else if op.is::<crate::builtin::ConstantFOp>()
+        } else if op.is::<crate::fp::ops::ConstantOp>()
             && let Some(&result) = op.results().first()
             && self
                 .float_width(result)
@@ -189,7 +189,10 @@ impl<'a> SemDagBuilder<'a> {
         let arms = gamma.arms();
         let binding = gamma.binding();
         for (index, &result) in op.results()[binding.results.clone()].iter().enumerate() {
-            if self.context.get_value(result).is_state() {
+            if self
+                .context
+                .is_state_type(self.context.get_value(result).ty())
+            {
                 continue;
             }
             let produced: Vec<ValueId> = arms
@@ -232,7 +235,7 @@ impl<'a> SemDagBuilder<'a> {
         let region = self.context.get_region(body);
         let ports: Vec<ValueId> = region.ports()[binding.ports.clone()]
             .iter()
-            .filter(|port| !port.is_state())
+            .filter(|port| !self.context.is_state_type(port.ty()))
             .map(|port| port.id())
             .collect();
         for &port in &ports {
@@ -376,10 +379,10 @@ impl<'a> SemDagBuilder<'a> {
     }
 
     pub(crate) fn build_for_op(&mut self, op: &OpHandle) -> Option<Id> {
-        // A standalone `constantf` is left for the target's pre-RA hook, like a
+        // A standalone `fp.constant` is left for the target's pre-RA hook, like a
         // bare integer `constant`; only as an operand (see `build_from_value`)
         // does it fold into a consumer via `float_constant_class`.
-        if op.is::<crate::builtin::ConstantFOp>() {
+        if op.is::<crate::fp::ops::ConstantOp>() {
             return None;
         }
         // A memory access names its own results: what it reads is the term, and
@@ -387,14 +390,79 @@ impl<'a> SemDagBuilder<'a> {
         if let Some(class) = self.build_memory_effect(op) {
             return Some(class);
         }
+        if let Some(semantics) = op
+            .clone()
+            .as_interface::<dyn tir::HasResourceSemantics>()
+            .map(|interface| interface.resource_semantics())
+        {
+            let root = self.lower_resource_semantics(op, &semantics);
+            return Some(root);
+        }
         let operands = self.build_operands(&op.operands());
         let mut graph = SemGraph::new();
         let root = op.clone().as_dyn_op().semantic_expr(&mut graph)?;
-        let class = self.lower_typed(&graph, root, &operands);
-        for result in op.results() {
+        let value = self.lower_typed(&graph, root, &operands);
+        if op
+            .clone()
+            .as_interface::<dyn tir::ResourceEffects>()
+            .map(|effects| effects.resource_effects())
+            .is_some_and(|effects| !effects.is_empty())
+        {
+            return None;
+        }
+        for result in op.value_results() {
+            self.value_to_class.insert(result, value);
+        }
+        Some(value)
+    }
+
+    fn lower_resource_semantics(
+        &mut self,
+        op: &OpHandle,
+        semantics: &tir::ResourceSemantics,
+    ) -> Id {
+        let types = self.infer_local_types(&semantics.graph, &[]);
+        let value = self.lower_graph_node(&semantics.graph, semantics.root, &[], types.as_deref());
+        let effects = op
+            .clone()
+            .as_interface::<dyn tir::ResourceEffects>()
+            .expect("resource semantics declare effects")
+            .resource_effects();
+        let environment = effects
+            .iter()
+            .find(|effect| effect.resource == crate::builtin::StateResource::FpEnv);
+        let change = environment.filter(|effect| effect.access == tir::ResourceAccess::Change);
+        let root = if let Some(effect) = change {
+            let state = self.build_from_value(effect.observed[0]);
+            self.add_op(
+                SymKind::FPEffect,
+                vec![value, state],
+                op.value_results()
+                    .first()
+                    .map(|result| self.context.get_value(*result).ty()),
+            )
+        } else {
+            value
+        };
+        for (&result, &node) in op.value_results().iter().zip(&semantics.value_results) {
+            let class = if change.is_some() {
+                root
+            } else {
+                self.lower_graph_node(&semantics.graph, node, &[], types.as_deref())
+            };
             self.value_to_class.insert(result, class);
         }
-        Some(class)
+        for effect in &effects {
+            let class = if change.is_some() {
+                root
+            } else {
+                self.build_from_value(effect.observed[0])
+            };
+            for &result in &effect.produced {
+                self.value_to_class.insert(result, class);
+            }
+        }
+        root
     }
 
     fn build_operands(&mut self, operands: &[ValueId]) -> Vec<Id> {
@@ -410,7 +478,7 @@ impl<'a> SemDagBuilder<'a> {
     }
 
     /// Lower a memory access over the chain the IR says it reads. The state is an
-    /// ordinary operand: `state.entry_state`, a block argument and `state.join`
+    /// ordinary operand: `state.entry_state : !state<memory>`, a block argument and `state.join`
     /// are leaves, and a write's own term is the state the accesses after it
     /// read. Nothing here invents an order — the mid-end's chains are the whole
     /// of memory identity, and the ports the term is built from are the ones
@@ -522,17 +590,19 @@ impl<'a> SemDagBuilder<'a> {
             let def = self.context.get_op(def_op_id);
             if def.is::<crate::builtin::ConstantOp>() {
                 self.constant_class(&def, value, value_ty)
-            } else if def.is::<crate::builtin::ConstantFOp>() {
+            } else if def.is::<crate::fp::ops::ConstantOp>() {
                 self.float_constant_class(&def)
                     .unwrap_or_else(|| self.add_input_value(value, value_ty))
+            } else if def.clone().as_interface::<dyn MemoryRead>().is_some()
+                || def.clone().as_interface::<dyn MemoryWrite>().is_some()
+            {
+                self.add_input_value(value, value_ty)
             } else {
-                let mut graph = SemGraph::new();
-                if let Some(root) = def.clone().as_dyn_op().semantic_expr(&mut graph) {
-                    let operands = self.build_operands(&def.operands());
-                    self.lower_typed(&graph, root, &operands)
-                } else {
-                    self.add_input_value(value, value_ty)
-                }
+                self.build_for_op(&def);
+                self.value_to_class
+                    .get(&value)
+                    .copied()
+                    .unwrap_or_else(|| self.add_input_value(value, value_ty))
             }
         } else {
             self.add_input_value(value, value_ty)
@@ -570,17 +640,15 @@ impl<'a> SemDagBuilder<'a> {
                 .downcast_ref::<FloatType>()?
                 .bit_width()
         };
-        let value = match def.attr("value")? {
-            AttributeValue::F64(value) => value,
+        let bits = match def.attr("bits")? {
+            AttributeValue::UInt(bits) => bits,
             _ => return None,
         };
-        let bits = match width {
-            32 => (value as f32).to_bits() as i32 as i64,
-            64 => value.to_bits() as i64,
-            _ => return None,
-        };
+        if width == 32 && bits > u32::MAX as u64 {
+            return None;
+        }
         let int_ty = IntegerType::new(self.context, width);
-        let bits = self.add_int(APInt::new_signed(64, bits), Some(int_ty));
+        let bits = self.add_int(APInt::new(width, bits), Some(int_ty));
         Some(self.add_op(SymKind::Bitcast, vec![bits], Some(result_ty)))
     }
 
@@ -594,6 +662,9 @@ impl<'a> SemDagBuilder<'a> {
                         .get(*id as usize)
                         .and_then(|&class| self.class_ty(class))
                         .and_then(|ty| semantic_type(self.context, ty)),
+                    Some(SymPayload::Value(value)) => {
+                        semantic_type(self.context, self.context.get_value(*value).ty())
+                    }
                     _ => None,
                 })
         })
@@ -614,6 +685,11 @@ impl<'a> SemDagBuilder<'a> {
     ) -> Id {
         let node_ty = graph
             .get_actual_type(node)
+            .map(|ty| {
+                semantic_type(self.context, ty)
+                    .and_then(|ty| ir_type(self.context, &ty))
+                    .unwrap_or(ty)
+            })
             .or_else(|| types.and_then(|types| ir_type(self.context, &types[node.index()])));
         match graph.get_node(node) {
             SymKind::Symbol => match graph.get_leaf_data(node) {
@@ -621,6 +697,7 @@ impl<'a> SemDagBuilder<'a> {
                     .get(*id as usize)
                     .copied()
                     .unwrap_or_else(|| self.add_unknown_symbol(*id, node_ty)),
+                Some(SymPayload::Value(value)) => self.build_from_value(*value),
                 _ => self.add_opaque(),
             },
             SymKind::Constant => match graph.get_leaf_data(node) {

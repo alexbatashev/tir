@@ -1,0 +1,14 @@
+// RUN: not tir mc --march=x86_64 --stage=isel %s 2>&1 | filecheck %s
+
+module {
+  %main = func.func @main(%a: !f64, %b: !f64) -> !f64 {
+    %env = state.entry_state : !state<fp.env>
+    %mode = fp.rounding_constant {mode = "toward_zero"} : !fp.rounding
+    %next = fp.set_round %mode state(%env)
+    %sum = fp.add %a, %b : !f64
+    func.return %sum state(%next)
+  }
+  module_end
+}
+
+// CHECK: x86-64: fp.add uses fixed rounding but fp.set_round changes the floating-point environment

@@ -1,4 +1,4 @@
-//! Float-comparison semantics, shared by the IR's `cmpf` operation and by
+//! Float-comparison semantics, shared by the IR's `fp.cmp` operation and by
 //! backend flag composition so both prove against the very same graph.
 
 use tir_adt::Predicate;
@@ -12,7 +12,7 @@ trait SemBuilder: MutDag<Node = SymKind, Leaf = SymPayload<ValueId>> {}
 
 impl<T> SemBuilder for T where T: MutDag<Node = SymKind, Leaf = SymPayload<ValueId>> {}
 
-/// Build the target-independent semantic graph for a `cmpf` predicate.
+/// Build the target-independent semantic graph for an `fp.cmp` predicate.
 pub fn cmpf_semantics(
     g: &mut impl MutDag<Node = SymKind, Leaf = SymPayload<ValueId>>,
     predicate: Predicate,

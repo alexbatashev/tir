@@ -8,7 +8,7 @@
 
 module {
   %fn_f = func.func @f(%0: !i1, %1: !ptr.p<!i32>, %2: !i32, %3: !i32) {
-    %4 = state.entry_state
+    %4 = state.entry_state : !state<memory>
     %5 = scf.switch %0 args(%4) (%9) {
       %10 = ptr.store %2, %1 state(%9)
       -> %10

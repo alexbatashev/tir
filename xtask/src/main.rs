@@ -1,6 +1,7 @@
 mod extbench;
 mod fcc_fuzz;
 mod fcc_torture;
+mod fp_check;
 mod gate;
 mod gate_bench;
 pub mod utils;
@@ -19,6 +20,9 @@ enum Task {
     /// Compile or run directory-defined external benchmarks.
     #[command(subcommand)]
     Extbench(extbench::Task),
+    /// Record and compare floating-point reference behavior.
+    #[command(subcommand)]
+    FpCheck(fp_check::Task),
     /// Build the TIR project
     Build,
     /// Build the project and run the check tests
@@ -66,6 +70,7 @@ fn main() -> anyhow::Result<()> {
     let sh = Shell::new()?;
     match Task::parse() {
         Task::Extbench(task) => extbench::run(&project_root(), task),
+        Task::FpCheck(task) => fp_check::run(&project_root(), task),
         Task::Build => build(&sh),
         Task::Check => {
             build(&sh)?;

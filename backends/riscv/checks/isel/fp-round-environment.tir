@@ -1,0 +1,15 @@
+// RUN: tir mc --march=rv64ifd --stage=isel %s | filecheck %s
+
+module {
+  %fn_round_environment = func.func @round_environment(%mode: !fp.rounding) -> !fp.rounding {
+    %env0 = state.entry_state : !state<fp.env>
+    %env1 = fp.set_round %mode state(%env0)
+    %current, %env2 = fp.get_round state(%env1) : !fp.rounding
+    func.return %current state(%env2)
+  }
+  module_end
+}
+
+// CHECK-LABEL: asm.symbol {name = "round_environment"
+// CHECK: riscv.set_fround
+// CHECK: riscv.read_fround {rd = %{{[0-9]+}}:GPR}

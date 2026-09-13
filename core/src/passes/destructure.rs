@@ -35,7 +35,7 @@ use crate::func::{FuncOp, ReturnOpBuilder};
 use crate::region::values_read;
 use crate::{
     BlockId, Context, Gamma, OpHandle, OpId, Operation, OperationRef, Pass, PassError, PassTarget,
-    RegionId, Theta, TypeId, ValueId,
+    RegionId, Theta, ValueId,
 };
 
 /// The test a branch decides.
@@ -551,7 +551,10 @@ impl Lowering<'_> {
             .iter()
             .flat_map(|&op| values_read(self.context, op))
             .chain(leaving.iter().copied())
-            .filter(|&value| self.context.get_value(value).is_state())
+            .filter(|&value| {
+                self.context
+                    .is_state_type(self.context.get_value(value).ty())
+            })
             .filter(|&value| {
                 self.context
                     .get_value(value)
@@ -564,7 +567,7 @@ impl Lowering<'_> {
         for value in read {
             let argument = self
                 .context
-                .append_block_argument(block, TypeId::STATE)
+                .append_block_argument(block, self.context.get_value(value).ty())
                 .id();
             entered.push(value);
             renames.push((value, argument));
@@ -759,6 +762,7 @@ impl Lowering<'_> {
                 let leaf = instance.operands().is_empty()
                     && instance.regions().is_empty()
                     && instance.state_results().is_empty()
+                    && inputs[index].is_empty()
                     && !implicit.contains(&op);
                 if !leaf {
                     return (index, 1);

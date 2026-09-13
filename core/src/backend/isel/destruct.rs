@@ -143,7 +143,7 @@ impl Edges for MachineEdges<'_> {
                     op: None,
                     results: &[],
                     result_ty: None,
-                    state: None,
+                    states: &[],
                 };
                 if let Some(prelude) = rule.prelude_emit {
                     holder.append(prelude(self.context, &request, &m)?.id());

@@ -10,6 +10,12 @@ pub enum RegisterTrait {
     /// side effect by compare-style instructions and read by conditional-branch
     /// guards. Marks the class for flag-branch rule derivation.
     StatusFlag,
+    /// Holds the accrued floating-point exception flags.
+    FpFlags,
+    /// Holds the ambient floating-point rounding mode.
+    FpRounding,
+    /// Holds the enabled floating-point traps.
+    FpTraps,
     /// Holds IEEE binary floating-point values. Marks the class so instruction
     /// selection types its patterns with float types and keeps float and
     /// integer operands from binding across register files.
@@ -2157,9 +2163,9 @@ impl Call {
         }
         match builtin {
             BuiltinFunction::FPFlags => {
-                let input = self.arguments[0].lower_with_ctx(ctx);
+                let outcome = self.arguments[0].lower_with_ctx(ctx);
                 if !matches!(
-                    ctx.graph.get_kind(input),
+                    ctx.graph.get_kind(outcome),
                     SymKind::FAddRound
                         | SymKind::FSubRound
                         | SymKind::FMulRound
@@ -2174,10 +2180,7 @@ impl Call {
                 ) {
                     ctx.had_error = true;
                 }
-                let kind = *ctx.graph.get_kind(input);
-                let operands: Vec<_> = ctx.graph.children(input).collect();
-                let operation = ctx.add_node(kind, &operands);
-                ctx.add_node(SymKind::FPFlags, &[operation])
+                ctx.add_node(SymKind::FPFlags, &[outcome])
             }
             BuiltinFunction::FAdd
             | BuiltinFunction::FSub

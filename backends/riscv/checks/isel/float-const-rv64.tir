@@ -3,8 +3,8 @@
 
 module {
   %fn_scale = func.func @scale(%0: !f64) -> !f64 {
-    %1 = constantf {value = 2.5} : !f64
-    %2 = mulf %0, %1 : !f64
+    %1 = fp.constant {bits = 4612811918334230528} : !f64
+    %2 = fp.mul %0, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f64
     func.return %2
   }
   module_end
@@ -14,4 +14,4 @@ module {
 // CHECK: riscv.slli
 // CHECK: riscv.fmv.d.x {fd = %{{[0-9]+}}:FPR64, rs1 = %{{[0-9]+}}:GPR}
 // CHECK: riscv.fmul.d.rne
-// CHECK-NOT: constantf
+// CHECK-NOT: fp.constant

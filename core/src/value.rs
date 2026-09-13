@@ -33,11 +33,6 @@ impl Value {
         self.ty
     }
 
-    /// Whether this value is a memory state: an ordering edge of type `!state`.
-    pub fn is_state(&self) -> bool {
-        self.ty == TypeId::STATE
-    }
-
     /// The operation defining this value, or `None` for a block or region
     /// argument.
     pub fn defining_op(&self) -> Option<OpId> {

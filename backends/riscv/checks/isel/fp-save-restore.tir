@@ -1,0 +1,26 @@
+// RUN: tir mc --march=rv64ifd --stage=isel %s | filecheck %s --check-prefix=ISEL
+// RUN: tir mc --march=rv64ifd --filetype=asm -o /tmp/tir-fp-save-restore.s %s
+// RUN: isasim --march=rv64ifd --entry=main --until-pc=0 --trace-registers-end /tmp/tir-fp-save-restore.s | filecheck %s
+// RUN: tir mc --march=rv64ifd --filetype=asm --shuffle-machine-order -o /tmp/tir-fp-save-restore.s %s
+// RUN: isasim --march=rv64ifd --entry=main --until-pc=0 --trace-registers-end /tmp/tir-fp-save-restore.s | filecheck %s
+
+module {
+  %main = func.func @main() -> !fp.rounding {
+    %e0 = state.entry_state : !state<fp.env>
+    %up = fp.rounding_constant {mode = "toward_positive"} : !fp.rounding
+    %zero = fp.rounding_constant {mode = "toward_zero"} : !fp.rounding
+    %e1 = fp.set_round %up state(%e0)
+    %saved, %e2 = fp.save state(%e1) : !fp.env
+    %e3 = fp.set_round %zero state(%e2)
+    %e4 = fp.restore %saved state(%e3)
+    %mode, %e5 = fp.get_round state(%e4) : !fp.rounding
+    func.return %mode state(%e5)
+  }
+  module_end
+}
+
+// ISEL: riscv.read_fenv
+// ISEL: riscv.set_fenv
+// CHECK: final registers:
+// CHECK-DAG: GPR[10] = 0x3
+// CHECK-DAG: CSR[2] = 0x3

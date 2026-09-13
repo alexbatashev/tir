@@ -376,26 +376,52 @@ fn splice_nodes(
         })
         .filter_map(|call| callee_node(context, &call, &graph.by_op))
         .collect();
-    let entered = call.state_operands().first().copied();
+    let entered: HashMap<crate::builtin::StateResource, ValueId> = call
+        .state_operands()
+        .into_iter()
+        .map(|state| {
+            (
+                context
+                    .state_resource(context.get_value(state).ty())
+                    .expect("call dependency has a state type"),
+                state,
+            )
+        })
+        .collect();
     let roots: Vec<OpId> = ops
         .iter()
         .copied()
         .filter(|&op| context.get_op(op).is::<crate::state::EntryStateOp>())
         .collect();
-    // The callee runs on a chain per object it names; the caller hands the
-    // call one state, so it is split into the memory each of those chains is
-    // entered on. Two chains rooted at one state would be two futures for it.
-    let mut chains = match (roots.len() > 1, entered) {
-        (true, Some(entered)) => {
+    let mut replacements = HashMap::new();
+    let mut roots_by_resource: HashMap<crate::builtin::StateResource, Vec<OpId>> = HashMap::new();
+    for root in roots {
+        let result = context.get_op(root).state_results()[0];
+        let resource = context
+            .state_resource(context.get_value(result).ty())
+            .expect("entry dependency has a state type");
+        roots_by_resource.entry(resource).or_default().push(root);
+    }
+    for (resource, roots) in roots_by_resource {
+        let entered = entered
+            .get(&resource)
+            .copied()
+            .ok_or(PassError::RewriteFailed(call.id))?;
+        let values = if roots.len() == 1 {
+            vec![entered]
+        } else if resource == crate::builtin::StateResource::Memory {
+            let state_type = context.get_value(entered).ty();
             let split = crate::state::SplitOpBuilder::new(context)
                 .state(entered)
-                .states(roots.len())
+                .states(std::iter::repeat_n(state_type, roots.len()))
                 .build();
             context.add(destination, split.id());
-            split.states().into_iter()
-        }
-        _ => Vec::new().into_iter(),
-    };
+            split.states()
+        } else {
+            return Err(PassError::RewriteFailed(call.id));
+        };
+        replacements.extend(roots.into_iter().zip(values));
+    }
     for &op in &ops {
         let instance = context.get_op(op);
         if instance.is::<AllocaOp>() && destination != body {
@@ -403,9 +429,7 @@ fn splice_nodes(
             context.add(body, op);
         }
         if instance.is::<crate::state::EntryStateOp>() {
-            let Some(entered) = chains.next().or(entered) else {
-                return Err(PassError::RewriteFailed(call.id));
-            };
+            let entered = replacements[&op];
             let root = instance.state_results()[0];
             rename(context, destination, root, entered);
             // A callee touching no memory hands back the state it was entered
@@ -420,6 +444,17 @@ fn splice_nodes(
     }
 
     let produced_states = context.states_among(&produced);
+    let produced_by_resource: HashMap<crate::builtin::StateResource, ValueId> = produced_states
+        .iter()
+        .map(|state| {
+            (
+                context
+                    .state_resource(context.get_value(*state).ty())
+                    .expect("produced dependency has a state type"),
+                *state,
+            )
+        })
+        .collect();
     for (&old, &new) in call
         .value_results()
         .iter()
@@ -429,11 +464,14 @@ fn splice_nodes(
     }
     // A callee touching no memory leaves no dependency behind: the call passed
     // the state it observed through unchanged.
-    for (index, &old) in call.state_results().iter().enumerate() {
-        let new = produced_states
-            .get(index)
+    for &old in &call.state_results() {
+        let resource = context
+            .state_resource(context.get_value(old).ty())
+            .expect("call result has a state type");
+        let new = produced_by_resource
+            .get(&resource)
             .copied()
-            .or(entered)
+            .or_else(|| entered.get(&resource).copied())
             .ok_or(PassError::RewriteFailed(call.id))?;
         rename(context, destination, old, new);
     }

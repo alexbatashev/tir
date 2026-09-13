@@ -2,7 +2,7 @@
 
 module {
   %fn_f = func.func @f(%0: !f32, %1: !f32) -> !f32 {
-    %2 = addf %0, %1 : !f32
+    %2 = fp.add %0, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
     func.return %2
   }
   module_end

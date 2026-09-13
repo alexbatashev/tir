@@ -1,0 +1,35 @@
+// RUN: tir mc --march=rv64ifd --filetype=asm -o /tmp/tir-riscv-fp-dynamic-rounding-exec.s %s
+// RUN: isasim --march=rv64ifd --entry=upward --until-pc=0 --trace-registers-end /tmp/tir-riscv-fp-dynamic-rounding-exec.s | filecheck %s --check-prefix=UPWARD
+// RUN: isasim --march=rv64ifd --entry=toward_zero --until-pc=0 --trace-registers-end /tmp/tir-riscv-fp-dynamic-rounding-exec.s | filecheck %s --check-prefix=TOWARD-ZERO
+// RUN: tir mc --march=rv64ifd --filetype=asm --shuffle-machine-order -o /tmp/tir-riscv-fp-dynamic-rounding-exec.s %s
+// RUN: isasim --march=rv64ifd --entry=upward --until-pc=0 --trace-registers-end /tmp/tir-riscv-fp-dynamic-rounding-exec.s | filecheck %s --check-prefix=UPWARD
+// RUN: isasim --march=rv64ifd --entry=toward_zero --until-pc=0 --trace-registers-end /tmp/tir-riscv-fp-dynamic-rounding-exec.s | filecheck %s --check-prefix=TOWARD-ZERO
+
+module {
+  %fn_upward = func.func @upward() -> !i64 {
+    %env0 = state.entry_state : !state<fp.env>
+    %upward = fp.rounding_constant {mode = "toward_positive"} : !fp.rounding
+    %env1 = fp.set_round %upward state(%env0)
+    %one = fp.constant {bits = 4607182418800017408} : !f64
+    %small = fp.constant {bits = 4336966441157787648} : !f64
+    %up, %env2 = fp.add %one, %small state(%env1) {semantics = {rounding = "dynamic"}} : !f64
+    %up_bits = bitcast %up : !i64
+    func.return %up_bits state(%env2)
+  }
+  %fn_toward_zero = func.func @toward_zero() -> !i64 {
+    %env0 = state.entry_state : !state<fp.env>
+    %toward_zero = fp.rounding_constant {mode = "toward_zero"} : !fp.rounding
+    %env1 = fp.set_round %toward_zero state(%env0)
+    %one = fp.constant {bits = 4607182418800017408} : !f64
+    %small = fp.constant {bits = 4336966441157787648} : !f64
+    %sum, %env2 = fp.add %one, %small state(%env1) {semantics = {rounding = "dynamic"}} : !f64
+    %bits = bitcast %sum : !i64
+    func.return %bits state(%env2)
+  }
+  module_end
+}
+
+// UPWARD: final registers:
+// UPWARD-DAG: GPR[10] = 0x3ff0000000000001
+// TOWARD-ZERO: final registers:
+// TOWARD-ZERO-DAG: GPR[10] = 0x3ff0000000000000

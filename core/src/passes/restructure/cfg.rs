@@ -111,6 +111,7 @@ pub struct Cfg {
     /// when the graph constructed it; each is bound at the region's entry to
     /// the memory that chain is entered with.
     pub chains: Vec<VarId>,
+    pub entry_chains: Vec<VarId>,
 }
 
 impl Cfg {
@@ -237,6 +238,7 @@ impl Cfg {
                 sink: 0,
                 value_var: BTreeMap::new(),
                 chains: Vec::new(),
+                entry_chains: Vec::new(),
             },
             node_of_block: BTreeMap::new(),
             arg_var: BTreeMap::new(),
@@ -247,7 +249,7 @@ impl Cfg {
         builder.add_preheader(blocks[0]);
         builder.unify_sinks()?;
         if thread {
-            builder.thread_memory(region)?;
+            builder.thread_resources(region)?;
         }
         builder.create_value_vars();
         Ok(builder.cfg)
@@ -378,11 +380,12 @@ impl Builder<'_> {
     /// node is. The exit exports every chain to the caller; where several
     /// exits were merged, the merged one reads the variables as they stand
     /// there.
-    fn thread_memory(&mut self, region: RegionId) -> Result<(), PassError> {
+    fn thread_resources(&mut self, region: RegionId) -> Result<(), PassError> {
         let plan = super::deps::plan(self.context, region);
         let chains: Vec<VarId> = (0..plan.chains())
-            .map(|_| self.cfg.add_var(TypeId::STATE))
+            .map(|chain| self.cfg.add_var(plan.state_type(self.context, chain)))
             .collect();
+        let entry_block = self.context.get_region(region).entry_block();
         for (block, node) in self.node_of_block.clone() {
             // A block is entered on the chains its own effects name; the one
             // control leaves the region from names every chain, since the exit
@@ -398,19 +401,59 @@ impl Builder<'_> {
             let entries: BTreeMap<usize, ValueId> = carried
                 .iter()
                 .map(|&index| {
-                    let entry = self
-                        .context
-                        .append_block_argument(block, TypeId::STATE)
-                        .id();
+                    let entry = if block == entry_block {
+                        plan.root(index).unwrap_or_else(|| {
+                            self.context
+                                .append_block_argument(block, plan.state_type(self.context, index))
+                                .id()
+                        })
+                    } else {
+                        self.context
+                            .append_block_argument(block, plan.state_type(self.context, index))
+                            .id()
+                    };
                     self.arg_var.insert(entry, chains[index]);
                     (index, entry)
                 })
                 .collect();
             let leaving = super::deps::thread_block(self.context, block, &entries, &plan)?;
+            let sink_slots: BTreeMap<_, Vec<usize>> = match &self.cfg.nodes[node].term {
+                Term::Sink { op, .. } => {
+                    let handle = self.context.get_op(*op);
+                    handle
+                        .operands()
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(position, operand)| {
+                            self.context
+                                .state_resource(self.context.get_value(*operand).ty())
+                                .map(|resource| (resource, position))
+                        })
+                        .fold(BTreeMap::new(), |mut slots, (resource, position)| {
+                            slots.entry(resource).or_default().push(position);
+                            slots
+                        })
+                }
+                _ => BTreeMap::new(),
+            };
+            let mut used_slots = BTreeMap::new();
             for &index in &carried {
                 let left = leaving[&index];
                 if let Term::Sink { op, .. } = &self.cfg.nodes[node].term {
-                    self.context.append_operand(*op, left);
+                    let resource = self
+                        .context
+                        .state_resource(plan.state_type(self.context, index))
+                        .expect("dependency chain has a state resource");
+                    let used = used_slots.entry(resource).or_insert(0usize);
+                    if let Some(&position) = sink_slots
+                        .get(&resource)
+                        .and_then(|positions| positions.get(*used))
+                    {
+                        self.context.set_op_operand(*op, position, left);
+                    } else {
+                        self.context.append_operand(*op, left);
+                    }
+                    *used += 1;
                 }
                 if left != entries[&index] {
                     self.cfg.value_var.insert(left, chains[index]);
@@ -423,6 +466,10 @@ impl Builder<'_> {
         {
             args.extend(chains.iter().copied());
         }
+        self.cfg.entry_chains = (0..plan.chains())
+            .filter(|chain| plan.root(*chain).is_none())
+            .map(|chain| chains[chain])
+            .collect();
         self.cfg.chains = chains;
         Ok(())
     }

@@ -1,4 +1,4 @@
-/// The comparison a `cmpi`, `cmpf` or `ptr.cmp` performs. Each op declares the
+/// The comparison a `cmpi`, `fp.cmp` or `ptr.cmp` performs. Each op declares the
 /// vocabulary it accepts ([`Predicate::INTEGER`], [`Predicate::FLOAT`],
 /// [`Predicate::POINTER`]); a predicate outside it cannot be built or parsed.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

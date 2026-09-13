@@ -570,6 +570,13 @@ an exact exponent/mantissa format. Matching unifies those inferred types with
 the ground types carried by e-classes, so integer and floating expressions do
 not cross-match.
 
+Pattern compilation seeds operands from float-only register classes with that
+class's exact IEEE format. This gives bitcast masks and other literals inside a
+floating pattern their concrete use width. When inference resolves an integer
+literal to a wider bit or raw-bit type, the compiled template extends its stored
+value to that width, preserving signed extension for signed literals. It never
+narrows a literal or assigns a width that inference left unresolved.
+
 This value type is separate from a physical register operand's
 `RegisterCapability`. Integer-only and float-only banks admit their respective
 semantic domains; a TMDL `polymorphic` register class admits both, covering
@@ -702,7 +709,8 @@ instruction of its own is therefore a pair of per-block policies
   says its defining block is B (a cross-block or unselected user, §1), a
   destruction's branch needs it here (the `mm_overlay` of
   [Conditional branches](#conditional-branches)), or it is an effectful root of B,
-  which must be performed whatever reads it;
+  which is recorded in the same base-class demand set and must be performed
+  whatever reads it;
 - **available** — some IR value of the class already sits in a register wherever B
   runs (`available_at`): an argument of a block that has run, a def selection does
   not touch, or a def its own block was itself asked to place (`placed_at`). A
@@ -815,10 +823,10 @@ regions become blocks of the function, and neither the pass walk nor a per-block
 commit can own that. `commit_block_solution` applies one plan through the
 `Rewriter`:
 
-1. Emit each `ScheduledEmit` in order, before its anchor (the terminator when it
-   has none). A rule carrying a `prelude_emit` (a flag definer) emits that
-   adjacently ahead of it. What an earlier tile emitted is remapped into the match
-   first, and each tile's destination values are recorded in `emitted_values`.
+1. Emit each `ScheduledEmit` in order using the rule's emitter and captures.
+   The instruction takes over the covered operation's resource ports.
+   A branch prelude remains an implicit input of its consumer. Selection maps
+   the emitted value results to the source results in `emitted_values`.
 2. Apply the plan's `value_remaps`, so every use of an erased value reads the
    register now holding it.
 3. Record each `aux` entry (a destruction's branch, counter value, or decided
@@ -890,6 +898,11 @@ operands), and a proved width-1 identity
 `c == If(c, 1, 0)` (any 1-bit `c`) bridges a bare comparison class to the
 `slt`-style `If`-patterns so a compare used as a *value* materializes with no
 hand-written rule.
+Canonicalization observes this identity only at the pattern root; the complete
+target behavior remains attached to the rule for refinement proof.
+`prove_relaxation` separates effect-wrapper removal, candidate selection,
+register-derived symbol typing, and floating refinement proof. Unsupported
+rounded-conversion encodings remain distinct from proven rules.
 
 Instructions that read or write the PC *unconditionally* (`jal`, `jalr`,
 `auipc`) get **no value rule**: their pattern would hide the control-flow
@@ -957,10 +970,9 @@ bit-blasting at the operands' architectural width. Above, the sign/overflow
 formula proves equal to `Lt(rn, rm)` — nothing recognizes the idiom
 syntactically, so any correct flag formulation derives, and a wrong one
 derives *no* rule instead of a miscompiling one. The proved comparison becomes
-the rule's pattern; emission produces **two real instructions** — the rule's
-`prelude_emit` builds the flag definer (binding the compared operands), then
-`emit_fn` builds the branch (binding the taken target) — inserted adjacently
-ahead of the branch it defines the flags for. Everything else (the `Dead`
+the rule's pattern; its ordered steps emit **two real instructions**: the flag
+definer binds the compared operands, then the branch binds the taken target.
+The operation group keeps them together through placement. Everything else (the `Dead`
 alternative consuming the compare, boundary-forced materialization, region
 assumptions) is the same machinery as the fused single-instruction path.
 
@@ -996,11 +1008,10 @@ matched integer `Eq` and dropped its operands). Instead `emit_flag_reader_rules`
 composes each definer with each reader — the definer's per-flag semantics
 substitute into the reader's condition, and when the composite SMT-proves equal
 to one canonical comparison the pair registers an `If`-rooted **value** rule
-whose prelude emits the definer (`cmp`) ahead of the reader. Boolean readers
+whose first step emits the definer (`cmp`) ahead of the reader. Boolean readers
 reuse their constant arms; select readers retain their encoded register arms
 and two-address destination tie, so a gate's `If` can match `cmp` + `cmov`/`csel`. The
-value-commit path honours `prelude_emit` for value rules (`isel/mod.rs`),
-inserting the definer before the reader. For boolean readers, the pattern is the
+shared step emitter handles value and branch rules alike. For boolean readers, the pattern is the
 width-polymorphic `slt`-style `If` the bool-materialize bridge already matches —
 the flag-arch analog of a compare materializing with no hand-written rule. A
 two-register `cmpi` as a value emits `cmp` + `cset.<cc>`.
@@ -1122,7 +1133,7 @@ class (chasing low-bit truncations to the class that owns the register):
      register, but written on the way into its own region, so it holds the class
      only inside it — never in a sibling arm), then
    - a def in an **enclosing region** that has run wherever `R` runs
-     (`has_run_at`) and whose own region was asked to place it (`placed_at`), or
+    (`has_run_at`) and whose own region was asked to place it (`placed_at`), or
      that selection never touched at all — closest enclosing region first, via
      `Scopes::distance`.
 
@@ -1212,6 +1223,37 @@ instruction names is a register, which the machine-IR verifier checks.
 
 ## IEEE arithmetic result refinement
 
+An `fp` operation with fixed rounding and `exceptions = ignore` selects by its
+value pattern. The instruction may set hardware sticky flags; its physical
+register effects carry those dependences without saving and restoring the FP
+environment. A rounded symbolic node is the value, and `FPFlags(node)` computes
+its correlated flags. Neither needs an outcome projection or an instruction
+sequence.
+
+A changing FP environment operation is rooted at `FPEffect(value, state)` in
+selection's graph. The incoming state distinguishes otherwise equal operations;
+the wrapper is impure, so an unused numeric result does not remove a required
+flag update. Numeric and published state results name the wrapper's class.
+Dynamic rounding with ignored exceptions reads the rounding field through
+`StateRead` and forwards its unchanged environment state.
+
+The generator emits ordinary value rules and effect rules from the same
+instruction behavior. The state child of an effect pattern is an unnamed
+wildcard; the selected instruction adopts the source resource ports. A trapping
+operation also transfers its memory ports. RISC-V preserves this ordering but
+does not deliver hardware FP traps.
+
+Each generated rule declares `fp_flags`: `None` for no flags assignment,
+`Clobber` for another update, or `Exact(term)` for a sole sticky update of the
+form `flags = flags | term`. A source operation requiring flags only accepts an
+Exact rule whose raised term matches after binding operands and canonicalizing.
+The `fp_flags`, `fp_rounding`, and `fp_traps` register traits identify environment fields;
+fixed-CSR instructions supply field reads and writes through their declared
+behaviors. A field also marked `hardwired_zero` contributes target facts that
+its reads are zero and its writes leave the incoming state unchanged. Selection
+forwards the ports of an effect proved to leave its state unchanged.
+Snapshots pack the three fields into 13 bits; restoring assigns each field.
+
 Strict floating-point arithmetic requires the exact non-NaN result, including
 signed zero and infinity. An arithmetic NaN result permits any quiet NaN payload
 and sign. Instruction selection therefore checks result membership when a target
@@ -1219,7 +1261,8 @@ chooses a particular quiet NaN. It does not equate arbitrary floating-point bit
 patterns or relax moves, constants, or bitcasts.
 
 The refinement proof first checks that the source arithmetic and the target's
-constant round-to-nearest arithmetic have the same operation and operands. It
+rounded arithmetic have the same operation, operands, and rounding mode.
+A generic arithmetic node fixes the mode to nearest-even. It
 replaces that shared result with a fresh floating-point symbol and retains the
 target's result-selection expression. The proof checks two cases for every bit
 pattern of that symbol: a non-NaN result must keep every bit, and a NaN result
@@ -1235,5 +1278,30 @@ clipping, as a proof obligation. A candidate can use the generic conversion
 only when its constant rounding mode matches that conversion's semantics. The
 typed refinement proof checks every input on which the source conversion is
 defined and requires the same result bits. Target behavior on invalid source
-inputs can define clipping or NaN results without weakening this check. A
-failed or unsupported proof rejects the candidate.
+inputs can define clipping or NaN results without weakening this check.
+`FPFlags` remains defined even when the numeric conversion result is not.
+The proof report separates proven rules from unsupported encodings; non-toward-zero
+rounded float-to-integer conversions currently need an unsupported bit-blast
+encoding. Failed proofs reject the rule set, and verification mode also rejects
+unsupported proofs.
+
+## Floating-point target coverage
+
+x86-64 and ARM64 require the default floating-point environment. Their function
+entry check rejects a fixed-rounding FP operation together with `fp.set_round`,
+`fp.restore`, `fp.update`, or `fp.hold`, naming both operations. It runs before
+the function's selection graph is built. Observable exceptions, dynamic rounding,
+and environment operations are rejected with the operation named.
+
+| Profile | RISC-V | x86-64 and ARM64 |
+| --- | --- | --- |
+| Scalar fixed rounding | Instruction rounding operands | Existing scalar rules under the default-environment precondition |
+| Observable flags | Single-instruction `Exact` rules | Unsupported |
+| Dynamic rounding | `FRM` field read | Unsupported |
+| Environment fields and snapshots | Fixed CSR instructions and declared hardwired fields | Unsupported |
+| Trapping arithmetic | State-port ordering; native delivery is deferred | Unsupported |
+
+ARM64 FPSR access is deferred to the later target-coverage work. A strict multiply
+followed by an add remains `fp.mul %a, %b : !f64` followed by
+`fp.add %product, %c : !f64`: the default semantics require separate roundings,
+ignore exceptions, and carry no state ports.

@@ -3,6 +3,7 @@
 
 use tir::{
     builtin::{ops, IntegerType, ModuleOp},
+    fp::ops as fp_ops,
     func::FuncOp,
     graph::{MetaMutDag, MutDag, OperandConstraint},
     sem::{SemGraph, SymKind},
@@ -13,6 +14,7 @@ use tir::backend::isel::{
     EmitRequest, ImmRange, InstructionSelectPass, RegisterCapability, RegisterRequirement, Rule,
     RuleEmitFn, RuleMatch, LATENCY_COST_SCALE,
 };
+use tir::ptr::{LoadOpBuilder, StoreOpBuilder};
 use tir::sem::template_node;
 
 use super::fixtures::{self, atomic_pattern, binary, marker_op, nary, symbol};
@@ -570,7 +572,12 @@ fn emit_float_marker(
     _m: &RuleMatch,
 ) -> Result<Box<dyn Operation>, PassError> {
     let ty = req.result_ty.ok_or(PassError::RewriteFailed(req.op_id()))?;
-    Ok(Box::new(ops::constantf(context, 0.0, ty).build()))
+    Ok(Box::new(
+        fp_ops::ConstantOpBuilder::new(context)
+            .bits(0)
+            .result_type(ty)
+            .build(),
+    ))
 }
 
 #[test]
@@ -578,7 +585,7 @@ fn introduced_integer_materializer_uses_its_class_type_under_float_bitcast() {
     let (context, module, _region) = function(
         r#"module {
 func.func @demo() -> !f32 {
-  %value = constantf {value = 0.0} : !f32
+  %value = fp.constant {bits = 0} : !f32
   func.return %value
 }
 module_end
@@ -863,7 +870,7 @@ fn store_pattern() -> SemGraph {
     g
 }
 
-fn emit_load_marker(
+fn emit_load(
     context: &Context,
     req: &EmitRequest,
     m: &RuleMatch,
@@ -872,30 +879,27 @@ fn emit_load_marker(
         .value_binding(0)
         .ok_or(PassError::RewriteFailed(req.op_id()))?;
     let result_ty = req.result_ty.expect("typed result");
-    Ok(marker!(
-        ShlMarkerOp,
-        ShlMarkerOpBuilder,
-        context,
-        base,
-        result_ty
+    Ok(Box::new(
+        LoadOpBuilder::new(context)
+            .ptr(base)
+            .result_type(result_ty)
+            .build(),
     ))
 }
 
-fn emit_store_marker(
+fn emit_store(
     context: &Context,
     req: &EmitRequest,
     m: &RuleMatch,
 ) -> Result<Box<dyn Operation>, PassError> {
+    let base = m
+        .value_binding(0)
+        .ok_or(PassError::RewriteFailed(req.op_id()))?;
     let value = m
         .value_binding(4)
         .ok_or(PassError::RewriteFailed(req.op_id()))?;
-    let result_ty = context.get_value(value).ty();
-    Ok(marker!(
-        MulMarkerOp,
-        MulMarkerOpBuilder,
-        context,
-        value,
-        result_ty
+    Ok(Box::new(
+        StoreOpBuilder::new(context).value(value).ptr(base).build(),
     ))
 }
 
@@ -920,22 +924,34 @@ func.func @demo(%a: !i32) -> !i32 {
 module_end
 }"#,
     );
-
+    let source_ops = context.get_region(region).op_ids();
+    let source_store = source_ops[1];
+    let source_load = source_ops[2];
     let rules = vec![
-        Rule::new("load", load_pattern(), LATENCY_COST_SCALE, emit_load_marker),
-        Rule::new(
-            "store",
-            store_pattern(),
-            LATENCY_COST_SCALE,
-            emit_store_marker,
-        ),
+        Rule::new("load", load_pattern(), LATENCY_COST_SCALE, emit_load),
+        Rule::new("store", store_pattern(), LATENCY_COST_SCALE, emit_store),
     ];
 
     run_pass(&context, &module, InstructionSelectPass::new(rules))
         .expect("memory ops should select through their interfaces");
 
-    // store -> muli marker, load -> shli marker; the alloca is untouched.
-    assert_eq!(body_names(&context, region), vec!["alloca", "muli", "shli"]);
+    let body = body_ops(&context, region);
+    let argument = context.get_region(region).value_arguments()[0].id();
+    assert_eq!(
+        body_names(&context, region),
+        vec!["alloca", "store", "load"]
+    );
+    assert_ne!(body[1].id, source_store);
+    assert_ne!(body[2].id, source_load);
+    assert_eq!(
+        body[1].value_operands().as_slice(),
+        &[argument, body[0].value_results()[0]]
+    );
+    assert_eq!(
+        body[2].value_operands().as_slice(),
+        &[body[0].value_results()[0]]
+    );
+    assert_eq!(body[1].state_results(), body[2].state_operands());
 }
 
 /// Equivalent definitions extract to one tile.

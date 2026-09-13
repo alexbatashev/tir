@@ -4,4 +4,4 @@
 // CHECK: ptr.alloca {size = 4, align = 4}
 // CHECK: ptr.store {{%[0-9]+}}, {{%[0-9]+}}
 // CHECK: ptr.load {{%[0-9]+}} {{.*}} : !f32
-// CHECK: addf {{%[0-9]+}}, {{%[0-9]+}} : !f32
+// CHECK: fp.add {{%[0-9]+}}, {{%[0-9]+}} : !f32

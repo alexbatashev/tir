@@ -2,7 +2,7 @@
 
 module {
   %fn_main = func.func @main() -> !i32 {
-    %state0 = state.entry_state
+    %state0 = state.entry_state : !state<memory>
     %slot, %state1 = ptr.alloca {size = 8, align = 4} : !ptr.p<!i32>
     %forty = constant {value = 40} : !i32
     %state2 = ptr.store %forty, %slot state(%state1)

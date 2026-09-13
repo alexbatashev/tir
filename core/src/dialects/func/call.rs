@@ -1,7 +1,10 @@
 use crate::Any;
 use crate::attributes::AttributeValue;
-use crate::builtin::{FnType, UnitType};
-use crate::{Apply, Context, Error, Operation, ValueId, operation};
+use crate::builtin::{FnType, StateResource, UnitType};
+use crate::{
+    Apply, Context, Error, Operation, ResourceAccess, ResourceEffect, ResourceEffects, ValueId,
+    operation,
+};
 
 use crate as tir;
 
@@ -19,8 +22,35 @@ operation! {
             result: "Any",
         },
         state: "in_out",
-        interfaces: [Apply],
+        interfaces: [Apply, ResourceEffects],
     }
+}
+
+impl ResourceEffects for CallOp {
+    fn resource_effects(&self) -> Vec<ResourceEffect> {
+        [StateResource::Memory, StateResource::FpEnv]
+            .into_iter()
+            .map(|resource| ResourceEffect {
+                resource,
+                access: ResourceAccess::Change,
+                observed: resource_states(&self.0, self.0.state_operands(), resource),
+                produced: resource_states(&self.0, self.0.state_results(), resource),
+            })
+            .collect()
+    }
+}
+
+fn resource_states(
+    op: &tir::OpHandle,
+    values: impl IntoIterator<Item = ValueId>,
+    resource: StateResource,
+) -> Vec<ValueId> {
+    values
+        .into_iter()
+        .filter(|value| {
+            op.context.state_resource(op.context.get_value(*value).ty()) == Some(resource)
+        })
+        .collect()
 }
 
 impl Apply for CallOp {
@@ -176,9 +206,7 @@ impl CallOp {
             .callee(callee)
             .args(args)
             .result_type(ret_type);
-        if let Some(&state) = parser.parse_state_operands(context)?.first() {
-            builder = builder.state(state);
-        }
+        builder = builder.state_operands(parser.parse_state_operands(context)?);
         if result_address {
             builder = builder.result_address();
         }

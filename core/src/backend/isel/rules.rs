@@ -11,8 +11,8 @@ use tir::sem::{ExtendSemBytes, ExtendSemBytesTyped, SymKind};
 use tir::{Context, NewOp, OpHandle, Operation, PassError};
 
 use crate::backend::isel::{
-    EmitRequest, ImmRange, RegisterCapability, RegisterRequirement, Rule, RuleEmitFn, RuleKind,
-    RuleMatch,
+    EmitRequest, FpFlags, ImmRange, RegisterCapability, RegisterRequirement, Rule, RuleEmitFn,
+    RuleKind, RuleMatch,
 };
 use crate::backend::regalloc::RegClassId;
 use crate::graph::MetaMutDag;
@@ -174,17 +174,16 @@ pub fn emit_with(
         operands.into_iter().map(|(_, value)| value).collect();
     let mut result_values: Vec<tir::ValueId> =
         results.into_iter().map(|(_, value)| value).collect();
-    // An opcode that touches memory carries the chain of the access it covers,
-    // as its trailing ports: the state the IR access read, and the state it
-    // published, taken over as this instruction's own definition.
-    let effects = spec.info.effects;
-    if effects.reads || effects.writes {
-        let state = req
-            .state
-            .ok_or_else(|| PassError::RewriteFailed(req.op_id()))?;
-        operand_values.push(state.observed);
-        result_values.extend(state.published);
+    if (spec.info.effects.reads || spec.info.effects.writes)
+        && !req.states.iter().any(|state| {
+            context.state_resource(context.get_value(state.observed).ty())
+                == Some(tir::builtin::StateResource::Memory)
+        })
+    {
+        return Err(PassError::RewriteFailed(req.op_id()));
     }
+    operand_values.extend(req.states.iter().map(|state| state.observed));
+    result_values.extend(req.states.iter().filter_map(|state| state.published));
     let instance = NewOp::new_dynamic(
         spec.op,
         context.clone(),
@@ -265,6 +264,7 @@ pub struct RuleSpec {
     /// [`crate::backend::isel::LATENCY_COST_SCALE`] plus the encoding size.
     pub emits: &'static [&'static crate::backend::InstrInfo],
     pub kind: RuleKind,
+    pub fp_flags: FpFlags<PatternRef>,
     /// Emitter for the prelude instruction, when the rule emits a flag-setting
     /// companion first. Generated as a shim over [`emit_with`].
     pub prelude_emit: Option<RuleEmitFn>,
@@ -362,6 +362,13 @@ pub fn build_rules(
             pattern: build_pattern(context, kinds, blob, &spec.pattern),
             base_cost,
             kind: spec.kind,
+            fp_flags: match &spec.fp_flags {
+                FpFlags::None => FpFlags::None,
+                FpFlags::Clobber => FpFlags::Clobber,
+                FpFlags::Exact(pattern) => {
+                    FpFlags::Exact(build_pattern(context, kinds, blob, pattern))
+                }
+            },
             prelude_emit: spec.prelude_emit,
             operand_constraints: spec.constraints.to_vec(),
             operand_registers,

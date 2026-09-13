@@ -69,13 +69,8 @@ fn emit_fixed_register_rules<'a>(
             &isa_param_values,
         );
 
-        if let Some(definer) = classify_definer(
-            inst,
-            &op_name,
-            &mnemonic,
-            &ops,
-            register_index_map,
-        ) {
+        if let Some(definer) = classify_definer(inst, &op_name, &mnemonic, &ops, register_index_map)
+        {
             definers.push(definer);
         } else if let Some(reader) = classify_reader(
             inst,
@@ -167,7 +162,11 @@ fn emit_division_rules(
 
     // The remainder is the then-arm write to the sibling register (`rdx`); its
     // value is the Euclidean identity, matching the `remsi`/`remui` semantics.
-    if let Some((_, remainder_rhs)) = reader.then_writes.iter().find(|(reg, _)| reg == sibling_reg) {
+    if let Some((_, remainder_rhs)) = reader
+        .then_writes
+        .iter()
+        .find(|(reg, _)| reg == sibling_reg)
+    {
         emit_one_division_rule(
             definer,
             reader,
@@ -361,12 +360,20 @@ fn substitute_symbol_with_subgraph(
     use tir_graph::Dag;
     use tir_symbolic::lang::{SymKind, SymPayload};
     use tir_symbolic::sem::{CopyAction, copy_subgraph_with};
-    copy_subgraph_with(dst, src, node, memo, &mut |dst, node| match src.get_leaf_data(node) {
-        Some(SymPayload::SymbolId(id)) if *id == symbol && *src.get_node(node) == SymKind::Symbol => {
-            CopyAction::Replace(copy_subgraph(dst, src, replacement, &mut HashMap::new()))
-        }
-        _ => CopyAction::Keep,
-    })
+    copy_subgraph_with(
+        dst,
+        src,
+        node,
+        memo,
+        &mut |dst, node| match src.get_leaf_data(node) {
+            Some(SymPayload::SymbolId(id))
+                if *id == symbol && *src.get_node(node) == SymKind::Symbol =>
+            {
+                CopyAction::Replace(copy_subgraph(dst, src, replacement, &mut HashMap::new()))
+            }
+            _ => CopyAction::Keep,
+        },
+    )
 }
 
 /// Emit one division value rule (quotient or remainder) for a (definer, reader)
@@ -412,8 +419,10 @@ fn emit_one_division_rule(
         return;
     };
     // The single register operand is the divisor.
-    let Some((divisor_name, Type::Struct(divisor_class))) =
-        reader.ops.iter().find(|(_, ty)| matches!(ty, Type::Struct(_)))
+    let Some((divisor_name, Type::Struct(divisor_class))) = reader
+        .ops
+        .iter()
+        .find(|(_, ty)| matches!(ty, Type::Struct(_)))
     else {
         return;
     };
@@ -424,12 +433,7 @@ fn emit_one_division_rule(
     let immediate_symbols = HashSet::new();
     let (canon_pattern, canon_root, forced_widths) =
         tir_symbolic::lang::canonicalize_for_selection(&pattern, lowering.root, &immediate_symbols);
-    let mut pattern_widths = tir_symbolic::lang::infer_widths(&canon_pattern, |_| None);
-    for (index, forced) in forced_widths.iter().enumerate() {
-        if forced.is_some() {
-            pattern_widths[index] = *forced;
-        }
-    }
+    let pattern_widths = selection_pattern_widths(&canon_pattern, forced_widths);
     let (pattern_offset, pattern_typed) = intern_dag(&canon_pattern, canon_root, &pattern_widths);
     let pattern_spec = SpecPattern {
         offset: pattern_offset,
@@ -552,8 +556,14 @@ fn emit_one_division_rule(
         &reader.inst.name,
     );
     let constraints = [
-        constraint_entry(lhs_symbol, quote! { tir::graph::OperandConstraint::Register }),
-        constraint_entry(divisor_symbol, quote! { tir::graph::OperandConstraint::Register }),
+        constraint_entry(
+            lhs_symbol,
+            quote! { tir::graph::OperandConstraint::Register },
+        ),
+        constraint_entry(
+            divisor_symbol,
+            quote! { tir::graph::OperandConstraint::Register },
+        ),
     ];
     let (rule_ts, rule_ident) = emit_rule_spec(
         &rule_key,
@@ -569,6 +579,7 @@ fn emit_one_division_rule(
         None,
         &[],
         None,
+        FpFlags::None,
     );
     isel_rule_emitters.push(quote! {
         #prelude_ts

@@ -1,3 +1,5 @@
+use crate::graph::NodeId;
+use crate::sem::SemGraph;
 use crate::sem::Value;
 use crate::utils::APInt;
 use crate::{BlockId, RegionId, TypeId, ValueId};
@@ -148,16 +150,65 @@ pub trait MemoryWrite {
     fn written_value(&self) -> ValueId;
 }
 
-/// An op ordered on memory: the states it observes and the ones it leaves.
-/// Both lists are empty until a threading pass has put the op on a chain.
-pub trait MemoryState {
-    /// Every state this op is ordered after.
-    fn observed(&self) -> Vec<ValueId>;
-    /// Every state this op leaves behind.
-    fn produced(&self) -> Vec<ValueId>;
-    /// Whether this op changes memory, so at most one op may observe each
-    /// state it consumes. Reads and joins answer false.
-    fn changes_memory(&self) -> bool;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResourceAccess {
+    Read,
+    Change,
+}
+
+impl ResourceAccess {
+    pub fn semantic_code(self) -> u64 {
+        match self {
+            Self::Read => crate::sem::StateAccessKind::Read as u64,
+            Self::Change => crate::sem::StateAccessKind::Change as u64,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResourceEffect {
+    pub resource: crate::builtin::StateResource,
+    pub access: ResourceAccess,
+    pub observed: Vec<ValueId>,
+    pub produced: Vec<ValueId>,
+}
+
+/// The execution resources an operation reads or changes.
+pub trait ResourceEffects {
+    fn resource_effects(&self) -> Vec<ResourceEffect>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResourceField {
+    Whole,
+    FpRounding,
+    FpFlags,
+    FpTraps,
+}
+
+impl ResourceField {
+    pub fn semantic_code(self) -> u64 {
+        match self {
+            Self::Whole => crate::sem::StateFieldKind::Whole as u64,
+            Self::FpRounding => crate::sem::StateFieldKind::FpRounding as u64,
+            Self::FpFlags => crate::sem::StateFieldKind::FpFlags as u64,
+            Self::FpTraps => crate::sem::StateFieldKind::FpTraps as u64,
+        }
+    }
+}
+
+pub struct ResourceSemantics {
+    pub graph: SemGraph,
+    pub root: NodeId,
+    /// Flags raised by this operation, before accumulation in the environment.
+    pub raised_flags: Option<NodeId>,
+    pub value_results: Vec<NodeId>,
+    pub state_results: Vec<NodeId>,
+}
+
+/// Exact value and resource-state semantics for an effectful operation.
+pub trait HasResourceSemantics {
+    fn resource_semantics(&self) -> ResourceSemantics;
 }
 
 /// Where the carried values sit on each side of a structured op: index ranges
@@ -225,7 +276,12 @@ pub trait Global {
 /// An operation that cannot trap, so it may run whether or not control would
 /// have reached it: a loop cone may hoist it, and a lowering may evaluate it on
 /// a path the source did not take.
-pub trait Speculatable {}
+pub trait Speculatable {
+    /// Whether this instance may execute on a path that did not demand it.
+    fn is_speculatable(&self) -> bool {
+        true
+    }
+}
 
 /// What a non-local exit leaves: the loop or switch nearest around it, or the
 /// enclosing scope carrying `label`.

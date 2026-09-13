@@ -554,6 +554,7 @@ fn hash_attr_value(value: &AttributeValue, h: &mut impl Hasher) {
         }),
         // Register and value attributes are machine IR; the value vocabulary
         // never sees them.
-        AttributeValue::Register(_) | AttributeValue::Value(_) => {}
+        AttributeValue::Register(_) | AttributeValue::Value(_) | AttributeValue::FpSemantics(_) => {
+        }
     }
 }

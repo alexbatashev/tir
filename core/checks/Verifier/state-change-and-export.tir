@@ -1,0 +1,12 @@
+// RUN: not tir opt --verify %s 2>&1 | filecheck %s
+
+module {
+  %f = func.func @main(%p: !ptr.p<!i32>, %value: !i32) {
+    %memory = state.entry_state : !state<memory>
+    %next = ptr.store %value, %p state(%memory)
+    -> %memory
+  }
+  module_end
+}
+
+// CHECK: state %{{[0-9]+}} has incompatible concurrent uses

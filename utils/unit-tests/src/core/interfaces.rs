@@ -1,7 +1,7 @@
 //! The generic views spec-05 gives functions, calls, globals and leaf ops:
 //! what a consumer reads without knowing the concrete op.
 
-use tir::{Apply, Callable, Global, MemoryState, Operation, Speculatable};
+use tir::{Apply, Callable, Global, Operation, ResourceAccess, ResourceEffects, Speculatable};
 
 use super::fixtures::{self, module_ops};
 
@@ -97,7 +97,7 @@ fn a_zero_filled_global_has_a_zero_image() {
 const THREADED_CALL: &str = r#"module {
   %fn_puts = func.declare @puts(!i32) -> !i32
   %fn_main = func.func @main(%0: !i32) -> !i32 {
-    %1 = state.entry_state
+    %1 = state.entry_state : !state<memory>
     %2, %3 = func.call %fn_puts(%0 : !i32) -> !i32 state(%1)
     func.return %2 state(%3)
   }
@@ -105,7 +105,7 @@ const THREADED_CALL: &str = r#"module {
 }"#;
 
 #[test]
-fn a_call_on_a_chain_reports_the_states_its_type_filter_finds() {
+fn a_call_declares_conservative_resource_effects() {
     let (context, module) = fixtures::parse(THREADED_CALL);
     let ops = module_ops(&context, module.id());
     let body = context.get_op(ops[1]).regions()[0];
@@ -117,15 +117,19 @@ fn a_call_on_a_chain_reports_the_states_its_type_filter_finds() {
         .find(|op| op.is::<tir::func::CallOp>())
         .expect("the body holds the call");
 
-    let memory = call
+    let effects = call
         .clone()
-        .as_interface::<dyn MemoryState>()
-        .expect("a call is ordered on memory");
-    assert_eq!(memory.observed(), call.state_operands().to_vec());
-    assert_eq!(memory.produced(), call.state_results().to_vec());
-    assert_eq!(memory.observed().len(), 1);
-    assert_eq!(memory.produced().len(), 1);
-    assert!(memory.changes_memory());
+        .as_interface::<dyn ResourceEffects>()
+        .expect("a call declares resource effects")
+        .resource_effects();
+    assert_eq!(effects.len(), 2);
+    assert_eq!(effects[0].resource, tir::builtin::StateResource::Memory);
+    assert_eq!(effects[0].access, ResourceAccess::Change);
+    assert_eq!(effects[0].observed, call.state_operands().to_vec());
+    assert_eq!(effects[0].produced, call.state_results().to_vec());
+    assert_eq!(effects[1].resource, tir::builtin::StateResource::FpEnv);
+    assert!(effects[1].observed.is_empty());
+    assert!(effects[1].produced.is_empty());
     assert_eq!(call.value_operands().len(), 2);
     assert_eq!(call.value_results().len(), 1);
 }

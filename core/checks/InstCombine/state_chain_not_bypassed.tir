@@ -14,7 +14,7 @@ module {
     %0 = constant {value = 0} : !i32
     %1 = constant {value = 0} : !i32
     %2 = cmpi %0, %1 {predicate = "ne"} : !i1
-    %3 = state.entry_state
+    %3 = state.entry_state : !state<memory>
     %4 = scf.switch %2 args(%3) (%5) {
       -> %5
     }

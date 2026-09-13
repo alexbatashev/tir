@@ -12,6 +12,9 @@ rule zext-shifts: #zext(x: int<N>, W) : int<W>
   => #lshr(#shl(x, W - N), W - N)
   where N < W;
 
+rule zext-zero: #zext(0, W) : int<W>
+  => const<W>(0);
+
 rule if-same: #if(c: int<1>, x: int<W>, x) : int<W>
   => x;
 
@@ -173,4 +176,3 @@ rule ule-via-cmp: #ule(a: int<W>, b: int<W>) : int<1>
 
 rule sub-via-add-neg: #sub(a: int<W>, c: const<W>) : int<W>
   => #add(a, #neg(c));
-

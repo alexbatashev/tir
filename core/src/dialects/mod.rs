@@ -1,5 +1,6 @@
 pub mod builtin;
 pub mod cfg;
+pub mod fp;
 pub mod func;
 pub mod ptr;
 pub mod scf;

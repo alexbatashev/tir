@@ -134,3 +134,30 @@ fn ieee_arithmetic_preserves_signed_zero() {
     nary(full, SymKind::If, &[is_zero, zero_float, original]);
     assert!(prove_guarded_relaxations(&[rule]).is_err());
 }
+
+#[test]
+fn non_rtz_conversion_proof_reports_unsupported() {
+    let mut candidate = SemGraph::new();
+    let input = symbol(&mut candidate, 0);
+    let width = constant(&mut candidate, 64, 32);
+    let mode = constant(&mut candidate, 0, 3);
+    nary(&mut candidate, SymKind::FPToSIRound, &[input, width, mode]);
+    let mut full = SemGraph::new();
+    let input = symbol(&mut full, 0);
+    let width = constant(&mut full, 64, 32);
+    let mode = constant(&mut full, 0, 3);
+    let result = nary(&mut full, SymKind::FPToSIRound, &[input, width, mode]);
+    let invalid = binary(&mut full, SymKind::Ne, input, input);
+    let saturated = constant(&mut full, i64::MAX as u64, 64);
+    nary(&mut full, SymKind::If, &[invalid, saturated, result]);
+    let rule = Rule {
+        guarded_semantics: Some(full),
+        operand_registers: vec![(0, RegisterRequirement::whole(RegisterCapability::float(64)))],
+        ..Rule::new("non-rtz-conversion", candidate, LATENCY_COST_SCALE, no_emit)
+    };
+    let report = prove_guarded_relaxations(&[rule]).unwrap();
+    assert!(report.proven.is_empty());
+    assert_eq!(report.unsupported.len(), 1);
+    assert_eq!(report.unsupported[0].0, "non-rtz-conversion");
+    assert!(report.unsupported[0].1.contains("FPToSIRound"));
+}

@@ -1,0 +1,30 @@
+// RUN: tir mc --march=rv64ifd --filetype=asm -o /tmp/tir-riscv-fp-comparison-flags-exec.s %s
+// RUN: isasim --march=rv64ifd --entry=main --until-pc=0 --trace-registers-end /tmp/tir-riscv-fp-comparison-flags-exec.s | filecheck %s
+// RUN: tir mc --march=rv64ifd --filetype=asm --shuffle-machine-order -o /tmp/tir-riscv-fp-comparison-flags-exec.s %s
+// RUN: isasim --march=rv64ifd --entry=main --until-pc=0 --trace-registers-end /tmp/tir-riscv-fp-comparison-flags-exec.s | filecheck %s
+
+module {
+  %fn_main = func.func @main() -> !i64 {
+    %env0 = state.entry_state : !state<fp.env>
+    %all_flags = constant {value = 31} : !i5
+    %env1 = fp.clear_flags %all_flags state(%env0)
+    %nan = fp.constant {bits = 9221120237041090560} : !f64
+    %one = fp.constant {bits = 4607182418800017408} : !f64
+    %unused_signaling, %env2 = fp.cmp %nan, %one state(%env1) {predicate = "olt", semantics = {behavior = "signaling", exceptions = "flags"}} : !i1
+    %signaling_flags, %env3 = fp.get_flags state(%env2) : !i5
+    %env4 = fp.clear_flags %all_flags state(%env3)
+    %unused_quiet, %env5 = fp.cmp %nan, %one state(%env4) {predicate = "oeq", semantics = {behavior = "quiet", exceptions = "flags"}} : !i1
+    %quiet_flags, %env6 = fp.get_flags state(%env5) : !i5
+    %wide_signaling = extui %signaling_flags : !i64
+    %shift = constant {value = 8} : !i64
+    %shifted_signaling = shli %wide_signaling, %shift : !i64
+    %wide_quiet = extui %quiet_flags : !i64
+    %observed = ori %shifted_signaling, %wide_quiet : !i64
+    func.return %observed state(%env6)
+  }
+  module_end
+}
+
+// CHECK: final registers:
+// CHECK-DAG: GPR[10] = 0x1000
+// CHECK-DAG: CSR[1] = 0x0

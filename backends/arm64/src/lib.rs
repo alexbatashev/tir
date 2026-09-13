@@ -227,6 +227,9 @@ fn create_isel_pass_for(
     abi: &'static tir::backend::abi::AbiInfo,
 ) -> tir::backend::isel::InstructionSelectPass {
     tir::backend::isel::InstructionSelectPass::new(get_isel_rules(context, features))
+        .with_function_check(|context, function| {
+            tir::backend::isel::check_default_fp_environment(context, function, "ARM64")
+        })
         .with_rules(include_str!("isel-materialize.pdl"))
         .with_branch_emitters(tir::backend::isel::BranchEmitters {
             uncond: tir::backend::emit_uncond_branch,

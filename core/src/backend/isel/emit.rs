@@ -37,8 +37,8 @@ pub(crate) struct ScheduledEmit {
     pub(crate) rule_index: usize,
     pub(crate) m: RuleMatch,
     pub(crate) source_op: Option<OpId>,
-    /// The state ports of the access this tile covers, where it covers one.
-    pub(crate) state: Option<super::StatePorts>,
+    /// The resource state ports of the operations this tile covers.
+    pub(crate) states: Vec<super::StatePorts>,
     pub(crate) results: Vec<ValueId>,
     pub(crate) result_ty: Option<TypeId>,
 }

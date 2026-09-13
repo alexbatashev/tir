@@ -1,0 +1,15 @@
+// RUN: tir opt --pass verify-deps %s | filecheck %s
+// RUN: tir opt --pass verify-deps,dce --verify %s | filecheck %s --check-prefix=DCE
+
+module {
+  %f = func.func @main(%a: !f64, %b: !f64) -> !f64 {
+    %unused = fp.add %a, %b {semantics = {kind = "arithmetic", rounding = "nearest_even", exceptions = "ignore", nan = "canonical", subnormals = "gradual", tininess = "after_rounding"}} : !f64
+    -> %a
+  }
+  module_end
+}
+
+// CHECK: fp.add
+// DCE: func.func
+// DCE-NOT: fp.add
+// DCE: module_end

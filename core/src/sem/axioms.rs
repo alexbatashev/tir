@@ -140,13 +140,13 @@ fn fits_unsigned(v: &APInt, bits: u32) -> bool {
 }
 
 /// The width a template constant materializes at.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum ConstWidth {
     /// A bare expression: an untyped immediate — proved at the register width,
     /// instantiated at the e-graph's 64-bit introduced-constant convention.
     Register,
     /// An explicit `(const <expr> <width>)`.
-    Fixed(u32),
+    Explicit(WidthExpr),
 }
 
 /// One template tree shared by both sides; which leaves are legal where is
@@ -568,7 +568,7 @@ impl Axiom {
             AxNode::Const(e, width) => {
                 let width = match width {
                     ConstWidth::Register => r.register_width,
-                    ConstWidth::Fixed(w) => *w,
+                    ConstWidth::Explicit(w) => u32::try_from(w.eval(widths)?).ok()?,
                 };
                 Some(con(g, e.eval(widths)?, width))
             }
@@ -1126,11 +1126,10 @@ impl<'a> Lowering<'a> {
                     out: value,
                     value: width_expr(expr, &widths),
                 });
-                let bits = match width {
-                    ConstWidth::Register => 64,
-                    ConstWidth::Fixed(width) => *width,
+                let width = match width {
+                    ConstWidth::Register => self.constant_width(64),
+                    ConstWidth::Explicit(width) => self.let_expr(width_expr(width, &widths)),
                 };
-                let width = self.constant_width(bits);
                 let var = self.literal(value, width, None, head);
                 Built {
                     var,

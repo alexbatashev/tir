@@ -10,7 +10,7 @@ module {
     ^bb2:
     cfg.br ^bb1(%1 : !f64)
     ^bb1(%2: !f64):
-    %3 = addf %2, %0 : !f64
+    %3 = fp.add %2, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f64
     func.return %3
   }
   module_end

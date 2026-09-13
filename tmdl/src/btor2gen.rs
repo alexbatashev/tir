@@ -605,6 +605,9 @@ pub fn generate_btor2<'a>(
                 matches!(
                     trait_,
                     ast::RegisterTrait::StatusFlag
+                        | ast::RegisterTrait::FpFlags
+                        | ast::RegisterTrait::FpRounding
+                        | ast::RegisterTrait::FpTraps
                         | ast::RegisterTrait::Float
                         | ast::RegisterTrait::Polymorphic
                 )

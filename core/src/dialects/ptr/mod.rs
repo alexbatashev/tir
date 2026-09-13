@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use crate::ty::TypeConstraint;
 use crate::{
-    Context, Error, IRFormatter, MemoryRead, MemoryWrite, Operation, PromotableAllocation, Type,
-    TypeId,
+    Context, Error, IRFormatter, MemoryRead, MemoryWrite, Operation, PromotableAllocation,
+    ResourceAccess, ResourceEffect, ResourceEffects, Type, TypeId,
     attributes::{AttributeValue, Predicate},
     dialect, operation,
     parse::Span,
@@ -332,7 +332,7 @@ operation! {
         results: R {
             result: "AnyConstraint",
         },
-        interfaces: [MemoryRead, crate::interp::Interp],
+        interfaces: [MemoryRead, ResourceEffects, crate::interp::Interp],
         state: "in_out",
     }
 }
@@ -346,7 +346,7 @@ operation! {
             value: "AnyConstraint",
             ptr: "crate::ptr::PtrType",
         },
-        interfaces: [MemoryWrite, crate::interp::Interp],
+        interfaces: [MemoryWrite, ResourceEffects, crate::interp::Interp],
         state: "in_out",
     }
 }
@@ -385,7 +385,7 @@ operation! {
             source: "crate::ptr::PtrType",
             size: "crate::Integer<64>",
         },
-        interfaces: [crate::interp::Interp],
+        interfaces: [ResourceEffects, crate::interp::Interp],
         state: "in_out",
     }
 }
@@ -399,7 +399,7 @@ operation! {
             value: "crate::Integer<8>",
             size: "crate::Integer<64>",
         },
-        interfaces: [MemoryWrite, crate::interp::Interp],
+        interfaces: [MemoryWrite, ResourceEffects, crate::interp::Interp],
         state: "in_out",
     }
 }
@@ -437,5 +437,38 @@ impl MemoryWrite for MemsetOp {
 
     fn written_value(&self) -> tir::ValueId {
         self.operands()[1]
+    }
+}
+
+fn memory_effect(op: &tir::OpHandle, access: ResourceAccess) -> Vec<ResourceEffect> {
+    vec![ResourceEffect {
+        resource: tir::builtin::StateResource::Memory,
+        access,
+        observed: op.state_operands().to_vec(),
+        produced: op.state_results().to_vec(),
+    }]
+}
+
+impl ResourceEffects for LoadOp {
+    fn resource_effects(&self) -> Vec<ResourceEffect> {
+        memory_effect(&self.0, ResourceAccess::Read)
+    }
+}
+
+impl ResourceEffects for StoreOp {
+    fn resource_effects(&self) -> Vec<ResourceEffect> {
+        memory_effect(&self.0, ResourceAccess::Change)
+    }
+}
+
+impl ResourceEffects for MemcpyOp {
+    fn resource_effects(&self) -> Vec<ResourceEffect> {
+        memory_effect(&self.0, ResourceAccess::Change)
+    }
+}
+
+impl ResourceEffects for MemsetOp {
+    fn resource_effects(&self) -> Vec<ResourceEffect> {
+        memory_effect(&self.0, ResourceAccess::Change)
     }
 }

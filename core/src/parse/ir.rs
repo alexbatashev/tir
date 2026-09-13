@@ -15,7 +15,7 @@ type ParseResult<T> = Result<T, (Span, Error)>;
 /// An unordered body: its operations and its results.
 type NodesBody = (Vec<OpId>, Vec<ValueId>);
 type BlockLabel = (String, BlockArguments, Vec<NamedAttribute>);
-/// The `(%a: !ty, %s: !state)` argument list of a block label.
+/// The `(%a: !ty, %s: !state<memory>)` argument list of a block label.
 type BlockArguments = Vec<(String, crate::TypeId)>;
 
 pub fn parse_ir<T: Operation>(context: &Context, src: &str) -> Result<T, (Span, Error)> {
@@ -114,16 +114,15 @@ pub(crate) fn parse_single_op<'src>(
 
         let op = op_parser(parser, context)?;
         coerce_predicates(parser, context, dialect, name, op.id())?;
-        // A name past what the op's own parser produced binds a memory state
-        // the text says it leaves: the chains memory order threads through an
-        // op are its own to carry, at whatever count the text names. A unit
-        // result is never spelled, so no name is its.
+        // A name past what the op's own parser produced binds a state the text
+        // says it leaves, at whatever count the text names.
         let unit = crate::builtin::UnitType::new(context);
+        let hides_unit_result = context.get_op(op.id()).has_interface::<dyn crate::Apply>();
         let results: Vec<ValueId> = context
             .get_op(op.id())
             .results()
             .into_iter()
-            .filter(|&result| context.get_value(result).ty() != unit)
+            .filter(|&result| !hides_unit_result || context.get_value(result).ty() != unit)
             .collect();
         if !result_names.is_empty() && result_names.len() < results.len() {
             return Err((
@@ -135,12 +134,49 @@ pub(crate) fn parse_single_op<'src>(
                 )),
             ));
         }
-        for (index, name) in result_names.iter().enumerate() {
-            let result = results
-                .get(index)
-                .copied()
-                .unwrap_or_else(|| context.append_result(op.id(), crate::TypeId::STATE));
-            parser.define_value(name, result);
+        for (index, result_name) in result_names.iter().enumerate() {
+            let result = if let Some(result) = results.get(index).copied() {
+                result
+            } else {
+                let state_index = index - results.len();
+                let handle = context.get_op(op.id());
+                let mut resources: Vec<_> = handle
+                    .state_operands()
+                    .into_iter()
+                    .filter_map(|state| context.state_resource(context.get_value(state).ty()))
+                    .collect();
+                if let Some(effects) = handle.clone().as_interface::<dyn crate::ResourceEffects>() {
+                    for effect in effects.resource_effects() {
+                        if !resources.contains(&effect.resource) {
+                            resources.push(effect.resource);
+                        }
+                    }
+                }
+                if handle.has_interface::<dyn crate::PromotableAllocation>()
+                    && !resources.contains(&crate::builtin::StateResource::Memory)
+                {
+                    resources.push(crate::builtin::StateResource::Memory);
+                }
+                let repeated = resources
+                    .first()
+                    .copied()
+                    .filter(|resource| resources.iter().all(|candidate| candidate == resource));
+                let resource = resources
+                    .get(state_index)
+                    .copied()
+                    .or(repeated)
+                    .ok_or_else(|| {
+                        (
+                            parser.span(),
+                            Error::VerificationError(format!(
+                                "{dialect}.{name} cannot infer the type of state result {}",
+                                state_index + 1
+                            )),
+                        )
+                    })?;
+                context.append_result(op.id(), crate::builtin::StateType::new(context, resource))
+            };
+            parser.define_value(result_name, result);
         }
         Ok(op)
     } else {

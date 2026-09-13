@@ -1,0 +1,24 @@
+// RUN: tir mc --march=rv64ifd --filetype=asm -o /tmp/tir-riscv-fp-divide-flags.s %s
+// RUN: isasim --march=rv64ifd --entry=main --until-pc=0 --trace-registers-end /tmp/tir-riscv-fp-divide-flags.s | filecheck %s
+// RUN: tir mc --march=rv64ifd --filetype=asm --shuffle-machine-order -o /tmp/tir-riscv-fp-divide-flags.s %s
+// RUN: isasim --march=rv64ifd --entry=main --until-pc=0 --trace-registers-end /tmp/tir-riscv-fp-divide-flags.s | filecheck %s
+
+module {
+  %fn_main = func.func @main() -> !i64 {
+    %env0 = state.entry_state : !state<fp.env>
+    %all_flags = constant {value = 31} : !i5
+    %env1 = fp.clear_flags %all_flags state(%env0)
+    %zero = fp.constant {bits = 0} : !f64
+    %result, %env2 = fp.div %zero, %zero state(%env1) {semantics = {exceptions = "flags"}} : !f64
+    %flags, %env3 = fp.get_flags state(%env2) : !i5
+    %bits = bitcast %result : !i64
+    %wide_flags = extui %flags : !i64
+    %observed = xori %bits, %wide_flags : !i64
+    func.return %observed state(%env3)
+  }
+  module_end
+}
+
+// CHECK: final registers:
+// CHECK-DAG: GPR[10] = 0x7ff8000000000010
+// CHECK-DAG: CSR[1] = 0x10

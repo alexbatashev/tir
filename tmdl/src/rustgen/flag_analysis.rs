@@ -2,7 +2,14 @@
 // Instruction analysis helpers
 // ---------------------------------------------------------------------------
 
+enum FpFlags<T> {
+    None,
+    Clobber,
+    Exact(T),
+}
+
 struct InstructionSemantics {
+    fp_flags: FpFlags<(tir_symbolic::sem::SemGraph, tir_graph::NodeId)>,
     pattern: tir_symbolic::sem::SemGraph,
     root: tir_graph::NodeId,
     variable_symbols: HashMap<String, u32>,
@@ -484,15 +491,19 @@ fn copy_subgraph_remapping(
     use tir_graph::Dag;
     use tir_symbolic::lang::SymPayload;
     use tir_symbolic::sem::{CopyAction, copy_subgraph_with};
-    copy_subgraph_with(dst, src, node, memo, &mut |_, node| {
-        match src.get_leaf_data(node).and_then(|leaf| match leaf {
+    copy_subgraph_with(
+        dst,
+        src,
+        node,
+        memo,
+        &mut |_, node| match src.get_leaf_data(node).and_then(|leaf| match leaf {
             SymPayload::SymbolId(id) => remap(*id),
             _ => None,
         }) {
             Some(id) => CopyAction::Payload(SymPayload::SymbolId(id)),
             None => CopyAction::Keep,
-        }
-    })
+        },
+    )
 }
 
 /// Copy a flag reader's arm. For a boolean materializer (`zext(0/1, W)`), replace the
@@ -510,7 +521,10 @@ fn copy_reader_arm(
 ) -> tir_graph::NodeId {
     use tir_graph::{Dag, MutDag};
     let kind = *src.get_node(arm_root);
-    if matches!(kind, tir_symbolic::lang::SymKind::ZExt | tir_symbolic::lang::SymKind::SExt) {
+    if matches!(
+        kind,
+        tir_symbolic::lang::SymKind::ZExt | tir_symbolic::lang::SymKind::SExt
+    ) {
         let children: Vec<tir_graph::NodeId> = src.children(arm_root).collect();
         if children.len() == 2 {
             let value = copy_subgraph_remap_symbols(
@@ -549,13 +563,18 @@ fn compose_guard_with_definer(
     use tir_graph::Dag;
     use tir_symbolic::lang::SymPayload;
     use tir_symbolic::sem::{CopyAction, copy_subgraph, copy_subgraph_with};
-    copy_subgraph_with(dst, guard, node, guard_memo, &mut |dst, node| {
-        match guard.get_leaf_data(node) {
-            Some(SymPayload::SymbolId(symbol)) if substitute.contains_key(symbol) => {
-                CopyAction::Replace(copy_subgraph(dst, definer, substitute[symbol], definer_memo))
-            }
-            _ => CopyAction::Keep,
+    copy_subgraph_with(dst, guard, node, guard_memo, &mut |dst, node| match guard
+        .get_leaf_data(node)
+    {
+        Some(SymPayload::SymbolId(symbol)) if substitute.contains_key(symbol) => {
+            CopyAction::Replace(copy_subgraph(
+                dst,
+                definer,
+                substitute[symbol],
+                definer_memo,
+            ))
         }
+        _ => CopyAction::Keep,
     })
 }
 
@@ -632,7 +651,8 @@ fn fold_constant_subtrees(
         let copied = if src.get_leaf_data(node).is_none() && all_constant(src, node, const_memo) {
             let mut sub: tir_symbolic::sem::SemGraph = tir_symbolic::sem::SemGraph::new();
             copy_subgraph(&mut sub, src, node, &mut HashMap::new());
-            let tir_symbolic::lang::Value::Int(value) = tir_symbolic::lang::execute(&sub, &[]) else {
+            let tir_symbolic::lang::Value::Int(value) = tir_symbolic::lang::execute(&sub, &[])
+            else {
                 // Not evaluable after all: copy verbatim.
                 return copy_subgraph(dst, src, node, copy_memo);
             };
@@ -709,8 +729,8 @@ fn find_equivalent_comparison(
     composed: &tir_symbolic::sem::SemGraph,
     symbols: &ComparisonSymbols,
 ) -> Option<(tir_symbolic::sem::SemGraph, tir_graph::NodeId)> {
-    use tir_symbolic::sem::{EquivalenceOracle, FuzzOracle, SmtOracle};
     use tir_symbolic::lang::SymKind;
+    use tir_symbolic::sem::{EquivalenceOracle, FuzzOracle, SmtOracle};
     const EQUALITY: &[(SymKind, bool)] = &[(SymKind::Eq, false), (SymKind::Ne, false)];
     const ORDERED: &[(SymKind, bool)] = &[
         (SymKind::Lt, false),
@@ -728,10 +748,11 @@ fn find_equivalent_comparison(
             .iter()
             .map(|(kind, swap)| comparison_candidate(*kind, *swap))
             .chain(
-                [tir_adt::Predicate::Oeq, tir_adt::Predicate::Une]
-                    .map(floating_equality_candidate),
+                [tir_adt::Predicate::Oeq, tir_adt::Predicate::Une].map(floating_equality_candidate),
             )
-            .find(|(candidate, _)| SmtOracle.equivalent_typed(composed, candidate, &symbols.types));
+            .find(|(candidate, _)| {
+                SmtOracle.equivalent_typed(composed, candidate, &symbols.types)
+            });
     }
     let fuzz = FuzzOracle::default();
     EQUALITY
@@ -786,7 +807,11 @@ impl ComparisonSymbols {
 
 /// The IEEE binary format of a float register class of `width` bits, or the
 /// plain bit-vector type for an integer class.
-fn operand_type(files: &[ast::File], class_name: &str, width: u32) -> Option<tir_symbolic::lang::SemType> {
+fn operand_type(
+    files: &[ast::File],
+    class_name: &str,
+    width: u32,
+) -> Option<tir_symbolic::lang::SemType> {
     let class = files
         .iter()
         .flat_map(|file| file.register_classes())
@@ -795,8 +820,12 @@ fn operand_type(files: &[ast::File], class_name: &str, width: u32) -> Option<tir
         return Some(tir_symbolic::lang::SemType::bits(width));
     }
     match width {
-        32 => Some(tir_symbolic::lang::SemType::Float(tir_symbolic::lang::FloatFormat::new(8, 23))),
-        64 => Some(tir_symbolic::lang::SemType::Float(tir_symbolic::lang::FloatFormat::new(11, 52))),
+        32 => Some(tir_symbolic::lang::SemType::Float(
+            tir_symbolic::lang::FloatFormat::new(8, 23),
+        )),
+        64 => Some(tir_symbolic::lang::SemType::Float(
+            tir_symbolic::lang::FloatFormat::new(11, 52),
+        )),
         _ => None,
     }
 }

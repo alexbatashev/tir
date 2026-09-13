@@ -68,7 +68,7 @@ pub(crate) fn is_comparison(kind: SymKind) -> bool {
 
 /// The bit-width of an IR integer or float type, or `None` for any other type.
 pub(crate) fn type_width(context: &Context, ty: TypeId) -> Option<u32> {
-    if ty == TypeId::STATE {
+    if context.is_state_type(ty) {
         return None;
     }
     let data = context.get_type_data(ty);
@@ -81,7 +81,7 @@ pub(crate) fn type_width(context: &Context, ty: TypeId) -> Option<u32> {
 /// The context-independent semantic type represented by an IR type. Register
 /// classes are intentionally absent: this describes the value, not its storage.
 pub(crate) fn semantic_type(context: &Context, ty: TypeId) -> Option<SemType> {
-    if ty == TypeId::STATE {
+    if context.is_state_type(ty) {
         return None;
     }
     let data = context.get_type_data(ty);
@@ -91,6 +91,26 @@ pub(crate) fn semantic_type(context: &Context, ty: TypeId) -> Option<SemType> {
         .or_else(|| {
             any.downcast_ref::<FloatType>()
                 .map(|ty| SemType::Float(FloatFormat::new(ty.exp_width(), ty.mant_width())))
+        })
+        .or_else(|| {
+            any.downcast_ref::<crate::fp::RoundingType>()
+                .map(|_| SemType::bits(3))
+        })
+        .or_else(|| {
+            any.downcast_ref::<crate::fp::EnvironmentType>()
+                .map(|_| SemType::bits(13))
+        })
+        .or_else(|| {
+            let elements = any
+                .downcast_ref::<crate::builtin::TupleType>()?
+                .elements(context);
+            let [lhs, rhs] = elements.as_slice() else {
+                return None;
+            };
+            Some(SemType::Pair(
+                Box::new(semantic_type(context, *lhs)?),
+                Box::new(semantic_type(context, *rhs)?),
+            ))
         })
 }
 
@@ -106,6 +126,11 @@ pub(crate) fn ir_type(context: &Context, ty: &SemType) -> Option<TypeId> {
             }
             _ => None,
         },
+        SemType::Pair(lhs, rhs) => Some(crate::builtin::TupleType::new(
+            context,
+            vec![ir_type(context, lhs)?, ir_type(context, rhs)?],
+        )),
+        SemType::Unit => Some(crate::builtin::UnitType::new(context)),
         _ => None,
     }
 }

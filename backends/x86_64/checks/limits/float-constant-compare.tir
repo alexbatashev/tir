@@ -2,8 +2,8 @@
 
 module {
   %fn_equal_literal = func.func @equal_literal(%0: !f64) -> !i1 {
-    %1 = constantf {value = 10.0} : !f64
-    %2 = cmpf %0, %1 {predicate = "oeq"} : !i1
+    %1 = fp.constant {bits = 4621819117588971520} : !f64
+    %2 = fp.cmp %0, %1 {predicate = "oeq", semantics = {behavior = "quiet", exceptions = "ignore", kind = "comparison", subnormals = "gradual"}} : !i1
     func.return %2
   }
   module_end

@@ -2,7 +2,7 @@
 
 module {
   %fn_f = func.func @f() -> !f64 {
-    %0 = constantf {value = 1.5} : !f64
+    %0 = fp.constant {bits = 4609434218613702656} : !f64
     func.return %0
   }
   module_end
@@ -10,4 +10,4 @@ module {
 
 // CHECK: x86_64.movabs
 // CHECK: x86_64.movq_xmm_gpr
-// CHECK-NOT: constantf
+// CHECK-NOT: fp.constant

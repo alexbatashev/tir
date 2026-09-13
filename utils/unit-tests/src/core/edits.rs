@@ -5,7 +5,7 @@ use tir::{
     builtin::{self, ops, ModuleOp},
     interp,
     scf::{LoopOp, SwitchOp},
-    Context, ExitTarget, NonLocalExit, OpId, Operation, RegionId, Terminator, TypeId, ValueId,
+    Context, ExitTarget, NonLocalExit, OpId, Operation, RegionId, Terminator, ValueId,
 };
 
 use super::fixtures::{self, module_ops};
@@ -91,12 +91,13 @@ fn growing_a_loop_state_port_keeps_the_carried_shape() {
     let body = body_of(&context, function);
     let loop_op = find::<LoopOp>(&context, body);
     let entry = tir::state::EntryStateOpBuilder::new(&context)
-        .state_result()
+        .state_result(tir::builtin::StateType::memory(&context))
         .build();
     context.add(body, entry.id());
     let chain = entry.result();
 
-    let result = context.grow_port(loop_op, TypeId::STATE, Some(chain), |_, port| port);
+    let state_type = context.get_value(chain).ty();
+    let result = context.grow_port(loop_op, state_type, Some(chain), |_, port| port);
 
     let grown = context.get_op(loop_op);
     let loop_body = context.get_region(grown.regions()[0]);
@@ -272,8 +273,8 @@ fn add_auto_pins_an_op_to_its_state() {
     let loop_op = find::<LoopOp>(&context, outer);
     let chain = context.grow_port(
         loop_op,
-        TypeId::STATE,
-        Some(context.create_state()),
+        tir::builtin::StateType::memory(&context),
+        Some(context.create_state(tir::builtin::StateResource::Memory)),
         |_, port| port,
     );
     let inner = context.get_op(loop_op).regions()[0];

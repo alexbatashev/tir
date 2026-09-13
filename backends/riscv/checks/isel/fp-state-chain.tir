@@ -1,0 +1,22 @@
+// RUN: tir mc --march=rv64ifd --stage=isel %s | filecheck %s
+// RUN: tir mc --march=rv64ifd --filetype=asm -o /tmp/tir-riscv-fp-state-chain.s %s
+// RUN: isasim --march=rv64ifd --entry=div --until-pc=0 --trace-registers-end /tmp/tir-riscv-fp-state-chain.s | filecheck %s --check-prefix=EXEC
+// RUN: tir mc --march=rv64ifd --filetype=asm --shuffle-machine-order -o /tmp/tir-riscv-fp-state-chain.s %s
+// RUN: isasim --march=rv64ifd --entry=div --until-pc=0 --trace-registers-end /tmp/tir-riscv-fp-state-chain.s | filecheck %s --check-prefix=EXEC
+
+module {
+  %fn_div = func.func @div(%0: !f64, %1: !f64) -> !f64 {
+    %env0 = state.entry_state : !state<fp.env>
+    %result, %env1 = fp.div %0, %1 state(%env0) {semantics = {exceptions = "flags", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f64
+    func.return %result state(%env1)
+  }
+  module_end
+}
+
+// CHECK: %[[ENV:[0-9]+]] = state.entry_state : !state<fp.env>
+// CHECK-NEXT: %[[NEXT:[0-9]+]] = riscv.fdiv.d.rne {{.*}} state(%[[ENV]])
+// CHECK-NEXT: asm.vret
+
+// EXEC: final registers:
+// EXEC-DAG: CSR[1] = 0x10
+// EXEC-DAG: FPR32[10] = 0x7ff8000000000000

@@ -383,10 +383,21 @@ impl CallLowering {
                 .collect::<Vec<_>>()
                 .into(),
         );
-        // The call runs a function, so the memory it observes and the one it
-        // leaves behind are the chain the mid-end put it on: the virtual call
-        // takes both ports over from `func.call`.
-        let published = crate::analysis::effects::produced_state(&context.get_op(call.id()));
+        let source = context.get_op(call.id());
+        let published = source.state_results().to_vec();
+        let mut dependencies = source.state_operands().to_vec();
+        if let Some(memory) = observed
+            && let Some(slot) = dependencies.iter_mut().find(|state| {
+                context.state_resource(context.get_value(**state).ty())
+                    == Some(tir::builtin::StateResource::Memory)
+            })
+        {
+            *slot = memory;
+        }
+        let dependency_types = dependencies
+            .iter()
+            .map(|state| context.get_value(*state).ty())
+            .collect::<Vec<_>>();
         let call: Box<dyn Operation> = match callee {
             Callee::Direct(name) => {
                 let mut builder = super::VirtualCallOpBuilder::new(context)
@@ -394,9 +405,9 @@ impl CallLowering {
                     .outgoing_stack_size(u64::from(outgoing_size))
                     .attr("clobbers", clobbers)
                     .attr("uses", uses);
-                if let Some(observed) = observed {
-                    builder = builder.state(observed).state_result();
-                }
+                builder = builder
+                    .state_operands(dependencies.clone())
+                    .state_results(dependency_types.clone());
                 Box::new(builder.build())
             }
             Callee::Indirect(_) => {
@@ -405,16 +416,16 @@ impl CallLowering {
                     .outgoing_stack_size(u64::from(outgoing_size))
                     .attr("clobbers", clobbers)
                     .attr("uses", uses);
-                if let Some(observed) = observed {
-                    builder = builder.state(observed).state_result();
-                }
+                builder = builder
+                    .state_operands(dependencies)
+                    .state_results(dependency_types);
                 Box::new(builder.build())
             }
         };
-        if let (Some(published), Some(new)) = (
-            published,
-            context.get_op(call.id()).state_results().first().copied(),
-        ) {
+        for (published, new) in published
+            .into_iter()
+            .zip(context.get_op(call.id()).state_results())
+        {
             context.replace_value_uses(published, new);
         }
         context.insert_op_before(op, call.as_ref())?;

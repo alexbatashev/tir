@@ -6,7 +6,7 @@
 
 module {
   %fn_f = func.func @f(%a: !ptr.p<!i32>, %b: !ptr.p<!i32>, %v: !i32) {
-    %s0 = state.entry_state
+    %s0 = state.entry_state : !state<memory>
     %s1, %s2 = state.split state(%s0)
     %s3 = ptr.store %v, %a state(%s1)
     %s4 = ptr.store %v, %b state(%s2)

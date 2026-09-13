@@ -1,0 +1,14 @@
+// RUN: tir mc --march=rv64ifd --stage=isel %s | filecheck %s
+
+module {
+  %fn_div = func.func @div(%0: !f64, %1: !f64) {
+    %env0 = state.entry_state : !state<fp.env>
+    %result, %env1 = fp.div %0, %1 state(%env0) {semantics = {exceptions = "flags", kind = "arithmetic", nan = "any_quiet", rounding = "toward_zero", subnormals = "gradual", tininess = "after_rounding"}} : !f64
+    func.return state(%env1)
+  }
+  module_end
+}
+
+
+
+// CHECK-COUNT-1: riscv.fdiv.d.rtz {{.*}} state(

@@ -1,6 +1,6 @@
 // RUN: tir opt --verify %s | filecheck %s
 
-// Every state is an ordinary `!state` value; the text groups the states of
+// Every state is an ordinary `!state<memory>` value; the text groups the states of
 // each list so the chains read apart from the values.
 
 module {
@@ -13,7 +13,7 @@ module {
       %11 = constant {value = 0} : !i1
       -> %11, %8, %8, %10, %9
     }
-    %e = state.entry_state
+    %e = state.entry_state : !state<memory>
     %j = state.join state(%7, %e)
     func.return %6 state(%j)
   }
@@ -28,6 +28,6 @@ module {
 // CHECK-NEXT: %[[Z:[0-9]+]] = constant {value = 0} : !i1
 // CHECK-NEXT: -> %[[Z]], %[[C]], %[[C]], %[[W]], %[[CS]]
 // CHECK-NEXT: }
-// CHECK-NEXT: %[[E:[0-9]+]] = state.entry_state
+// CHECK-NEXT: %[[E:[0-9]+]] = state.entry_state : !state<memory>
 // CHECK-NEXT: %[[J:[0-9]+]] = state.join state(%[[RS]], %[[E]])
 // CHECK-NEXT: func.return %[[R]] state(%[[J]])

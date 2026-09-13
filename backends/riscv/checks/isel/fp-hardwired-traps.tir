@@ -1,0 +1,24 @@
+// RUN: tir mc --march=rv64ifd --stage=isel %s | filecheck %s --check-prefix=ISEL
+// RUN: tir mc --march=rv64ifd --filetype=asm -o /tmp/tir-fp-hardwired-traps.s %s
+// RUN: isasim --march=rv64ifd --entry=main --until-pc=0 --trace-registers-end /tmp/tir-fp-hardwired-traps.s | filecheck %s --check-prefix=EXEC
+// RUN: tir mc --march=rv64ifd --filetype=asm --shuffle-machine-order -o /tmp/tir-fp-hardwired-traps.s %s
+// RUN: isasim --march=rv64ifd --entry=main --until-pc=0 --trace-registers-end /tmp/tir-fp-hardwired-traps.s | filecheck %s --check-prefix=EXEC
+
+module {
+  %main = func.func @main() -> !i5 {
+    %e0 = state.entry_state : !state<fp.env>
+    %mask = constant {value = 31} : !i5
+    %e1 = fp.set_traps %mask state(%e0)
+    %traps, %e2 = fp.get_traps state(%e1) : !i5
+    func.return %traps state(%e2)
+  }
+  module_end
+}
+
+// ISEL: asm.symbol {name = "main"
+// ISEL-NOT: csr
+// ISEL-NOT: fp.set_traps
+// ISEL-NOT: fp.get_traps
+// ISEL: asm.vret
+// EXEC: final registers:
+// EXEC: GPR[10] = 0x0

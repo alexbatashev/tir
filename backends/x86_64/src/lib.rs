@@ -46,15 +46,15 @@ mod isa {
         })
     }
 
-    /// Pre-RA: materialize a `constantf` that survived instruction selection
+    /// Pre-RA: materialize an `fp.constant` that survived instruction selection
     /// into `movabs r64, bits` + `movq xmm, r64`.
     fn lower_float_constant(
         context: &tir::Context,
         op: &tir::OperationRef,
     ) -> Result<bool, tir::PassError> {
-        use tir::builtin::ConstantFOp;
+        use tir::fp::ops::ConstantOp;
 
-        let Some(constant) = op.as_op::<ConstantFOp>() else {
+        let Some(constant) = op.as_op::<ConstantOp>() else {
             return Ok(false);
         };
         let Some(bits) = tir::backend::f64_constant_bits(context, &constant) else {
@@ -668,6 +668,9 @@ mod isa {
         abi: &'static tir::backend::abi::AbiInfo,
     ) -> tir::backend::isel::InstructionSelectPass {
         tir::backend::isel::InstructionSelectPass::new(get_isel_rules(context, features))
+            .with_function_check(|context, function| {
+                tir::backend::isel::check_default_fp_environment(context, function, "x86-64")
+            })
             .with_rules(include_str!("isel.pdl"))
             .with_branch_emitters(tir::backend::isel::BranchEmitters {
                 uncond: tir::backend::emit_uncond_branch,

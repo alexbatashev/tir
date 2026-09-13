@@ -11,8 +11,9 @@ use crate::{Operation, ValueId};
 
 pub use tir_symbolic::lang::{
     AtomicRmwOp, BuildError, FloatFormat, MemOrdering, Memory, SCALAR_OPS, ScalarOp,
-    SemBuilderHooks, SemExpr, SemType, SmtTemplate, SymKind, SymPayload, TypeError, TypeUnifier,
-    TypeVar, Value, Width, WidthRule, WidthVar, build, canonicalize_for_selection, execute,
+    SemBuilderHooks, SemExpr, SemType, SmtTemplate, StateAccessKind, StateFieldKind,
+    StateFieldSchema, StateResourceKind, SymKind, SymPayload, TypeError, TypeUnifier, TypeVar,
+    Value, Width, WidthRule, WidthVar, build, canonicalize_for_selection, execute,
     execute_with_memory, infer_types, infer_widths, op_kind, op_name, parse, scalar_op,
     scalar_op_named,
 };

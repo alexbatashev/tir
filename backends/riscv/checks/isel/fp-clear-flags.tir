@@ -1,0 +1,13 @@
+// RUN: tir mc --march=rv64ifd --stage=isel %s | filecheck %s
+
+module {
+  %fn_clear_flags = func.func @clear_flags(%mask: !i5) -> !unit {
+    %env0 = state.entry_state : !state<fp.env>
+    %env1 = fp.clear_flags %mask state(%env0)
+    func.return state(%env1)
+  }
+  module_end
+}
+
+// CHECK-LABEL: asm.symbol {name = "clear_flags"
+// CHECK: riscv.clear_fflags

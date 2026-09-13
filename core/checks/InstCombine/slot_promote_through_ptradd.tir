@@ -21,9 +21,10 @@ module {data_layout = #data_layout} {
 }
 
 // CHECK-LABEL: %{{[0-9]+}} = func.func @f(%[[X:[0-9]+]]: !i32)
-// CHECK-NEXT: %[[E:[0-9]+]] = state.entry_state
+// CHECK-NEXT: %[[E:[0-9]+]] = state.entry_state : !state<memory>
 // CHECK-NEXT: %[[SLOT:[0-9]+]], %[[WORLD:[0-9]+]] = state.split state(%[[E]])
-// CHECK-NEXT: %[[CALL:[0-9]+]] = func.call %{{[0-9]+}}() state(%[[WORLD]])
+// CHECK-NEXT: %[[ENV:[0-9]+]] = state.entry_state : !state<fp.env>
+// CHECK-NEXT: %[[CALL:[0-9]+]], %[[CALL_ENV:[0-9]+]] = func.call %{{[0-9]+}}() state(%[[WORLD]], %[[ENV]])
 // CHECK-NEXT: %[[EXIT:[0-9]+]] = state.join state(%[[SLOT]], %[[CALL]])
-// CHECK-NEXT: -> %[[X]], %[[EXIT]]
+// CHECK-NEXT: -> %[[X]], %[[EXIT]], %[[CALL_ENV]]
 // CHECK-NOT: ptr.

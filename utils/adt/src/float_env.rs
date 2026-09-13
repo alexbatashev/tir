@@ -1,11 +1,14 @@
 mod arithmetic;
+mod compare;
 mod convert;
 mod format;
+
+pub use compare::{ComparisonKind, FloatClass, classify_float, compare_float};
 
 use format::Format;
 
 /// IEEE rounding directions and tie-breaking rules.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RoundingMode {
     TiesToEven,
     TowardZero,
@@ -35,6 +38,16 @@ pub enum FloatOp {
 pub enum FloatWidth {
     W32,
     W64,
+}
+
+impl FloatWidth {
+    /// Number of bits in the interchange representation.
+    pub const fn bit_width(self) -> u32 {
+        match self {
+            Self::W32 => 32,
+            Self::W64 => 64,
+        }
+    }
 }
 
 /// Result bits and IEEE flags ordered as invalid, divide-by-zero, overflow,

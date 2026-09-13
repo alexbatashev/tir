@@ -7,5 +7,5 @@ int call_consume(float value) {
 }
 
 // CHECK-LABEL: func.func @call_consume
-// CHECK: fcvt {{%[0-9]+}} : !f64
+// CHECK: fp.convert {{%[0-9]+}} : !f64
 // CHECK: func.call {{%[0-9]+}}({{%[0-9]+}} : !f64) -> !i32

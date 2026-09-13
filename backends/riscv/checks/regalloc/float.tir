@@ -9,8 +9,8 @@
 
 module {
   %fn_mix = func.func @mix(%0: !f32, %1: !i32, %2: !f64, %3: !f32) -> !f32 {
-    %4 = addf %0, %3 : !f32
-    %5 = mulf %4, %0 : !f32
+    %4 = fp.add %0, %3 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
+    %5 = fp.mul %4, %0 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f32
     func.return %5
   }
   module_end

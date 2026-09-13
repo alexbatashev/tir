@@ -39,7 +39,8 @@ double call_external_pair(void) {
 // CHECK: -> %[[PAIR]], %
 // CHECK: %{{[0-9]+}} = func.declare @external_pair(!f64, !f64) -> !tuple<!f64, !f64>
 // CHECK: %{{[0-9]+}} = func.func @call_external_pair() -> !f64 {
-// CHECK: %[[CALL:[0-9]+]], %{{[0-9]+}} = func.call %{{[0-9]+}}({{.*}}) -> !tuple<!f64, !f64>
+// CHECK: %[[FP:[0-9]+]] = state.entry_state : !state<fp.env>
+// CHECK-NEXT: %[[CALL:[0-9]+]], %{{[0-9]+}}, %{{[0-9]+}} = func.call %{{[0-9]+}}({{.*}}) -> !tuple<!f64, !f64> state(%{{[0-9]+}}, %[[FP]])
 // CHECK: tuple_get %[[CALL]] {index = 0} : !f64
 // CHECK: tuple_get %[[CALL]] {index = 1} : !f64
 

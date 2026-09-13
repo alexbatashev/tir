@@ -1,0 +1,15 @@
+// RUN: tir mc --march=rv64ifd --stage=isel %s | filecheck %s
+
+module {
+  %fn_get_flags = func.func @get_flags() -> !i5 {
+    %env0 = state.entry_state : !state<fp.env>
+    %flags, %env1 = fp.get_flags state(%env0) : !i5
+    func.return %flags state(%env1)
+  }
+  module_end
+}
+
+// CHECK-LABEL: asm.symbol {name = "get_flags"
+// CHECK: %[[ENV:[0-9]+]] = state.entry_state : !state<fp.env>
+// CHECK-NEXT: %{{[0-9]+}} = riscv.read_fflags {rd = %{{[0-9]+}}:GPR} state(%[[ENV]])
+// CHECK-NEXT: asm.vret

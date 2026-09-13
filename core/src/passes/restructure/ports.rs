@@ -33,7 +33,7 @@ impl Emitter<'_> {
     /// `ports` with the states moved after the values: the order every port
     /// list keeps its groups in.
     pub(super) fn deps_last(&self, ports: &[VarId]) -> Vec<VarId> {
-        let is_state = |var: &VarId| self.cfg.var_types[*var] == TypeId::STATE;
+        let is_state = |var: &VarId| self.context.is_state_type(self.cfg.var_types[*var]);
         let mut ordered: Vec<VarId> = ports.iter().copied().filter(|var| !is_state(var)).collect();
         ordered.extend(ports.iter().copied().filter(is_state));
         ordered
@@ -44,11 +44,11 @@ impl Emitter<'_> {
         ports
             .iter()
             .copied()
-            .filter(|&var| self.cfg.var_types[var] == TypeId::STATE)
+            .filter(|&var| self.context.is_state_type(self.cfg.var_types[var]))
             .collect()
     }
 
-    /// The type of every port, `!state` for the chains among them.
+    /// The type of every port, `!state<memory>` for the chains among them.
     pub(super) fn port_types(&self, ports: &[VarId]) -> Vec<TypeId> {
         ports.iter().map(|&var| self.cfg.var_types[var]).collect()
     }

@@ -6,7 +6,7 @@
 module {
   %fn_mixed = func.func @mixed(%0: !i1, %1: !i32, %2: !f32) -> !i32 {
     %3 = ptr.alloca {size = 4, align = 4} : !ptr.p
-    %4 = state.entry_state
+    %4 = state.entry_state : !state<memory>
     %5 = scf.switch %0 args(%4) (%6) {
       %7 = ptr.store %2, %3 state(%6)
       -> %7

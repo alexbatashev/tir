@@ -31,57 +31,6 @@ fn rounded_add_and_flags() {
 }
 
 #[test]
-fn selection_canonicalizes_matching_rounding_modes() {
-    use std::collections::HashSet;
-    use tir_graph::Dag;
-    use tir_symbolic::lang::canonicalize_for_selection;
-
-    for (rounded, generic, default_rounding) in [
-        (SymKind::SIToFPRound, SymKind::SIToFP, 0),
-        (SymKind::UIToFPRound, SymKind::UIToFP, 0),
-    ] {
-        for rounding in [0, 1] {
-            let mut graph = GenericDag::<SymKind, SymPayload<()>>::new();
-            let operands: Vec<_> = (0..generic.arity())
-                .map(|i| {
-                    let leaf = graph.add_node(SymKind::Symbol);
-                    graph.set_leaf_data(leaf, SymPayload::SymbolId(i as u32));
-                    leaf
-                })
-                .collect();
-            let rm = graph.add_node(SymKind::Constant);
-            graph.set_leaf_data(rm, SymPayload::Int(APInt::new(3, rounding)));
-            let value = graph.add_node(rounded);
-            for operand in operands.into_iter().chain([rm]) {
-                graph.add_edge(value, operand);
-            }
-            let (canonical, root, _) = canonicalize_for_selection(&graph, value, &HashSet::new());
-            assert_eq!(
-                *canonical.get_kind(root),
-                if rounding == default_rounding {
-                    generic
-                } else {
-                    rounded
-                }
-            );
-            assert_eq!(
-                canonical.children(root).count(),
-                if rounding == default_rounding {
-                    generic.arity()
-                } else {
-                    rounded.arity()
-                }
-            );
-            let flags = graph.add_node(SymKind::FPFlags);
-            graph.add_edge(flags, value);
-            let (canonical, root, _) = canonicalize_for_selection(&graph, flags, &HashSet::new());
-            let operation = canonical.children(root).next().unwrap();
-            assert_eq!(*canonical.get_kind(operation), rounded);
-        }
-    }
-}
-
-#[test]
 fn integer_to_float_avoids_double_rounding() {
     let mut graph = GenericDag::<SymKind, SymPayload<()>>::new();
     let input = graph.add_node(SymKind::Constant);
@@ -127,6 +76,7 @@ fn rounded_rtz_conversion_refines_partial_conversion() {
         (SymKind::FPToUI, SymKind::FPToUIRound),
     ] {
         assert!(SmtOracle.refines(&graph(generic), &graph(rounded), &[64]));
+        assert!(SmtOracle.refines(&graph(rounded), &graph(generic), &[64]));
         assert!(SmtOracle.refines_typed(
             &graph(generic),
             &graph(rounded),
@@ -149,10 +99,11 @@ fn selection_fallback_preserves_conversion_width_wrapper() {
     graph.set_leaf_data(width, SymPayload::Int(APInt::new(32, 32)));
     let rm = graph.add_node(SymKind::Constant);
     graph.set_leaf_data(rm, SymPayload::Int(APInt::new(3, 1)));
-    let value = graph.add_node(SymKind::FPToSIRound);
+    let outcome = graph.add_node(SymKind::FPToSIRound);
     for child in [input, width, rm] {
-        graph.add_edge(value, child);
+        graph.add_edge(outcome, child);
     }
+    let value = outcome;
     let guard = graph.add_node(SymKind::Symbol);
     graph.set_leaf_data(guard, SymPayload::SymbolId(1));
     let select = graph.add_node(SymKind::If);
@@ -203,6 +154,41 @@ fn selection_fallback_proposes_arithmetic_inside_nan_wrapper() {
     assert_eq!(
         *candidate.get_kind(candidate.root().unwrap()),
         SymKind::FAdd
+    );
+}
+
+#[test]
+fn selection_fallback_preserves_nondefault_rounding_inside_nan_wrapper() {
+    use tir_graph::Dag;
+    use tir_symbolic::lang::selection_fallback;
+    use tir_symbolic::sem::SemGraph;
+    let mut graph = SemGraph::<()>::new();
+    let input = graph.add_node(SymKind::Symbol);
+    graph.set_leaf_data(input, SymPayload::SymbolId(0));
+    let rm = graph.add_node(SymKind::Constant);
+    graph.set_leaf_data(rm, SymPayload::Int(APInt::new(3, 3)));
+    let add = graph.add_node(SymKind::FAddRound);
+    for child in [input, input, rm] {
+        graph.add_edge(add, child);
+    }
+    let ordered = graph.add_node(SymKind::Ge);
+    graph.add_edge(ordered, add);
+    graph.add_edge(ordered, add);
+    let nan_bits = graph.add_node(SymKind::Constant);
+    graph.set_leaf_data(
+        nan_bits,
+        SymPayload::Int(APInt::new(64, 0x7ff8000000000000)),
+    );
+    let nan = graph.add_node(SymKind::AsFloat);
+    graph.add_edge(nan, nan_bits);
+    let full = graph.add_node(SymKind::If);
+    for child in [ordered, add, nan] {
+        graph.add_edge(full, child);
+    }
+    let candidate = selection_fallback(&graph, full).unwrap();
+    assert_eq!(
+        *candidate.get_kind(candidate.root().unwrap()),
+        SymKind::FAddRound
     );
 }
 
@@ -288,4 +274,39 @@ fn selection_fallback_preserves_existing_unrounded_guards() {
         graph.add_edge(value, child);
     }
     assert!(selection_fallback(&graph, value).is_none());
+}
+
+#[test]
+fn selection_fallback_preserves_rounded_conversion_inside_invalid_guard() {
+    use tir_graph::Dag;
+    use tir_symbolic::lang::selection_fallback_preserving_rounding;
+    use tir_symbolic::sem::SemGraph;
+    let mut graph = SemGraph::<()>::new();
+    let input = graph.add_node(SymKind::Symbol);
+    graph.set_leaf_data(input, SymPayload::SymbolId(0));
+    let width = graph.add_node(SymKind::Constant);
+    graph.set_leaf_data(width, SymPayload::Int(APInt::new(32, 64)));
+    let rm = graph.add_node(SymKind::Constant);
+    graph.set_leaf_data(rm, SymPayload::Int(APInt::new(3, 0)));
+    let converted = graph.add_node(SymKind::FPToSIRound);
+    for child in [input, width, rm] {
+        graph.add_edge(converted, child);
+    }
+    let invalid = graph.add_node(SymKind::Symbol);
+    graph.set_leaf_data(invalid, SymPayload::SymbolId(1));
+    let saturated = graph.add_node(SymKind::Constant);
+    graph.set_leaf_data(saturated, SymPayload::Int(APInt::new(64, i64::MAX as u64)));
+    let guarded = graph.add_node(SymKind::If);
+    for child in [invalid, saturated, converted] {
+        graph.add_edge(guarded, child);
+    }
+    let outer = graph.add_node(SymKind::If);
+    for child in [invalid, saturated, guarded] {
+        graph.add_edge(outer, child);
+    }
+    let candidate = selection_fallback_preserving_rounding(&graph, outer).unwrap();
+    assert_eq!(
+        *candidate.get_kind(candidate.root().unwrap()),
+        SymKind::FPToSIRound
+    );
 }

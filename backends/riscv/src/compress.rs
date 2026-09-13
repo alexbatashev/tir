@@ -95,8 +95,8 @@ fn compress(
             for state in op.op().state_operands() {
                 context.append_operand(new_op.id(), state);
             }
-            for _ in op.op().state_results() {
-                context.append_result(new_op.id(), tir::TypeId::STATE);
+            for state in op.op().state_results() {
+                context.append_result(new_op.id(), context.get_value(state).ty());
             }
             context.replace_op(op, new_op.as_ref()).map(|()| true)
         }

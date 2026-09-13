@@ -12,7 +12,11 @@ fn feature_id_slice(for_isas: &[String]) -> proc_macro2::TokenStream {
     quote! { &[#(#ids),*] }
 }
 
-fn emit_attr_result(name: &str, result: usize, class: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+fn emit_attr_result(
+    name: &str,
+    result: usize,
+    class: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
     let name_lit = proc_macro2::Literal::string(name);
     let result_lit = proc_macro2::Literal::u16_unsuffixed(result as u16);
     quote! {
@@ -73,7 +77,11 @@ fn emit_attr_result_fixed_def(
     }
 }
 
-fn emit_attr_physical(name: &str, class: &proc_macro2::TokenStream, index: u16) -> proc_macro2::TokenStream {
+fn emit_attr_physical(
+    name: &str,
+    class: &proc_macro2::TokenStream,
+    index: u16,
+) -> proc_macro2::TokenStream {
     let name_lit = proc_macro2::Literal::string(name);
     let index_lit = proc_macro2::Literal::u16_unsuffixed(index);
     quote! {
@@ -316,6 +324,7 @@ fn emit_rule_spec(
     result: Option<proc_macro2::TokenStream>,
     imm_ranges: &[proc_macro2::TokenStream],
     guarded: Option<&SpecPattern>,
+    fp_flags: FpFlags<&SpecPattern>,
 ) -> (proc_macro2::TokenStream, proc_macro2::Ident) {
     let spec_ident = format_ident!("RULE_{}", rule_key.to_uppercase());
     let rule_name_lit = proc_macro2::Literal::string(rule_name);
@@ -337,6 +346,14 @@ fn emit_rule_spec(
         }
         None => quote! { None },
     };
+    let fp_flags = match fp_flags {
+        FpFlags::None => quote! { tir::backend::isel::FpFlags::None },
+        FpFlags::Clobber => quote! { tir::backend::isel::FpFlags::Clobber },
+        FpFlags::Exact(pattern) => {
+            let pattern = pattern_ref_tokens(pattern);
+            quote! { tir::backend::isel::FpFlags::Exact(#pattern) }
+        }
+    };
     let tokens = quote! {
         static #spec_ident: tir::backend::isel::RuleSpec = tir::backend::isel::RuleSpec {
             name: #rule_name_lit,
@@ -351,6 +368,7 @@ fn emit_rule_spec(
             result: #result_ts,
             imm_ranges: &[#(#imm_ranges),*],
             guarded: #guarded_ts,
+            fp_flags: #fp_flags,
         };
     };
     (tokens, spec_ident)

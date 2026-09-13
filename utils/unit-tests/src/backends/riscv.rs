@@ -1,6 +1,8 @@
 //! Unit tests for the `tir-riscv` backend's public API.
 
 use tir::backend::TargetMachine;
+use tir::graph::Dag;
+use tir::sem::{FloatFormat, SemType, SymKind, SymPayload};
 use tir::Context;
 use tir_riscv::{Feature, RegClass, TargetConfig};
 
@@ -263,6 +265,71 @@ fn isel_rules_filter_by_feature_set() {
     assert!(rv64ifd.contains(&"fstoredouble"));
 }
 
+#[test]
+fn directed_float_rule_keeps_its_rounding_mode() {
+    let context = Context::with_default_dialects();
+    let rules = tir_riscv::get_isel_rules(
+        &context,
+        &[Feature::RV64I, Feature::F, Feature::F64, Feature::D],
+    );
+    let rule = rules.iter().find(|rule| rule.name == "fadddrup").unwrap();
+    let outcome = rule.pattern.root().unwrap();
+    assert_eq!(*rule.pattern.get_kind(outcome), SymKind::FAddRound);
+    let rounding = rule.pattern.children(outcome).last().unwrap();
+    assert!(matches!(
+        rule.pattern.get_leaf_data(rounding),
+        Some(SymPayload::Int(value)) if value.width() == 3 && value.to_u64() == 3
+    ));
+}
+
+#[test]
+fn float_comparison_rule_infers_contextual_literal_widths() {
+    let context = Context::with_default_dialects();
+    let rules = tir_riscv::get_isel_rules(
+        &context,
+        &[Feature::RV64I, Feature::F, Feature::F64, Feature::D],
+    );
+    let rule = rules.iter().find(|rule| rule.name == "feqd").unwrap();
+
+    let result = tir::sem::infer_types(&rule.pattern, |_| None);
+    assert!(
+        result.is_ok(),
+        "feqd pattern type inference failed: {result:?}"
+    );
+}
+
+#[test]
+fn double_comparison_rules_accept_float_register_operands() {
+    let context = Context::with_default_dialects();
+    let rules = tir_riscv::get_isel_rules(
+        &context,
+        &[Feature::RV64I, Feature::F, Feature::F64, Feature::D],
+    );
+    let f64 = SemType::Float(FloatFormat::new(11, 52));
+
+    for name in ["feqd", "fltd", "fled"] {
+        let rule = rules.iter().find(|rule| rule.name == name).unwrap();
+        let result = tir::sem::infer_types(&rule.pattern, |node| {
+            let Some(SymPayload::SymbolId(symbol)) = rule.pattern.get_leaf_data(node) else {
+                return None;
+            };
+            let requirement = rule
+                .operand_registers
+                .iter()
+                .find_map(|(operand, requirement)| (operand == symbol).then_some(requirement))?;
+            if requirement.accepts(&f64) && !requirement.accepts(&SemType::bits(64)) {
+                Some(f64.clone())
+            } else {
+                Some(SemType::bits(requirement.width()))
+            }
+        });
+        assert!(
+            result.is_ok(),
+            "{name} pattern rejects its declared register operand types: {result:?}"
+        );
+    }
+}
+
 fn features(march: &str, mattr: Option<&str>) -> Vec<Feature> {
     TargetConfig::parse(march, None, mattr)
         .expect("march should parse")
@@ -417,6 +484,7 @@ fn isa_params_resolve_from_the_selected_base() {
             ("FPR64", 64),
             ("FFLAGS", 5),
             ("FRM", 3),
+            ("FPTRAPS", 5),
             ("GPRC", 32),
             ("FPR64C", 64),
             ("FPR32C", 32),
@@ -434,6 +502,7 @@ fn isa_params_resolve_from_the_selected_base() {
             ("FPR64", 64),
             ("FFLAGS", 5),
             ("FRM", 3),
+            ("FPTRAPS", 5),
             ("GPRC", 64),
             ("FPR64C", 64),
             ("FPR32C", 32),
@@ -457,4 +526,29 @@ fn counter_registers_follow_the_feature_set() {
     assert_eq!(rv32.len(), 6);
     assert!(rv32.contains(&("CSR", 0xC80, PerfCounter::CyclesHigh)));
     assert!(rv32.contains(&("CSR", 0xC82, PerfCounter::InstructionsRetiredHigh)));
+}
+
+#[test]
+fn division_rule_records_exact_raised_flags() {
+    let context = Context::with_default_dialects();
+    let rules = tir_riscv::get_isel_rules(&context, &[Feature::RV64I, Feature::F, Feature::D]);
+    let rule = rules.iter().find(|rule| rule.name == "fdivdrne").unwrap();
+    let tir::backend::isel::FpFlags::Exact(flags) = &rule.fp_flags else {
+        panic!("rounded division must describe its exact raised flags");
+    };
+    let root = flags.root().unwrap();
+    assert_eq!(*flags.get_kind(root), SymKind::FPFlags);
+    let value = flags.children(root).next().unwrap();
+    assert_eq!(*flags.get_kind(value), SymKind::FDivRound);
+}
+
+#[test]
+fn classification_rule_does_not_claim_exact_flags() {
+    let context = Context::with_default_dialects();
+    let rules = tir_riscv::get_isel_rules(&context, &[Feature::RV64I, Feature::F, Feature::D]);
+    let rule = rules.iter().find(|rule| rule.name == "fclassd").unwrap();
+    assert!(matches!(
+        rule.fp_flags,
+        tir::backend::isel::FpFlags::None | tir::backend::isel::FpFlags::Clobber
+    ));
 }

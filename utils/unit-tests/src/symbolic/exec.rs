@@ -208,6 +208,14 @@ fn division_edge_cases_follow_smtlib_conventions() {
     for &(kind, a, b, expected) in signed {
         assert_eq!(as_i64(exec_op(kind, &[iv(a), iv(b)])), expected, "{kind:?}");
     }
+
+    assert_eq!(
+        as_u64(exec_op(
+            SymKind::UDiv,
+            &[rb(&7u32.to_le_bytes()), rb(&[0; 4])]
+        )),
+        u32::MAX as u64,
+    );
 }
 
 #[test]

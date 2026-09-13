@@ -236,6 +236,8 @@ struct TargetTables<'a> {
     register_index_map: HashMap<(String, String), u32>,
     pc_classes: HashSet<String>,
     flag_classes: HashSet<String>,
+    fp_fields: HashMap<String, FpField>,
+    effect_classes: HashSet<String>,
     register_name_map: HashMap<(String, u32), String>,
     register_files: HashMap<String, String>,
     float_classes: HashSet<String>,
@@ -258,6 +260,122 @@ struct InstrEmitCtx<'a> {
     defined_register_operands: &'a [String],
     read_register_operands: &'a HashSet<String>,
     implicit_reads: &'a [(String, u32)],
+}
+
+fn fp_value_patterns(
+    semantics: &InstructionSemantics,
+    immediate_symbols: &HashSet<u32>,
+    canon_pattern: &tir_graph::GenericDag<
+        tir_symbolic::lang::SymKind,
+        tir_symbolic::lang::SymPayload<tir_symbolic::sem::ValueId>,
+    >,
+    canon_root: tir_graph::NodeId,
+    pattern_widths: &[Option<u32>],
+) -> Vec<(&'static str, SpecPattern, bool)> {
+    if matches!(semantics.fp_flags, FpFlags::None)
+        && *tir_graph::Dag::get_node(canon_pattern, canon_root)
+            != tir_symbolic::lang::SymKind::StateAssign
+    {
+        return Vec::new();
+    }
+    use tir_graph::{Dag, MutDag};
+    use tir_symbolic::lang::SymKind;
+    let (full, full_root) = semantics
+        .guarded_semantics
+        .as_ref()
+        .map_or((&semantics.pattern, semantics.root), |(graph, root)| {
+            (graph, *root)
+        });
+    let rounded = tir_symbolic::lang::selection_fallback_preserving_rounding(full, full_root);
+    let (rounded, rounded_root) = rounded
+        .as_ref()
+        .map_or((full, full_root), |graph| (graph, graph.root().unwrap()));
+    let (rounded, rounded_root, forced) =
+        tir_symbolic::lang::canonicalize_for_selection(rounded, rounded_root, immediate_symbols);
+    let mut widths = selection_pattern_widths(&rounded, forced);
+    if widths[rounded_root.index()].is_none() {
+        widths[rounded_root.index()] = pattern_widths[canon_root.index()];
+    }
+    let needs_rounded_value =
+        !tir_graph::subgraphs_equal(&rounded, rounded_root, canon_pattern, canon_root);
+    let (full_pattern, full_pattern_root, forced) =
+        tir_symbolic::lang::canonicalize_for_selection(full, full_root, immediate_symbols);
+    let rounded_is_full =
+        tir_graph::subgraphs_equal(&rounded, rounded_root, &full_pattern, full_pattern_root);
+    let needs_full_value = !rounded_is_full
+        && !tir_graph::subgraphs_equal(&full_pattern, full_pattern_root, canon_pattern, canon_root);
+    let full_widths = selection_pattern_widths(&full_pattern, forced);
+    let (effect_pattern, effect_root, _) = tir_symbolic::lang::canonicalize_for_selection(
+        &semantics.pattern,
+        semantics.root,
+        immediate_symbols,
+    );
+    let mut patterns = Vec::new();
+    for (mut graph, value_root, mut widths, value_suffix, effect_suffix, needs_guard, enabled) in [
+        (
+            effect_pattern,
+            effect_root,
+            pattern_widths.to_vec(),
+            None,
+            "fp_effect",
+            true,
+            true,
+        ),
+        (
+            rounded,
+            rounded_root,
+            widths,
+            Some("rounded"),
+            "rounded_fp_effect",
+            !rounded_is_full,
+            needs_rounded_value,
+        ),
+        (
+            full_pattern,
+            full_pattern_root,
+            full_widths,
+            Some("full"),
+            "full_fp_effect",
+            false,
+            needs_full_value,
+        ),
+    ] {
+        if !enabled {
+            continue;
+        }
+        for (suffix, effect) in [(value_suffix, false), (Some(effect_suffix), true)] {
+            let Some(suffix) = suffix else { continue };
+            let root = if effect {
+                // An effect observes the typed low bits under the Narrow contract.
+                let value_root =
+                    if matches!(graph.get_node(value_root), SymKind::SExt | SymKind::ZExt)
+                        && let Some(value) = graph.children(value_root).next()
+                        && widths[value.index()].is_some()
+                    {
+                        value
+                    } else {
+                        value_root
+                    };
+                let state = graph.add_node(SymKind::StateBlock);
+                let root = graph.add_node(SymKind::FPEffect);
+                graph.add_edge(root, value_root);
+                graph.add_edge(root, state);
+                widths.resize(root.index() + 1, None);
+                widths[root.index()] = widths[value_root.index()];
+                root
+            } else {
+                value_root
+            };
+            let (offset, typed) = intern_dag(&graph, root, &widths);
+            let spec = SpecPattern {
+                offset,
+                typed,
+                float_width: None,
+            };
+            patterns.push((suffix, spec, needs_guard));
+        }
+    }
+    patterns
 }
 
 fn emit_value_rules(
@@ -377,12 +495,7 @@ fn emit_value_rules(
         semantics.root,
         &immediate_symbols,
     );
-    let mut pattern_widths = tir_symbolic::lang::infer_widths(&canon_pattern, |_| None);
-    for (index, forced) in forced_widths.iter().enumerate() {
-        if forced.is_some() {
-            pattern_widths[index] = *forced;
-        }
-    }
+    let mut pattern_widths = selection_pattern_widths(&canon_pattern, forced_widths);
     // A destination register class statically narrower than the
     // architectural width (x86 `add32`/`add16`/`add8`) defines exactly
     // that many bits: type the pattern root at the class width, so the
@@ -472,26 +585,59 @@ fn emit_value_rules(
         &emit_attrs,
         &ctx.inst.name,
     );
-    let (rule_ts, rule_spec_ident) = emit_rule_spec(
-        &rule_key,
-        &rule_key,
-        &ctx.inst.for_isas,
-        &pattern_spec,
-        &[&ctx.inst.name],
-        quote! { tir::backend::isel::RuleKind::Value },
-        None,
-        &emit_shim,
-        &operand_constraint_entries,
-        &operand_register_specs,
-        result_register_spec.clone(),
-        &imm_range_entries,
-        guarded_spec.as_ref(),
-    );
-    out.isel_rule_emitters.push(quote! {
-        #emitter_ts
-        #rule_ts
-    });
-    out.rule_spec_idents.push(rule_spec_ident);
+    let flags_spec = match &semantics.fp_flags {
+        FpFlags::Exact((graph, root)) => {
+            let (graph, root, forced) =
+                tir_symbolic::lang::canonicalize_for_selection(graph, *root, &immediate_symbols);
+            let widths = selection_pattern_widths(&graph, forced);
+            let (offset, typed) = intern_dag(&graph, root, &widths);
+            Some(SpecPattern {
+                offset,
+                typed,
+                float_width: None,
+            })
+        }
+        _ => None,
+    };
+    let mut patterns = vec![("", pattern_spec, true)];
+    patterns.extend(fp_value_patterns(
+        semantics,
+        &immediate_symbols,
+        &canon_pattern,
+        canon_root,
+        &pattern_widths,
+    ));
+    out.isel_rule_emitters.push(emitter_ts);
+    for (suffix, pattern_spec, needs_guard) in patterns {
+        let key = if suffix.is_empty() {
+            rule_key.clone()
+        } else {
+            format!("{rule_key}_{suffix}")
+        };
+        let fp_flags = match &semantics.fp_flags {
+            FpFlags::None => FpFlags::None,
+            FpFlags::Clobber => FpFlags::Clobber,
+            FpFlags::Exact(_) => FpFlags::Exact(flags_spec.as_ref().unwrap()),
+        };
+        let (rule_ts, rule_spec_ident) = emit_rule_spec(
+            &key,
+            &key,
+            &ctx.inst.for_isas,
+            &pattern_spec,
+            &[&ctx.inst.name],
+            quote! { tir::backend::isel::RuleKind::Value },
+            None,
+            &emit_shim,
+            &operand_constraint_entries,
+            &operand_register_specs,
+            result_register_spec.clone(),
+            &imm_range_entries,
+            guarded_spec.as_ref().filter(|_| needs_guard),
+            fp_flags,
+        );
+        out.isel_rule_emitters.push(rule_ts);
+        out.rule_spec_idents.push(rule_spec_ident);
+    }
 
     // Zero-form constant materializer: when the canonical pattern is
     // `reg + imm` and the source register's class has a hardwired-zero
@@ -622,6 +768,7 @@ fn emit_value_rules(
             result_register_spec.clone(),
             &zero_imm_range_entries,
             None,
+            FpFlags::None,
         );
         out.isel_rule_emitters.push(quote! {
             #zero_emitter_ts
@@ -820,7 +967,7 @@ fn instruction_ports(
         ctx.ops,
         &tables.register_index_map,
         &tables.register_name_map,
-        &tables.flag_classes,
+        &tables.effect_classes,
         &tables.pc_classes,
     ) {
         ports.push((slot, Some(class_name), is_def, None));
@@ -1184,8 +1331,25 @@ fn collect_target_tables(files: &[ast::File]) -> TargetTables<'_> {
         })
         .collect();
 
+    let fp_fields: HashMap<_, _> = files
+        .iter()
+        .flat_map(|f| f.register_classes())
+        .filter_map(|class| {
+            class
+                .resolve_registers()
+                .find_map(|register| fp_field(&register.traits))
+                .map(|field| (class.name.clone(), field))
+        })
+        .collect();
+    let effect_classes = flag_classes
+        .iter()
+        .chain(fp_fields.keys())
+        .cloned()
+        .collect();
     TargetTables {
         files,
+        fp_fields,
+        effect_classes,
         register_index_map,
         pc_classes,
         flag_classes,
@@ -1318,17 +1482,12 @@ fn emit_instruction(
         .and_then(|(_, value)| value.as_ref())
         .and_then(resolve_string);
 
-    let op_name = if let Some(opname) = opname.as_deref() {
-        opname
-    } else if let Some(mnemonic) = mnemonic.as_deref() {
-        mnemonic
-    } else {
-        return Err(TMDLError::Codegen(format!(
+    let op_name = opname.as_deref().or(mnemonic.as_deref()).ok_or_else(|| {
+        TMDLError::Codegen(format!(
             "Instruction '{}' must define OPNAME or MNEMONIC",
             inst.name
-        )));
-    };
-
+        ))
+    })?;
     let mnemonic_name = mnemonic.as_deref().unwrap_or(op_name);
     let encoding_shapes = get_encoding_shapes(inst, item_cache);
     // The same view of the operands the shape expansion was computed
@@ -1398,7 +1557,7 @@ fn emit_instruction(
         && !behavior_has_atomic_ops(&inst.behavior)
         && !behavior_has_dynamic_sized_memory_access(&inst.behavior, &const_size_params)
         && !value_reads_flag_register(&selection_behavior, &tables.flag_classes)
-        && !behavior_writes_fixed_register(&inst.behavior, &tables.flag_classes)
+        && !behavior_writes_fixed_register(&inst.behavior, &tables.effect_classes)
     {
         analyze_instruction_semantics(
             &selection_behavior,
@@ -1407,6 +1566,7 @@ fn emit_instruction(
             &numeric_params,
             &isa_param_values,
             &tables.register_index_map,
+            &tables.fp_fields,
         )
     } else {
         None
@@ -1484,7 +1644,7 @@ fn emit_instruction(
     let is_terminator = uncond_pc || cond_pc;
     let (interfaces_list, terminator_impl) = if is_terminator {
         (
-            quote! { [tir::backend::MachineInstruction, tir::MemoryState, tir::Terminator] },
+            quote! { [tir::backend::MachineInstruction, tir::ResourceEffects, tir::Terminator] },
             quote! {
                 impl tir::Terminator for #name_ident {
                     fn successors(&self) -> Vec<tir::BlockId> {
@@ -1495,7 +1655,7 @@ fn emit_instruction(
         )
     } else {
         (
-            quote! { [tir::backend::MachineInstruction, tir::MemoryState] },
+            quote! { [tir::backend::MachineInstruction, tir::ResourceEffects] },
             quote! {},
         )
     };
@@ -1509,6 +1669,8 @@ fn emit_instruction(
     // touches memory is put on it by selection, and a call is handed the
     // chain of the call it finalizes whatever its own opcode says.
     let (reads_memory, writes_memory) = behavior_memory_effects(&inst.behavior);
+    let touches_memory = reads_memory || writes_memory;
+    let touches_fp_environment = behavior_updates_fp_environment(&inst.behavior);
     let state_schema = quote! { state: "in_out", };
 
     out.instruction_defs.push(quote! {
@@ -1634,19 +1796,38 @@ fn emit_instruction(
             }
         }
 
-        // The memory an instruction changes is what its effects say it writes;
-        // a load or a branch carrying the chain along observes it.
-        impl tir::MemoryState for #name_ident {
-            fn observed(&self) -> Vec<tir::ValueId> {
-                self.0.state_operands().to_vec()
-            }
-
-            fn produced(&self) -> Vec<tir::ValueId> {
-                self.0.state_results().to_vec()
-            }
-
-            fn changes_memory(&self) -> bool {
-                #info_ident.effects.writes
+        impl tir::ResourceEffects for #name_ident {
+            fn resource_effects(&self) -> Vec<tir::ResourceEffect> {
+                let effect = |resource, access| tir::ResourceEffect {
+                    resource,
+                    access,
+                    observed: self.0.state_operands().into_iter().filter(|value| {
+                        self.0.context.state_resource(self.0.context.get_value(*value).ty())
+                            == Some(resource)
+                    }).collect(),
+                    produced: self.0.state_results().into_iter().filter(|value| {
+                        self.0.context.state_resource(self.0.context.get_value(*value).ty())
+                            == Some(resource)
+                    }).collect(),
+                };
+                let mut effects = Vec::new();
+                if #touches_memory {
+                    effects.push(effect(
+                        tir::builtin::StateResource::Memory,
+                        if #writes_memory {
+                            tir::ResourceAccess::Change
+                        } else {
+                            tir::ResourceAccess::Read
+                        },
+                    ));
+                }
+                if #touches_fp_environment {
+                    effects.push(effect(
+                        tir::builtin::StateResource::FpEnv,
+                        tir::ResourceAccess::Change,
+                    ));
+                }
+                effects
             }
         }
     });

@@ -1,0 +1,12 @@
+// RUN: not tir opt --pass verify-deps %s 2>&1 | filecheck %s
+
+module {
+  %f = func.func @main(%value: !i32) -> !i32 {
+    %env = state.entry_state : !state<fp.env>
+    %mode, %next = fp.get_round state(%env) : !fp.rounding
+    -> %value
+  }
+  module_end
+}
+
+// CHECK: fp.get_round in @main is demanded by nothing

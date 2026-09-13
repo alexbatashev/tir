@@ -25,7 +25,7 @@ module {
 
 // CHECK-LABEL: %{{[0-9]+}} = func.func @g
 // CHECK-NEXT: %[[P:[0-9]+]] = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
-// CHECK-NEXT: %[[ENTRY:[0-9]+]] = state.entry_state
+// CHECK-NEXT: %[[ENTRY:[0-9]+]] = state.entry_state : !state<memory>
 // CHECK-NEXT: %[[A1:[0-9]+]] = ptr.store %{{[0-9]+}}, %[[P]] state(%[[ENTRY]])
 // CHECK-NEXT: %[[FINAL:[0-9]+]] = scf.loop (%[[CARRIED:[0-9]+]] = %[[A1]]) {
 // CHECK-NEXT: %[[REPEAT:[0-9]+]], %[[STATE:[0-9]+]] = scf.switch %{{[0-9]+}} args(%[[CARRIED]]) (%[[E:[0-9]+]]) {

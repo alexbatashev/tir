@@ -27,11 +27,12 @@ struct Large forward_large(long a, long b, long c) {
 // CHECK-LABEL: %{{[0-9]+}} = func.func @forward_large(%[[FORWARD_DEST:[0-9]+]]: !ptr.p,
 // CHECK-SAME: ) result_address {
 // CHECK: %[[TEMP:[0-9]+]] = ptr.alloca {size = 24, align = 8}
-// CHECK: %[[CALL:[0-9]+]] = func.call %{{[0-9]+}}(%[[TEMP]]
+// CHECK: %[[FP:[0-9]+]] = state.entry_state : !state<fp.env>
+// CHECK-NEXT: %[[CALL:[0-9]+]], %[[CALL_FP:[0-9]+]] = func.call %{{[0-9]+}}(%[[TEMP]]
 // CHECK-SAME: ) result_address
 // CHECK: %[[FORWARD_COPY:[0-9]+]] = ptr.memcpy %[[FORWARD_DEST]], %[[TEMP]], %{{[0-9]+}} state(%[[CALL]])
 // CHECK-NEXT: %[[FORWARD_OUT:[0-9]+]] = state.join state(%{{[0-9]+}}, %{{[0-9]+}}, %{{[0-9]+}}, %[[FORWARD_COPY]])
-// CHECK-NEXT: -> %[[FORWARD_OUT]]
+// CHECK-NEXT: -> %[[FORWARD_OUT]], %[[CALL_FP]]
 
 // ASM-LABEL: make_large:
 // ASM: bl memcpy

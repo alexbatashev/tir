@@ -9,7 +9,7 @@ module {
     %1 = ptr.alloca {size = 4, align = 4} : !ptr.p
     %2 = ptr.alloca {size = 4, align = 4} : !ptr.p
     %3 = constant {value = 0} : !i32
-    %s0 = state.entry_state
+    %s0 = state.entry_state : !state<memory>
     %s1 = ptr.store %3, %1 state(%s0)
     %s2 = ptr.store %3, %2 state(%s1)
     %s3 = scf.switch %0 args(%s2) (%e) {

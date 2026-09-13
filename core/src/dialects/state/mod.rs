@@ -1,4 +1,4 @@
-use crate::{Context, Error, MemoryState, dialect, operation};
+use crate::{Context, Error, Operation, builtin::StateResource, dialect, operation};
 
 use crate as tir;
 
@@ -14,13 +14,12 @@ dialect! {
     }
 }
 
-// The memory a function is entered with, one op per chain. Spelled
-// `state(%s) = state.entry_state`: it carries a state and nothing else.
 operation! {
     EntryStateOp {
         name: "entry_state",
         dialect: "state",
-        interfaces: [MemoryState, crate::interp::Interp],
+        format: "custom",
+        interfaces: [crate::interp::Interp],
         state: "out",
     }
 }
@@ -30,19 +29,34 @@ impl EntryStateOp {
     pub fn result(&self) -> tir::ValueId {
         self.0.results()[0]
     }
-}
 
-impl MemoryState for EntryStateOp {
-    fn observed(&self) -> Vec<tir::ValueId> {
-        Vec::new()
+    fn custom_print(&self, fmt: &mut tir::IRFormatter) -> Result<(), std::fmt::Error> {
+        tir::region_format::print_result_prefix(fmt, &self.0)?;
+        fmt.write("state.entry_state : ")?;
+        self.0
+            .context
+            .print_type(self.0.context.get_value(self.result()).ty(), fmt)?;
+        fmt.write("\n")
     }
 
-    fn produced(&self) -> Vec<tir::ValueId> {
-        self.0.results().to_vec()
-    }
+    fn custom_parse(
+        parser: &mut tir::parse::text::Parser,
+        context: &Context,
+    ) -> Result<Box<dyn Operation>, (tir::parse::Span, Error)> {
+        use tir::parse::common::Cursor;
 
-    fn changes_memory(&self) -> bool {
-        false
+        if !parser.parse_token(":") {
+            return Err((parser.span(), Error::ExpectedToken(":")));
+        }
+        let ty = parser
+            .parse_type(context)?
+            .ok_or_else(|| (parser.span(), Error::ExpectedType))?;
+        if context.state_resource(ty).is_none() {
+            return Err((parser.span(), Error::ExpectedType));
+        }
+        Ok(Box::new(
+            EntryStateOpBuilder::new(context).state_result(ty).build(),
+        ))
     }
 }
 
@@ -58,7 +72,7 @@ operation! {
         operands: O {
             states: "*crate::builtin::StateType",
         },
-        interfaces: [MemoryState, crate::interp::Interp],
+        interfaces: [crate::interp::Interp],
         state: "out",
     }
 }
@@ -70,28 +84,27 @@ impl JoinOp {
     }
 }
 
-impl MemoryState for JoinOp {
-    fn observed(&self) -> Vec<tir::ValueId> {
-        self.0.operands().to_vec()
-    }
-
-    fn produced(&self) -> Vec<tir::ValueId> {
-        self.0.results().to_vec()
-    }
-
-    fn changes_memory(&self) -> bool {
-        false
-    }
-}
-
 impl tir::Verifiable for JoinOp {
-    fn verify_impl(&self, _context: &Context) -> Result<(), Error> {
+    fn verify_impl(&self, context: &Context) -> Result<(), Error> {
         if self.0.operands().is_empty() {
             return Err(Error::VerificationError(
                 "state.join merges at least one state".to_string(),
             ));
         }
-        expect_states(&self.0, 1)
+        expect_states(&self.0, 1)?;
+        let result_ty = context.get_value(self.result()).ty();
+        if context.state_resource(result_ty) != Some(StateResource::Memory)
+            || self
+                .0
+                .operands()
+                .iter()
+                .any(|operand| context.get_value(*operand).ty() != result_ty)
+        {
+            return Err(Error::VerificationError(
+                "state.join only merges memory states of one type".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -107,7 +120,7 @@ operation! {
         results: R {
             states: "*crate::builtin::StateType",
         },
-        interfaces: [MemoryState, crate::interp::Interp],
+        interfaces: [crate::interp::Interp],
         state: "in",
     }
 }
@@ -124,28 +137,27 @@ impl SplitOp {
     }
 }
 
-impl MemoryState for SplitOp {
-    fn observed(&self) -> Vec<tir::ValueId> {
-        self.0.operands().to_vec()
-    }
-
-    fn produced(&self) -> Vec<tir::ValueId> {
-        self.0.results().to_vec()
-    }
-
-    fn changes_memory(&self) -> bool {
-        false
-    }
-}
-
 impl tir::Verifiable for SplitOp {
-    fn verify_impl(&self, _context: &Context) -> Result<(), Error> {
+    fn verify_impl(&self, context: &Context) -> Result<(), Error> {
         if self.0.results().is_empty() {
             return Err(Error::VerificationError(
                 "state.split names at least one chain".to_string(),
             ));
         }
-        expect_states(&self.0, self.0.results().len())
+        expect_states(&self.0, self.0.results().len())?;
+        let observed_ty = context.get_value(self.observed()).ty();
+        if context.state_resource(observed_ty) != Some(StateResource::Memory)
+            || self
+                .0
+                .results()
+                .iter()
+                .any(|result| context.get_value(*result).ty() != observed_ty)
+        {
+            return Err(Error::VerificationError(
+                "state.split only partitions memory states of one type".into(),
+            ));
+        }
+        Ok(())
     }
 }
 

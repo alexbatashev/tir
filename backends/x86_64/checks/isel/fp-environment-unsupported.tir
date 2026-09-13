@@ -1,0 +1,13 @@
+// RUN: not tir mc --march=x86_64 --stage=isel %s 2>&1 | filecheck %s
+// RUN: not tir mc --march=arm64 --stage=isel %s 2>&1 | filecheck %s
+
+module {
+  %main = func.func @main() -> !i5 {
+    %env = state.entry_state : !state<fp.env>
+    %flags, %next = fp.get_flags state(%env) : !i5
+    func.return %flags state(%next)
+  }
+  module_end
+}
+
+// CHECK: fp.get_flags does not support floating-point environment access

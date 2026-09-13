@@ -240,57 +240,8 @@ pub fn verify_op_tree(context: &Context, op_id: OpId) -> Result<(), Error> {
     verify_state_forks(context, op_id)
 }
 
-/// Checks the fork/join discipline memory state follows.
-///
-/// A state names the memory at one point in the program, so at most one
-/// operation may *change* it: a second would describe two futures for one memory.
-/// Everything else naming it observes it — a read, which leaves memory as it found
-/// it, or a [`crate::state::JoinOp`], which names the memory its inputs merge into
-/// — and any number of those may, unordered against each other. One operation
-/// naming a state twice observes it once: joining a memory with itself is that
-/// memory.
-///
-/// The check is structural, so it cannot see chains: that every access of a chain
-/// is in the cone of the state its next write takes is what the insertion-order
-/// shuffling of the fuzzer and `--shuffle-seed` is for, not this.
-///
-/// State crossing a region boundary does so as a carried argument, which is a
-/// fresh value, so a single walk of the whole tree suffices.
 pub(crate) fn verify_state_forks(context: &Context, op_id: OpId) -> Result<(), Error> {
-    let mut consumers: std::collections::HashMap<crate::ValueId, Vec<(OpId, bool)>> =
-        std::collections::HashMap::new();
-    let mut worklist = vec![op_id];
-    while let Some(op_id) = worklist.pop() {
-        let instance = context.get_op(op_id);
-        let observes = !changes_memory(&instance);
-        for operand in instance.state_operands() {
-            let taken = consumers.entry(operand).or_default();
-            if !taken.iter().any(|(taker, _)| *taker == op_id) {
-                taken.push((op_id, observes));
-            }
-        }
-        for region_id in instance.regions().iter().rev() {
-            worklist.extend(context.get_region(*region_id).op_ids().iter().rev());
-        }
-    }
-    for (value, taken) in &consumers {
-        if taken.len() > 1 && !taken.iter().all(|(_, observes)| *observes) {
-            return Err(Error::VerificationError(format!(
-                "state %{} is both observed and changed",
-                value.number()
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// Whether `op` changes the memory it names: what its [`crate::MemoryState`]
-/// says, and nothing for an op that only carries states along, such as a
-/// terminator or a loop.
-pub(crate) fn changes_memory(op: &OpHandle) -> bool {
-    op.clone()
-        .as_interface::<dyn crate::MemoryState>()
-        .is_some_and(|memory| memory.changes_memory())
+    crate::state_verification::verify_state_forks(context, op_id)
 }
 
 fn verify_op_tree_ops(context: &Context, op_id: OpId) -> Result<(), Error> {
@@ -521,39 +472,44 @@ pub fn verify_opdef_operands(
         }
     }
 
-    let results_len = results.len();
-
-    let variadic_result = result_fields.iter().any(|field| field.variadic);
-    if variadic_result {
-        // A variadic result declares one spec covering every result value.
-    } else if result_fields.iter().any(|field| field.ty.starts_with('?')) {
-        if results_len > result_fields.len() {
+    let mut cursor = 0;
+    for (index, field) in result_fields.iter().enumerate() {
+        let required_after = result_fields[index + 1..]
+            .iter()
+            .filter(|field| !field.variadic && !field.ty.starts_with('?'))
+            .count();
+        let available = results.len().saturating_sub(cursor + required_after);
+        let count = if field.variadic {
+            available
+        } else if field.ty.starts_with('?') {
+            usize::from(available != 0)
+        } else {
+            1
+        };
+        if cursor + count > results.len() {
             return Err(crate::Error::VerificationError(format!(
-                "{op_name} expects at most {} results, got {}",
-                result_fields.len(),
-                results_len
+                "{op_name} missing required result '{}'",
+                field.name
             )));
         }
-    } else if results_len != result_fields.len() {
-        return Err(crate::Error::VerificationError(format!(
-            "{op_name} expects {} results, got {}",
-            result_fields.len(),
-            results_len
-        )));
+        for result in &results[cursor..cursor + count] {
+            verify_def_value(
+                context,
+                op_name,
+                "result",
+                field.name,
+                *result,
+                spec.result_checkers[index],
+                constraint_name(field.ty),
+            )?;
+        }
+        cursor += count;
     }
-
-    for result_index in 0..results_len {
-        let idx = if variadic_result { 0 } else { result_index };
-        let field = &result_fields[idx];
-        verify_def_value(
-            context,
-            op_name,
-            "result",
-            field.name,
-            results[result_index],
-            spec.result_checkers[idx],
-            constraint_name(field.ty),
-        )?;
+    if cursor != results.len() {
+        return Err(crate::Error::VerificationError(format!(
+            "{op_name} expects {cursor} results, got {}",
+            results.len()
+        )));
     }
 
     if spec.same_type {
@@ -618,6 +574,7 @@ fn attr_type_matches(attr_type: &str, value: &crate::attributes::AttributeValue)
         "Bool" => matches!(value, V::Bool(_)),
         "Array" => matches!(value, V::Array(_)),
         "Dict" => matches!(value, V::Dict(_)),
+        "FpSemantics" => matches!(value, V::FpSemantics(_)),
         "Register" => matches!(value, V::Register(_)),
         "Type" => matches!(value, V::Type(_)),
         "Block" => matches!(value, V::Block(_)),

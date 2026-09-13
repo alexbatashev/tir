@@ -142,6 +142,11 @@ fn format_value(context: &Context, value: &Value, ty: Option<tir::TypeId>) -> St
                 .collect();
             format!("({})", inner.join(", "))
         }
+        Value::FpEnvironment(environment) => format!(
+            "rounding={:?}, flags={}, traps={}",
+            environment.rounding, environment.flags, environment.traps
+        ),
+        Value::Rounding(mode) => format!("{spelled} {mode:?}"),
         Value::Function(_) | Value::Unit => spelled.clone(),
     };
     format!("{spelled} {rendered}")

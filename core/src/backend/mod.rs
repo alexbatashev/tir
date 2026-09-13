@@ -453,7 +453,7 @@ pub fn print_machine_op<T: tir::Operation>(
     }
     for attr in op.attributes() {
         let name = context.resolve(attr.name);
-        if slots.iter().any(|slot| slot.port.name == name) {
+        if name == "operand_segment_sizes" || slots.iter().any(|slot| slot.port.name == name) {
             continue;
         }
         open(fmt, &mut first)?;
@@ -479,14 +479,12 @@ pub fn print_machine_op<T: tir::Operation>(
 /// reach. Called before `new` is inserted, because an opcode's builder cannot
 /// know the chain.
 pub fn forward_state(context: &tir::Context, old: &tir::OpHandle, new: &dyn tir::Operation) {
-    let (Some(observed), Some(published)) = (
-        old.state_operands().first().copied(),
-        old.state_results().first().copied(),
-    ) else {
-        return;
-    };
-    context.append_operand(new.id(), observed);
-    context.adopt_result(new.id(), published);
+    for observed in old.state_operands() {
+        context.append_operand(new.id(), observed);
+    }
+    for published in old.state_results() {
+        context.adopt_result(new.id(), published);
+    }
 }
 
 /// Put `op` on the chain `observed` names and hand back the state it leaves
@@ -500,7 +498,7 @@ pub fn put_on_chain(
     observed: tir::ValueId,
 ) -> tir::ValueId {
     context.append_operand(op.id(), observed);
-    context.append_result(op.id(), tir::TypeId::STATE)
+    context.append_result(op.id(), context.get_value(observed).ty())
 }
 
 /// Whether the operation exists only to name a memory state: the root of a
@@ -559,9 +557,8 @@ pub fn branch_successors(op: &dyn tir::Operation) -> Vec<tir::BlockId> {
         .collect()
 }
 
-/// The IEEE-754 bit pattern of an f64 `constantf`, as the immediate a
-/// materializing move takes. `None` unless the constant's result is f64.
-pub fn f64_constant_bits(context: &tir::Context, op: &crate::builtin::ConstantFOp) -> Option<i64> {
+/// The IEEE-754 bit pattern of an `fp.constant` f64.
+pub fn f64_constant_bits(context: &tir::Context, op: &crate::fp::ops::ConstantOp) -> Option<i64> {
     let ty = context.get_value(op.result()).ty();
     let is_f64 = (context.get_type_data(ty).as_ref() as &dyn std::any::Any)
         .downcast_ref::<crate::builtin::FloatType>()
@@ -569,10 +566,7 @@ pub fn f64_constant_bits(context: &tir::Context, op: &crate::builtin::ConstantFO
     if !is_f64 {
         return None;
     }
-    match crate::Operation::attr(op, "value") {
-        Some(AttributeValue::F64(value)) => Some(value.to_bits() as i64),
-        _ => None,
-    }
+    Some(op.bits() as i64)
 }
 
 pub fn int_attr(op: &impl tir::Operation, name: &str) -> Option<i64> {

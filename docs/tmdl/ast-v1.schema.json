@@ -1740,6 +1740,9 @@
         "hardwired_zero",
         "program_counter",
         "status_flag",
+        "fp_flags",
+        "fp_rounding",
+        "fp_traps",
         "float",
         "polymorphic"
       ]

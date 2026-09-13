@@ -1,0 +1,18 @@
+// RUN: tir mc --march=rv64ifd --stage=isel %s | filecheck %s
+
+module {
+  %fn_nearest = func.func @nearest(%0: !f64, %1: !f64) -> !f64 {
+    %result = fp.add %0, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "nearest_even", subnormals = "gradual", tininess = "after_rounding"}} : !f64
+    func.return %result
+  }
+  %fn_upward = func.func @upward(%0: !f64, %1: !f64) -> !f64 {
+    %result = fp.add %0, %1 {semantics = {exceptions = "ignore", kind = "arithmetic", nan = "any_quiet", rounding = "toward_positive", subnormals = "gradual", tininess = "after_rounding"}} : !f64
+    func.return %result
+  }
+  module_end
+}
+
+// CHECK-LABEL: asm.symbol {name = "nearest"
+// CHECK: riscv.fadd.d.rne
+// CHECK-LABEL: asm.symbol {name = "upward"
+// CHECK: riscv.fadd.d.rup
