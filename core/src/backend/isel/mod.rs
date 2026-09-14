@@ -56,7 +56,7 @@ use matches::{MatchRef, Matches};
 use node::{chase_low_extract, is_low_extract_view};
 use pattern::{CompiledIselPattern, PatternNode, compile_isel_pattern};
 use scopes::Scopes;
-use tir::sem::axioms::{self, verify_axioms};
+use tir::sem::axioms;
 use tir::sem::rewrites::{self, discover_rewrites};
 
 /// A conditional-branch rule chosen for a destruction's test: the rule, its
@@ -858,7 +858,6 @@ pub struct GuardedRelaxationProofs {
 
 enum GuardedRelaxationProof {
     Proven,
-    Unsupported(String),
 }
 
 /// Prove guarded rule refinement, reporting unsupported encodings separately.
@@ -870,9 +869,6 @@ pub fn prove_guarded_relaxations(rules: &[Rule]) -> Result<GuardedRelaxationProo
             continue;
         };
         match prove_relaxation(rule, guarded).map_err(PassError::InvalidRuleSet)? {
-            GuardedRelaxationProof::Unsupported(reason) => {
-                report.unsupported.push((rule.name.to_string(), reason))
-            }
             GuardedRelaxationProof::Proven => report.proven.push(rule.name.to_string()),
         }
     }
@@ -1094,23 +1090,14 @@ fn prove_float_relaxation(
         proof_guarded_root,
         &mut HashMap::new(),
     );
-    if floating
-        && (float_refinement::ieee_arithmetic_refines(guarded, candidate, symbol_types)
-            || SmtOracle.refines_typed(&proof_candidate, &proof_guarded, symbol_types))
-    {
+    if floating && float_refinement::ieee_arithmetic_refines(guarded, candidate, symbol_types) {
         return Some(GuardedRelaxationProof::Proven);
     }
-    for graph in [&proof_candidate, &proof_guarded] {
-        for node in graph.postorder(graph.root().unwrap()) {
-            let kind = *graph.get_kind(node);
-            if matches!(kind, SymKind::FPToSIRound | SymKind::FPToUIRound)
-                && !matches!(graph.children(node).nth(2).and_then(|mode| graph.get_leaf_data(mode)),
-                    Some(SymPayload::Int(mode)) if mode.to_u64() == 1)
-            {
-                return Some(GuardedRelaxationProof::Unsupported(format!(
-                    "unsupported {kind:?}: bit-blasting requires toward-zero rounding"
-                )));
-            }
+    if floating {
+        match SmtOracle.refines_typed_outcome(&proof_candidate, &proof_guarded, symbol_types) {
+            tir::sem::ProofOutcome::Proven => return Some(GuardedRelaxationProof::Proven),
+            tir::sem::ProofOutcome::Unsupported(_) => {}
+            tir::sem::ProofOutcome::Disproven { .. } => {}
         }
     }
     None
@@ -1239,19 +1226,10 @@ impl InstructionSelectPass {
         Ok(cost)
     }
 
-    /// Build the pass, panicking when a guarded rule's guard-relaxation obligation
-    /// `D(pattern) => guarded_semantics == pattern` does not hold — checked only
-    /// under [`verify_axioms`]. The generated backends call this: an unprovable
-    /// rule is a target-definition bug that must fail loudly, not at runtime.
+    /// Build the pass. Guarded-rule relaxation proofs are not inputs to
+    /// selection; the target-definition test
+    /// `guarded_relaxations_hold_for_all_rules` discharges them once.
     pub fn new(rules: Vec<Rule>) -> Self {
-        if verify_axioms() {
-            let report = prove_guarded_relaxations(&rules).unwrap_or_else(|e| panic!("{e}"));
-            assert!(
-                report.unsupported.is_empty(),
-                "unsupported rule proofs: {:?}",
-                report.unsupported
-            );
-        }
         Self::build(rules)
     }
 
