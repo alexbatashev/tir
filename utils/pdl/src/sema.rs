@@ -33,6 +33,20 @@ pub fn analyze(file: &File) -> Vec<Diagnostic> {
 
     for item in &file.items {
         let Item::Rule(rule) = item else { continue };
+        if matches!(rule.kind, RuleKind::Refinement) && rule.proof == Some(Proof::Trusted) {
+            diagnostics.push(Diagnostic::new(
+                format!("refinement rule '{}' cannot use trusted proof", rule.name),
+                "refinement candidates require a checked proof",
+                rule.span,
+            ));
+        }
+        if matches!(rule.kind, RuleKind::Equality(_)) && rule.proof == Some(Proof::Contract) {
+            diagnostics.push(Diagnostic::new(
+                format!("equality rule '{}' cannot use contract proof", rule.name),
+                "contract proofs only license directional refinements",
+                rule.span,
+            ));
+        }
         let mut binders = HashSet::new();
         let mut widths = HashSet::new();
         collect_lhs_bindings(&rule.lhs, &mut binders, &mut widths, &mut diagnostics);
