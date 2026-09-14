@@ -1,9 +1,8 @@
 //! Tokenizer for LLVM textual IR, built on `logos`. Newlines are significant —
 //! LLVM instructions are line-terminated with no explicit separator — so `\n`
-//! is its own token. Comments (`;` and `//`) and string literals are skipped;
-//! any byte `logos` cannot classify is dropped, which keeps the unsupported
-//! top-level lines (metadata, attribute groups, target triples) from aborting
-//! the lex.
+//! is its own token. Comments (`;` and `//`) are skipped; any byte `logos` cannot
+//! classify is dropped, which keeps unsupported top-level lines (metadata,
+//! attribute groups, target triples) from aborting the lex.
 
 use chumsky::span::SimpleSpan;
 use logos::Logos;
@@ -32,6 +31,10 @@ pub enum Token<'src> {
     LBrace,
     #[token("}")]
     RBrace,
+    #[token("[")]
+    LBracket,
+    #[token("]")]
+    RBracket,
     #[token("=")]
     Eq,
     #[token("*")]
@@ -39,9 +42,15 @@ pub enum Token<'src> {
     #[token(":")]
     Colon,
 
+    #[regex(r#"c\"([^\"\\]|\\.)*\""#, |l| &l.slice()[2..l.slice().len() - 1], priority = 7)]
+    CString(&'src str),
+
     /// `iN`, carrying the bit width.
     #[regex(r"i[0-9]+", |l| l.slice()[1..].parse().ok(), priority = 5)]
     IntTy(u32),
+
+    #[regex(r"-?[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?", |l| l.slice().parse().ok(), priority = 6)]
+    Float(f64),
 
     #[regex(r"-?[0-9]+", |l| l.slice().parse().ok())]
     Int(i64),
