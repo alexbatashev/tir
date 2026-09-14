@@ -467,7 +467,7 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
             .fields
             .iter()
             .map(|field| {
-                AttributeValue::Dict(Box::new(BTreeMap::from([
+                let attributes = BTreeMap::from([
                     (
                         "name".to_string(),
                         AttributeValue::Str(field.name.clone().into()),
@@ -477,7 +477,8 @@ pub fn codegen(context: &Context, typed: &TypedAst) -> Result<ModuleOp, Diagnost
                         AttributeValue::Type(lower_type(context, typed, field.ty)),
                     ),
                     ("offset".to_string(), AttributeValue::UInt(field.offset)),
-                ])))
+                ]);
+                AttributeValue::Dict(Box::new(attributes))
             })
             .collect();
         module.body().append_op(
@@ -2119,7 +2120,7 @@ impl FnCodegen<'_> {
             return self.lower_initializer(target, address, value);
         }
         let value = self.lower_expr(initializer)?;
-        self.emit(p::store(self.context, value, address).build());
+        self.store_scalar(value, address, lower_type(self.context, self.typed, target));
         Ok(())
     }
 
@@ -2895,7 +2896,7 @@ impl FnCodegen<'_> {
             AstKind::Empty => {}
             AstKind::Assign => self.lower_stmt(step)?,
             _ => {
-                self.lower_expr(step)?;
+                self.lower_discarded_expr(step)?;
             }
         }
         Ok(())
@@ -2923,7 +2924,7 @@ impl FnCodegen<'_> {
                         self.lower_record_copy(init, slot.ptr, record.as_str())?;
                     } else {
                         let value = self.lower_expr(init)?;
-                        self.emit(p::store(self.context, value, slot.ptr).build());
+                        self.store_scalar(value, slot.ptr, slot.elem);
                     }
                 }
                 self.locals.insert(entity, slot);
@@ -2949,13 +2950,13 @@ impl FnCodegen<'_> {
                     self.lower_record_copy(value, slot.ptr, record.as_str())?;
                 } else {
                     let v = self.lower_expr(value)?;
-                    self.emit(p::store(self.context, v, slot.ptr).build());
+                    self.store_scalar(v, slot.ptr, slot.elem);
                 }
                 Ok(())
             }
             AstKind::ExprStmt => {
                 if let Some(expr) = ast.children(stmt).next() {
-                    self.lower_expr(expr)?;
+                    self.lower_discarded_expr(expr)?;
                 }
                 Ok(())
             }
@@ -3014,6 +3015,12 @@ impl FnCodegen<'_> {
         }
         self.emit(b::extui(self.context, value, target).build())
             .result()
+    }
+
+    fn store_scalar(&mut self, value: ValueId, address: ValueId, target: TypeId) -> ValueId {
+        let value = self.promote_boolean_result(value, target);
+        self.emit(p::store(self.context, value, address).build());
+        value
     }
 
     /// Compare a scalar with zero using the source domain's equality rules.
@@ -3348,6 +3355,17 @@ impl FnCodegen<'_> {
     fn lower_expr(&mut self, root: NodeId) -> Result<ValueId, Diagnostic> {
         let expression = self.lower_expr_value(root)?;
         Ok(self.materialize(expression))
+    }
+
+    fn lower_discarded_expr(&mut self, node: NodeId) -> Result<(), Diagnostic> {
+        let expression = self.lower_expr_value(node)?;
+        if !matches!(
+            self.typed.types().kind(node_type(self.typed, node)),
+            TypeKind::Record(_)
+        ) {
+            self.materialize(expression);
+        }
+        Ok(())
     }
 
     fn lower_expr_value(&mut self, root: NodeId) -> Result<LoweredExpr, Diagnostic> {
@@ -4102,7 +4120,7 @@ impl FnCodegen<'_> {
             return Ok(LoweredExpr::Address { ptr, elem });
         }
         let value = self.materialize(rhs);
-        self.emit(p::store(self.context, value, ptr).build());
+        let value = self.store_scalar(value, ptr, elem);
         Ok(LoweredExpr::Value(value))
     }
     fn lower_logical(&mut self, node: NodeId, kind: AstKind) -> Result<LoweredExpr, Diagnostic> {
