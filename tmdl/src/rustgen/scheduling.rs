@@ -99,9 +99,9 @@ fn machine_model_ts(
 /// returns it) per TMDL `machine` block, and resolve every instruction's `unit`
 /// membership against each machine's `bind`s into a concrete scheduling class.
 /// Machines are numbered, so an instruction reaches its class by indexing rather
-/// than by looking its own name up in a per-machine table. This is the static
-/// half of the performance model: the same classes feed the compiler cost model
-/// and the cycle-approximate simulator, so they cannot disagree.
+/// than by looking its own name up in a per-machine table. These classes
+/// feed static scheduling and provide the simulator fallback; captured
+/// conditional latencies override that fallback during timing replay.
 fn emit_machine_models<'a>(
     files: &'a [ast::File],
     item_cache: &HashMap<&'a str, &'a ast::Item>,
@@ -113,9 +113,19 @@ fn emit_machine_models<'a>(
     let mut lookup_arms = Vec::new();
     let mut machine_names = Vec::new();
     let mut class_pool = SchedClassPool::default();
+    let machine_count = files.iter().flat_map(|file| file.machines()).count();
+    let mut latency_cases = HashMap::new();
     // Per scheduled instruction, its class on each machine, in machine-id order.
     let mut per_instruction: Vec<Vec<proc_macro2::Ident>> = vec![Vec::new(); scheduled.len()];
     for (machine_id, machine) in files.iter().flat_map(|f| f.machines()).enumerate() {
+        for override_ in &machine.overrides {
+            if !override_.latency_cases.is_empty() {
+                let cases = latency_cases
+                    .entry(override_.instruction.clone())
+                    .or_insert_with(|| vec![Vec::new(); machine_count]);
+                cases[machine_id] = override_.latency_cases.clone();
+            }
+        }
         let binds: HashMap<&str, &ast::UnitBind> =
             machine.binds.iter().map(|b| (b.unit.as_str(), b)).collect();
         let overrides: HashMap<&str, &ast::MachineOverride> = machine
@@ -188,6 +198,7 @@ fn emit_machine_models<'a>(
     }
 
     let tables = SchedTables {
+        latency_cases,
         costs: instruction_costs(files, item_cache),
         classes: scheduled
             .iter()
@@ -339,11 +350,20 @@ fn collect_scheduled<'a>(
 ) -> Vec<(String, String, String, Vec<String>)> {
     let mut scheduled = Vec::new();
     for inst in files.iter().flat_map(|f| f.instructions()) {
-        let Some(schedule) =
-            crate::utils::resolve_effective_schedule_for_instruction(inst, item_cache)
-        else {
+        let schedule = crate::utils::resolve_effective_schedule_for_instruction(inst, item_cache);
+        if schedule.is_none()
+            && !files
+                .iter()
+                .flat_map(|file| file.machines())
+                .any(|machine| {
+                    machine
+                        .overrides
+                        .iter()
+                        .any(|override_| override_.instruction == inst.name)
+                })
+        {
             continue;
-        };
+        }
         let resolved_params = resolve_params_for_instruction(inst, item_cache);
         let operation = resolved_params
             .get("OPNAME")
@@ -367,7 +387,9 @@ fn collect_scheduled<'a>(
             inst.name.clone(),
             operation,
             mnemonic,
-            schedule.classes.clone(),
+            schedule
+                .map(|schedule| schedule.classes.clone())
+                .unwrap_or_default(),
         ));
     }
     scheduled
@@ -377,6 +399,7 @@ fn collect_scheduled<'a>(
 /// for the `InstrInfo` records [`emit_instructions`] emits. Keyed by instruction
 /// declaration name.
 struct SchedTables {
+    latency_cases: HashMap<String, Vec<Vec<ast::LatencyCase>>>,
     costs: HashMap<String, u32>,
     /// The `SCHED_C*` class of each instruction on each machine, in machine-id
     /// order. Absent for an instruction no machine describes.
@@ -398,9 +421,8 @@ impl SchedTables {
 }
 
 /// Machine-independent cost per instruction declaration, derived from its `unit`
-/// defaults (latency, falling back to 1). This is the single source of truth the
-/// compiler cost model consults — most importantly the instruction-selection
-/// `base_cost` — so selection and the simulator agree on relative cost.
+/// defaults (latency, falling back to 1). Instruction selection uses this cost
+/// independently of machine overrides and conditional simulator latencies.
 fn instruction_costs<'a>(
     files: &'a [ast::File],
     item_cache: &HashMap<&'a str, &'a ast::Item>,

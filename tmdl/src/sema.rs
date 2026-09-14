@@ -1056,6 +1056,59 @@ fn check_machine_overrides(
     // machine's resources, and reference real pipeline phases.
     let mut overridden: HashSet<&str> = HashSet::new();
     for ov in &machine.overrides {
+        if !ov.latency_cases.is_empty()
+            && !ov
+                .latency
+                .is_some_and(|latency| (1..=65535).contains(&latency))
+        {
+            diags.push((
+                file_name.to_string(),
+                Rich::custom(
+                    ov.span,
+                    "conditional latency requires a fallback latency in 1..65535",
+                ),
+            ));
+        }
+        if !ov.latency_cases.is_empty() {
+            if ov.eliminated == Some(true) {
+                diags.push((
+                    file_name.to_string(),
+                    Rich::custom(
+                        ov.span,
+                        "conditional latency cannot be used with eliminated = true",
+                    ),
+                ));
+            }
+            if ov.zero_idiom == Some(true) {
+                diags.push((
+                    file_name.to_string(),
+                    Rich::custom(
+                        ov.span,
+                        "conditional latency cannot be used with zero_idiom = true",
+                    ),
+                ));
+            }
+            if ov.reads.is_some() || ov.writes.is_some() {
+                diags.push((
+                    file_name.to_string(),
+                    Rich::custom(
+                        ov.span,
+                        "conditional latency cannot be used with reads or writes phases",
+                    ),
+                ));
+            }
+        }
+        for case in &ov.latency_cases {
+            if !(1..=65535).contains(&case.latency) {
+                diags.push((
+                    file_name.to_string(),
+                    Rich::custom(case.span, "conditional latency case must be in 1..65535"),
+                ));
+            }
+            if let Some(message) = latency_condition_error(&case.condition) {
+                diags.push((file_name.to_string(), Rich::custom(case.span, message)));
+            }
+        }
         if ov.decode_uops.is_some_and(|count| count <= 0) {
             diags.push((
                 file_name.to_string(),
@@ -1180,6 +1233,47 @@ fn check_machine_overrides(
             }
         }
     }
+}
+
+fn latency_condition_error(expr: &ast::Expr) -> Option<&'static str> {
+    use ast::BuiltinFunction::*;
+    let mut error = None;
+    crate::utils::visit_exprs(expr, &mut |expr| {
+        if error.is_some() {
+            return;
+        }
+        match expr {
+            ast::Expr::Assign(_) | ast::Expr::Try(_) => {
+                error = Some("conditional latency predicate cannot have side effects");
+            }
+            ast::Expr::Call(call) => {
+                let count = call.arguments.len();
+                let valid_arity = match call.callee.as_ref() {
+                    ast::Expr::BuiltinFunction(Clamp | Extract) => count == 3,
+                    ast::Expr::BuiltinFunction(Bitcast | Log2Ceil | Regnum | Width) => count == 1,
+                    ast::Expr::BuiltinFunction(SExt | ZExt) => count == 2,
+                    ast::Expr::BuiltinFunction(
+                        Load | Store | LoadReserved | StoreConditional | AtomicRmw | Fence | FenceI
+                        | Trap | Todo,
+                    ) => {
+                        error = Some(
+                            "conditional latency predicate cannot access memory or have side effects",
+                        );
+                        return;
+                    }
+                    _ => {
+                        error = Some("unsupported builtin in latency predicate");
+                        return;
+                    }
+                };
+                if !valid_arity {
+                    error = Some("invalid argument count in latency predicate");
+                }
+            }
+            _ => {}
+        }
+    });
+    error
 }
 
 fn check_machine_fusions(

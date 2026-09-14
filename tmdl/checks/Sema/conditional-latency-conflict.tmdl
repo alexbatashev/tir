@@ -1,0 +1,21 @@
+// RUN: not tmdlc --action=emit-ast-json --text-only --output=- %s | filecheck %s
+instruction I {
+    param MNEMONIC: String = "i";
+    asm { "i" }
+    behavior { todo(); }
+}
+machine Core {
+    pipeline { EX; }
+    override I {
+        latency = 4;
+        eliminated = true;
+        zero_idiom = true;
+        reads = EX;
+        when 0b1 == 0b1 { latency = 2; }
+        when 0b0 == 0b1 { latency = 3; }
+    }
+}
+// CHECK: Error:{{.*}} conditional latency cannot be used with eliminated = true
+// CHECK: Error:{{.*}} conditional latency cannot be used with zero_idiom = true
+// CHECK: Error:{{.*}} conditional latency cannot be used with reads or writes phases
+// CHECK-NOT: Error:{{.*}} conditional latency cannot be used with

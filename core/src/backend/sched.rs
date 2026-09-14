@@ -7,8 +7,35 @@
 //! buffer sizes, and the per-instruction scheduling classes obtained by resolving
 //! each instruction's `unit` membership against that machine's `bind`s.
 //!
-//! Both the compiler cost model and the cycle-approximate simulator consume this
-//! single source of truth, so they can never disagree about an instruction's cost.
+//! Instruction selection uses machine-independent scheduling-class defaults.
+//! Static scheduling uses the machine class, including its fallback latency.
+//! The simulator resolves conditional latency from values captured before execution.
+
+/// One ordered latency predicate evaluated against the instruction's entry state.
+pub struct LatencyCase {
+    pub env: &'static super::exec::ExecEnv,
+    pub sym_count: usize,
+    pub sources: &'static [(usize, super::exec::SymSource)],
+    /// Offset of a pure bits<1> expression in the semantic blob.
+    pub condition: u32,
+    pub latency: u16,
+}
+
+impl LatencyCase {
+    pub(super) fn matches(
+        &self,
+        instance: &crate::OpHandle,
+        context: &mut dyn super::MachineContext,
+        name: &'static str,
+    ) -> Option<bool> {
+        let syms =
+            super::exec::init_syms(instance, context, name, self.sym_count, self.sources).ok()?;
+        use crate::sem::ExtendSemBytes as _;
+        let mut graph = crate::sem::SemGraph::new();
+        graph.extend_sem_bytes(self.env.kinds, self.env.blob, self.condition);
+        crate::sem::execute_pure(&graph, &syms).map(|value| !value.is_zero())
+    }
+}
 
 /// One functional unit / issue resource of a machine (e.g. `ALU`, `MUL`, `LSU`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
