@@ -40,6 +40,8 @@ pub struct Package {
 pub struct Compiler {
     pub name: String,
     #[serde(default)]
+    pub opt_in: bool,
+    #[serde(default)]
     pub input: Input,
     #[serde(default)]
     pub build: Vec<String>,
@@ -137,6 +139,8 @@ pub struct Benchmark {
     pub link_flags: Vec<String>,
     #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default)]
+    pub verify: Vec<String>,
     #[serde(default = "levels")]
     pub levels: Vec<String>,
     #[serde(default)]
