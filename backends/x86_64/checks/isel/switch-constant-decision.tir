@@ -4,7 +4,7 @@
 // operation of the block, so a literal decision is a tile whose only consumer is
 // a branch. It has to be placed ahead of that branch like any other operand: a
 // tile that lands after the block it is read in is a register read before it is
-// written. The comparison inputs and decision below must all precede the branch.
+// written. The comparison of two constants below folds to that literal.
 
 module {
   %fn_g = func.func @g(%0: !i64) -> !i64 {
@@ -24,8 +24,6 @@ module {
 }
 
 // CHECK-LABEL: asm.symbol {name = "g"
-// CHECK: x86_64.xor_zero32 {dst = %[[D:[0-9]+]]{{.*}}}
-// CHECK-NEXT: x86_64.cmp32 {dst = %[[D]]{{.*}}, src = %[[D]]{{.*}}}
-// CHECK-NEXT: x86_64.sete
-// CHECK-NEXT: x86_64.test_imm32
+// CHECK: x86_64.mov_imm8 {dst = %[[D:[0-9]+]]{{.*}}, imm = 0}
+// CHECK: x86_64.cmp_imm8 {dst = %[[D]]{{.*}}, imm = 1}
 // CHECK: x86_64.jne

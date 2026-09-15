@@ -123,6 +123,26 @@ fn modrm_disp(reg, base, disp) {
     )
 }
 
+fn modrm_disp_ext(ext, base, disp) {
+    (
+        if ~signed_fits(disp, 8) {
+            (0b10, ext, rm_field(base))
+        } else if needs_disp8(base, disp) {
+            (0b01, ext, rm_field(base))
+        } else {
+            (0b00, ext, rm_field(base))
+        },
+        sib_byte(base),
+        if ~signed_fits(disp, 8) {
+            disp
+        } else if needs_disp8(base, disp) {
+            disp as bits<8>
+        } else {
+            ()
+        },
+    )
+}
+
 // The prefix for an address with an index register, which has its own fourth
 // bit in REX.X.
 fn rex_sib(w, reg, index, base, needed) {

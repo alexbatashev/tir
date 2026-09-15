@@ -16,7 +16,7 @@ void distinct_offset_stores(int *p)
 }
 
 // CHECK-LABEL: distinct_offset_stores:
-// CHECK: xor eax, eax
+// CHECK: mov eax, 0
 // CHECK-NEXT: mov [rdi + 0], eax
 // CHECK-NEXT: mov [rdi + 4], eax
 // CHECK-NEXT: ret

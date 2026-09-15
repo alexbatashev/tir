@@ -38,5 +38,5 @@ int classify(int value, int flag)
 // CHECK:     mov eax, 110
 // CHECK:     mov eax, 106
 // CHECK:     mov eax, 100
-// CHECK:     xor eax, eax
+// CHECK:     mov eax, 0
 // CHECK:     ret
