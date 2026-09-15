@@ -41,4 +41,4 @@ module {
 // CHECK:      ^[[ARM]](%{{[0-9]+}}: !state<memory>, %{{[0-9]+}}: !state<fp.env>):
 // CHECK-NEXT: x86_64.test32 {dst = %[[INNER]]:GPR, src = %[[INNER]]:GPR}
 // CHECK-NEXT: x86_64.jne
-// CHECK:      x86_64.mov_imm32 {dst = %{{[0-9]+}}:GPR32, imm = 0}
+// CHECK:      x86_64.xor_zero32 {dst = %{{[0-9]+}}:GPR32}

@@ -105,7 +105,7 @@ module {
 // CHECK:      x86_64.movq_xmm_gpr {dst = %{{[0-9]+}}:XMMzx, src = %{{[0-9]+}}:GPR}
 // CHECK:      x86_64.movq_gpr_xmm {dst = %{{[0-9]+}}:GPR, src = %{{[0-9]+}}:XMM}
 // CHECK-LABEL: asm.symbol {name = "shared_zero"
-// CHECK:      x86_64.mov_imm {dst = %[[ZERO:[0-9]+]]:GPR, imm = 0}
+// CHECK:      x86_64.xor_zero {dst = %[[ZERO:[0-9]+]]:GPR}
 // CHECK-NEXT: x86_64.movq_xmm_gpr {dst = %{{[0-9]+}}:XMMzx, src = %[[ZERO]]:GPR}
 // CHECK:      x86_64.movsd_store_disp
 // CHECK:      x86_64.mov_load

@@ -28,5 +28,5 @@ module {
 
 // CHECK-LABEL: asm.symbol {name = "demanded_low_view_constant"
 // CHECK: ^bb1:
-// CHECK-NEXT: x86_64.mov_imm32 {dst = %[[ZERO:[0-9]+]]:GPR32, imm = 0}
+// CHECK-NEXT: x86_64.xor_zero32 {dst = %[[ZERO:[0-9]+]]:GPR32}
 // CHECK-NEXT: asm.vbr %[[ZERO]] ^bb{{[0-9]+}}

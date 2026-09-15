@@ -12,6 +12,7 @@ void invariant_store(int *p, int a)
 
 // CHECK-LABEL: invariant_store:
 // CHECK: and esi, 3
-// CHECK: mov ecx, 0
-// CHECK-NEXT: mov [rax], ecx
+// CHECK: xor [[ZERO:[a-z0-9]+]],
+// CHECK-SAME: [[ZERO]]
+// CHECK-NEXT: mov [{{.*}}], [[ZERO]]
 // CHECK-NEXT: ret

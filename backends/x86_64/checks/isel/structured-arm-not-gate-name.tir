@@ -30,7 +30,7 @@ module {
 
 // Both edges into the inner join carry the zero register the block before the
 // gates defined.
-// CHECK: x86_64.mov_imm {dst = %[[Z:[0-9]+]]:GPR, imm = 0}
+// CHECK: x86_64.xor_zero {dst = %[[Z:[0-9]+]]:GPR}
 // CHECK: x86_64.je {imm = ^[[ARM:bb[0-9]+]]}
 // CHECK-NEXT: asm.vbr %[[Z]] ^[[INNER:bb[0-9]+]]
 // CHECK-NEXT: ^[[ARM]]:
