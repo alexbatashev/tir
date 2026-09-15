@@ -3,9 +3,11 @@
 // The two joins merge equal values, so they share an e-class, but neither block
 // dominates the other: a consumer must read its own block's argument register,
 // which is the only one its path wrote.
+// Use an independent subtrahend: %c is zero on the first path, so subtracting
+// it would fold away the consumer this fixture needs to check.
 
 module {
-  %fn_exclusive = func.func @exclusive(%c: !i64, %a: !i64, %b: !i64) -> !i64 {
+  %fn_exclusive = func.func @exclusive(%c: !i64, %a: !i64, %b: !i64, %d: !i64) -> !i64 {
     %z = constant {value = 0} : !i64
     %sel = cmpi %c, %z {predicate = "eq"} : !i1
     cfg.cond_br %sel, ^bb1, ^bb2
@@ -28,7 +30,7 @@ module {
     %y2 = addi %a, %b : !i64
     cfg.br ^bb8(%y2 : !i64)
   ^bb7(%g1: !i64):
-    %r1 = subi %g1, %c : !i64
+    %r1 = subi %g1, %d : !i64
     cfg.br ^bb9(%r1 : !i64)
   ^bb8(%g2: !i64):
     %r2 = subi %g2, %b : !i64
