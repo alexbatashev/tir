@@ -84,6 +84,13 @@ pub enum SimTrap {
         address: u64,
         size: usize,
     },
+    /// A mapped-memory access failed before observing or changing bytes.
+    MemoryFault {
+        address: u64,
+        size: usize,
+        access: &'static str,
+        reason: &'static str,
+    },
     ProgramNotLoaded,
     PcNotMapped {
         pc: u64,
@@ -154,6 +161,23 @@ pub trait MachineContext {
     }
     fn read_memory(&self, address: u64, size: usize) -> Result<u64, SimTrap>;
     fn write_memory(&mut self, address: u64, size: usize, value: u64) -> Result<(), SimTrap>;
+    /// Write a complete byte range, with no bytes changed on failure.
+    /// Contexts must override this to support writes wider than one word.
+    fn write_memory_bytes(&mut self, address: u64, bytes: &[u8]) -> Result<(), SimTrap> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        if bytes.len() > 8 {
+            return Err(SimTrap::InvalidInstruction {
+                op: "<machine-context>",
+                reason: "whole-range wide memory writes are not supported".into(),
+            });
+        }
+        let mut word = [0; 8];
+        word[..bytes.len()].copy_from_slice(bytes);
+        self.write_memory(address, bytes.len(), u64::from_le_bytes(word))
+    }
+
     /// Read `size` bytes and register a reservation covering the access. The
     /// default has no reservation concept and behaves like a plain read.
     fn load_reserved(
@@ -231,6 +255,17 @@ impl tir::sem::Memory for MachineMemory<'_> {
 
     fn write_memory(&mut self, address: u64, size: usize, value: u64) -> Result<(), Self::Error> {
         self.0.write_memory(address, size, value)
+    }
+
+    fn write_memory_bytes(
+        &mut self,
+        address: u64,
+        size: usize,
+        value: tir::utils::RawBits,
+    ) -> Result<(), Self::Error> {
+        let mut bytes = value.bytes().to_vec();
+        bytes.resize(size, 0);
+        self.0.write_memory_bytes(address, &bytes)
     }
 
     fn load_reserved(

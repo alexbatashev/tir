@@ -1,4 +1,4 @@
-use super::{NoMemory, eval_node, integer_view};
+use super::{NoMemory, eval_ready, integer_view};
 use crate::lang::{SymKind, SymPayload, Value, scalar_op};
 use tir_adt::APInt;
 use tir_graph::{Dag, NodeId};
@@ -57,7 +57,7 @@ fn eval_pure_node<V>(
         if !valid {
             return None;
         }
-        match eval_node(graph, node, symbols, cache, &mut Vec::new(), &mut NoMemory) {
+        match eval_ready(graph, node, symbols, cache, &[], &mut NoMemory) {
             Ok(value) => value,
             Err(error) => match error {},
         }
