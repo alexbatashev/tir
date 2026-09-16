@@ -40,8 +40,12 @@ observing or modifying bytes. The flat CLI window becomes an explicit mapping,
 and untouched bytes remain zero without allocating the whole window.
 
 The synchronous execution API drives the same frame with a `MachineContext`
-adapter. Its memory visibility remains the caller's responsibility. `Executor`
-uses the memory service and commits staged stores before publishing registers. Dynamic timing replay continues to consume the existing trace and
+adapter. Whole-range writes use `MachineContext::write_memory_bytes`; the default
+rejects unsupported wide writes before changing bytes, and `Executor` validates
+and writes their complete range. Multi-access memory visibility remains the
+caller's responsibility. `Executor` uses the memory service and commits staged
+stores before publishing registers. Dynamic timing replay continues to consume
+the existing trace and
 the scheduling class selected from instruction-entry values. Wide memory effects
 remain one semantic request, while the legacy memory trace retains its
 word-sized chunks for the existing cache model.
@@ -65,7 +69,10 @@ request; a repeated accepted token is an error. Requests carry instruction and
 sequence identities. The service assigns memory-order indices to observations
 and immediate atomics when accepted, and to staged stores when committed.
 A mapping-generation change invalidates an active instruction and LR/SC
-reservations. Ordinary stores preserve the existing simulator reservation rule.
+reservations. An SC attempt consumes the reservation even if its write faults.
+Ordinary stores preserve the existing simulator reservation rule. Unmapping the
+last alias retires a read-to-clear device; raw mapping changes are pruned before
+the next instruction or device allocation.
 
 An exception request invokes the configured synchronous handler once. A handler
 may continue or halt; an unhandled exception faults. Handlers see instruction-entry

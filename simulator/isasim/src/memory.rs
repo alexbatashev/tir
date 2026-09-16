@@ -52,16 +52,19 @@ pub fn load_memory_config(executor: &mut Executor, path: &str) {
     let text = std::fs::read_to_string(path).expect("failed to read memory config");
     let config: MemoryConfig = serde_json::from_str(&text).expect("failed to parse memory config");
     if let Some(mappings) = config.mappings {
-        let (memory, address_space) = executor.memory_service_mut().memory_and_space_mut();
-        let existing: Vec<_> = address_space
+        let existing: Vec<_> = executor
+            .memory_service()
+            .address_space()
             .mappings()
             .map(|mapping| (mapping.start, mapping.end - mapping.start))
             .collect();
         for (start, size) in existing {
-            memory
-                .unmap(address_space, start, size)
+            executor
+                .memory_service_mut()
+                .unmap(start, size)
                 .expect("failed to clear default memory mappings");
         }
+        let (memory, address_space) = executor.memory_service_mut().memory_and_space_mut();
         for mapping in mappings {
             let start = parse_addr(&mapping.start);
             let permissions = parse_permissions(&mapping.permissions);

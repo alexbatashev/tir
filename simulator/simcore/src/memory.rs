@@ -286,9 +286,7 @@ impl Default for AddressSpace {
 
 struct Backing {
     size: u64,
-    generation: u64,
     pages: HashMap<u64, Box<[u8; MEMORY_PAGE_SIZE as usize]>>,
-    page_generations: HashMap<u64, u64>,
 }
 
 /// Owner of sparse backing pages and the service for mapped memory accesses.
@@ -321,9 +319,7 @@ impl Memory {
             id,
             Backing {
                 size,
-                generation: 0,
                 pages: HashMap::new(),
-                page_generations: HashMap::new(),
             },
         );
         Ok(id)
@@ -466,19 +462,6 @@ impl Memory {
             Permissions::WRITE,
             MemoryAccess::Write,
         )?;
-        let mut generations = HashMap::new();
-        for span in &spans {
-            if let std::collections::hash_map::Entry::Vacant(entry) =
-                generations.entry(span.backing)
-            {
-                let backing = self.backings.get_mut(&span.backing).unwrap();
-                backing.generation = backing
-                    .generation
-                    .checked_add(1)
-                    .expect("backing generation exhausted");
-                entry.insert(backing.generation);
-            }
-        }
         let mut source_offset = 0;
         for span in spans {
             let backing = self.backings.get_mut(&span.backing).unwrap();
@@ -486,7 +469,6 @@ impl Memory {
                 backing,
                 span.offset,
                 &source[source_offset..source_offset + span.len],
-                generations[&span.backing],
             );
             source_offset += span.len;
         }
@@ -515,23 +497,6 @@ impl Memory {
         };
         self.resolve(address_space, address, size, permission, access)?;
         Ok(())
-    }
-
-    pub fn backing_generation(&self, backing: BackingId) -> Option<u64> {
-        self.backings
-            .get(&backing)
-            .map(|backing| backing.generation)
-    }
-
-    pub fn backing_page_generation(&self, backing: BackingId, offset: u64) -> Option<u64> {
-        let backing = self.backings.get(&backing)?;
-        (offset < backing.size).then(|| {
-            backing
-                .page_generations
-                .get(&(offset / MEMORY_PAGE_SIZE))
-                .copied()
-                .unwrap_or(0)
-        })
     }
 
     fn resolve(
@@ -618,7 +583,7 @@ fn read_backing(backing: &Backing, offset: u64, destination: &mut [u8]) {
     }
 }
 
-fn write_backing(backing: &mut Backing, offset: u64, source: &[u8], generation: u64) {
+fn write_backing(backing: &mut Backing, offset: u64, source: &[u8]) {
     let mut copied = 0;
     while copied < source.len() {
         let current = offset + copied as u64;
@@ -633,7 +598,6 @@ fn write_backing(backing: &mut Backing, offset: u64, source: &[u8], generation: 
                 .or_insert_with(|| Box::new([0; MEMORY_PAGE_SIZE as usize]));
             page[page_offset..page_offset + len].copy_from_slice(bytes);
         }
-        backing.page_generations.insert(page_number, generation);
         copied += len;
     }
 }

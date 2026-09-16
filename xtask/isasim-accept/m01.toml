@@ -26,7 +26,7 @@ name = "simcore-runtime-unit-tests"
 required = true
 command = ["cargo", "test", "-p", "tir-unit-tests", "simcore::"]
 tool = "cargo"
-expected_cases = 118
+expected_cases = 122
 
 [[cases]]
 name = "symbolic-runtime-unit-tests"

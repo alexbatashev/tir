@@ -9,19 +9,9 @@ use crate::{
     memory_trap,
 };
 
-/// Visibility policy for ordinary stores issued by one instruction.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum StorePolicy {
-    /// Publish all stores together when the instruction commits.
-    Staged,
-    /// Publish each accepted store before servicing the next effect.
-    Ordered,
-}
-
 struct PendingInstruction {
     id: u64,
     next_sequence: u64,
-    policy: StorePolicy,
     stores: Vec<PendingStore>,
     failed: bool,
     mapping_generation: u64,
@@ -85,18 +75,24 @@ impl MemoryService {
         self.memory.write(&self.address_space, address, source)
     }
 
-    pub fn begin_instruction(&mut self, id: u64, policy: StorePolicy) -> Result<(), SimTrap> {
+    pub fn unmap(&mut self, address: u64, size: u64) -> Result<(), MemoryError> {
+        self.memory.unmap(&mut self.address_space, address, size)?;
+        self.prune_read_to_clear();
+        Ok(())
+    }
+
+    pub fn begin_instruction(&mut self, id: u64) -> Result<(), SimTrap> {
         if self.active.is_some() || self.last_instruction.is_some_and(|last| id <= last) {
             return Err(protocol_trap(
                 "instruction identity is stale or already active",
             ));
         }
+        self.prune_read_to_clear();
         self.last_instruction = Some(id);
         self.effect_orders.clear();
         self.active = Some(PendingInstruction {
             id,
             next_sequence: 0,
-            policy,
             stores: Vec::new(),
             failed: false,
             mapping_generation: self.address_space.generation(),
@@ -205,6 +201,7 @@ impl MemoryService {
         value: u64,
         permissions: Permissions,
     ) -> Result<(), MemoryError> {
+        self.prune_read_to_clear();
         if size == 0 || size > 8 {
             return self.map_invalid_device_range(address);
         }
@@ -270,10 +267,7 @@ impl MemoryService {
             | MemoryEffect::StoreConditional { .. }
             | MemoryEffect::AtomicRmw { .. }
             | MemoryEffect::Fence { .. } => true,
-            MemoryEffect::Write { .. } => self
-                .active
-                .as_ref()
-                .is_some_and(|active| active.policy == StorePolicy::Ordered),
+            MemoryEffect::Write { .. } => false,
             MemoryEffect::Exception { .. } => false,
         }
     }
@@ -316,13 +310,12 @@ impl MemoryService {
                 value,
                 ..
             } => {
-                let success =
-                    self.reservation == Some((*address, *size, self.address_space.generation()));
+                let success = self.reservation.take()
+                    == Some((*address, *size, self.address_space.generation()));
                 if success {
                     self.validate_ram_access(*address, *size, MemoryAccess::Write)
                         .map_err(|error| memory_trap(error, *size))?;
                 }
-                self.reservation = None;
                 if success {
                     self.write_word(*address, *size, *value)?;
                 }
@@ -408,19 +401,21 @@ impl MemoryService {
                 bytes.len(),
             ));
         }
-        let active = self.active.as_mut().unwrap();
-        match active.policy {
-            StorePolicy::Staged => active.stores.push(PendingStore {
-                id,
-                address,
-                bytes: bytes.to_vec(),
-            }),
-            StorePolicy::Ordered => self
-                .memory
-                .write(&self.address_space, address, bytes)
-                .map_err(|error| memory_trap(error, bytes.len()))?,
-        }
+        self.active.as_mut().unwrap().stores.push(PendingStore {
+            id,
+            address,
+            bytes: bytes.to_vec(),
+        });
         Ok(ResponseValue::Done)
+    }
+
+    fn prune_read_to_clear(&mut self) {
+        let address_space = &self.address_space;
+        self.read_to_clear.retain(|device| {
+            address_space
+                .mappings()
+                .any(|mapping| mapping.backing == device.backing)
+        });
     }
 
     fn read_word(&mut self, address: u64, size: usize) -> Result<u64, SimTrap> {

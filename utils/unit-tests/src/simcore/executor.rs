@@ -496,7 +496,7 @@ fn synchronous_execution_keeps_pair_destinations_provisional_on_fault() {
 fn frame_backpressure_observes_read_to_clear_once() {
     use tir::backend::exec::{EffectResponse, FrameYield, RequestId, ResponseValue, SemanticFrame};
     use tir::backend::{MachineContext, MachineInstruction};
-    use tir_sim::{Permissions, StorePolicy};
+    use tir_sim::Permissions;
     let context = Context::with_default_dialects();
     let program = riscv_program(&context, ".global first\nfirst:\n lw x2, 0(x1)\n", "first");
     let instruction = context
@@ -512,10 +512,7 @@ fn frame_backpressure_observes_read_to_clear_once() {
         .map_read_to_clear(4096, 4, 42, Permissions::READ)
         .unwrap();
     let mut frame = SemanticFrame::new(9, 0, instruction.as_ref(), &mut executor).unwrap();
-    executor
-        .memory_service_mut()
-        .begin_instruction(9, StorePolicy::Staged)
-        .unwrap();
+    executor.memory_service_mut().begin_instruction(9).unwrap();
     let FrameYield::Effect(request) = frame.resume(None).unwrap() else {
         panic!("load must yield")
     };
@@ -690,4 +687,42 @@ fn wide_effect_retains_word_chunks_in_legacy_memory_trace() {
             size: 16
         }
     ));
+}
+
+#[test]
+fn synchronous_wide_store_is_all_or_nothing() {
+    use tir::backend::{MachineContext, MachineInstruction};
+    use tir::utils::RawBits;
+    let context = Context::with_default_dialects();
+    let target = tir::backend::select_target("arm64", None, None).unwrap();
+    target.register_dialects(&context);
+    let module = target
+        .asm_parser(&context)
+        .parse_asm(&context, ".global first\nfirst:\n str q2, [x1, 0]\n")
+        .unwrap();
+    let program = tir_sim::ProgramImage::from_module(&context, module, 0, Some("first")).unwrap();
+    let instruction = context
+        .get_op(program.blocks[0].instructions[0])
+        .as_interface::<dyn MachineInstruction>()
+        .unwrap();
+    for address in [48, 56] {
+        let mut executor = Executor::new(64);
+        executor.set_register_widths(target.register_widths());
+        executor
+            .write_register("GPRsp", 1, APInt::new(64, address))
+            .unwrap();
+        executor
+            .write_register_bits("QPR", 2, RawBits::from_bytes(vec![42; 16]))
+            .unwrap();
+        executor.write_bytes(0, &[99; 64]).unwrap();
+        let result = instruction.execute(&mut executor);
+        assert_eq!(result.is_ok(), address == 48);
+        let mut expected = [99; 64];
+        if address == 48 {
+            expected[48..].fill(42);
+        }
+        let mut actual = [0; 64];
+        executor.memory_service().read(0, &mut actual).unwrap();
+        assert_eq!(actual, expected);
+    }
 }

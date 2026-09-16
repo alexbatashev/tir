@@ -621,8 +621,7 @@ impl Executor {
                     reason: format!("multi-access instruction rejected before effects: {error}"),
                 })?;
         }
-        self.memory
-            .begin_instruction(id, crate::StorePolicy::Staged)?;
+        self.memory.begin_instruction(id)?;
         let event_start = self.effect_events.len();
         let result = self.drive_frame(&mut frame);
         if let Err(trap) = result {
@@ -679,8 +678,7 @@ impl Executor {
     fn service_immediate(&mut self, effect: MemoryEffect) -> Result<ResponseValue, SimTrap> {
         let id = self.next_instruction;
         self.next_instruction = id.checked_add(1).expect("instruction identity exhausted");
-        self.memory
-            .begin_instruction(id, crate::StorePolicy::Staged)?;
+        self.memory.begin_instruction(id)?;
         let request = EffectRequest {
             id: tir::backend::exec::RequestId {
                 instruction: id,
@@ -739,21 +737,25 @@ impl Executor {
             ),
             MemoryEffect::Exception { .. } => return,
         };
-        if kind == MemAccessKind::Data && size > 8 {
-            for offset in (0..size).step_by(8) {
-                self.record_mem_access(MemAccess {
-                    addr: address + offset as u64,
-                    size: (size - offset).min(8) as u8,
-                    is_write,
-                    kind,
-                });
-            }
+        if kind == MemAccessKind::Data {
+            self.record_data_access(address, size, is_write);
         } else {
             self.record_mem_access(MemAccess {
                 addr: address,
                 size: size as u8,
                 is_write,
                 kind,
+            });
+        }
+    }
+
+    fn record_data_access(&self, address: u64, size: usize, is_write: bool) {
+        for offset in (0..size).step_by(8) {
+            self.record_mem_access(MemAccess {
+                addr: address + offset as u64,
+                size: (size - offset).min(8) as u8,
+                is_write,
+                kind: MemAccessKind::Data,
             });
         }
     }
@@ -1143,6 +1145,15 @@ impl MachineContext for Executor {
             is_write: true,
             kind: MemAccessKind::Data,
         });
+        Ok(())
+    }
+
+    fn write_memory_bytes(&mut self, address: u64, bytes: &[u8]) -> Result<(), SimTrap> {
+        self.memory
+            .validate_ram_access(address, bytes.len(), crate::MemoryAccess::Write)
+            .map_err(|error| crate::memory_trap(error, bytes.len()))?;
+        self.write_bytes(address, bytes)?;
+        self.record_data_access(address, bytes.len(), true);
         Ok(())
     }
 

@@ -1,6 +1,6 @@
 use tir::backend::exec::{EffectRequest, MemoryEffect, RequestId, ResponseValue};
 use tir::sem::{AtomicRmwOp, MemOrdering};
-use tir_sim::{MemoryAccess, MemoryService, Permissions, StorePolicy};
+use tir_sim::{MemoryAccess, MemoryService, Permissions};
 
 #[test]
 fn read_to_clear_runs_once_after_backpressure() {
@@ -8,7 +8,7 @@ fn read_to_clear_runs_once_after_backpressure() {
     service
         .map_read_to_clear(0x1000, 8, 7, Permissions::READ)
         .unwrap();
-    service.begin_instruction(3, StorePolicy::Staged).unwrap();
+    service.begin_instruction(3).unwrap();
     let request = EffectRequest {
         id: RequestId {
             instruction: 3,
@@ -44,6 +44,61 @@ fn read_to_clear_runs_once_after_backpressure() {
 }
 
 #[test]
+fn unmapping_one_read_to_clear_alias_preserves_the_device() {
+    let mut service = MemoryService::new();
+    service
+        .map_read_to_clear(0x1000, 8, 7, Permissions::READ)
+        .unwrap();
+    let backing = service.address_space().mapping_at(0x1000).unwrap().backing;
+    let (memory, address_space) = service.memory_and_space_mut();
+    memory
+        .map(address_space, 0x2000, 8, backing, 0, Permissions::READ)
+        .unwrap();
+
+    service.unmap(0x1000, 8).unwrap();
+
+    assert_eq!(service.read_to_clear_value(0x2000), Some(7));
+}
+
+#[test]
+fn raw_unmap_retires_read_to_clear_device_before_later_reuse() {
+    let mut service = MemoryService::new();
+    service
+        .map_read_to_clear(0x1000, 8, 7, Permissions::READ)
+        .unwrap();
+    let backing = service.address_space().mapping_at(0x1000).unwrap().backing;
+    let (memory, address_space) = service.memory_and_space_mut();
+    memory.unmap(address_space, 0x1000, 8).unwrap();
+
+    service.begin_instruction(1).unwrap();
+    service.abort_instruction(1).unwrap();
+
+    let (memory, address_space) = service.memory_and_space_mut();
+    memory
+        .map(address_space, 0x2000, 8, backing, 0, Permissions::READ)
+        .unwrap();
+    service.begin_instruction(2).unwrap();
+    let response = service
+        .service(
+            &EffectRequest {
+                id: RequestId {
+                    instruction: 2,
+                    sequence: 0,
+                },
+                pc: 0x80,
+                effect: MemoryEffect::Read {
+                    address: 0x2000,
+                    size: 8,
+                },
+            },
+            true,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(matches!(response.result, Ok(ResponseValue::Word(0))));
+}
+
+#[test]
 fn staged_stores_publish_together_at_commit() {
     let mut service = MemoryService::new();
     let (memory, address_space) = service.memory_and_space_mut();
@@ -59,7 +114,7 @@ fn staged_stores_publish_together_at_commit() {
         )
         .unwrap();
 
-    service.begin_instruction(1, StorePolicy::Staged).unwrap();
+    service.begin_instruction(1).unwrap();
     for (sequence, address, byte) in [(0, 0x2000, 4), (1, 0x2001, 5)] {
         let response = service
             .service(
@@ -97,7 +152,7 @@ fn faulted_instruction_accepts_only_abort() {
     memory
         .map(address_space, 0x3000, 4, backing, 0, Permissions::READ)
         .unwrap();
-    service.begin_instruction(9, StorePolicy::Staged).unwrap();
+    service.begin_instruction(9).unwrap();
     let fault = service
         .service(
             &EffectRequest {
@@ -139,7 +194,7 @@ fn atomic_rejects_device_before_reading_it() {
     service
         .map_read_to_clear(0x4000, 8, 11, Permissions::ALL)
         .unwrap();
-    service.begin_instruction(5, StorePolicy::Staged).unwrap();
+    service.begin_instruction(5).unwrap();
 
     let response = service
         .service(
@@ -183,7 +238,7 @@ fn access_crossing_from_ram_into_device_is_rejected_without_observation() {
         .validate_ram_access(0x1000, 8, MemoryAccess::Read)
         .is_err());
 
-    service.begin_instruction(1, StorePolicy::Staged).unwrap();
+    service.begin_instruction(1).unwrap();
     let response = service
         .service(
             &EffectRequest {
@@ -227,7 +282,7 @@ fn memory_order_follows_observation_and_visibility_events() {
         instruction: 1,
         sequence: 0,
     };
-    service.begin_instruction(1, StorePolicy::Staged).unwrap();
+    service.begin_instruction(1).unwrap();
     service
         .service(
             &EffectRequest {
@@ -248,7 +303,7 @@ fn memory_order_follows_observation_and_visibility_events() {
         instruction: 2,
         sequence: 0,
     };
-    service.begin_instruction(2, StorePolicy::Staged).unwrap();
+    service.begin_instruction(2).unwrap();
     service
         .service(
             &EffectRequest {
@@ -270,7 +325,7 @@ fn memory_order_follows_observation_and_visibility_events() {
         instruction: 3,
         sequence: 0,
     };
-    service.begin_instruction(3, StorePolicy::Staged).unwrap();
+    service.begin_instruction(3).unwrap();
     service
         .service(
             &EffectRequest {
@@ -324,7 +379,7 @@ fn plain_store_does_not_clear_lr_sc_reservation() {
         )
         .unwrap();
 
-    service.begin_instruction(1, StorePolicy::Staged).unwrap();
+    service.begin_instruction(1).unwrap();
     service
         .service(
             &EffectRequest {
@@ -344,7 +399,7 @@ fn plain_store_does_not_clear_lr_sc_reservation() {
         .unwrap();
     service.commit_instruction(1).unwrap();
 
-    service.begin_instruction(2, StorePolicy::Staged).unwrap();
+    service.begin_instruction(2).unwrap();
     service
         .service(
             &EffectRequest {
@@ -363,7 +418,7 @@ fn plain_store_does_not_clear_lr_sc_reservation() {
         .unwrap();
     service.commit_instruction(2).unwrap();
 
-    service.begin_instruction(3, StorePolicy::Staged).unwrap();
+    service.begin_instruction(3).unwrap();
     let response = service
         .service(
             &EffectRequest {
@@ -392,6 +447,81 @@ fn plain_store_does_not_clear_lr_sc_reservation() {
 }
 
 #[test]
+fn faulting_store_conditional_consumes_reservation() {
+    let mut service = MemoryService::new();
+    let (memory, address_space) = service.memory_and_space_mut();
+    let backing = memory.create_backing(8).unwrap();
+    memory
+        .map(address_space, 0x7800, 8, backing, 0, Permissions::READ)
+        .unwrap();
+
+    service.begin_instruction(1).unwrap();
+    service
+        .service(
+            &EffectRequest {
+                id: RequestId {
+                    instruction: 1,
+                    sequence: 0,
+                },
+                pc: 0xaa,
+                effect: MemoryEffect::LoadReserved {
+                    address: 0x7800,
+                    size: 8,
+                    ordering: MemOrdering::Acquire,
+                },
+            },
+            true,
+        )
+        .unwrap();
+    service.commit_instruction(1).unwrap();
+
+    service.begin_instruction(2).unwrap();
+    let fault = service
+        .service(
+            &EffectRequest {
+                id: RequestId {
+                    instruction: 2,
+                    sequence: 0,
+                },
+                pc: 0xac,
+                effect: MemoryEffect::StoreConditional {
+                    address: 0x7800,
+                    size: 8,
+                    value: 1,
+                    ordering: MemOrdering::Release,
+                },
+            },
+            true,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(fault.result.is_err());
+    service.abort_instruction(2).unwrap();
+
+    service.begin_instruction(3).unwrap();
+    let retry = service
+        .service(
+            &EffectRequest {
+                id: RequestId {
+                    instruction: 3,
+                    sequence: 0,
+                },
+                pc: 0xb0,
+                effect: MemoryEffect::StoreConditional {
+                    address: 0x7800,
+                    size: 8,
+                    value: 2,
+                    ordering: MemOrdering::Release,
+                },
+            },
+            true,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(matches!(retry.result, Ok(ResponseValue::Word(0))));
+}
+
+#[test]
 fn remapping_reserved_address_makes_store_conditional_fail() {
     let mut service = MemoryService::new();
     let (memory, address_space) = service.memory_and_space_mut();
@@ -407,7 +537,7 @@ fn remapping_reserved_address_makes_store_conditional_fail() {
         )
         .unwrap();
 
-    service.begin_instruction(1, StorePolicy::Staged).unwrap();
+    service.begin_instruction(1).unwrap();
     service
         .service(
             &EffectRequest {
@@ -442,7 +572,7 @@ fn remapping_reserved_address_makes_store_conditional_fail() {
         .unwrap();
     service.write(0x7000, &9_u64.to_le_bytes()).unwrap();
 
-    service.begin_instruction(2, StorePolicy::Staged).unwrap();
+    service.begin_instruction(2).unwrap();
     let response = service
         .service(
             &EffectRequest {
@@ -485,7 +615,7 @@ fn staged_store_rejects_a_later_observing_effect() {
             Permissions::READ_WRITE,
         )
         .unwrap();
-    service.begin_instruction(1, StorePolicy::Staged).unwrap();
+    service.begin_instruction(1).unwrap();
     service
         .service(
             &EffectRequest {
@@ -534,7 +664,7 @@ fn mapping_change_invalidates_active_instruction() {
             Permissions::READ_WRITE,
         )
         .unwrap();
-    service.begin_instruction(1, StorePolicy::Staged).unwrap();
+    service.begin_instruction(1).unwrap();
     service
         .service(
             &EffectRequest {
@@ -558,7 +688,7 @@ fn mapping_change_invalidates_active_instruction() {
     assert!(service.commit_instruction(1).is_err());
     service.abort_instruction(1).unwrap();
 
-    service.begin_instruction(2, StorePolicy::Staged).unwrap();
+    service.begin_instruction(2).unwrap();
     let (memory, address_space) = service.memory_and_space_mut();
     memory
         .protect(address_space, 0x9000, 2, Permissions::READ_WRITE)

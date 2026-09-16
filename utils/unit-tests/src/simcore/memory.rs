@@ -169,7 +169,7 @@ fn protect_and_unmap_split_exact_mapping_windows() {
 }
 
 #[test]
-fn backing_and_mapping_generations_track_changes() {
+fn new_mapping_records_its_address_space_generation() {
     let mut memory = Memory::new();
     let backing = memory.create_backing(MEMORY_PAGE_SIZE * 2).unwrap();
     let mut address_space = AddressSpace::new();
@@ -185,15 +185,6 @@ fn backing_and_mapping_generations_track_changes() {
         .unwrap();
     let mapping_generation = address_space.mapping_at(0x1000).unwrap().generation;
     assert_eq!(mapping_generation, address_space.generation());
-    assert_eq!(memory.backing_generation(backing), Some(0));
-
-    memory.write(&address_space, 0x1fff, &[1, 2]).unwrap();
-    assert_eq!(memory.backing_generation(backing), Some(1));
-    assert_eq!(memory.backing_page_generation(backing, 0), Some(1));
-    assert_eq!(
-        memory.backing_page_generation(backing, MEMORY_PAGE_SIZE),
-        Some(1)
-    );
 }
 
 #[test]
