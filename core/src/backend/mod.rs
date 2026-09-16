@@ -84,6 +84,13 @@ pub enum SimTrap {
         address: u64,
         size: usize,
     },
+    /// A mapped-memory access failed before observing or changing bytes.
+    MemoryFault {
+        address: u64,
+        size: usize,
+        access: &'static str,
+        reason: &'static str,
+    },
     ProgramNotLoaded,
     PcNotMapped {
         pc: u64,
