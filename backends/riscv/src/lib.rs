@@ -85,6 +85,16 @@ impl TargetConfig {
                 }
             }
         }
+        for (feature, base, xlen) in [
+            (Feature::Zba64, Feature::Zba, 64),
+            (Feature::Zbb32, Feature::Zbb, 32),
+            (Feature::Zbb64, Feature::Zbb, 64),
+        ] {
+            config.features.retain(|enabled| *enabled != feature);
+            if config.xlen == xlen && config.features.contains(&base) {
+                config.features.push(feature);
+            }
+        }
         validate_features(&config.features)?;
         let base = config.base_feature();
         if !config.features.contains(&base) {
@@ -134,14 +144,16 @@ impl TargetConfig {
             .iter()
             .copied()
             .filter(|f| match f {
-                Feature::RV32I | Feature::C32 | Feature::Zcf => xlen == 32,
+                Feature::RV32I | Feature::C32 | Feature::Zcf | Feature::Zbb32 => xlen == 32,
                 Feature::RV64I
                 | Feature::F64
                 | Feature::D64
                 | Feature::C64
                 | Feature::Zmmul64
                 | Feature::RVM64
-                | Feature::A64 => xlen == 64,
+                | Feature::A64
+                | Feature::Zba64
+                | Feature::Zbb64 => xlen == 64,
                 _ => true,
             })
             .collect();
