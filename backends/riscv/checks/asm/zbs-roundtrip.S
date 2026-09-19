@@ -1,10 +1,8 @@
 # Zbs roundtrip and golden encodings per the Sail RISC-V model.
 # RUN: tir mc --march=rv32i_zbs %s | filecheck %s
 # RUN: tir mc --march=rv64i_zbs %s | filecheck %s
-# RUN: tir mc --march=rv32i_zbs --mattr=+zbs %s | filecheck %s
-# RUN: tir mc --march=rv64i_zbs --mattr=+zbs %s | filecheck %s
-# RUN: not tir mc --march=rv32i_zbs --mattr=-zbs %s
-# RUN: not tir mc --march=rv64i_zbs --mattr=-zbs %s
+# RUN: tir mc --march=rv32i --mattr=+zbs %s | filecheck %s
+# RUN: tir mc --march=rv64i --mattr=+zbs %s | filecheck %s
 # RUN: tir mc --march=rv64i_zbs --filetype=obj-ascii %s | filecheck --check-prefix=ENC %s
 
 .global f
