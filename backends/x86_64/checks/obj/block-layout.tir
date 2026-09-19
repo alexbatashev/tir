@@ -1,0 +1,32 @@
+// RUN: tir mc --march=x86_64 --filetype=asm %s | filecheck %s
+
+// The layout pass should place the unconditional backedge before the loop
+// header, so the backedge needs no explicit jump.
+module {
+  %fn_layout = func.func @layout(%remaining: !i64, %value: !i64) -> !i64 {
+    cfg.br ^loop(%remaining, %value : !i64, !i64)
+  ^loop(%remaining: !i64, %value: !i64):
+    %doubled = addi %value, %value : !i64
+    %one = constant {value = 1} : !i64
+    %next = subi %remaining, %one : !i64
+    %zero = constant {value = 0} : !i64
+    %more = cmpi %next, %zero {predicate = "ne"} : !i1
+    cfg.cond_br %more, ^backedge(%next, %doubled : !i64, !i64), ^exit(%doubled : !i64)
+  ^backedge(%remaining: !i64, %value: !i64):
+    cfg.br ^loop(%remaining, %value : !i64, !i64)
+  ^exit(%result: !i64):
+    func.return %result
+  }
+  module_end
+}
+
+// CHECK-LABEL: layout:
+// CHECK-NOT: .L{{[0-9]+}}:
+// CHECK: jmp .L[[HEADER:[0-9]+]]
+// CHECK-NEXT: .L[[BACKEDGE:[0-9]+]]:
+// CHECK-NOT: jmp .L[[HEADER]]
+// CHECK: .L[[HEADER]]:
+// CHECK: mov [[DOUBLED:r[a-z0-9]+]], [[VALUE:r[a-z0-9]+]]
+// CHECK-NEXT: add [[DOUBLED]], [[VALUE]]
+// CHECK: jne .L[[BACKEDGE]]
+// CHECK: ret
