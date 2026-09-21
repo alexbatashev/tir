@@ -14,7 +14,7 @@ use tir_relational::{Atom, Cmp, ColumnId, Expr, Guard, HeadOp, Plan, Query, Sour
 use crate::sem::{SemNode as Node, SymKind, node::field};
 
 /// `Load(address, bytes, metadata, state)`.
-const LOAD_ARITY: usize = 4;
+pub(super) const LOAD_ARITY: usize = 4;
 const LOAD_STATE: usize = 3;
 /// `Store(address, bytes, value, address_space, state)`.
 pub(super) const STORE_ARITY: usize = 5;
