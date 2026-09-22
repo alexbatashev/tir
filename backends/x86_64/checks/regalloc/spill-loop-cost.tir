@@ -1,4 +1,5 @@
 // RUN: tir mc --march=x86_64 --stage=regalloc %s | filecheck %s
+// RUN: tir mc --march=x86_64 --filetype=asm %s | filecheck --check-prefix=ASM %s
 
 // Twelve loop-carried accumulators leave no register free for the inner loop.
 // Spilling is unavoidable, but a spill's reloads and stores land where the
@@ -47,16 +48,35 @@ module {
   module_end
 }
 
-// The inner loop is the five-argument block defining the imul; it ends where a
-// later block branches back to it. No spill reload or store may appear in that
-// whole region; spills of the passive accumulators belong to the entry and
-// tail blocks around it.
+// Recovery shares the loop header, but edge-copy blocks stay with their
+// source branches so layout can give the inner backedge a fallthrough.
+// The inner body and its backedge copies must remain free of spill traffic.
 // CHECK: x86_64.mov_store_disp
-// CHECK: ^[[INNER:bb[0-9]+]]({{(%[0-9]+: !x86_64.GPR, ){4}%[0-9]+: !x86_64.GPR}}):
+// CHECK: ^[[INNER:bb[0-9]+]]({{(%[0-9]+: !x86_64.GPR, ){13}%[0-9]+: !x86_64.GPR}}):
 // CHECK-NOT: mov_load_disp
 // CHECK-NOT: mov_store_disp
 // CHECK: x86_64.imul
 // CHECK-NOT: mov_load_disp
 // CHECK-NOT: mov_store_disp
-// CHECK: asm.vbr ^[[INNER]]
+// CHECK: x86_64.jl {imm = ^[[BACK:bb[0-9]+]]}
+// CHECK-NEXT: asm.vbr
+// CHECK-NEXT: ^[[BACK]]:
+// CHECK-NEXT: x86_64.mov
+// CHECK-NEXT: x86_64.mov
+// CHECK-NEXT: asm.vbr ^[[INNER]]
 // CHECK: x86_64.mov_load_disp
+
+// Layout must put the inner backedge copies immediately before its header.
+// Each inner iteration executes one conditional jump and no extra jump.
+// ASM-LABEL: pressure:
+// ASM: jmp .L[[INNER:[0-9]+]]
+// ASM-NEXT: .L[[BACK:[0-9]+]]:
+// ASM-NEXT: mov
+// ASM-NEXT: mov
+// ASM-NEXT: .L[[INNER]]:
+// ASM-NOT: jmp
+// ASM-NOT: [rsp
+// ASM: imul
+// ASM-NOT: jmp
+// ASM-NOT: [rsp
+// ASM: jl .L[[BACK]]

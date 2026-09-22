@@ -184,67 +184,97 @@ terminators and operands so the pass can combine them. These requirements
 apply to the input representation, including graphs with multiple-entry loops
 or several loop exits.
 
-## Reconstruction places demanded computations in blocks
+## Predicates determine the recovered control flow
 
-The shared `destructure` routine turns unordered regions into CFG blocks.
-It starts from a region's results and follows their dependencies. These
-dependencies determine which operations must execute to produce the results.
-The routine places those operations in topological order, so each computation
-follows the computations it depends on.
+The standalone `destructure` pass and CPU code generation use predicative
+control-flow recovery. A private recovery plan records predicate definitions,
+region bindings, and the computations each path demands before instruction
+selection replaces the source operations.
 
-A dependency cone is the set of operations needed to produce a particular set
-of values. The cone includes state dependencies as well as ordinary values.
-An unused pure computation needs no place in the output. An operation with a
-state result that no region result demands is an error, because dropping that
-operation would lose an effect.
+Recovery first prepares computation fragments, producer-owned control
+definitions, and unresolved continuations. Each definition has a finite set of
+exact or default outcomes. A separate routing map records which outcome a
+conditional or loop consumes. FINISH starts at the definition, selects an
+outcome, and follows its fact through region bindings to the next computation.
+A structural operation need not become a branch or a merge block. For example,
+when a conditional produces `false` as a loop's repeat selector, that outcome
+can reach the loop exit directly without storing and retesting the boolean.
 
-### Conditionals become tests, alternatives, and a merge
+The algorithm follows the PREPARE and FINISH organization of
+[Bahmann et al.'s predicative recovery](https://www.sjalander.com/research/pdf/reissmann-PhD-thesis.pdf#page=129).
+The private representation adapts TIR's demand semantics and preserves SSA
+values. It does not imply the paper's exact-reconstruction guarantee for every
+optimized TIR program.
 
-For a `Gamma` operation, reconstruction creates tests that select an
-alternative. Each alternative computes its results and transfers them to a
-merge block. The merge block's arguments take the place of the conditional's
-results.
+### Control predicates and ordinary values
 
-An alternative with no demanded computations can pass its results directly to
-the merge. A test already resolved by the caller can also eliminate an
-unreachable alternative. The routine creates blocks for the work that remains.
+A boolean used as ordinary data must remain available to its readers. Recovery
+cannot eliminate its computation merely because it also selects a branch.
+When a producer's successor structure prevents a legal control definition,
+normalization retains its value and creates a consumer-local conversion. The
+conversion owns a new control definition at that consumer. Normalization does
+not add dependency edges to force an invalid order or duplicate effects.
+Consumers share a direct definition only when their outcome partitions agree.
+A wider selector used by conditionals with different arm counts requires a
+local conversion for the incompatible consumer.
 
-### Loop paths determine where computations run
+Constant selectors can pass through several boundaries. Their facts travel
+together with the corresponding value bindings, so a loop's entry, repetition,
+and exit selectors keep their correlation. Recovery stops at computations
+whose execution is still required. Pure literal definitions do not interrupt
+this tracing. FINISH places the surviving literals along paths that dominate
+their uses, stopping at joins so loop invariants are not rematerialized on each
+iteration. Within a fragment, literals wait until their first reader; a literal
+needed only beyond the terminator follows the fragment's computations.
+A constant replaced under an arm's selection assumption is a local
+fact, not evidence that its replacement is constant on every path. Routes
+carry only dynamic facts; literal values remain in a shared table. A backedge
+forgets facts owned by the loop body and facts whose owner is unknown.
+
+### Loop paths keep their demand semantics
 
 A `Theta` body exposes a predicate, continuation values, and exit values.
-Reconstruction finds the dependency cone of each group. The loop header holds
-the predicate's cone and the computations needed by both continuation and exit.
-The remaining computations belong only to their selected path.
+The predicate's dependencies and the computations shared by both outcomes
+run before the decision. The remaining computations run only on the selected
+path. A continue-only load or trap must not execute when the loop exits; an
+exit-only store must not execute on continuation.
 
-```mermaid
-flowchart TD
-	I["Initial carried values"] --> H["Header: predicate and shared dependencies"]
-	H --> P{"Repeat?"}
-	P -->|Yes| C["Continue-only computations"]
-	C -->|"Next carried values"| H
-	P -->|No| E["Exit-only computations"]
-	E --> M["Merge: final loop results"]
-```
+The private plan represents this split as a canonical loop containing a
+conditional. Its true arm computes feedback values and produces a true repeat
+selector. Its false arm computes exit values and produces a false selector.
+Each original computation keeps one execution owner, including each resource
+state transition. An effect that no result demands remains an error.
 
-This placement preserves conditional evaluation. A load needed only to prepare
-the next iteration does not execute when the predicate says to stop. A store
-needed only on exit executes when the loop stops. Computations shared by both
-paths run before the decision because either outcome needs them.
+A counted loop can use the same comparison for a Gamma and its repetition
+result. When the mandatory Gamma yields both the feedback and exit tuples,
+normalization adds a private Boolean result to its alternatives. Each arm
+assigns that result after its computations, and the Theta reads it instead of
+using the comparison a second time. This control port has its own identity;
+its fact is cleared between iterations. If later placement loses that fact,
+recovery discards the candidate and restores a materialized repetition test.
 
-The diagram shows the general shape. Empty continuation or exit computations
-need no separate block. Nested structured operations introduce their own
-blocks within the path that evaluates them.
+### Edges preserve simultaneous value transfer
 
-### The caller supplies the branch operations
+Crossing a region boundary changes the names through which computations read
+values. Recovery composes these bindings simultaneously. A loop edge swapping
+`x` and `y` must read both incoming values before writing either next-iteration
+value. Surviving joins and loop entries use block arguments; existing machine
+SSA destruction later implements their parallel copies.
+Blocks created for branch-edge assignments follow their source block. This
+keeps layout tie-breaking independent of late edge-block allocation and lets
+short loop backedges become fallthroughs.
 
-Reconstruction uses an `Edges` interface to emit jumps, conditional branches,
-and function exits. The standalone `destructure` pass supplies `CfgEdges`,
-which creates generic `cfg` operations. The backend supplies `MachineEdges`,
-which creates target branches from the instruction selector's choices.
+The `Edges` adapter supplies generic CFG or target branch operations. Selected
+branches are identified by stable control definition and outcome IDs. Their
+register inputs are remapped through the same bindings as ordinary operands.
+This includes inputs captured inside a fused comparison and its branch prelude.
 
-Both callers use the same region bindings and dependency rules. The backend
-can use a selected comparison directly as a branch test and preserve implicit
-machine dependencies alongside explicit value dependencies.
+### SPIR-V explicitly retains structured recovery
+
+SPIR-V calls `recover_structured` on a copy of the function. This path preserves
+selection merges and loop header, continuation, and merge records for
+`OpSelectionMerge` and `OpLoopMerge`. CPU recovery can produce control flow
+that does not have those structural records, so it does not return them.
 
 ## FCC keeps regions through instruction selection
 
@@ -284,12 +314,12 @@ tiles while respecting dependencies. Machine emission at `-O0` still runs the
 normalizing simplifier. An `-O0` IR dump shows the frontend conversion before
 that simplification.
 
-Instruction selection processes the nested unordered regions. After it commits
-the selected instructions, it calls the shared destructurer with machine
-branches. Each resulting block then receives an order consistent with its
-machine dependencies. Register allocation and final emission consume those
-blocks. The [Instruction selection chapter](isel.md) explains how TIR chooses
-the instructions.
+Instruction selection processes the nested unordered regions against the
+recovery plan. It stages selected instructions and control-flow recovery in a
+private context, then publishes the result only after machine dependencies
+admit an order. Register allocation and final emission consume those blocks.
+The [Instruction selection chapter](isel.md) explains how TIR chooses the
+instructions.
 
 The shared backend also accepts raw CFG input from other clients. Its prologue
 runs `restructure-nodes` before selection and verifies the state dependencies.

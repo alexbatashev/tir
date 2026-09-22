@@ -1,37 +1,41 @@
 //! Destruction of unordered regions into a CFG, demand preserved.
 //!
-//! A callable whose body is an unordered region becomes blocks. Every
-//! operation the region's results demand is moved, never copied, into a block,
-//! in topological order, and a [`Gamma`] or [`Theta`] met on the way becomes
-//! the blocks its evaluation rule names.
+//! [`recover_cfg`] normalizes a callable's semantic regions into private
+//! computation fragments, control definitions, and typed boundaries. PREPARE
+//! chooses a dependency order without mutating the IR. FINISH follows joint
+//! selector facts and simultaneous bindings through [`Gamma`] and [`Theta`]
+//! boundaries until it reaches executable fragments, then emits each fragment
+//! once with the block parameters its incoming routes require.
 //!
-//! A gate becomes the chain of tests its arms describe, each arm a block
-//! entered on its ports, all of them leaving for the merge block that adopts
-//! the gate's results. A loop becomes a header entered on the ports, holding
-//! the predicate's cone and what both the continue and the exit cone demand;
-//! the header branches to a continue block holding what only the continue cone
-//! demands, which jumps back, and to an exit block holding what only the exit
-//! cone demands, which jumps to the merge block adopting the loop's results.
-//! An operation in no cone is never run and is not placed. Hoisting what both
-//! cones demand above the branch speculates nothing: it runs once whichever
-//! way the branch goes, exactly as the definitional semantics run it.
+//! A Theta remains lazy. Its predicate and shared dependencies form the head
+//! demand domain, while continue-only and exit-only computations remain on
+//! their respective outcomes. A selector with an ordinary data use is tested
+//! by a consumer-local control definition. Eligible control definitions own
+//! their branches directly, so region nesting does not require synthetic merge
+//! and dispatch blocks.
 //!
-//! The values keep their identity: a port becomes an argument of the block
-//! entering the region, a result the argument of the block continuing after
-//! the operation. Nothing is renamed, so readers already placed go on naming
-//! what they read.
+//! [`recover_structured`] retains the structural lowering for consumers that
+//! require merge records. It is separate from predicative recovery.
 //!
 //! What the blocks are joined by is the caller's choice, through [`Edges`]:
 //! the `cfg` dialect for core IR, a target's branches once the region holds
 //! machine operations.
 
+mod recovery;
+
 use std::collections::{HashMap, HashSet};
+
+pub(crate) use recovery::RecoveryError;
+pub use recovery::{
+    ControlDefinition, ControlId, ControlKind, ControlOutcome, DemandDomainId, DemandDomainKind,
+    RecoveryPlan, ValueBinding,
+};
 
 use crate::analysis::AnalysisManager;
 use crate::attributes::{AttributeValue, Predicate};
 use crate::builtin::{CmpIOpBuilder, ConstantOp, ConstantOpBuilder, IntegerType, XOrIOp};
 use crate::cfg::{BranchOpBuilder, CondBranchOpBuilder};
-use crate::func::{FuncOp, ReturnOpBuilder};
+use crate::func::{FuncOp, ReturnOp, ReturnOpBuilder};
 use crate::region::values_read;
 use crate::{
     BlockId, Context, Gamma, OpHandle, OpId, Operation, OperationRef, Pass, PassError, PassTarget,
@@ -39,7 +43,7 @@ use crate::{
 };
 
 /// The test a branch decides.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Test {
     /// Whether `gate` selects its arm `index`: the predicate equals the index,
     /// or, for the last tested arm of a chain, whatever is left.
@@ -90,6 +94,26 @@ pub trait Edges {
         mint: &mut dyn FnMut() -> BlockId,
     ) -> Result<(), PassError>;
 
+    /// End `block` with the branch owned by a recovery control definition.
+    /// `predicate` is the value after FINISH has applied region bindings. It
+    /// can differ from the source predicate recorded in `control`.
+    #[allow(clippy::too_many_arguments)]
+    fn branch_control(
+        &self,
+        _control: &ControlDefinition,
+        _outcome: usize,
+        _predicate: ValueId,
+        _bindings: &[ValueBinding],
+        _block: BlockId,
+        _taken: &Edge,
+        _fallthrough: &Edge,
+        _mint: &mut dyn FnMut() -> BlockId,
+    ) -> Result<(), PassError> {
+        Err(PassError::InvalidRuleSet(
+            "this edge adapter does not implement producer-owned recovery control".into(),
+        ))
+    }
+
     /// End `block` by leaving the callable with `values` and `deps`.
     fn leave(&self, block: BlockId, values: &[ValueId], deps: &[ValueId]) -> Result<(), PassError>;
 
@@ -99,11 +123,47 @@ pub trait Edges {
         None
     }
 
+    /// The selected outcome of a recovery control, when selection proved it.
+    fn decided_control(&self, _control: &ControlDefinition, _outcome: usize) -> Option<bool> {
+        None
+    }
+
     /// What deciding `test` of `op` reads besides the operation's own operands
     /// and results: a machine test bound to registers its region's tiles
     /// define, which are demanded along with the test.
     fn test_reads(&self, _op: &OpHandle, _test: Test) -> Vec<ValueId> {
         Vec::new()
+    }
+
+    /// Every value the selected recovery control reads. Generic CFG recovery
+    /// reads the current structured predicate plus [`Edges::test_reads`]. A
+    /// target override names the complete selected branch input set instead;
+    /// a fused branch need not retain an erased source predicate.
+    fn control_reads(&self, control: &ControlDefinition, _outcome: usize) -> Vec<ValueId> {
+        vec![control.source_predicate]
+    }
+
+    /// Map semantic source values to the values emitted by selection.
+    fn value(&self, source: ValueId) -> ValueId {
+        source
+    }
+
+    /// Whether selection changed a semantic value's representation type.
+    /// Generic recovery requires the original type; target adapters may name
+    /// register-class representations selected by their instruction rules.
+    fn compatible_type(&self, source: crate::TypeId, selected: crate::TypeId) -> bool {
+        source == selected
+    }
+
+    /// Whether an instruction was selected by a formal constant-materializer
+    /// rule. Its fixed-register reads may include a target's hardwired zero.
+    fn is_literal(&self, _op: OpId) -> bool {
+        false
+    }
+
+    /// The recovery demand domain assigned to a selected operation.
+    fn execution_domain(&self, _op: OpId) -> Option<DemandDomainId> {
+        None
     }
 
     /// Operations `op` runs after besides those defining what it reads: a
@@ -131,40 +191,27 @@ impl CfgEdges<'_> {
             .build();
         self.context.get_block(block).append(op.id());
     }
-}
 
-impl Edges for CfgEdges<'_> {
-    fn jump(&self, block: BlockId, edge: &Edge) {
-        let op = BranchOpBuilder::new(self.context)
-            .dest_args(values_then_states(self.context, &edge.args))
-            .dest(edge.dest)
-            .build();
-        self.context.get_block(block).append(op.id());
-    }
-
-    fn branch(
+    fn branch_value(
         &self,
         block: BlockId,
-        op: &OpHandle,
+        predicate: ValueId,
         test: Test,
         taken: &Edge,
         fallthrough: &Edge,
         mint: &mut dyn FnMut() -> BlockId,
-    ) -> Result<(), PassError> {
+    ) {
         let (condition, holds) = match test {
             Test::Repeat => {
-                let predicate = theta(op)?.predicate();
                 // Restructure negates a head-tested loop's exit into a tail
                 // repeat (`xori(cmp, 1)`). Branch on the comparison with the
-                // edges swapped instead of materializing the negation, or
-                // selection can only test a register holding it.
+                // edges swapped instead of materializing the negation.
                 match unnegate(self.context, predicate) {
                     Some(inner) => (inner, false),
                     None => (predicate, true),
                 }
             }
             Test::Arm(index) => {
-                let predicate = gamma(op)?.predicate();
                 let ty = self.context.get_value(predicate).ty();
                 if ty == IntegerType::new(self.context, 1) {
                     (predicate, index == 1)
@@ -200,6 +247,61 @@ impl Edges for CfgEdges<'_> {
         } else {
             self.cond_br(block, condition, fallthrough, &hop);
         }
+    }
+}
+
+impl Edges for CfgEdges<'_> {
+    fn jump(&self, block: BlockId, edge: &Edge) {
+        let op = BranchOpBuilder::new(self.context)
+            .dest_args(values_then_states(self.context, &edge.args))
+            .dest(edge.dest)
+            .build();
+        self.context.get_block(block).append(op.id());
+    }
+
+    fn branch(
+        &self,
+        block: BlockId,
+        op: &OpHandle,
+        test: Test,
+        taken: &Edge,
+        fallthrough: &Edge,
+        mint: &mut dyn FnMut() -> BlockId,
+    ) -> Result<(), PassError> {
+        let predicate = match test {
+            Test::Repeat => theta(op)?.predicate(),
+            Test::Arm(_) => gamma(op)?.predicate(),
+        };
+        self.branch_value(block, predicate, test, taken, fallthrough, mint);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn branch_control(
+        &self,
+        control: &ControlDefinition,
+        outcome: usize,
+        predicate: ValueId,
+        _bindings: &[ValueBinding],
+        block: BlockId,
+        taken: &Edge,
+        fallthrough: &Edge,
+        mint: &mut dyn FnMut() -> BlockId,
+    ) -> Result<(), PassError> {
+        let test = match control.outcomes.get(outcome) {
+            Some(ControlOutcome::Exact(value)) => Test::Arm(*value as usize),
+            Some(ControlOutcome::DefaultFrom(_))
+                if control.predicate_type == IntegerType::new(self.context, 1) =>
+            {
+                Test::Repeat
+            }
+            _ => {
+                return Err(PassError::InvalidRuleSet(
+                    "generic CFG cannot emit a non-boolean default control outcome".into(),
+                ));
+            }
+        };
+        self.branch_value(block, predicate, test, taken, fallthrough, mint);
         Ok(())
     }
 
@@ -298,11 +400,119 @@ pub struct Destructured {
     pub gates: Vec<GateBlocks>,
 }
 
-/// Turn `region`, a callable's body, into blocks joined by `edges`. An
-/// unordered region becomes blocks outright, the first entered on its ports;
-/// an ordered one keeps its blocks, each structured operation in them
-/// replaced by the blocks it stands for.
-pub fn destructure(
+/// Explicit compatibility entry point for consumers that require structured
+/// merge and loop records, such as SPIR-V emission.
+pub fn recover_structured(
+    context: &Context,
+    region: RegionId,
+    edges: &dyn Edges,
+) -> Result<Destructured, PassError> {
+    lower(context, region, edges)
+}
+
+/// Analyze and recover a generic CFG with predicate-owned control.
+pub fn recover_cfg(
+    context: &Context,
+    region: RegionId,
+    edges: &dyn Edges,
+) -> Result<(), PassError> {
+    if !context.get_region(region).is_nodes() {
+        let blocks = context.get_region(region).block_ids();
+        let has_structured = blocks.iter().any(|&block| {
+            context
+                .get_block(block)
+                .op_ids()
+                .iter()
+                .any(|&op| is_structured(&context.get_op(op)))
+        });
+        if blocks.len() == 1 && has_structured {
+            linear_ordered_to_nodes(context, region, blocks[0])?;
+        } else {
+            restructure_ordered_root(context, region)?;
+        }
+    }
+    RecoveryPlan::analyze(context, region)?.emit(context, region, edges)
+}
+
+fn restructure_ordered_root(context: &Context, region: RegionId) -> Result<(), PassError> {
+    let owner = context
+        .get_region(region)
+        .parent_op()
+        .ok_or_else(|| PassError::InvalidRuleSet("ordered callable region has no owner".into()))?;
+    let owner = context.get_op(owner);
+    if !owner.is::<FuncOp>() || owner.regions().first() != Some(&region) {
+        return Err(PassError::InvalidRuleSet(
+            "ordered CFG recovery requires a function body".into(),
+        ));
+    }
+    let mut restructure = crate::passes::restructure::RestructureNodesPass::new();
+    restructure.run(&OperationRef::new(owner), context, &AnalysisManager::new())?;
+    Ok(())
+}
+
+/// Convert the common ordered compatibility form, one block containing
+/// semantic structured operations and a return, into the unordered form PCFR
+/// analyzes. The block order is already represented by SSA and state chains;
+/// this only changes ownership and the return boundary.
+fn linear_ordered_to_nodes(
+    context: &Context,
+    region: RegionId,
+    block: BlockId,
+) -> Result<(), PassError> {
+    let handle = context.get_block(block);
+    let mut ops = handle.op_ids();
+    let return_id = ops
+        .pop()
+        .ok_or_else(|| PassError::InvalidRuleSet("ordered callable block is empty".into()))?;
+    let return_op = context.get_op(return_id);
+    if !return_op.is::<ReturnOp>() {
+        return Err(PassError::InvalidRuleSet(
+            "ordered structured compatibility requires a func.return terminator".into(),
+        ));
+    }
+    let old_ports = handle.arguments();
+    let ports: Vec<crate::Value> = old_ports
+        .iter()
+        .map(|port| context.create_value(port.ty(), None))
+        .collect();
+    let renames: Vec<(ValueId, ValueId)> = old_ports
+        .iter()
+        .zip(&ports)
+        .map(|(old, new)| (old.id(), new.id()))
+        .collect();
+    for &op in &ops {
+        rename_within(context, op, &renames);
+    }
+    let results: Vec<ValueId> = return_op
+        .value_operands()
+        .iter()
+        .chain(return_op.state_operands().iter())
+        .map(|value| {
+            renames
+                .iter()
+                .find(|(old, _)| old == value)
+                .map_or(*value, |&(_, new)| new)
+        })
+        .collect();
+    for &op in &ops {
+        handle.remove_op(op);
+    }
+    context.erase_op(&OperationRef::new(return_op))?;
+    let staged = context.create_nodes_region(ports, ops, results).id();
+    context.replace_region_with_nodes(region, staged);
+    Ok(())
+}
+
+pub(crate) fn recover_with_plan(
+    context: &Context,
+    region: RegionId,
+    edges: &dyn Edges,
+    plan: &RecoveryPlan,
+) -> Result<(), RecoveryError> {
+    recovery::emit_recovery(context, region, edges, plan)
+}
+
+fn lower(
     context: &Context,
     region: RegionId,
     edges: &dyn Edges,
@@ -339,7 +549,102 @@ struct Lowering<'a> {
     record: Destructured,
 }
 
+/// Operations in `region` needed by `roots`, following the dependencies each
+/// caller uses for its form of recovery.
+pub(super) fn cone(
+    context: &Context,
+    region: RegionId,
+    roots: &[ValueId],
+    mut inputs: impl FnMut(OpId) -> Vec<OpId>,
+) -> HashSet<OpId> {
+    let mut cone = HashSet::new();
+    let mut pending: Vec<OpId> = roots
+        .iter()
+        .filter_map(|&value| context.get_value(value).defining_op())
+        .collect();
+    while let Some(op) = pending.pop() {
+        if context.parent_nodes_region(op) != Some(region) || !cone.insert(op) {
+            continue;
+        }
+        pending.extend(inputs(op));
+    }
+    cone
+}
+
+/// Stable Kahn order for a node region. Ties retain insertion order.
+pub(super) fn stable_order(
+    context: &Context,
+    region: RegionId,
+    mut inputs: impl FnMut(OpId) -> Vec<OpId>,
+) -> Result<Vec<OpId>, PassError> {
+    let ops = context.get_region(region).op_ids();
+    let positions: HashMap<OpId, usize> = ops
+        .iter()
+        .enumerate()
+        .map(|(index, &op)| (op, index))
+        .collect();
+    let mut pending = vec![0; ops.len()];
+    let mut readers = vec![HashSet::new(); ops.len()];
+    for (index, &op) in ops.iter().enumerate() {
+        for input in inputs(op) {
+            if let Some(&dependency) = positions.get(&input)
+                && readers[dependency].insert(index)
+            {
+                pending[index] += 1;
+            }
+        }
+    }
+    let ranks: Vec<_> = (0..ops.len()).collect();
+    let order = stable_group_order(&readers, &mut pending, &ranks);
+    if order.len() != ops.len() {
+        return Err(PassError::InvalidRuleSet(
+            "an unordered region contains a dependency cycle".into(),
+        ));
+    }
+    Ok(order.into_iter().map(|index| ops[index]).collect())
+}
+
+/// Stable Kahn order for contracted groups and the operations inside them.
+pub(super) fn stable_group_order(
+    outgoing: &[HashSet<usize>],
+    pending: &mut [usize],
+    ranks: &[usize],
+) -> Vec<usize> {
+    let mut ready: std::collections::BTreeSet<_> = pending
+        .iter()
+        .enumerate()
+        .filter_map(|(node, &count)| (count == 0).then_some((ranks[node], node)))
+        .collect();
+    let mut order = Vec::with_capacity(pending.len());
+    while let Some((_, node)) = ready.pop_first() {
+        order.push(node);
+        for &reader in &outgoing[node] {
+            pending[reader] -= 1;
+            if pending[reader] == 0 {
+                ready.insert((ranks[reader], reader));
+            }
+        }
+    }
+    order
+}
+
 impl Lowering<'_> {
+    fn branch(
+        &mut self,
+        block: BlockId,
+        op: &OpHandle,
+        test: Test,
+        taken: &Edge,
+        fallthrough: &Edge,
+    ) -> Result<(), PassError> {
+        let context = self.context;
+        let blocks = &mut self.blocks;
+        self.edges
+            .branch(block, op, test, taken, fallthrough, &mut || {
+                mint(context, blocks)
+            })
+    }
+
     fn block(&mut self) -> BlockId {
         let block = self.context.create_block(vec![]).id();
         self.blocks.push(block);
@@ -362,7 +667,7 @@ impl Lowering<'_> {
     /// the results are available in.
     fn region(&mut self, region: RegionId, block: BlockId) -> Result<BlockId, PassError> {
         let results = self.context.get_region(region).results();
-        let demanded = self.cone(region, &results);
+        let demanded = cone(self.context, region, &results, |op| self.inputs(op));
         let order = self.order(region)?;
         self.require_effects_demanded(&order, &demanded)?;
         self.ops(region, &order, &demanded, block)
@@ -405,85 +710,10 @@ impl Lowering<'_> {
     /// insertion order: the order a machine region was emitted in keeps an
     /// instruction's implicit inputs ahead of it.
     fn order(&self, region: RegionId) -> Result<Vec<OpId>, PassError> {
-        let ops = self.context.get_region(region).op_ids();
-        let held: HashSet<OpId> = ops.iter().copied().collect();
-        let mut pending: HashMap<OpId, usize> = HashMap::new();
-        let mut readers: HashMap<OpId, Vec<OpId>> = HashMap::new();
-        for &op in &ops {
-            let inputs: HashSet<OpId> = self
-                .inputs(op)
-                .into_iter()
-                .filter(|input| held.contains(input))
-                .collect();
-            for &input in &inputs {
-                readers.entry(input).or_default().push(op);
-            }
-            pending.insert(op, inputs.len());
-        }
-        let mut order = Vec::with_capacity(ops.len());
-        let mut ready: Vec<OpId> = ops
-            .iter()
-            .rev()
-            .copied()
-            .filter(|op| pending[op] == 0)
-            .collect();
-        while let Some(op) = ready.pop() {
-            order.push(op);
-            for &reader in readers.get(&op).into_iter().flatten() {
-                let count = pending.get_mut(&reader).expect("a reader of a region op");
-                *count -= 1;
-                if *count == 0 {
-                    ready.push(reader);
-                    ready.sort_by_key(|op| {
-                        std::cmp::Reverse(ops.iter().position(|held| held == op))
-                    });
-                }
-            }
-        }
-        if order.len() == ops.len() {
-            self.sink_leaves(&mut order);
-            abut_implicit_inputs(self.edges, &mut order);
-        }
-        if order.len() != ops.len() {
-            let stuck: Vec<String> = ops
-                .iter()
-                .filter(|op| pending[op] > 0)
-                .map(|&op| {
-                    let instance = self.context.get_op(op);
-                    format!(
-                        "{}.{} -> {:?}",
-                        instance.dialect(),
-                        instance.name(),
-                        self.inputs(op)
-                            .iter()
-                            .filter(|input| pending.get(input).is_some_and(|left| *left > 0))
-                            .map(|input| self.context.get_op(*input).name().to_string())
-                            .collect::<Vec<_>>()
-                    )
-                })
-                .collect();
-            return Err(PassError::InvalidRuleSet(format!(
-                "an unordered region holds a dependency cycle among: {}",
-                stuck.join("; ")
-            )));
-        }
+        let mut order = stable_order(self.context, region, |op| self.inputs(op))?;
+        self.sink_leaves(&mut order);
+        abut_implicit_inputs(self.edges, &mut order);
         Ok(order)
-    }
-
-    /// The operations of `region` that computing `roots` demands.
-    fn cone(&self, region: RegionId, roots: &[ValueId]) -> HashSet<OpId> {
-        let mut cone = HashSet::new();
-        let mut pending: Vec<OpId> = roots
-            .iter()
-            .filter_map(|&value| self.context.get_value(value).defining_op())
-            .collect();
-        while let Some(op) = pending.pop() {
-            if self.context.parent_nodes_region(op) != Some(region) || !cone.insert(op) {
-                continue;
-            }
-            pending.extend(self.inputs(op));
-        }
-        cone
     }
 
     /// Refuse a region whose cones leave an effect out. [`Self::ops`] moves
@@ -656,7 +886,7 @@ impl Lowering<'_> {
             let arm = regions[index];
             let handle = self.context.get_region(arm);
             let results = handle.results();
-            if self.cone(arm, &results).is_empty() {
+            if cone(self.context, arm, &results, |op| self.inputs(op)).is_empty() {
                 let ports: Vec<ValueId> = handle.ports().iter().map(|port| port.id()).collect();
                 let forwarded: Vec<ValueId> = results
                     .iter()
@@ -692,16 +922,7 @@ impl Lowering<'_> {
             } else {
                 Edge::to(self.block())
             };
-            let context = self.context;
-            let blocks = &mut self.blocks;
-            self.edges.branch(
-                current,
-                op,
-                Test::Arm(index),
-                &arms[&index],
-                &next,
-                &mut || mint(context, blocks),
-            )?;
+            self.branch(current, op, Test::Arm(index), &arms[&index], &next)?;
             current = next.dest;
         }
         self.record.gates.push(GateBlocks { head: block, merge });
@@ -724,9 +945,10 @@ impl Lowering<'_> {
 
         let mut tested = vec![theta.predicate()];
         tested.extend(self.edges.test_reads(op, Test::Repeat));
-        let predicate = self.cone(body, &tested);
-        let continue_cone = self.cone(body, &continue_values);
-        let exit_cone = self.cone(body, &exit_values);
+        let demand = |roots: &[ValueId]| cone(self.context, body, roots, |op| self.inputs(op));
+        let predicate = demand(&tested);
+        let continue_cone = demand(&continue_values);
+        let exit_cone = demand(&exit_values);
         let header_ops: HashSet<OpId> = predicate
             .iter()
             .copied()
@@ -762,19 +984,14 @@ impl Lowering<'_> {
             self.edges.jump(end, &Edge::with(merge, &exit_values));
             Edge::with(block, &entered)
         };
-        let context = self.context;
-        let blocks = &mut self.blocks;
-        self.edges
-            .branch(header_end, op, Test::Repeat, &continue_, &exit, &mut || {
-                mint(context, blocks)
-            })?;
+        self.branch(header_end, op, Test::Repeat, &continue_, &exit)?;
 
         self.record.loops.push(LoopBlocks {
             header,
             continue_: continue_.dest,
             merge,
         });
-        context.erase_op(&OperationRef::new(op.clone()))
+        self.context.erase_op(&OperationRef::new(op.clone()))
     }
 }
 
@@ -938,7 +1155,7 @@ impl Pass for DestructurePass {
         let Some(&body) = op.op().regions().first() else {
             return Ok(());
         };
-        destructure(context, body, &CfgEdges { context })?;
+        recover_cfg(context, body, &CfgEdges { context })?;
         Ok(())
     }
 }
