@@ -518,8 +518,14 @@ fn emit_branch_nonzero(
 
 /// Build a register-register move (`addi rd, rs, 0`).
 fn mv(context: &tir::Context, rd: RegSlot, rs: RegSlot) -> Box<dyn Operation> {
-    let builder =
-        AddImmOpBuilder::new(context).attr("imm", tir::attributes::AttributeValue::Int(0));
+    // Adding zero copies the whole GPR. Record its named ports for allocation,
+    // since the general add-immediate opcode is not unconditionally a copy.
+    let builder = AddImmOpBuilder::new(context)
+        .attr("imm", tir::attributes::AttributeValue::Int(0))
+        .attr(
+            tir::backend::FULL_REGISTER_COPY_ATTR,
+            tir::attributes::AttributeValue::Array(vec!["rs1".into(), "rd".into()].into()),
+        );
     let builder = tir::reg_use!(builder, rs1, rs);
     Box::new(tir::reg_def!(builder, rd, rd).build())
 }

@@ -35,7 +35,9 @@ The output is machine IR containing instructions for the chosen target. Values
 can still use virtual registers, which name values without assigning them to
 specific processor registers. Register allocation makes that assignment later.
 Instruction encoding eventually turns the instructions into bytes. Full-register copies are
-identified from a single assignment in the target instruction's behavior.
+identified from a single assignment in the target instruction's behavior. A copy
+constructor may also record its source and destination port names when fixed
+operands establish a full-register copy, such as adding zero on RISC-V.
 Allocation prefers placing their endpoints in the same physical register,
 including copies to or from fixed ABI registers. This preference never overrides
 interference or a fixed assignment. After spill insertion, copies whose current

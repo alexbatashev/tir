@@ -123,8 +123,9 @@ fn inline_chunks(
         if chunks.len() == 8 {
             return Ok(None);
         }
-        // A nonvolatile memcpy has disjoint source and destination ranges, so
-        // an overlapping tail writes the same bytes again. Use the smallest
+        // MemcpyOp requires disjoint source and destination ranges and has no
+        // volatile or atomic semantics. Only the chunks within each range
+        // overlap: the tail writes the same destination bytes again. Use the smallest
         // legal width covering the remainder to avoid unnecessary traffic.
         if copy
             && let Some(&width) = widths

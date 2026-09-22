@@ -350,6 +350,13 @@ impl MemoryEffects {
     };
 }
 
+/// Named source and destination ports of a producer-emitted full-register copy.
+/// The producer guarantees that the instruction copies the entire physical
+/// register without other effects. Narrow writes must not carry this marker.
+/// Its array contains the source port name followed by the destination name;
+/// values are resolved after allocation and spill splitting.
+pub const FULL_REGISTER_COPY_ATTR: &str = "full_register_copy";
+
 #[derive(Debug, Clone, Copy)]
 pub struct CopyPorts {
     pub src: &'static str,

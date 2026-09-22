@@ -842,6 +842,7 @@ impl Pass for RegisterAllocationPass {
                 context.erase_op_keeping_results(&op_ref_in(context, copy))?;
             } else {
                 strip_attr(context, copy, prealloc::COALESCABLE_COPY_ATTR);
+                strip_attr(context, copy, crate::backend::FULL_REGISTER_COPY_ATTR);
             }
         }
         // Preserve the callee-saved registers the allocation used for this
@@ -1670,6 +1671,15 @@ fn allocation_copy_endpoints(context: &Context, op_id: OpId) -> Option<(RegSlot,
         return Some((
             RegSlot::Value(ValueId::from_number(src)),
             RegSlot::Value(ValueId::from_number(dst)),
+        ));
+    }
+    if let Some(AttributeValue::Array(ports)) = op.attr(crate::backend::FULL_REGISTER_COPY_ATTR) {
+        let [AttributeValue::Str(src), AttributeValue::Str(dst)] = ports.as_ref() else {
+            return None;
+        };
+        return Some((
+            crate::backend::reg_slot(&op, src.as_ref())?,
+            crate::backend::reg_slot(&op, dst.as_ref())?,
         ));
     }
     let machine = op
