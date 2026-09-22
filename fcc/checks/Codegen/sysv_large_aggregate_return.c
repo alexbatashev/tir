@@ -37,20 +37,16 @@ struct Large forward_large(long a, long b, long c) {
 
 // ASM-LABEL: make_large:
 // ASM-NOT: call memcpy
-// ASM: mov {{[^,]+}}, [{{[^]]+}}]
-// ASM: mov [{{[^]]+}}],
-// ASM: mov {{[^,]+}}, [{{[^]]+}} + 8]
-// ASM: mov [{{[^]]+}} + 8],
+// ASM: movups xmm{{[0-9]+}}, [{{[^]]+}} + 0]
+// ASM: movups [{{[^]]+}} + 0], xmm{{[0-9]+}}
 // ASM: mov {{[^,]+}}, [{{[^]]+}} + 16]
 // ASM: mov [{{[^]]+}} + 16],
 // ASM: mov rax,
 // ASM-LABEL: forward_large:
 // ASM: call make_large
 // ASM-NOT: call memcpy
-// ASM: mov {{[^,]+}}, [{{[^]]+}}]
-// ASM: mov [{{[^]]+}}],
-// ASM: mov {{[^,]+}}, [{{[^]]+}} + 8]
-// ASM: mov [{{[^]]+}} + 8],
+// ASM: movups xmm{{[0-9]+}}, [{{[^]]+}} + 0]
+// ASM: movups [{{[^]]+}} + 0], xmm{{[0-9]+}}
 // ASM: mov {{[^,]+}}, [{{[^]]+}} + 16]
 // ASM: mov [{{[^]]+}} + 16],
 // ASM: mov rax,

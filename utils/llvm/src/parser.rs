@@ -13,8 +13,8 @@ use crate::error::Error;
 use crate::lexer::{Span, Token, lex};
 
 /// Attribute, linkage and flag keywords that decorate instructions and
-/// signatures but carry no meaning for this importer; skipped wherever they may
-/// appear. None of these collide with a type, opcode or operand keyword.
+/// signatures. Individual instruction parsers retain the flags they support;
+/// the rest are skipped. None collide with a type, opcode or operand keyword.
 const SKIP: &[&str] = &[
     "nsw",
     "nuw",
@@ -348,14 +348,16 @@ where
     let binary = binding
         .clone()
         .then(binop)
-        .then_ignore(skip)
+        .then(skip.collect::<Vec<_>>())
         .then(ty.clone())
         .then(operand.clone())
         .then_ignore(just(Token::Comma))
         .then(operand.clone())
-        .map(|((((result, op), ty), lhs), rhs)| Inst::Binary {
+        .map(|(((((result, op), flags), ty), lhs), rhs)| Inst::Binary {
             result,
             op,
+            no_signed_wrap: flags.contains(&Token::Ident("nsw")),
+            no_unsigned_wrap: flags.contains(&Token::Ident("nuw")),
             ty,
             lhs,
             rhs,

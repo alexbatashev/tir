@@ -17,6 +17,7 @@ use tir::{BlockId, Context, OpId};
 
 use crate::backend::liveness::Liveness;
 use crate::backend::reg_slots;
+use crate::backend::regalloc::TargetRegAlloc;
 use crate::backend::registers::{RegSlot, value_class};
 
 /// The spill cost the allocator prices a rematerializable vreg at: at most one
@@ -36,6 +37,7 @@ pub(crate) fn rematerializable(
     context: &Context,
     blocks: &[BlockId],
     liveness: &Liveness,
+    target: &dyn TargetRegAlloc,
 ) -> HashMap<u32, OpId> {
     let mut def_counts: HashMap<u32, usize> = HashMap::new();
     for &block_id in blocks {
@@ -74,7 +76,9 @@ pub(crate) fn rematerializable(
             {
                 continue;
             }
-            if !matches!(op.attr("imm"), Some(AttributeValue::Int(_))) {
+            if !matches!(op.attr("imm"), Some(AttributeValue::Int(_)))
+                && !target.is_symbol_materialization(&op)
+            {
                 continue;
             }
             if liveness.vreg_class.get(&result.number()).copied() != value_class(context, result) {

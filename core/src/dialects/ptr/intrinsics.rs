@@ -16,7 +16,7 @@ impl Intrinsic for MemcpyOp {
         let [destination, source, size] = self.operands()[..3] else {
             unreachable!()
         };
-        if let Some(chunks) = inline_chunks(context, size, env)? {
+        if let Some(chunks) = inline_chunks(context, size, env, true)? {
             let mut state = observed_state(operation.op());
             for Chunk { offset, bytes } in chunks {
                 let ty = IntegerType::new(context, bytes * 8);
@@ -49,7 +49,7 @@ impl Intrinsic for MemsetOp {
         let [destination, value, size] = self.operands()[..3] else {
             unreachable!()
         };
-        if let Some(chunks) = inline_chunks(context, size, env)? {
+        if let Some(chunks) = inline_chunks(context, size, env, false)? {
             let mut state = observed_state(operation.op());
             for Chunk { offset, bytes } in chunks {
                 let dst = address(context, &operation, destination, offset)?;
@@ -85,13 +85,14 @@ struct Chunk {
     bytes: u32,
 }
 
-/// An exact partition: no access may read or write beyond the copied range.
+/// No access may read or write beyond the copied range.
 /// Declared widths are legal even at byte alignment. Missing facts permit only
 /// byte accesses; in particular, native register width does not prove legality.
 fn inline_chunks(
     context: &Context,
     size: ValueId,
     env: Option<&TargetEnv>,
+    copy: bool,
 ) -> Result<Option<Vec<Chunk>>, PassError> {
     let limit = match env.and_then(|env| env.get("memory_inline_bytes")) {
         None => 64,
@@ -99,19 +100,9 @@ fn inline_chunks(
             .ok_or_else(|| invalid("memory_inline_bytes must be an unsigned byte count"))?,
     };
     let mut widths = vec![1];
-    if let Some(value) = env.and_then(|env| env.get("memory_scalar_bytes")) {
-        let AttributeValue::Array(values) = value else {
-            return Err(invalid("memory_scalar_bytes must be an array"));
-        };
-        for value in values {
-            let bytes = unsigned(value)
-                .and_then(|n| u32::try_from(n).ok())
-                .filter(|n| n.is_power_of_two() && *n <= 8)
-                .ok_or_else(|| {
-                    invalid("memory_scalar_bytes contains an unsupported access width")
-                })?;
-            widths.push(bytes);
-        }
+    widths.extend(access_widths(env, "memory_scalar_bytes", 8)?);
+    if copy {
+        widths.extend(access_widths(env, "memory_copy_bytes", 16)?);
     }
     let Some(constant) = context
         .get_value(size)
@@ -132,6 +123,21 @@ fn inline_chunks(
         if chunks.len() == 8 {
             return Ok(None);
         }
+        // A nonvolatile memcpy has disjoint source and destination ranges, so
+        // an overlapping tail writes the same bytes again. Use the smallest
+        // legal width covering the remainder to avoid unnecessary traffic.
+        if copy
+            && let Some(&width) = widths
+                .iter()
+                .rev()
+                .find(|&&width| u64::from(width) >= bytes - offset && u64::from(width) <= bytes)
+        {
+            chunks.push(Chunk {
+                offset: bytes - u64::from(width),
+                bytes: width,
+            });
+            break;
+        }
         let &width = widths
             .iter()
             .find(|width| u64::from(**width) <= bytes - offset)
@@ -143,6 +149,28 @@ fn inline_chunks(
         offset += u64::from(width);
     }
     Ok(Some(chunks))
+}
+
+fn access_widths(
+    env: Option<&TargetEnv>,
+    entry: &str,
+    maximum: u32,
+) -> Result<Vec<u32>, PassError> {
+    let Some(value) = env.and_then(|env| env.get(entry)) else {
+        return Ok(Vec::new());
+    };
+    let AttributeValue::Array(values) = value else {
+        return Err(invalid(format!("{entry} must be an array")));
+    };
+    values
+        .iter()
+        .map(|value| {
+            unsigned(value)
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|n| n.is_power_of_two() && *n <= maximum)
+                .ok_or_else(|| invalid(format!("{entry} contains an unsupported access width")))
+        })
+        .collect()
 }
 
 fn unsigned(value: &AttributeValue) -> Option<u64> {

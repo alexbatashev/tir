@@ -1,0 +1,24 @@
+// RUN: tir mc --march=x86_64 --filetype=asm %s | filecheck %s
+// RUN: tir mc --march=x86_64 --shuffle-machine-order --filetype=obj %s -o /dev/null
+
+// Both values must survive a call that clobbers every XMM register. Their spill
+// slots must hold all 16 bytes without overlapping each other.
+module {
+  %clobber = func.declare @clobber() -> !unit
+  %spill = func.func @spill(%src0: !ptr.p, %src1: !ptr.p, %dst0: !ptr.p, %dst1: !ptr.p) {
+    %a = ptr.load %src0 : !i128
+    %b = ptr.load %src1 : !i128
+    func.call %clobber()
+    ptr.store %a, %dst0
+    ptr.store %b, %dst1
+    func.return
+  }
+  module_end
+}
+
+// CHECK-LABEL: spill:
+// CHECK: movups [rsp + 0], xmm{{[0-9]+}}
+// CHECK: movups [rsp + 16], xmm{{[0-9]+}}
+// CHECK: call clobber
+// CHECK: movups xmm{{[0-9]+}}, [rsp + 0]
+// CHECK: movups xmm{{[0-9]+}}, [rsp + 16]

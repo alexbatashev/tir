@@ -1,0 +1,60 @@
+// RUN: tir mc --march=x86_64 --filetype=asm %s | filecheck %s
+// RUN: tir mc --march=x86_64 --shuffle-machine-order --filetype=obj %s -o /dev/null
+
+module {
+  %get = func.declare @get() -> !i64
+  %forward = func.func @forward_result() -> !i64 {
+    %r = func.call %get() -> !i64
+    func.return %r
+  }
+  %keep = func.func @keep_across_call(%x: !i64) -> !i64 {
+    %r = func.call %get() -> !i64
+    %sum = addi %x, %r : !i64
+    func.return %sum
+  }
+  %narrow = func.func @narrow(%x: !i64) -> !i64 {
+    %low = trunci %x : !i32
+    %wide = extui %low : !i64
+    func.return %wide
+  }
+  %spills = func.func @spilled_results() -> !i64 {
+    %v0 = func.call %get() -> !i64
+    %v1 = func.call %get() -> !i64
+    %v2 = func.call %get() -> !i64
+    %v3 = func.call %get() -> !i64
+    %v4 = func.call %get() -> !i64
+    %v5 = func.call %get() -> !i64
+    %v6 = func.call %get() -> !i64
+    %v7 = func.call %get() -> !i64
+    %v8 = func.call %get() -> !i64
+    %s1 = addi %v0, %v1 : !i64
+    %s2 = addi %s1, %v2 : !i64
+    %s3 = addi %s2, %v3 : !i64
+    %s4 = addi %s3, %v4 : !i64
+    %s5 = addi %s4, %v5 : !i64
+    %s6 = addi %s5, %v6 : !i64
+    %s7 = addi %s6, %v7 : !i64
+    %s8 = addi %s7, %v8 : !i64
+    func.return %s8
+  }
+  module_end
+}
+
+// The fixed return register and virtual call result need no self-copy.
+// CHECK-LABEL: forward_result:
+// CHECK: call get
+// CHECK-NOT: mov rax, rax
+// CHECK: ret
+// CHECK-LABEL: keep_across_call:
+// CHECK: call get
+// CHECK: add
+// CHECK: ret
+
+// CHECK-LABEL: narrow:
+// CHECK: mov rax, edi
+// CHECK: ret
+
+// CHECK-LABEL: spilled_results:
+// CHECK: mov [rsp
+// CHECK: call get
+// CHECK: ret

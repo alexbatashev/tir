@@ -1,0 +1,19 @@
+// RUN: tir mc --march=x86_64 --stage=regalloc %s
+// RUN: tir mc --march=x86_64 --shuffle-machine-order --filetype=obj %s -o /dev/null
+
+// Block arguments require register copies before coalescing, including XMM128.
+module {
+  %choose = func.func @choose(%dst: !ptr.p, %src0: !ptr.p, %src1: !ptr.p, %flag: !i1) {
+    %a = ptr.load %src0 : !i128
+    %b = ptr.load %src1 : !i128
+    cfg.cond_br %flag, ^left, ^right
+  ^left:
+    cfg.br ^join(%a : !i128)
+  ^right:
+    cfg.br ^join(%b : !i128)
+  ^join(%value: !i128):
+    ptr.store %value, %dst
+    func.return
+  }
+  module_end
+}

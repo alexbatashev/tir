@@ -17,8 +17,6 @@
 ; CHECK-NEXT: }
 ; CHECK: func.func @wrapped_gep() -> !i32 {
 ; CHECK-NEXT: %{{[0-9]+}} = ptr.alloca {size = 4, align = 4} : !ptr.p
-; CHECK-NEXT: %{{[0-9]+}} = constant {value = 0} : !i64
-; CHECK-NEXT: %{{[0-9]+}} = ptr.ptradd %{{[0-9]+}}, %{{[0-9]+}} : !ptr.p
 ; CHECK-NEXT: %{{[0-9]+}} = ptr.load %{{[0-9]+}} : !i32
 ; CHECK-NEXT: func.return %{{[0-9]+}}
 ; CHECK-NEXT: }
@@ -29,8 +27,8 @@
 ; CHECK: func.func @mixed_gep(%{{[0-9]+}}: !ptr.p, %{{[0-9]+}}: !i64) -> !i32 {
 ; CHECK-NEXT: %{{[0-9]+}} = constant {value = 8} : !i64
 ; CHECK-NEXT: %{{[0-9]+}} = muli %{{[0-9]+}}, %{{[0-9]+}} : !i64
+; CHECK-NEXT: %{{[0-9]+}} = ptr.ptradd %{{[0-9]+}}, %{{[0-9]+}} : !ptr.p
 ; CHECK-NEXT: %{{[0-9]+}} = constant {value = 4} : !i64
-; CHECK-NEXT: %{{[0-9]+}} = addi %{{[0-9]+}}, %{{[0-9]+}} : !i64
 ; CHECK-NEXT: %{{[0-9]+}} = ptr.ptradd %{{[0-9]+}}, %{{[0-9]+}} : !ptr.p
 ; CHECK-NEXT: %{{[0-9]+}} = ptr.load %{{[0-9]+}} : !i32
 ; CHECK-NEXT: func.return %{{[0-9]+}}

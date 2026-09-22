@@ -76,6 +76,8 @@ pub enum Inst {
     Binary {
         result: String,
         op: BinOp,
+        no_signed_wrap: bool,
+        no_unsigned_wrap: bool,
         ty: Type,
         lhs: Operand,
         rhs: Operand,

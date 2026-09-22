@@ -21,17 +21,19 @@ impl LowerIntrinsicsPass {
             Some(AttributeValue::Dict(entries)) => *entries,
             _ => Default::default(),
         };
-        entries
-            .entry("memory_scalar_bytes".to_string())
-            .or_insert_with(|| {
+        for (name, widths) in [
+            ("memory_scalar_bytes", target.unaligned_scalar_bytes()),
+            ("memory_copy_bytes", target.unaligned_copy_bytes()),
+        ] {
+            entries.entry(name.to_string()).or_insert_with(|| {
                 AttributeValue::Array(
-                    target
-                        .unaligned_scalar_bytes()
+                    widths
                         .iter()
                         .map(|width| AttributeValue::UInt(u64::from(*width)))
                         .collect(),
                 )
             });
+        }
         Self {
             target: Some(AttributeValue::Dict(Box::new(entries))),
         }

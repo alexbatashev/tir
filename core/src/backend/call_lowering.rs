@@ -279,6 +279,12 @@ impl CallLowering {
             let copy = self
                 .emitter
                 .copy(context, RegSlot::Value(fresh), RegSlot::Value(value));
+            super::prealloc::mark_op(
+                context,
+                copy.id(),
+                super::prealloc::COALESCABLE_COPY_ATTR,
+                AttributeValue::Bool(true),
+            );
             context.insert_op_before(op, copy.as_ref()).map(|()| fresh)
         };
 

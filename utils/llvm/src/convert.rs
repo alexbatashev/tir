@@ -374,6 +374,12 @@ fn lower_function(
                 .map(|label| (label.clone(), &block.insts))
         })
         .collect();
+    let definitions: HashMap<_, _> = func
+        .blocks
+        .iter()
+        .flat_map(|block| &block.insts)
+        .filter_map(|inst| inst_result_name(inst).map(|name| (name, inst)))
+        .collect();
     let implicit_entry_label = func
         .params
         .iter()
@@ -405,6 +411,7 @@ fn lower_function(
                 function_types,
                 &current_label,
                 &phis,
+                &definitions,
             )?;
             if let Some((old, new)) = old_result
                 .zip(result_name.and_then(|name| values.get(name).copied()))
@@ -434,6 +441,86 @@ fn inst_result_name(inst: &Inst) -> Option<&str> {
     }
 }
 
+/// On defined `nsw` executions the signed result fits the original width, so
+/// extending it equals computing with extended operands. Overflow is poison in
+/// LLVM and permits this concrete result. Inspect only the direct definition;
+/// in particular, no fact is carried through a freeze or another instruction.
+fn widening_no_wrap<'a>(
+    cast: &Inst,
+    definitions: &HashMap<&str, &'a Inst>,
+    values: &HashMap<String, ValueId>,
+) -> Option<(BinOp, &'a ast::Operand, &'a ast::Operand)> {
+    let Inst::Cast {
+        op: CastOp::SExt,
+        from: Type::Int(source_width),
+        to: Type::Int(destination_width),
+        value: ast::Operand::Ref(name),
+        ..
+    } = cast
+    else {
+        return None;
+    };
+    if source_width >= destination_width {
+        return None;
+    }
+    let Inst::Binary {
+        op: op @ (BinOp::Add | BinOp::Sub),
+        no_signed_wrap: true,
+        ty: Type::Int(width),
+        lhs,
+        rhs,
+        ..
+    } = *definitions.get(name.as_str())?
+    else {
+        return None;
+    };
+    if width != source_width {
+        return None;
+    }
+    let variable = match (lhs, rhs) {
+        (ast::Operand::Ref(name), ast::Operand::ConstInt(_))
+        | (ast::Operand::ConstInt(_), ast::Operand::Ref(name)) => name,
+        _ => return None,
+    };
+    values.contains_key(variable).then_some((*op, lhs, rhs))
+}
+
+/// Split a proven signed affine index before applying the GEP element scale.
+/// The returned constant is interpreted at the binary operation's width.
+fn affine_no_wrap_index<'a>(
+    index_type: &Type,
+    index: &ast::Operand,
+    definitions: &HashMap<&str, &'a Inst>,
+    values: &HashMap<String, ValueId>,
+) -> Option<(&'a Type, &'a ast::Operand, i64)> {
+    let (Type::Int(64), ast::Operand::Ref(name)) = (index_type, index) else {
+        return None;
+    };
+    let cast = *definitions.get(name.as_str())?;
+    let Inst::Cast {
+        from: source @ Type::Int(width),
+        to,
+        ..
+    } = cast
+    else {
+        return None;
+    };
+    if to != index_type || *width == 0 || *width >= 64 {
+        return None;
+    }
+    let (BinOp::Add, lhs, rhs) = widening_no_wrap(cast, definitions, values)? else {
+        return None;
+    };
+    let (variable, constant) = match (lhs, rhs) {
+        (variable @ ast::Operand::Ref(_), ast::Operand::ConstInt(constant))
+        | (ast::Operand::ConstInt(constant), variable @ ast::Operand::Ref(_)) => {
+            (variable, constant)
+        }
+        _ => return None,
+    };
+    Some((source, variable, gep_index(*constant, *width)))
+}
+
 #[allow(clippy::cognitive_complexity, clippy::too_many_arguments)]
 fn lower_inst(
     context: &Context,
@@ -447,6 +534,7 @@ fn lower_inst(
     function_types: &HashMap<String, (Vec<Type>, Type, bool)>,
     current_label: &str,
     phis: &HashMap<String, &Vec<Inst>>,
+    definitions: &HashMap<&str, &Inst>,
 ) -> Result<(), Error> {
     // Resolve an operand to a value, materialising a `builtin.constant` for
     // inline integer literals (TIR has no inline constants).
@@ -563,11 +651,16 @@ fn lower_inst(
                             .ok_or_else(|| Error::UndefinedValue(format!("@{name}")))?,
                         _ => return Err(Error::Unsupported("nested getelementptr base".into())),
                     };
-                    let offset = lower_gep_offset(context, body, source, indices, values, named)?;
-                    let op = pops::ptradd(context, base, offset, PtrType::opaque(context)).build();
-                    let result = op.result();
-                    body.append(op.id());
-                    result
+                    lower_gep(
+                        context,
+                        body,
+                        base,
+                        source,
+                        indices,
+                        values,
+                        named,
+                        definitions,
+                    )?
                 }
             }
         };
@@ -579,6 +672,7 @@ fn lower_inst(
             ty,
             lhs,
             rhs,
+            ..
         } => {
             let t = lower_type(context, ty)?;
             let l = val!(lhs, ty);
@@ -626,15 +720,19 @@ fn lower_inst(
             value,
             to,
         } => {
-            let input = val!(value, from);
-            let id = lower_cast(
-                context,
-                body,
-                *op,
-                *non_negative,
-                input,
-                lower_type(context, to)?,
-            );
+            let destination = lower_type(context, to)?;
+            let id = if let Some((binary, lhs, rhs)) = widening_no_wrap(inst, definitions, values) {
+                // Lower literals at the source width first: a positive LLVM
+                // spelling can denote a negative narrow bit pattern.
+                let lhs = val!(lhs, from);
+                let rhs = val!(rhs, from);
+                let lhs = lower_cast(context, body, CastOp::SExt, false, lhs, destination);
+                let rhs = lower_cast(context, body, CastOp::SExt, false, rhs, destination);
+                lower_binary(context, body, binary, lhs, rhs, destination)
+            } else {
+                let input = val!(value, from);
+                lower_cast(context, body, *op, *non_negative, input, destination)
+            };
             values.insert(result.clone(), id);
         }
         Inst::Alloca { result, ty, align } => {
@@ -662,10 +760,17 @@ fn lower_inst(
             indices,
         } => {
             let base = val!(base, &Type::Ptr(None));
-            let offset = lower_gep_offset(context, body, source, indices, values, named)?;
-            let op = pops::ptradd(context, base, offset, PtrType::opaque(context)).build();
-            values.insert(result.clone(), op.result());
-            body.append_op(op);
+            let address = lower_gep(
+                context,
+                body,
+                base,
+                source,
+                indices,
+                values,
+                named,
+                definitions,
+            )?;
+            values.insert(result.clone(), address);
         }
         Inst::Phi { .. } => {}
         Inst::Select {
@@ -1230,13 +1335,16 @@ fn phi_arguments(
         .collect()
 }
 
-fn lower_gep_offset(
+#[allow(clippy::too_many_arguments)]
+fn lower_gep(
     context: &Context,
     body: &BlockHandle,
+    base: ValueId,
     source: &Type,
     indices: &[(Type, ast::Operand)],
     values: &HashMap<String, ValueId>,
     named: &HashMap<String, Type>,
+    definitions: &HashMap<&str, &Inst>,
 ) -> Result<ValueId, Error> {
     let i64_ty = IntegerType::new(context, 64);
     let mut offset = None;
@@ -1244,6 +1352,14 @@ fn lower_gep_offset(
     let mut current = source.clone();
     for (position, (index_ty, index)) in indices.iter().enumerate() {
         let (scale, next, direct) = gep_step(&current, position, index, named)?;
+        let (index_ty, index) = if let Some((ty, variable, constant)) =
+            affine_no_wrap_index(index_ty, index, definitions, values)
+        {
+            literal_offset = literal_offset.wrapping_add(constant.wrapping_mul(scale as i64));
+            (ty, variable)
+        } else {
+            (index_ty, index)
+        };
         if let ast::Operand::ConstInt(value) = index {
             let value = if direct {
                 scale as i64
@@ -1299,19 +1415,31 @@ fn lower_gep_offset(
         });
         current = next;
     }
+    let mut address = base;
+    // A previously lowered GEP leaves its literal byte displacement outermost.
+    // Combine that displacement here so the next dynamic index precedes it.
+    if let Some(definition) = context.get_value(base).defining_op()
+        && let Some(add) = context.get_op(definition).as_op::<tir::ptr::PtrAddOp>()
+        && context.get_value(add.operands()[1]).ty() == i64_ty
+        && let Some(definition) = context.get_value(add.operands()[1]).defining_op()
+        && let Some(literal) = context.get_op(definition).as_op::<builtin::ConstantOp>()
+        && let Some(AttributeValue::Int(value)) = literal.attr("value")
+    {
+        address = add.operands()[0];
+        literal_offset = literal_offset.wrapping_add(value);
+    }
+    if let Some(offset) = offset {
+        address = body
+            .append_op(pops::ptradd(context, address, offset, PtrType::opaque(context)).build())
+            .result();
+    }
     if literal_offset != 0 {
         let literal = constant(context, body, literal_offset, i64_ty);
-        offset = Some(match offset {
-            Some(offset) => {
-                let add = bops::addi(context, offset, literal, i64_ty).build();
-                let result = add.result();
-                body.append_op(add);
-                result
-            }
-            None => literal,
-        });
+        address = body
+            .append_op(pops::ptradd(context, address, literal, PtrType::opaque(context)).build())
+            .result();
     }
-    Ok(offset.unwrap_or_else(|| constant(context, body, 0, i64_ty)))
+    Ok(address)
 }
 
 fn gep_index(value: i64, width: u32) -> i64 {

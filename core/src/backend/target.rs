@@ -86,6 +86,12 @@ pub trait TargetMachine {
         &[1]
     }
 
+    /// Additional unaligned load/store widths for copying opaque bits, in bytes.
+    /// These widths need not support scalar integer arithmetic.
+    fn unaligned_copy_bytes(&self) -> &'static [u32] {
+        &[]
+    }
+
     fn abis(&self) -> &'static [crate::backend::abi::AbiInfo] {
         &[]
     }

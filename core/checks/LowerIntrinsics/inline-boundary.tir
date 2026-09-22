@@ -2,7 +2,7 @@
 // RUN: tir opt --pass restructure-nodes --pass lower-intrinsics --verify %s | tir opt --pass verify-deps --verify | filecheck %s --check-prefix=SUMMARY
 // RUN: tir opt --pass restructure-nodes --pass lower-intrinsics --pass verify-deps --verify %s -o /dev/null
 
-// 63 bytes need ten exact chunks; 64 bytes need eight.
+// Both 63 and 64 bytes need eight chunks. The 63-byte copy overlaps its tail.
 module {target_env = {memory_scalar_bytes = [1, 2, 4, 8]}} {
   %copy63 = func.func @copy63(%dst: !ptr.p, %src: !ptr.p) {
     %n = constant {value = 63} : !i64
@@ -24,8 +24,10 @@ module {target_env = {memory_scalar_bytes = [1, 2, 4, 8]}} {
 
 // CHECK: func.declare @memcpy
 // CHECK-LABEL: func.func @copy63
-// CHECK-NOT: ptr.load
-// CHECK: func.call
+// CHECK: ptr.load %{{[0-9]+}} : !i64
+// CHECK: constant {value = 55} : !i64
+// CHECK: ptr.load %{{[0-9]+}} : !i64
+// CHECK-NOT: func.call
 // CHECK: func.return
 // CHECK-LABEL: func.func @copy64
 // CHECK: ptr.load %{{[0-9]+}} : !i64
