@@ -16,6 +16,12 @@ pub struct LangOptions {
     pub gnu_extensions: bool,
 }
 
+impl LangOptions {
+    pub(crate) fn is_strict_c89(self) -> bool {
+        self.std_version == StdVersion::C89 && !self.gnu_extensions
+    }
+}
+
 impl Default for LangOptions {
     fn default() -> Self {
         Self {
