@@ -81,6 +81,11 @@ pub trait TargetMachine {
         None
     }
 
+    /// Integer load/store sizes legal at byte alignment, in bytes.
+    fn unaligned_scalar_bytes(&self) -> &'static [u32] {
+        &[1]
+    }
+
     fn abis(&self) -> &'static [crate::backend::abi::AbiInfo] {
         &[]
     }
