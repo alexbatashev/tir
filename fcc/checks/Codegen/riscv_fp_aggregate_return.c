@@ -50,7 +50,9 @@ double call_external_pair(void) {
 // ASM-LABEL: make_pair:
 // ASM-DAG: fsd f10, 0({{.*}})
 // ASM-DAG: fsd f11, 8({{.*}})
-// ASM-DAG: fld f10, 0({{.*}})
+// The compressed stack-address instruction must retain its implicit sp read.
+// ASM: c.addi4spn {{.*}}, sp, {{[0-9]+}}
+// ASM: fld f10, 0({{.*}})
 // ASM-LABEL: call_external_pair:
 // ASM: jal x1, external_pair
 // ASM: fsd f{{[0-9]+}}, 0({{.*}})

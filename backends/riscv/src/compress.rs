@@ -176,7 +176,9 @@ fn compress_add_imm(context: &tir::Context, op: &tir::OperationRef) -> Option<Bo
         return Some(Box::new(tir::reg_def!(li, rd, rd_slot).build()));
     }
     if rs1 == 2 && is_c_reg(rd) && value > 0 && fits_uimm(value, 10, 4) {
-        let addi4spn = CAddImm4SpNOpBuilder::new(context).attr("imm", imm);
+        let addi4spn = CAddImm4SpNOpBuilder::new(context)
+            .attr("imm", imm)
+            .attr("x2", phys_attr((crate::RegClass::GPR.id(), 2)));
         return Some(Box::new(tir::reg_def!(addi4spn, rd, rd_slot).build()));
     }
     None
