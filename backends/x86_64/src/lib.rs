@@ -302,6 +302,7 @@ mod isa {
         Gpr16,
         Gpr8,
         Gpr8High,
+        Xmm128,
         Xmm64,
         Xmm32,
     }
@@ -333,6 +334,7 @@ mod isa {
                 ("GPR", 16, 0) => Some(MoveKind::Gpr16),
                 ("GPR", 8, 0) => Some(MoveKind::Gpr8),
                 ("GPR", 8, 8) => Some(MoveKind::Gpr8High),
+                ("XMM128", 128, 0) => Some(MoveKind::Xmm128),
                 ("XMM128", 64, 0) => Some(MoveKind::Xmm64),
                 ("XMM128", 32, 0) => Some(MoveKind::Xmm32),
                 _ => None,
@@ -343,6 +345,26 @@ mod isa {
     impl tir::backend::regalloc::TargetRegAlloc for X86RegAlloc {
         fn register_info(&self) -> tir::backend::regalloc::RegisterInfo {
             register_info()
+        }
+
+        fn is_symbol_materialization(&self, op: &tir::OpHandle) -> bool {
+            // Each replay gets a PC32 relocation at its own displacement field;
+            // adding that displacement to RIP always produces the same symbol.
+            op.is::<LeaRipOp>() && matches!(op.attr("imm"), Some(AttributeValue::Str(_)))
+        }
+
+        fn spill_slot_size(
+            &self,
+            class: tir::backend::regalloc::RegClassId,
+            abi: &tir::backend::abi::AbiInfo,
+        ) -> u32 {
+            let width = self
+                .widths
+                .iter()
+                .find(|(name, _)| *name == class.name())
+                .expect("spill register class has an architectural width")
+                .1;
+            abi.stack.slot_size.max(width.div_ceil(8))
         }
 
         fn emit_spill_store(
@@ -369,6 +391,7 @@ mod isa {
                 Some(MoveKind::Gpr32) => store!(Mov32StoreDispOpBuilder),
                 Some(MoveKind::Gpr16) => store!(Mov16StoreDispOpBuilder),
                 Some(MoveKind::Gpr8) => store!(Mov8StoreDispOpBuilder),
+                Some(MoveKind::Xmm128) => store!(MovupsStoreDispOpBuilder),
                 Some(MoveKind::Xmm64) => store!(MovsdStoreDispOpBuilder),
                 Some(MoveKind::Xmm32) => store!(MovssStoreDispOpBuilder),
                 _ => unimplemented!("x86-64 spilling for {} is not implemented", class.name()),
@@ -399,6 +422,7 @@ mod isa {
                 Some(MoveKind::Gpr32) => load!(Mov32LoadDispOpBuilder),
                 Some(MoveKind::Gpr16) => load!(Mov16LoadDispOpBuilder),
                 Some(MoveKind::Gpr8) => load!(Mov8LoadDispOpBuilder),
+                Some(MoveKind::Xmm128) => load!(MovupsLoadDispOpBuilder),
                 Some(MoveKind::Xmm64) => load!(MovsdLoadDispOpBuilder),
                 Some(MoveKind::Xmm32) => load!(MovssLoadDispOpBuilder),
                 _ => unimplemented!("x86-64 spilling for {} is not implemented", class.name()),
@@ -425,6 +449,7 @@ mod isa {
                 Some(MoveKind::Gpr16) => move_op!(Mov16OpBuilder),
                 Some(MoveKind::Gpr8) => move_op!(Mov8OpBuilder),
                 Some(MoveKind::Gpr8High) => move_op!(Mov8HOpBuilder),
+                Some(MoveKind::Xmm128) => move_op!(MovupsOpBuilder),
                 Some(MoveKind::Xmm64) => move_op!(MovsdOpBuilder),
                 Some(MoveKind::Xmm32) => move_op!(MovssOpBuilder),
                 None => unreachable!("unknown x86-64 register class {}", class.name()),
@@ -705,6 +730,14 @@ mod isa {
 
         fn unaligned_scalar_bytes(&self) -> &'static [u32] {
             &[1, 2, 4, 8]
+        }
+
+        fn unaligned_copy_bytes(&self) -> &'static [u32] {
+            if self.config.features().contains(&Feature::SSE) {
+                &[16]
+            } else {
+                &[]
+            }
         }
 
         fn pre_ra_lowerings(&self) -> Vec<tir::backend::isel::OpLowering> {

@@ -34,7 +34,15 @@ An effect dependency preserves required order, such as a store before a load.
 The output is machine IR containing instructions for the chosen target. Values
 can still use virtual registers, which name values without assigning them to
 specific processor registers. Register allocation makes that assignment later.
-Instruction encoding eventually turns the instructions into bytes.
+Instruction encoding eventually turns the instructions into bytes. Full-register copies are
+identified from a single assignment in the target instruction's behavior. A copy
+constructor may also record its source and destination port names when fixed
+operands establish a full-register copy, such as adding zero on RISC-V.
+Allocation prefers placing their endpoints in the same physical register,
+including copies to or from fixed ABI registers. This preference never overrides
+interference or a fixed assignment. After spill insertion, copies whose current
+endpoints occupy the same register are removed. Narrow register views are
+excluded because a self-move can still change the rest of the register.
 
 ```mermaid
 flowchart TD
@@ -83,15 +91,25 @@ Memory expansion recognizes these `target_env` entries:
 | Entry | Meaning | Default |
 |---|---|---|
 | `memory_scalar_bytes` | Additional legal unaligned integer access sizes, powers of two up to 8 bytes | None beyond byte accesses |
+| `memory_copy_bytes` | Additional legal unaligned bit-copy access sizes, powers of two up to 16 bytes | None |
 | `memory_inline_bytes` | Maximum constant copy or fill size considered for inlining | 64 |
 
 A constant copy uses the widest legal accesses that fit entirely inside its
-range. A constant fill repeats the byte across each stored integer. Expansion
-also requires at most eight chunks: each copy chunk emits one load/store pair,
+range. Its final access uses the smallest legal width covering the remaining
+bytes, placed at the end of the range. This may repeat destination bytes, which
+is valid because memcpy has disjoint source and destination ranges and no
+volatile or atomic semantics. For example, a 31-byte copy can use two 16-byte
+pairs at offsets 0 and 15. x86-64 with SSE permits 16-byte copies through its
+packed load/store
+instructions. These widths do not enable wide integer arithmetic or fills.
+Wide register spills reserve the register's full size at the ABI slot alignment;
+x86 uses unaligned packed moves for those slots. A constant fill repeats the byte
+across each stored integer. Expansion also requires at most eight chunks:
+each copy chunk emits one load/store pair,
 and each fill chunk emits one store. This bounds the number of memory accesses
 on byte-only targets as well as wide-access targets. For example, a byte-only
 target inlines at most eight bytes; an eight-byte-access target can inline
-64 bytes, but a 63-byte copy needs ten exact chunks and stays a runtime call.
+64 bytes; a 63-byte copy uses eight chunks with its last access at offset 55.
 This is a code-size bound, not a calibrated target cost model.
 
 Zero-length operations forward their incoming memory state without accessing
@@ -300,6 +318,32 @@ Instruction matching and cover selection then choose instructions for the
 parts. The exact sequence can change with available target features and costs.
 The design requirement stays the same: every immediate must fit, and the
 sequence must compute the original value.
+
+LLVM input conversion retains binary-operation no-wrap flags. A sign extension of an `add nsw`
+or `sub nsw` with a constant operand can be expressed as wider arithmetic on
+sign-extended operands. The constant is interpreted at its source width first.
+Other uses retain the narrow operation; unflagged and unsigned-only arithmetic
+retain wrapping before sign extension. This conversion uses LLVM's guarantee
+that signed overflow does not occur on defined executions and introduces
+ordinary TIR operations for selection. GEP conversion scales the variable and
+constant parts of these signed additions separately. It adds dynamic offsets
+to the base before literal offsets, and returns the base directly for zero
+offsets, exposing shared products and displacement addressing to selection.
+A constant displacement at the end of a previously converted GEP is combined
+with the new displacement using wrapping byte arithmetic. The earlier address
+remains intact for its other users.
+
+For constant-arm selects, shared selection axioms rewrite the mask blend as
+an XOR with the differing constant bits. A one-bit mask is reduced through an
+explicit low-bit extraction before zero extension, preserving correctness when
+its physical register has unspecified upper bits.
+
+Register allocation can replay an immediate producer instead of spilling its
+value. Replay sites retain block order so fresh register numbering and allocation
+remain reproducible across compiler processes. A target can also identify a symbol-address instruction whose independent
+relocation computes the same address at every replay site. x86-64 permits this
+for symbolic RIP-relative `lea`; arbitrary numeric PC-relative computations do
+not acquire that guarantee from the symbol-address hook.
 
 ## From selected computations to executable instructions
 

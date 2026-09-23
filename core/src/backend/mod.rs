@@ -350,6 +350,19 @@ impl MemoryEffects {
     };
 }
 
+/// Named source and destination ports of a producer-emitted full-register copy.
+/// The producer guarantees that the instruction copies the entire physical
+/// register without other effects. Narrow writes must not carry this marker.
+/// Its array contains the source port name followed by the destination name;
+/// values are resolved after allocation and spill splitting.
+pub const FULL_REGISTER_COPY_ATTR: &str = "full_register_copy";
+
+#[derive(Debug, Clone, Copy)]
+pub struct CopyPorts {
+    pub src: &'static str,
+    pub dst: &'static str,
+}
+
 /// Everything the backend knows about one opcode, as one `'static` record.
 ///
 /// Every per-opcode fact is a field here, reached through
@@ -373,6 +386,8 @@ pub struct InstrInfo {
     /// The opcode's register slots, in declaration order: which are results and
     /// which operands, and the class each admits. See [`RegPort`].
     pub regs: &'static [RegPort],
+    /// A plain register-to-register copy recognized from the TMDL behavior.
+    pub copy: Option<CopyPorts>,
     pub effects: MemoryEffects,
     /// Assembly syntax, or `None` for an opcode with no textual form.
     pub asm: Option<&'static asm_desc::InstrDesc>,
@@ -400,6 +415,7 @@ impl InstrInfo {
         implicit_regs: &[],
         implicit_or_updates: &[],
         regs: &[],
+        copy: None,
         effects: MemoryEffects::NONE,
         asm: None,
         encode: None,

@@ -1,0 +1,51 @@
+// RUN: tir mc --march=x86_64 --stage=regalloc %s | filecheck %s
+// RUN: tir mc --march=x86_64 --shuffle-machine-order --filetype=obj %s -o /dev/null
+
+// Eight distinct addresses remain live across a call. The values exceeding
+// the callee-saved registers can be recomputed with independent relocations.
+module {
+  %g0 = global @g0 size 8 align 8
+  %g1 = global @g1 size 8 align 8
+  %g2 = global @g2 size 8 align 8
+  %g3 = global @g3 size 8 align 8
+  %g4 = global @g4 size 8 align 8
+  %g5 = global @g5 size 8 align 8
+  %g6 = global @g6 size 8 align 8
+  %g7 = global @g7 size 8 align 8
+  %clobber = func.declare @clobber(!ptr.p, !ptr.p, !ptr.p, !ptr.p, !ptr.p, !ptr.p, !ptr.p, !ptr.p) -> !unit
+  %test = func.func @symbol_spills() -> !i64 {
+    %p0 = asm.symbol_address {sym_name = "g0"} : !ptr.p
+    %p1 = asm.symbol_address {sym_name = "g1"} : !ptr.p
+    %p2 = asm.symbol_address {sym_name = "g2"} : !ptr.p
+    %p3 = asm.symbol_address {sym_name = "g3"} : !ptr.p
+    %p4 = asm.symbol_address {sym_name = "g4"} : !ptr.p
+    %p5 = asm.symbol_address {sym_name = "g5"} : !ptr.p
+    %p6 = asm.symbol_address {sym_name = "g6"} : !ptr.p
+    %p7 = asm.symbol_address {sym_name = "g7"} : !ptr.p
+    func.call %clobber(%p0, %p1, %p2, %p3, %p4, %p5, %p6, %p7 : !ptr.p, !ptr.p, !ptr.p, !ptr.p, !ptr.p, !ptr.p, !ptr.p, !ptr.p)
+    %v0 = ptr.load %p0 : !i64
+    %v1 = ptr.load %p1 : !i64
+    %v2 = ptr.load %p2 : !i64
+    %v3 = ptr.load %p3 : !i64
+    %v4 = ptr.load %p4 : !i64
+    %v5 = ptr.load %p5 : !i64
+    %v6 = ptr.load %p6 : !i64
+    %v7 = ptr.load %p7 : !i64
+    %s1 = addi %v0, %v1 : !i64
+    %s2 = addi %s1, %v2 : !i64
+    %s3 = addi %s2, %v3 : !i64
+    %s4 = addi %s3, %v4 : !i64
+    %s5 = addi %s4, %v5 : !i64
+    %s6 = addi %s5, %v6 : !i64
+    %s7 = addi %s6, %v7 : !i64
+    func.return %s7
+  }
+  module_end
+}
+
+// CHECK-LABEL: asm.symbol {name = "symbol_spills"
+// CHECK: asm.vcall
+// CHECK-NOT: x86_64.mov_load_disp
+// CHECK: x86_64.lea {dst = %{{[0-9]+}}:{{[a-z0-9]+}}, imm = "g{{[0-7]}}"}
+// CHECK-NOT: x86_64.mov_load_disp
+// CHECK: asm.vret

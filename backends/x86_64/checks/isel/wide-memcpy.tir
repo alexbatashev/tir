@@ -1,0 +1,16 @@
+// RUN: tir mc --march=x86_64 --filetype=asm %s | filecheck %s
+
+// The target supplies legal unaligned 16-byte copy widths.
+module {
+  %copy = func.func @copy16(%dst: !ptr.p, %src: !ptr.p) {
+    %n = constant {value = 16} : !i64
+    ptr.memcpy %dst, %src, %n
+    func.return
+  }
+  module_end
+}
+
+// CHECK-LABEL: copy16:
+// CHECK: movups xmm{{[0-9]+}}, [rsi + 0]
+// CHECK: movups [rdi + 0], xmm{{[0-9]+}}
+// CHECK: ret

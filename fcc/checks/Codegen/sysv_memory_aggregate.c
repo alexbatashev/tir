@@ -33,5 +33,6 @@ long forward_large(struct Large value, long tail) {
 // ASM: mov [rsp + 0], {{.*}}
 // ASM: mov [rsp + 8], {{.*}}
 // ASM: mov [rsp + 16], {{.*}}
-// ASM: mov rdi, {{.*}}
+// The incoming scalar argument already occupies rdi.
+// ASM-NOT: mov rdi,
 // ASM: call sink_large

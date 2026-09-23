@@ -18,9 +18,8 @@ module {target_env = {memory_scalar_bytes = [1, 2, 4, 8]}} {
 // CHECK-LABEL: func.func @copy
 // CHECK: ptr.load %{{[0-9]+}} : !i64
 // CHECK: ptr.store
-// CHECK: ptr.load %{{[0-9]+}} : !i16
-// CHECK: ptr.store
-// CHECK: ptr.load %{{[0-9]+}} : !i8
+// CHECK: constant {value = 7} : !i64
+// CHECK: ptr.load %{{[0-9]+}} : !i32
 // CHECK: ptr.store
 // CHECK-NOT: ptr.memcpy
 // CHECK-LABEL: func.func @fill

@@ -25,7 +25,7 @@ use crate::backend::liveness::{self, Liveness, PhysReg};
 use crate::backend::prealloc;
 use crate::backend::registers::fresh_reg;
 use crate::backend::{
-    SymbolOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp, symbol_body_blocks,
+    RegSlot, SymbolOp, VirtualCallOp, VirtualIndirectCallOp, VirtualReturnOp, symbol_body_blocks,
 };
 use crate::ptr::AllocaOp;
 
@@ -299,12 +299,13 @@ pub struct AllocConfig<'a> {
 /// assignment is read back from the PBQP solution. If the optimum spills any vreg,
 /// the spilled set is returned so the caller can lower it and retry.
 pub fn allocate(config: &AllocConfig) -> Result<AllocResult, RegAllocError> {
-    allocate_with_affinities(config, &[])
+    allocate_with_affinities(config, &[], &[])
 }
 
 fn allocate_with_affinities(
     config: &AllocConfig,
     affinities: &[(u32, u32)],
+    physical_preferences: &[(u32, PhysReg)],
 ) -> Result<AllocResult, RegAllocError> {
     let AllocConfig {
         info,
@@ -350,7 +351,7 @@ fn allocate_with_affinities(
 
     let mut problem = PbqpProblem::new();
     for (i, &vreg) in vregs.iter().enumerate() {
-        let costs = node_costs(
+        let mut costs = node_costs(
             info,
             &alternatives[i],
             vreg,
@@ -359,6 +360,16 @@ fn allocate_with_affinities(
             abi,
             spill_cost,
         );
+        for &(_, preferred) in physical_preferences.iter().filter(|(v, _)| *v == vreg) {
+            for (cost, alternative) in costs.iter_mut().zip(&alternatives[i]) {
+                if let Alternative::Phys(actual) = alternative
+                    && *cost < INF_COST
+                    && actual.0.span(actual.1) != preferred.0.span(preferred.1)
+                {
+                    *cost = cost.saturating_add(1).min(INF_COST);
+                }
+            }
+        }
         // A node with no finite alternative is unallocatable and unspillable.
         if costs.iter().all(|&c| c >= INF_COST) {
             return Err(RegAllocError::Infeasible(vreg));
@@ -584,6 +595,17 @@ fn interference_matrix(
 pub trait TargetRegAlloc: Send + Sync {
     fn register_info(&self) -> RegisterInfo;
 
+    /// Whether cloning this symbol materialization at another location, with
+    /// fresh independent relocation, produces the identical value.
+    fn is_symbol_materialization(&self, _op: &tir::OpHandle) -> bool {
+        false
+    }
+
+    /// Bytes needed to spill one register, allocated at the ABI slot alignment.
+    fn spill_slot_size(&self, _class: RegClassId, abi: &crate::backend::abi::AbiInfo) -> u32 {
+        abi.stack.slot_size
+    }
+
     /// Build a store of `value` (of class `class`) to `[frame + offset]`.
     fn emit_spill_store(
         &self,
@@ -718,12 +740,6 @@ impl Pass for RegisterAllocationPass {
         // every use it survives.
         let depths = crate::backend::machine_cfg::loop_depths(&blocks, &scan.successors);
 
-        let affinities: Vec<_> = scan
-            .coalescable_copies
-            .iter()
-            .map(|copy| (copy.src, copy.dst))
-            .collect();
-
         let mut frame = FramePlan::new(self.abi);
         frame.reserve_outgoing(scan.outgoing_size);
         let stack_allocas = scan.stack_allocas(&mut frame);
@@ -740,7 +756,8 @@ impl Pass for RegisterAllocationPass {
             // Definitions that count nothing but an immediate are free to
             // spill: spilling one costs a replay per use, not a frame slot,
             // so the solver prices them the cheapest possible way out.
-            let rematerializable = rematerializable(context, &blocks, &liveness);
+            let rematerializable =
+                rematerializable(context, &blocks, &liveness, self.target.as_ref());
             let use_counts = weighted_reference_counts(context, &blocks, &depths);
             // Spill the least-used value first. Reload/store temps are unspillable:
             // they have single-instruction ranges and must occupy a register, so
@@ -758,6 +775,21 @@ impl Pass for RegisterAllocationPass {
                 }
             };
 
+            let mut affinities = Vec::new();
+            let mut physical_preferences = Vec::new();
+            for &copy in &scan.copies {
+                match allocation_copy_endpoints(context, copy) {
+                    Some((RegSlot::Value(src), RegSlot::Value(dst))) => {
+                        affinities.push((src.number(), dst.number()));
+                    }
+                    Some((RegSlot::Value(value), RegSlot::Phys(phys)))
+                    | Some((RegSlot::Phys(phys), RegSlot::Value(value))) => {
+                        physical_preferences.push((value.number(), phys));
+                    }
+                    _ => {}
+                }
+            }
+
             let result = allocate_with_affinities(
                 &AllocConfig {
                     info: &info,
@@ -767,6 +799,7 @@ impl Pass for RegisterAllocationPass {
                     spill_cost: &spill_cost,
                 },
                 &affinities,
+                &physical_preferences,
             )
             .map_err(|e| PassError::InvalidRuleSet(format!("register allocation failed: {e:?}")))?;
 
@@ -791,26 +824,25 @@ impl Pass for RegisterAllocationPass {
             }
         };
 
-        for copy in &scan.coalescable_copies {
-            if !context.has_operation(copy.op) {
+        for &copy in &scan.copies {
+            if !context.has_operation(copy) {
                 continue;
             }
-            // Read the endpoints as they stand: spilling and an earlier
-            // coalesce may have renamed either end since collection.
-            let erasable = matches!(
-                copy_endpoints(context, copy.op),
-                Some((src, dst)) if matches!(
-                    (assignment.get(&src), assignment.get(&dst)),
-                    (Some(src), Some(dst)) if src.0.span(src.1) == dst.0.span(dst.1)
-                )
-            );
+            let physical = |slot| match slot {
+                RegSlot::Value(value) => assignment.get(&value.number()).copied(),
+                RegSlot::Phys(phys) => Some(phys),
+            };
+            let erasable = allocation_copy_endpoints(context, copy).is_some_and(|(src, dst)| {
+                matches!((physical(src), physical(dst)), (Some(src), Some(dst))
+                    if src.0.span(src.1) == dst.0.span(dst.1))
+            });
             if erasable {
-                // Both ends live in one register, so the copy is a self-move.
-                // Its destination value stays: the assignment placed it, and a
-                // two-address instruction may define it again.
-                context.erase_op_keeping_results(&op_ref_in(context, copy.op))?;
+                // Keep the assigned destination value for its users and later
+                // two-address definitions, including spill stores.
+                context.erase_op_keeping_results(&op_ref_in(context, copy))?;
             } else {
-                strip_attr(context, copy.op, prealloc::COALESCABLE_COPY_ATTR);
+                strip_attr(context, copy, prealloc::COALESCABLE_COPY_ATTR);
+                strip_attr(context, copy, crate::backend::FULL_REGISTER_COPY_ATTR);
             }
         }
         // Preserve the callee-saved registers the allocation used for this
@@ -829,8 +861,7 @@ impl Pass for RegisterAllocationPass {
             frame_size,
             saves.len(),
         )?;
-        // Allocation ends by recording where every value went; the ops it
-        // decided about are untouched.
+        // Record the final assignment after spilling and copy removal.
         // Coalescing and spilling retire values; the map describes the ones the
         // function still names.
         let map: crate::backend::RegAssignment = assignment
@@ -868,7 +899,7 @@ impl RegisterAllocationPass {
         spilled: ValueId,
         frame: &mut FramePlan,
     ) -> Result<(), PassError> {
-        let mut sites: HashMap<OpId, Vec<usize>> = HashMap::new();
+        let mut sites = Vec::new();
         for &block_id in blocks {
             for op_id in context.get_block(block_id).op_ids() {
                 if op_id == def_id || !context.has_operation(op_id) {
@@ -883,7 +914,7 @@ impl RegisterAllocationPass {
                     .map(|(index, _)| index)
                     .collect();
                 if !uses.is_empty() {
-                    sites.insert(op_id, uses);
+                    sites.push((op_id, uses));
                 }
             }
         }
@@ -1083,7 +1114,8 @@ impl RegisterAllocationPass {
                 continue;
             }
 
-            let offset = frame.alloc_slot();
+            let size = self.target.spill_slot_size(class, self.abi);
+            let offset = frame.alloc(size, self.abi.stack.slot_size);
 
             for &block_id in blocks {
                 let mut chain = SlotChain::default();
@@ -1497,12 +1529,6 @@ fn callee_saved_slots(
         .collect()
 }
 
-struct CoalescableCopy {
-    op: OpId,
-    src: u32,
-    dst: u32,
-}
-
 /// An `alloca` the scan found, before the frame gives it an offset.
 struct ScannedAlloca {
     op_id: OpId,
@@ -1514,11 +1540,8 @@ struct ScannedAlloca {
 /// One walk of the function body, taken before allocation rewrites anything.
 /// Everything allocation needs to know about the body as selection left it:
 ///
-/// - the copies marked with [`prealloc::COALESCABLE_COPY_ATTR`], whose endpoint
-///   registers seed the coalescing affinity and which are erased after
-///   allocation if both ends landed in one register. Endpoints are recorded
-///   before the spill loop so a copy whose registers were renamed by spill
-///   splitting is never erased (its inserted reload/store still needs it);
+/// - marked virtual copies and full-register machine copies. Their current
+///   endpoints are resolved each round and before erasure after spilling;
 /// - the outgoing call frame the body's calls need, and whether it calls at all;
 /// - the stack allocations, which the frame plan then places;
 /// - the class each value is first named through, for a value whose own type
@@ -1532,7 +1555,7 @@ struct ScannedAlloca {
 ///   holds for every round.
 #[derive(Default)]
 struct BodyScan {
-    coalescable_copies: Vec<CoalescableCopy>,
+    copies: Vec<OpId>,
     outgoing_size: u32,
     has_calls: bool,
     allocas: Vec<ScannedAlloca>,
@@ -1548,16 +1571,14 @@ impl BodyScan {
             for op_id in context.get_block(block_id).op_ids() {
                 let op = context.get_op(op_id);
                 if op.attr(prealloc::COALESCABLE_COPY_ATTR).is_some() {
-                    let (src, dst) = copy_endpoints(context, op_id).ok_or_else(|| {
+                    copy_endpoints(context, op_id).ok_or_else(|| {
                         PassError::InvalidRuleSet(format!(
                             "coalescable copy {op_id:?} does not move one virtual register to another"
                         ))
                     })?;
-                    scan.coalescable_copies.push(CoalescableCopy {
-                        op: op_id,
-                        src,
-                        dst,
-                    });
+                    scan.copies.push(op_id);
+                } else if allocation_copy_endpoints(context, op_id).is_some() {
+                    scan.copies.push(op_id);
                 }
 
                 let outgoing = op
@@ -1636,6 +1657,39 @@ pub(crate) fn copy_endpoints(context: &Context, op_id: OpId) -> Option<(u32, u32
     let src = regs.uses.first()?.number();
     let dst = regs.defs.first()?.number();
     Some((src, dst))
+}
+
+/// Resolve the named ports after any spill splitting. Marked synthetic copies
+/// retain their existing virtual-register contract, including narrow views.
+fn allocation_copy_endpoints(context: &Context, op_id: OpId) -> Option<(RegSlot, RegSlot)> {
+    if !context.has_operation(op_id) {
+        return None;
+    }
+    let op = context.get_op(op_id);
+    if op.attr(prealloc::COALESCABLE_COPY_ATTR).is_some() {
+        let (src, dst) = copy_endpoints(context, op_id)?;
+        return Some((
+            RegSlot::Value(ValueId::from_number(src)),
+            RegSlot::Value(ValueId::from_number(dst)),
+        ));
+    }
+    if let Some(AttributeValue::Array(ports)) = op.attr(crate::backend::FULL_REGISTER_COPY_ATTR) {
+        let [AttributeValue::Str(src), AttributeValue::Str(dst)] = ports.as_ref() else {
+            return None;
+        };
+        return Some((
+            crate::backend::reg_slot(&op, src.as_ref())?,
+            crate::backend::reg_slot(&op, dst.as_ref())?,
+        ));
+    }
+    let machine = op
+        .clone()
+        .as_interface::<dyn crate::backend::MachineInstruction>()?;
+    let copy = machine.info().copy?;
+    Some((
+        crate::backend::reg_slot(&op, copy.src)?,
+        crate::backend::reg_slot(&op, copy.dst)?,
+    ))
 }
 
 fn strip_attr(context: &Context, op_id: OpId, name: &str) {

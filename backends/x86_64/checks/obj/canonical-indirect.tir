@@ -3,8 +3,8 @@
 // An indirect call spells the REX byte whatever its target register is: the
 // return address it pushes is its own end, so it has one length. Everything
 // around it takes the shortest form its operands allow — the frame adjustment
-// folds to the imm8 group, `mov eax, 0` needs no REX. GNU as writes `call rcx`
-// as `ff d1`, one byte shorter; that byte buys the model a single shape.
+// folds to the imm8 group, `mov eax, 0` needs no REX. GNU as writes `call rdi`
+// as `ff d7`, one byte shorter; that byte buys the model a single shape.
 
 module {
   %fn_f = func.func @f(%fp: !ptr.p) -> !i64 {
@@ -18,12 +18,9 @@ module {
 // CHECK: f:
 // add rsp, -8 (imm8): 48 83 c4 f8
 // CHECK-NEXT: [0x48, 0x83, 0xC4, 0xF8]
-// mov rcx, rdi (detach callee): 48 89 f9
-// CHECK-NEXT: [0x48, 0x89, 0xF9]
 // mov eax, 0 (norex): the B8+rd form, b8 00 00 00 00.
 // CHECK-NEXT: [0xB8, 0x00, 0x00, 0x00, 0x00]
-// call rcx: the empty REX, then ff d1.
-// CHECK-NEXT: [0x40, 0xFF, 0xD1]
-// CHECK-NEXT: [0x48, 0x89, 0xC0]
+// call rdi: the empty REX, then ff d7. The detached callee coalesces away.
+// CHECK-NEXT: [0x40, 0xFF, 0xD7]
 // CHECK-NEXT: [0x48, 0x83, 0xC4, 0x08]
 // CHECK-NEXT: [0xC3]

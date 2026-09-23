@@ -1347,7 +1347,9 @@ fn collect_target_tables(files: &[ast::File]) -> TargetTables<'_> {
         .flat_map(|file| file.register_classes())
         .flat_map(|class| {
             class.resolve_registers().filter_map(|register| {
-                register.traits.contains(&ast::RegisterTrait::FpFlags)
+                register
+                    .traits
+                    .contains(&ast::RegisterTrait::FpFlags)
                     .then(|| (class.name.clone(), register.name))
             })
         })
@@ -1406,6 +1408,7 @@ struct InstrInfoParts<'a> {
     implicit_items: &'a [proc_macro2::TokenStream],
     implicit_or_update_items: &'a [proc_macro2::TokenStream],
     ports_ident: &'a proc_macro2::Ident,
+    copy_ports: Option<(String, String)>,
     reads_memory: bool,
     writes_memory: bool,
     desc_ident: &'a Option<proc_macro2::Ident>,
@@ -1429,6 +1432,7 @@ fn instr_info_fields(
         implicit_items,
         implicit_or_update_items,
         ports_ident,
+        copy_ports,
         reads_memory,
         writes_memory,
         desc_ident,
@@ -1454,6 +1458,20 @@ fn instr_info_fields(
         });
     }
     info_fields.push(quote! { regs: &#ports_ident });
+    if let Some((src, dst)) = copy_ports
+        && !uncond_pc
+        && !cond_pc
+        && implicit_items.is_empty()
+        && implicit_or_update_items.is_empty()
+        && !reads_memory
+        && !writes_memory
+    {
+        let src_lit = proc_macro2::Literal::string(src);
+        let dst_lit = proc_macro2::Literal::string(dst);
+        info_fields.push(quote! {
+            copy: Some(tir::backend::CopyPorts { src: #src_lit, dst: #dst_lit })
+        });
+    }
     if *reads_memory || *writes_memory {
         info_fields.push(quote! {
             effects: tir::backend::MemoryEffects {
@@ -1478,6 +1496,45 @@ fn instr_info_fields(
         info_fields.push(quote! { sched: #sched_ts });
     }
     info_fields
+}
+
+fn copy_ports(
+    behavior: &ast::Expr,
+    operands: &[(String, Type)],
+    register_files: &HashMap<String, String>,
+) -> Option<(String, String)> {
+    let assignment = match behavior {
+        ast::Expr::Assign(assign) => assign,
+        ast::Expr::Block(block) if block.stmts.len() == 1 => {
+            let ast::Expr::Assign(assign) = &block.stmts[0] else {
+                return None;
+            };
+            assign
+        }
+        _ => return None,
+    };
+    let ast::Expr::Ident(dst) = assignment.dest.as_ref() else {
+        return None;
+    };
+    let ast::Expr::Ident(src) = assignment.value.as_ref() else {
+        return None;
+    };
+    if dst.name == src.name {
+        return None;
+    }
+    let dst_ty = operands
+        .iter()
+        .find_map(|(name, ty)| (name == &dst.name).then_some(ty));
+    let src_ty = operands
+        .iter()
+        .find_map(|(name, ty)| (name == &src.name).then_some(ty));
+    let (Some(Type::Struct(dst_class)), Some(Type::Struct(src_class))) = (dst_ty, src_ty) else {
+        return None;
+    };
+    if dst_class != src_class || register_files.get(dst_class) != Some(dst_class) {
+        return None;
+    }
+    Some((src.name.clone(), dst.name.clone()))
 }
 
 fn emit_instruction(
@@ -1637,6 +1694,7 @@ fn emit_instruction(
         implicit_reads: &implicit_reads,
     };
     let ports = instruction_ports(tables, &instr_ctx);
+    let copy_ports = copy_ports(&inst.behavior, &ops, &tables.register_files);
     let port_entries = reg_port_entries(&ports);
     let ports_ident = format_ident!("REGS_{}", inst.name.to_uppercase());
     let port_count = port_entries.len();
@@ -1907,6 +1965,7 @@ fn emit_instruction(
             implicit_items: &implicit_items,
             implicit_or_update_items: &implicit_or_update_items,
             ports_ident: &ports_ident,
+            copy_ports,
             reads_memory,
             writes_memory,
             desc_ident: &desc_ident,

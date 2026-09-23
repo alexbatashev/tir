@@ -1,0 +1,55 @@
+// RUN: tir opt --pass lower-intrinsics --verify %s | filecheck %s
+// RUN: tir opt --pass restructure-nodes --pass lower-intrinsics --pass verify-deps --verify %s -o /dev/null
+
+module {target_env = {memory_scalar_bytes = [1, 2, 4, 8], memory_copy_bytes = [16]}} {
+  %copy31 = func.func @copy31(%dst: !ptr.p, %src: !ptr.p) {
+    %n = constant {value = 31} : !i64
+    ptr.memcpy %dst, %src, %n
+    func.return
+  }
+  %copy56 = func.func @copy56(%dst: !ptr.p, %src: !ptr.p) {
+    %n = constant {value = 56} : !i64
+    ptr.memcpy %dst, %src, %n
+    func.return
+  }
+  %fill = func.func @fill(%dst: !ptr.p, %byte: !i8) {
+    %n = constant {value = 16} : !i64
+    ptr.memset %dst, %byte, %n
+    func.return
+  }
+  module {target_env = {memory_copy_bytes = []}} {
+    %scalar = func.func @scalar(%dst: !ptr.p, %src: !ptr.p) {
+      %n = constant {value = 16} : !i64
+      ptr.memcpy %dst, %src, %n
+      func.return
+    }
+    module_end
+  }
+  module_end
+}
+
+// An overlapping tail keeps every access inside the copied ranges.
+// CHECK-LABEL: func.func @copy31
+// CHECK: ptr.load %{{[0-9]+}} : !i128
+// CHECK: constant {value = 15} : !i64
+// CHECK: ptr.load %{{[0-9]+}} : !i128
+// CHECK-NOT: ptr.load
+// CHECK: func.return
+// CHECK-LABEL: func.func @copy56
+// CHECK: ptr.load %{{[0-9]+}} : !i128
+// CHECK: constant {value = 16} : !i64
+// CHECK: ptr.load %{{[0-9]+}} : !i128
+// CHECK: constant {value = 32} : !i64
+// CHECK: ptr.load %{{[0-9]+}} : !i128
+// CHECK: constant {value = 48} : !i64
+// CHECK: ptr.load %{{[0-9]+}} : !i64
+// CHECK-NOT: ptr.load
+// CHECK: func.return
+// CHECK-LABEL: func.func @fill
+// CHECK-NOT: !i128
+// CHECK: func.return
+// CHECK-LABEL: func.func @scalar
+// CHECK: ptr.load %{{[0-9]+}} : !i64
+// CHECK: ptr.load %{{[0-9]+}} : !i64
+// CHECK-NOT: ptr.load
+// CHECK: func.return

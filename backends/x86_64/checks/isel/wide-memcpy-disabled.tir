@@ -1,0 +1,15 @@
+// RUN: tir mc --march=x86_64 --filetype=asm %s | filecheck %s
+
+// An explicit environment overrides the target's copy widths.
+module {target_env = {memory_copy_bytes = []}} {
+  %copy = func.func @copy16(%dst: !ptr.p, %src: !ptr.p) {
+    %n = constant {value = 16} : !i64
+    ptr.memcpy %dst, %src, %n
+    func.return
+  }
+  module_end
+}
+
+// CHECK-LABEL: copy16:
+// CHECK-NOT: xmm
+// CHECK: ret

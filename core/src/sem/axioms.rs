@@ -89,6 +89,15 @@ enum WidthExpr {
 }
 
 impl WidthExpr {
+    fn references_width(&self) -> bool {
+        match self {
+            Self::Lit(_) => false,
+            Self::Name(_) => true,
+            Self::Sub(a, b) => a.references_width() || b.references_width(),
+            Self::Ones(value) => value.references_width(),
+        }
+    }
+
     fn eval(&self, widths: &[u64]) -> Option<u64> {
         match self {
             WidthExpr::Lit(v) => Some(*v),
@@ -363,6 +372,7 @@ impl Axiom {
         let mut low = Lowering::new(self, folds, assume);
         low.left(self);
         low.widths(self);
+        low.constant_matches();
         low.predicates(self, index);
         // Everything below matches; everything above is what the head builds.
         let match_vars = low.slots.vars;
@@ -891,6 +901,8 @@ struct Lowering<'a> {
     declared: Vec<u32>,
     /// Scalars holding each declared const var's value and width.
     const_values: HashMap<usize, (u32, u32)>,
+    /// Constant matches whose expressions can refer to widths bound later.
+    constant_matches: Vec<(u32, WidthExpr)>,
     /// Scalar per width name.
     widths: Vec<u32>,
     /// Scalar holding the register width, once something asks for it.
@@ -934,6 +946,7 @@ impl<'a> Lowering<'a> {
             holes: HashMap::new(),
             declared: vec![u32::MAX; axiom.vars.len()],
             const_values: HashMap::new(),
+            constant_matches: Vec::new(),
             widths: Vec::new(),
             register: None,
             folds,
@@ -1004,6 +1017,20 @@ impl<'a> Lowering<'a> {
     /// An operand that must be the constant `expr` evaluates to.
     fn const_match(&mut self, class: u32, expr: &WidthExpr) {
         let (value, _) = self.constant(class);
+        if expr.references_width() {
+            self.constant_matches.push((value, expr.clone()));
+        } else {
+            self.match_constant_value(value, expr);
+        }
+    }
+
+    fn constant_matches(&mut self) {
+        for (value, expr) in std::mem::take(&mut self.constant_matches) {
+            self.match_constant_value(value, &expr);
+        }
+    }
+
+    fn match_constant_value(&mut self, value: u32, expr: &WidthExpr) {
         let want = self.slots.scalar();
         self.guards.push(Guard::Let {
             out: want,

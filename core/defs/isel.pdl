@@ -222,3 +222,13 @@ rule ule-via-cmp: #ule(a: int<W>, b: int<W>) : int<1>
 
 rule sub-via-add-neg: #sub(a: int<W>, c: const<W>) : int<W>
   => #add(a, #neg(c));
+
+// Constant select arms share their mask; fold the differing bits first.
+rule constant-mask-blend:
+  #or(#and(t: const<W>, m: int<W>),
+      #and(f: const<W>, #xor(m, ones(W)))) : int<W>
+  => #xor(#and(m, #xor(t, f)), f);
+rule sext-bool-low-bit:
+  #and(#sext(c: int<1>, W), 1) : int<W>
+  => #zext(#extract(c, 0, 0), W)
+  where 1 < W;

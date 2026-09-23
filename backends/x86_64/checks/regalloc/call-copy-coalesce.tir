@@ -1,0 +1,16 @@
+// RUN: tir mc --march=x86_64 --stage=regalloc %s | filecheck %s
+// RUN: tir mc --march=x86_64 --shuffle-machine-order --filetype=obj -o /dev/null %s
+
+// Forwarding an argument does not need a temporary register before ABI placement.
+module {
+  %callee = func.declare @callee(!i64) -> !unit
+  %forward = func.func @forward(%x: !i64) {
+    func.call %callee(%x : !i64)
+    func.return
+  }
+  module_end
+}
+
+// CHECK-LABEL: asm.symbol {name = "forward"
+// CHECK-NOT: x86_64.mov {dst = %
+// CHECK: asm.vcall
