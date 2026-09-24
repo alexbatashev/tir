@@ -38,7 +38,9 @@ class ModuleResult:
     spellings: tuple[str, str, str, str]
 
 
-def parse_results(output: str) -> list[ModuleResult]:
+def parse_results(
+    output: str, expected_counts: tuple[tuple[int, int, int], ...] | None = COUNTS
+) -> list[ModuleResult]:
     results: list[ModuleResult] = []
     for line in output.splitlines():
         match = RESULT.match(line)
@@ -53,7 +55,7 @@ def parse_results(output: str) -> list[ModuleResult]:
     if len(results) != len(MODULES):
         raise AssertionError(f"expected {len(MODULES)} module results, found {len(results)}")
     actual_counts = tuple(result.counts for result in results)
-    if actual_counts != COUNTS:
+    if expected_counts is not None and actual_counts != expected_counts:
         raise AssertionError(f"missing or reordered module results: {actual_counts}")
     return results
 
@@ -80,7 +82,7 @@ def compare_results(
             zip(actual.values, actual.spellings, expected.values, expected.spellings, strict=True),
             start=1,
         ):
-            tolerance = max(printed_quantum(spelling), printed_quantum(expected_spelling))
+            tolerance = min(printed_quantum(spelling), printed_quantum(expected_spelling))
             if abs(value - expected_value) > tolerance:
                 raise AssertionError(
                     f"module {module} value {index} differs: "
@@ -95,11 +97,32 @@ def validate_comparator(reference: list[ModuleResult]) -> None:
     corrupted_values[0] += 10.0 * printed_quantum(first.spellings[0])
     corrupted = list(reference)
     corrupted[0] = ModuleResult(first.counts, tuple(corrupted_values), first.spellings)
-    try:
-        compare_results("corrupted", corrupted, "reference", reference)
-    except AssertionError:
-        return
-    raise AssertionError("the numerical comparator accepted a deliberately corrupted result")
+
+    def assert_rejected(candidate: list[ModuleResult], expected: list[ModuleResult]) -> None:
+        try:
+            compare_results("corrupted", candidate, "reference", expected)
+        except AssertionError:
+            return
+        raise AssertionError("the numerical comparator accepted a deliberately corrupted result")
+
+    assert_rejected(corrupted, reference)
+    for actual_spelling, expected_spelling in (
+        ("0.0000e+00", "-1.7680e-313"),
+        ("1.0000e+00", "9.9994e-01"),
+    ):
+        candidate = list(reference)
+        expected = list(reference)
+        candidate[0] = ModuleResult(
+            first.counts,
+            (float(actual_spelling), *first.values[1:]),
+            (actual_spelling, *first.spellings[1:]),
+        )
+        expected[0] = ModuleResult(
+            first.counts,
+            (float(expected_spelling), *first.values[1:]),
+            (expected_spelling, *first.spellings[1:]),
+        )
+        assert_rejected(candidate, expected)
 
 
 def compile_and_run(
@@ -132,7 +155,22 @@ def main() -> None:
     parser.add_argument("--fcc", default="fcc")
     parser.add_argument("--gcc", default="gcc")
     parser.add_argument("--clang", default="clang")
+    parser.add_argument("--stdout", type=Path)
+    parser.add_argument("args", nargs="*")
     args = parser.parse_args()
+    if args.stdout is not None:
+        if args.args != ["1000000"]:
+            raise AssertionError(f"unexpected Whetstone workload: {args.args}")
+        output = args.stdout.read_text()
+        summary = r"^Loops:\s+1000000, Iterations:\s+1, Duration:\s+[1-9]\d* sec\.$"
+        if not re.search(summary, output, re.MULTILINE):
+            raise AssertionError("Whetstone did not complete exactly one fixed-work iteration")
+        reference = parse_results(Path(__file__).with_name("expected.out").read_text(), None)
+        counts = tuple(result.counts for result in reference)
+        compare_results("candidate", parse_results(output, counts), "Clang reference", reference)
+        return
+    if args.args:
+        parser.error("positional arguments require --stdout")
     source = Path(__file__).with_name("whetstone.c").resolve()
     with tempfile.TemporaryDirectory(prefix="whetstone-verify-") as temporary:
         directory = Path(temporary)
@@ -151,4 +189,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
