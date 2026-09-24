@@ -12,6 +12,7 @@ test = false
 doctest = false
 
 [dependencies]
+gungraun = { workspace = true, optional = true }
 tir-macros.workspace = true
 tir-graph.workspace = true
 tir-relational.workspace = true
@@ -30,7 +31,11 @@ tir-pdl = { path = "../utils/pdl", default-features = false }
 tir-pdl = { path = "../utils/pdl", default-features = false }
 
 [dev-dependencies]
-tir-bench.workspace = true
+serde_json.workspace = true
+criterion.workspace = true
+
+[features]
+nightly-cachegrind = ["dep:gungraun"]
 
 [[bench]]
 name = "lexer"
