@@ -214,71 +214,6 @@ jobs:
           name: benchmark-micro
           path: target/gungraun
 
-  benchboard-publish:
-    if: github.ref == 'refs/heads/master'
-    needs: [benchmark-programs, benchmark-micro]
-    runs-on: ubuntu-24.04
-    env:
-      BENCHBOARD_URL: ${{ vars.BENCHBOARD_URL || vars.BENCHBOARD_API_URL || 'https://benchboard-api.terantamoulamp.workers.dev' }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/checkout@v7
-        with:
-          repository: frontiers-labs/benchboard
-          ref: a77547ad514754f4ac91b17f92b5675a1aab9fff
-          path: .benchboard
-          persist-credentials: false
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-      - run: npm ci --prefix .benchboard
-      - uses: actions/download-artifact@v8
-        with:
-          name: benchmark-programs
-          path: incoming/programs
-      - uses: actions/download-artifact@v8
-        with:
-          name: benchmark-micro
-          path: incoming/micro
-      - name: Import Cachegrind results
-        shell: bash
-        run: |
-          mapfile -t reports < <(find incoming/programs -name results.json)
-          [ "${#reports[@]}" -eq 2 ] || { echo 'Expected two complete program reports' >&2; exit 1; }
-          .benchboard/node_modules/.bin/tsx .benchboard/cli/main.ts import-tir \
-            --input "${reports[0]}" --input "${reports[1]}" \
-            --id "tir-${{ github.run_id }}-${{ github.run_attempt }}" \
-            --project tir --commit "${{ github.sha }}" --branch master --kind nightly \
-            --machine github-ubuntu-24.04 --config cachegrind-v1 \
-            --timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --output benchboard-run.json
-          python3 .github/scripts/benchboard-add-gungraun.py benchboard-run.json incoming/micro
-      - uses: actions/upload-artifact@v7
-        with:
-          name: benchboard-run
-          path: benchboard-run.json
-      - name: Compare with the previous nightly
-        id: comparison
-        continue-on-error: true
-        shell: bash
-        run: |
-          set +e
-          .benchboard/node_modules/.bin/tsx .benchboard/cli/main.ts check \
-            --run benchboard-run.json --branch master --threshold 5 > comparison.json
-          status=$?
-          set -e
-          cat comparison.json
-          if [ "$status" -eq 2 ] && python3 -c 'import json; r=json.load(open("comparison.json")); assert r["status"] == "incomparable" and r["baselineId"] is None and r["reason"] == "No matching nightly baseline"'; then
-            exit 0
-          fi
-          exit "$status"
-      - name: Store nightly result
-        env:
-          BENCHBOARD_TOKEN: ${{ secrets.BENCHBOARD_TOKEN }}
-        run: .benchboard/node_modules/.bin/tsx .benchboard/cli/main.ts submit --run benchboard-run.json
-      - name: Fail on regression
-        if: steps.comparison.outcome == 'failure'
-        run: exit 1
-
   libfuzzer:
     # Only for the xtask binary, which reads the records embedded in open
     # issues. A broken workspace build must not stop the fuzzing, so the job
@@ -355,7 +290,6 @@ jobs:
         differential-fuzz,
         benchmark-programs,
         benchmark-micro,
-        benchboard-publish,
         libfuzzer,
       ]
     runs-on: ubuntu-latest

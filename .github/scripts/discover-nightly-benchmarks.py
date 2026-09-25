@@ -104,7 +104,7 @@ def expected_cases(targets):
 def contract_hash(expected, targets):
     paths = {
         ROOT / "Cargo.toml", ROOT / "Cargo.lock", ROOT / "benchmarks/functions.rs",
-        Path(__file__).resolve(), ROOT / ".github/scripts/benchboard-add-gungraun.py",
+        Path(__file__).resolve(),
         ROOT / ".github/scripts/run-nightly-benchmarks.sh",
     }
     for package, target in expected.values():
