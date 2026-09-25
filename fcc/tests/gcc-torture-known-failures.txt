@@ -2267,7 +2267,6 @@ execute/va-arg-24.c
 execute/va-arg-4.c
 execute/va-arg-5.c
 execute/va-arg-6.c
-execute/va-arg-7.c
 execute/va-arg-9.c
 execute/va-arg-pack-1.c
 execute/va-arg-trap-1.c
