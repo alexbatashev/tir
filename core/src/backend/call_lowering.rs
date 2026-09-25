@@ -73,6 +73,15 @@ impl CallLowering {
         }
     }
 
+    pub fn register_file(&self, kind: ValueKind) -> Option<&'static str> {
+        self.abi
+            .args
+            .iter()
+            .chain(self.abi.rets.iter())
+            .find(|sequence| sequence.kind == kind && !sequence.regs.is_empty())
+            .map(|sequence| sequence.regs[0].0.file())
+    }
+
     /// Drop the scratch of the function just finished. Both maps are keyed by
     /// op id and describe one function, so they must not outlive it: a later
     /// function's op reusing an id would otherwise read the old one's answer.

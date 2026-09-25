@@ -134,6 +134,16 @@ impl TargetProfile {
             TypeKind::Enum(_) => LayoutClass::I32,
             TypeKind::Float => LayoutClass::F32,
             TypeKind::Double => LayoutClass::F64,
+            TypeKind::ComplexFloat => {
+                let (size, align) = self.class_layout(LayoutClass::F32);
+                return Some((2 * size, align));
+            }
+            TypeKind::ComplexDouble => {
+                let (size, align) = self.class_layout(LayoutClass::F64);
+                return Some((2 * size, align));
+            }
+            TypeKind::ComplexLongDouble => return Some((32, 16)),
+            TypeKind::VaList => return Some((24, 8)),
             // `long double` maps onto no TIR layout class: fcc carries it as an
             // opaque object rather than an arithmetic type, so its ABI size and
             // alignment have nowhere in the data layout to come from.

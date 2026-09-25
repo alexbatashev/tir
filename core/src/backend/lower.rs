@@ -49,13 +49,24 @@ pub fn lower_function_and_return(
         let signature = tir::builtin::FnType::signature_of(context, func.fn_value())
             .map(|(params, _)| params)
             .unwrap_or_default();
+        let variadic = signature.last().copied() == Some(tir::builtin::VarArgsType::new(context));
+        let public_parameter_count = signature.len().saturating_sub(usize::from(variadic));
+        let implicit_argument_types = func.implicit_argument_types();
+        let entry_sp = func.entry_sp_argument();
         let function_arguments: Vec<(tir::Value, tir::TypeId)> = func
             .body()
             .value_arguments()
             .into_iter()
             .enumerate()
             .map(|(index, argument)| {
-                let ty = signature.get(index).copied().unwrap_or(argument.ty());
+                let ty = if index < public_parameter_count {
+                    signature[index]
+                } else {
+                    implicit_argument_types
+                        .get(index - public_parameter_count)
+                        .copied()
+                        .unwrap_or_else(|| argument.ty())
+                };
                 (argument, ty)
             })
             .collect();
@@ -83,6 +94,11 @@ pub fn lower_function_and_return(
             None
         };
         for ((argument, ty), alignment) in function_arguments.zip(argument_alignments) {
+            if Some(argument.id()) == entry_sp {
+                let class = argument_class(ty)?;
+                retype(context, argument.id(), class);
+                continue;
+            }
             let ty = context.get_type_data(ty);
             let Some(tuple) = (ty.as_ref() as &dyn std::any::Any).downcast_ref::<TupleType>()
             else {
@@ -163,6 +179,12 @@ pub fn lower_function_and_return(
             .body(op.op().regions()[0])
             .attr("name", AttributeValue::Str(name.into()))
             .attr("arg_regs", AttributeValue::Array(arguments.into()));
+        if variadic {
+            symbol = symbol.attr("variadic", AttributeValue::Bool(true));
+        }
+        if let Some(entry_sp) = entry_sp {
+            symbol = symbol.attr("entry_sp", AttributeValue::Value(entry_sp));
+        }
         if let Some(result_address) = result_address {
             symbol = symbol.attr("result_address", result_address);
         }

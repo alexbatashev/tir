@@ -2,11 +2,10 @@
 
 use super::{lower_type, node_entity, node_type, source_type_layout};
 use crate::ast::{AstLeaf, RecordKind};
-use crate::cir::VarArgsType;
 use crate::diagnostics::Diagnostic;
 use crate::sema::{EntityId, QualType, TargetProfile, TypeKind, TypedAst};
 use tir::backend::abi::{Overflow, ValueKind, type_kind};
-use tir::builtin::{FloatType, IntegerType, TupleType, UnitType};
+use tir::builtin::{FloatType, IntegerType, TupleType, UnitType, VarArgsType};
 use tir::graph::{Dag, NodeId};
 use tir::ptr::PtrType;
 use tir::{Context, TypeId};
@@ -16,6 +15,7 @@ pub(super) struct Signature {
     pub(super) ret: AbiReturn,
     pub(super) params: Vec<AbiParameter>,
     pub(super) varargs: bool,
+    pub(super) register_usage: AbiRegisterUsage,
 }
 
 #[derive(Clone)]
@@ -42,10 +42,11 @@ pub(super) struct AbiReturn {
     pub(super) indirect: bool,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(super) struct AbiRegisterUsage {
     pub(super) integers: usize,
     pub(super) floats: usize,
+    pub(super) stack_slots: usize,
 }
 
 impl AbiRegisterUsage {
@@ -119,7 +120,7 @@ impl AbiRegisterUsage {
                 ValueKind::Int if self.integers < integer_limit => {
                     self.integers += 1;
                 }
-                _ => {}
+                _ => self.stack_slots += 1,
             }
         }
     }
@@ -128,6 +129,7 @@ impl AbiRegisterUsage {
         if self.has_direct_registers(context, target, pieces) {
             self.consume(context, target, pieces);
         } else {
+            self.stack_slots += pieces.len();
             for piece in pieces {
                 match type_kind(context, piece.ty) {
                     ValueKind::Int => {
@@ -243,6 +245,7 @@ pub(super) fn classify_function_type(
         ret,
         params,
         varargs: *varargs || !prototype,
+        register_usage,
     }
 }
 

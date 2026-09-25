@@ -170,6 +170,18 @@ conditional can own regions for its alternatives, and a loop can own a region
 for its body. This creates a containment tree alongside the value dependency
 graph.
 
+A variadic function's `!fn` type ends with `!varargs`. Ordinarily, its body has
+arguments only for the named parameters; `func.func` prints `...` after them.
+The marker does not create an SSA value at function entry.
+Inlining binds only the named arguments. Extra argument computations remain
+in the caller, where normal dead-code elimination may remove unused values.
+
+A variadic definition may declare trailing body-only arguments with
+`implicit_arguments`. These arguments are absent from its public `!fn` type and
+receive normal ABI placement. An `entry_sp` attribute may name one implicit
+pointer argument. ABI binding materializes the stack pointer value as it was
+on entry, accounting for the frame and callee-saved register area.
+
 ```mermaid
 flowchart TD
 	O[Operation] --> R[Region]

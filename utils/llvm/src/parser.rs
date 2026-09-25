@@ -47,10 +47,33 @@ const SKIP: &[&str] = &[
     "readnone",
     "returned",
     "writeonly",
+    "dead_on_unwind",
+    "writable",
     "fastcc",
     "coldcc",
     "tailcc",
 ];
+
+#[derive(Clone)]
+enum ParsedAbiAttr {
+    SRet(Type),
+    ByVal(Type),
+    Align(u64),
+    Other,
+}
+
+fn abi_attrs(attrs: Vec<ParsedAbiAttr>) -> AbiAttrs {
+    let mut result = AbiAttrs::default();
+    for attr in attrs {
+        match attr {
+            ParsedAbiAttr::SRet(ty) => result.sret = Some(ty),
+            ParsedAbiAttr::ByVal(ty) => result.byval = Some(ty),
+            ParsedAbiAttr::Align(align) => result.align = Some(align),
+            ParsedAbiAttr::Other => {}
+        }
+    }
+    result
+}
 
 pub fn parse_module(src: &str) -> Result<Module, Error> {
     let normalized = normalize_constant_geps(&normalize_switches(&normalize_attributes(src))?);
@@ -253,6 +276,11 @@ where
             .then(ty.clone())
             .delimited_by(just(Token::LBracket), just(Token::RBracket))
             .map(|(count, elem)| Type::Array(count, Box::new(elem)));
+        let vector = select! { Token::Int(n) if n > 0 && n <= u32::MAX as i64 => n as u32 }
+            .then_ignore(just(Token::Ident("x")))
+            .then(ty.clone())
+            .delimited_by(just(Token::LAngle), just(Token::RAngle))
+            .map(|(count, elem)| Type::Vector(count, Box::new(elem)));
         let structure = ty
             .clone()
             .separated_by(just(Token::Comma))
@@ -270,6 +298,7 @@ where
                 Token::Ident("double") => Type::Float(64),
             },
             array,
+            vector,
             structure,
         ))
         .then(just(Token::Star).repeated().collect::<Vec<_>>())
@@ -289,12 +318,13 @@ where
         Token::Local(n) => Operand::Ref(n.to_string()),
         Token::Int(v) => Operand::ConstInt(v),
         Token::Float(v) => Operand::ConstFloat(v),
-        Token::HexFloat(bits) => Operand::ConstFloat(f64::from_bits(bits)),
+        Token::HexFloatBits(bits) => Operand::ConstFloatBits(bits),
         Token::Ident("true") => Operand::ConstInt(1),
         Token::Ident("false") => Operand::ConstInt(0),
         Token::Global(n) => Operand::Global(n.to_string()),
         Token::Ident("null") => Operand::Null,
         Token::Ident("undef") => Operand::Undef,
+        Token::Ident("poison") => Operand::Poison,
     }
 }
 
@@ -323,6 +353,48 @@ where
     }
 }
 
+fn abi_attr_parser<'src, I>() -> impl Parser<'src, I, ParsedAbiAttr, Extra<'src>> + Clone
+where
+    I: ValueInput<'src, Token = Token<'src>, Span = Span>,
+{
+    let ty = type_parser();
+    choice((
+        just(Token::Ident("sret"))
+            .ignore_then(
+                ty.clone()
+                    .delimited_by(just(Token::LParen), just(Token::RParen)),
+            )
+            .map(ParsedAbiAttr::SRet),
+        just(Token::Ident("byval"))
+            .ignore_then(
+                ty.clone()
+                    .delimited_by(just(Token::LParen), just(Token::RParen)),
+            )
+            .map(ParsedAbiAttr::ByVal),
+        just(Token::Ident("align"))
+            .ignore_then(select! { Token::Int(value) if value > 0 => value as u64 })
+            .map(ParsedAbiAttr::Align),
+        any()
+            .filter(|t: &Token| matches!(t, Token::Ident(s) if SKIP.contains(s)))
+            .to(ParsedAbiAttr::Other),
+        just(Token::Ident("dereferenceable"))
+            .ignore_then(
+                select! { Token::Int(_) => () }
+                    .delimited_by(just(Token::LParen), just(Token::RParen)),
+            )
+            .to(ParsedAbiAttr::Other),
+        just(Token::Ident("captures"))
+            .ignore_then(
+                any()
+                    .and_is(just(Token::RParen).not())
+                    .repeated()
+                    .delimited_by(just(Token::LParen), just(Token::RParen)),
+            )
+            .to(ParsedAbiAttr::Other),
+    ))
+}
+
+#[allow(clippy::too_many_lines)]
 fn module<'src, I>() -> impl Parser<'src, I, Result<Module, Error>, Extra<'src>>
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
@@ -334,6 +406,10 @@ where
 
     let ty = type_parser();
     let operand = operand_parser();
+    let abi_attrs = abi_attr_parser()
+        .repeated()
+        .collect::<Vec<_>>()
+        .map(abi_attrs);
 
     let local = select! { Token::Local(n) => n.to_string() };
     // A branch target, `%name`; matches the stripped label defined at a block.
@@ -368,10 +444,10 @@ where
             lhs,
             rhs,
         });
-
     let fneg = binding
         .clone()
         .then_ignore(just(Token::Ident("fneg")))
+        .then_ignore(skip.collect::<Vec<_>>())
         .then(ty.clone())
         .then(operand.clone())
         .map(|((result, ty), value)| Inst::FNeg { result, ty, value });
@@ -408,6 +484,43 @@ where
             rhs,
         });
 
+    let extractelement = binding
+        .clone()
+        .then_ignore(just(Token::Ident("extractelement")))
+        .then(ty.clone())
+        .then(operand.clone())
+        .then_ignore(just(Token::Comma))
+        .then(ty.clone())
+        .then(operand.clone())
+        .map(
+            |((((result, vector), value), _), index)| Inst::ExtractElement {
+                result,
+                vector,
+                value,
+                index,
+            },
+        );
+    let insertelement = binding
+        .clone()
+        .then_ignore(just(Token::Ident("insertelement")))
+        .then(ty.clone())
+        .then(operand.clone())
+        .then_ignore(just(Token::Comma))
+        .then(ty.clone())
+        .then(operand.clone())
+        .then_ignore(just(Token::Comma))
+        .then(ty.clone())
+        .then(operand.clone())
+        .map(
+            |((((((result, vector), value), _), element), _), index)| Inst::InsertElement {
+                result,
+                vector,
+                value,
+                element,
+                index,
+            },
+        );
+
     let castop = select! {
         Token::Ident("sext") => CastOp::SExt,
         Token::Ident("zext") => CastOp::ZExt,
@@ -440,6 +553,12 @@ where
                 to,
             },
         );
+    let freeze = binding
+        .clone()
+        .then_ignore(just(Token::Ident("freeze")))
+        .then(ty.clone())
+        .then(operand.clone())
+        .map(|((result, ty), value)| Inst::Freeze { result, ty, value });
 
     let alloca = binding
         .clone()
@@ -489,6 +608,43 @@ where
         .then_ignore(ty.clone())
         .then(address.clone())
         .map(|((result, ty), ptr)| Inst::Load { result, ty, ptr });
+    let extractvalue = binding
+        .clone()
+        .then_ignore(just(Token::Ident("extractvalue")))
+        .then(ty.clone())
+        .then(operand.clone())
+        .then_ignore(just(Token::Comma))
+        .then(
+            select! { Token::Int(index) if index >= 0 && index <= u32::MAX as i64 => index as u32 },
+        )
+        .map(|(((result, aggregate), value), index)| Inst::ExtractValue {
+            result,
+            aggregate,
+            value,
+            index,
+        });
+    let insertvalue = binding
+        .clone()
+        .then_ignore(just(Token::Ident("insertvalue")))
+        .then(ty.clone())
+        .then(operand.clone())
+        .then_ignore(just(Token::Comma))
+        .then(ty.clone())
+        .then(operand.clone())
+        .then_ignore(just(Token::Comma))
+        .then(
+            select! { Token::Int(index) if index >= 0 && index <= u32::MAX as i64 => index as u32 },
+        )
+        .map(
+            |(((((result, aggregate), value), element_type), element), index)| Inst::InsertValue {
+                result,
+                aggregate,
+                value,
+                element_type,
+                element,
+                index,
+            },
+        );
 
     let store = just(Token::Ident("store"))
         .ignore_then(skip)
@@ -586,27 +742,14 @@ where
         });
         just(Token::Ident("ret")).ignore_then(void.or(val))
     };
+    let unreachable = just(Token::Ident("unreachable")).to(Inst::Unreachable);
 
     let call = {
-        let arg_attr = choice((
-            any()
-                .filter(|t: &Token| matches!(t, Token::Ident(s) if SKIP.contains(s)))
-                .ignored(),
-            just(Token::Ident("align")).ignore_then(select! { Token::Int(_) => () }),
-            just(Token::Ident("dereferenceable")).ignore_then(
-                select! { Token::Int(_) => () }
-                    .delimited_by(just(Token::LParen), just(Token::RParen)),
-            ),
-            just(Token::Ident("captures")).ignore_then(
-                any()
-                    .and_is(just(Token::RParen).not())
-                    .repeated()
-                    .delimited_by(just(Token::LParen), just(Token::RParen))
-                    .ignored(),
-            ),
-        ))
-        .repeated();
-        let arg = ty.clone().then_ignore(arg_attr).then(operand.clone());
+        let arg = ty
+            .clone()
+            .then(abi_attrs.clone())
+            .then(operand.clone())
+            .map(|((ty, abi), value)| CallArg { ty, value, abi });
         let args = arg
             .separated_by(just(Token::Comma))
             .collect::<Vec<_>>()
@@ -647,13 +790,18 @@ where
         .map(Inst::Unsupported);
 
     let inst = choice((
-        binary,
+        freeze,
         fneg,
+        binary,
         icmp,
         fcmp,
+        extractelement,
+        insertelement,
         cast,
         alloca,
         load,
+        extractvalue,
+        insertvalue,
         gep,
         phi,
         select,
@@ -661,6 +809,7 @@ where
         store,
         br,
         ret,
+        unreachable,
         unsupported,
     ));
 
@@ -682,17 +831,24 @@ where
 
     let param = ty
         .clone()
-        .then_ignore(skip)
+        .then(abi_attrs)
         .then(local)
-        .map(|(ty, name)| Param { name, ty });
+        .map(|((ty, abi), name)| Param { name, ty, abi });
     let params = param
         .separated_by(just(Token::Comma))
         .collect::<Vec<_>>()
+        .then(
+            just(Token::Comma)
+                .or_not()
+                .ignore_then(just(Token::Ident("...")))
+                .or_not(),
+        )
+        .map(|(params, variadic)| (params, variadic.is_some()))
         .delimited_by(just(Token::LParen), just(Token::RParen));
 
     let function = just(Token::Ident("define"))
-        .ignore_then(skip)
-        .ignore_then(ty.clone())
+        .ignore_then(skip.collect::<Vec<_>>())
+        .then(ty.clone())
         .then(select! { Token::Global(n) => n.to_string() })
         .then(params)
         // Skip anything between the signature and the opening brace: attribute
@@ -701,7 +857,12 @@ where
         .then_ignore(just(Token::LBrace))
         .then(body)
         .then_ignore(just(Token::RBrace))
-        .map(|(((ret, name), params), items)| build_function(name, ret, params, items));
+        .map(|((((linkage, ret), name), (params, variadic)), items)| {
+            let internal = linkage
+                .iter()
+                .any(|token| matches!(token, Token::Ident("internal" | "private")));
+            build_function(name, internal, ret, params, variadic, items)
+        });
 
     choice((
         function.map(|function| Ok(Some(TopItem::Function(function)))),
@@ -791,8 +952,10 @@ enum Item {
 /// opens a new block.
 fn build_function(
     name: String,
+    internal: bool,
     ret: Type,
     params: Vec<Param>,
+    variadic: bool,
     items: Vec<Option<Item>>,
 ) -> Function {
     let mut blocks = vec![Block {
@@ -818,8 +981,10 @@ fn build_function(
     }
     Function {
         name,
+        internal,
         ret,
         params,
+        variadic,
         blocks,
     }
 }

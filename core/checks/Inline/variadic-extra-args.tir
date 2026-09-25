@@ -1,0 +1,16 @@
+// RUN: tir opt --pass func.func(restructure-nodes),inline<1000,0> --verify %s | filecheck %s
+
+module {
+  %callee = func.func @take_first(%x: !i32, ...) -> !i32 {
+    func.return %x
+  }
+  %caller = func.func @caller(%x: !i32, %extra: !i64) -> !i32 {
+    %result = func.call %callee(%x, %extra : !i32, !i64) -> !i32
+    func.return %result
+  }
+  module_end
+}
+
+// CHECK-LABEL: func.func @caller
+// CHECK-NOT: func.call
+// CHECK: ->

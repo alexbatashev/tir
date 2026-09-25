@@ -33,16 +33,35 @@ mod isa {
     ) -> Result<bool, tir::PassError> {
         tir::backend::lower::lower_function_and_return(context, op, |ty| {
             let ty = context.get_type_data(ty);
-            Ok(
-                if (ty.as_ref() as &dyn std::any::Any)
+            let any = ty.as_ref() as &dyn std::any::Any;
+            if any.downcast_ref::<tir::builtin::FloatType>().is_some() {
+                return Ok(RegClass::XMM.id());
+            }
+            if let Some(vector) = any.downcast_ref::<tir::vector::VectorType>() {
+                let element = context.get_type_data(vector.element(context));
+                let element = element.as_ref() as &dyn std::any::Any;
+                let element_width = element
                     .downcast_ref::<tir::builtin::FloatType>()
-                    .is_some()
-                {
-                    RegClass::XMM.id()
-                } else {
-                    RegClass::GPR.id()
-                },
-            )
+                    .map(tir::builtin::FloatType::bit_width)
+                    .or_else(|| {
+                        element
+                            .downcast_ref::<tir::builtin::IntegerType>()
+                            .map(tir::builtin::IntegerType::width)
+                    });
+                let width = vector
+                    .length()
+                    .zip(element_width)
+                    .and_then(|(count, width)| count.checked_mul(width));
+                return match width {
+                    Some(32) => Ok(RegClass::XMM32.id()),
+                    Some(64) => Ok(RegClass::XMM64.id()),
+                    Some(128) => Ok(RegClass::XMM128.id()),
+                    _ => Err(tir::PassError::InvalidRuleSet(
+                        "x86-64 has no register class for this vector type".into(),
+                    )),
+                };
+            }
+            Ok(RegClass::GPR.id())
         })
     }
 
@@ -68,7 +87,7 @@ mod isa {
         let move_bits = MovqXmmGprOpBuilder::new(context)
             .result_types(vec![tir::backend::RegClassType::new(
                 context,
-                RegClass::XMMzx.id(),
+                RegClass::XMM64.id(),
             )])
             .src(temp)
             .build();

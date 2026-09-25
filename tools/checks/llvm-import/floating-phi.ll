@@ -12,5 +12,6 @@ merge:
 }
 
 ; CHECK-LABEL: func.func @choose
-; CHECK: fp.constant
+; CHECK: constant {value = -4616189618054758400} : !i64
+; CHECK: bitcast
 ; CHECK: func.return

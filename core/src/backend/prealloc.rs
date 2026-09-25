@@ -19,6 +19,8 @@ use crate::backend::regalloc::{
 use crate::backend::registers::{RegAssignment, RegSlot, fresh_reg, value_class};
 use crate::backend::{SymbolOp, VirtualBranchOp, VirtualReturnOp, reg_slots, symbol_body_blocks};
 
+pub(crate) const ENTRY_SP_COPY_ATTR: &str = "entry_sp_copy";
+
 /// A fresh value of `class`: the type a machine instruction reads it through.
 /// Require the slot of `op` holding `value` to be `register`. A copy whose
 /// slots do not name the value cannot carry the constraint, and the ABI
@@ -399,6 +401,28 @@ impl Pass for AbiPrecolorPass {
                     )
                 })
             };
+            if let Some(AttributeValue::Value(entry_sp)) = op.op().attr("entry_sp") {
+                let class = value_class(context, entry_sp).ok_or_else(|| {
+                    PassError::InvalidRuleSet(format!(
+                        "entry stack pointer %{} has no register class",
+                        entry_sp.number()
+                    ))
+                })?;
+                let copy = self.target.emit_copy(
+                    context,
+                    class,
+                    RegSlot::Value(entry_sp),
+                    RegSlot::Phys(self.abi.sp),
+                );
+                let copy_id = copy.id();
+                context.insert_op_before(&entry()?, copy.as_ref())?;
+                mark_op(
+                    context,
+                    copy_id,
+                    ENTRY_SP_COPY_ATTR,
+                    AttributeValue::Bool(true),
+                );
+            }
             for &(incoming, pin) in &plan.pins {
                 let body = fresh_reg(context, pin.0);
                 // Rename first: the copy is the one op that must keep reading
