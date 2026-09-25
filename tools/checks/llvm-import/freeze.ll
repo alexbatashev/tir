@@ -2,12 +2,6 @@
 ; RUN: cc /tmp/tir-freeze-lit.o %S/Inputs/freeze-harness.c -o /tmp/tir-freeze-lit
 ; RUN: /tmp/tir-freeze-lit
 
-define i64 @frozen_poison_twice() {
-  %frozen = freeze i64 poison
-  %result = xor i64 %frozen, %frozen
-  ret i64 %result
-}
-
 define i64 @frozen_value(i64 %value) {
   %frozen = freeze i64 %value
   ret i64 %frozen

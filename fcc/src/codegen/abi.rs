@@ -4,7 +4,7 @@ use super::{lower_type, node_entity, node_type, source_type_layout};
 use crate::ast::{AstLeaf, RecordKind};
 use crate::diagnostics::Diagnostic;
 use crate::sema::{EntityId, QualType, TargetProfile, TypeKind, TypedAst};
-use tir::backend::abi::{Overflow, ValueKind, type_kind};
+use tir::backend::abi::{GroupRollback, Overflow, ValueKind, type_kind};
 use tir::builtin::{FloatType, IntegerType, TupleType, UnitType, VarArgsType};
 use tir::graph::{Dag, NodeId};
 use tir::ptr::PtrType;
@@ -99,7 +99,8 @@ impl AbiRegisterUsage {
                 ValueKind::Vector => return false,
             }
         }
-        self.integers + integers <= target.argument_registers(ValueKind::Int)
+        target.argument_group_fits_register_limit(pieces.len())
+            && self.integers + integers <= target.argument_registers(ValueKind::Int)
             && self.floats + floats <= target.argument_registers(ValueKind::Float)
     }
 
@@ -130,15 +131,17 @@ impl AbiRegisterUsage {
             self.consume(context, target, pieces);
         } else {
             self.stack_slots += pieces.len();
-            for piece in pieces {
-                match type_kind(context, piece.ty) {
-                    ValueKind::Int => {
-                        self.integers = target.argument_registers(ValueKind::Int);
+            if target.argument_group_rollback() == GroupRollback::Exhaust {
+                for piece in pieces {
+                    match type_kind(context, piece.ty) {
+                        ValueKind::Int => {
+                            self.integers = target.argument_registers(ValueKind::Int);
+                        }
+                        ValueKind::Float => {
+                            self.floats = target.argument_registers(ValueKind::Float);
+                        }
+                        ValueKind::Vector => {}
                     }
-                    ValueKind::Float => {
-                        self.floats = target.argument_registers(ValueKind::Float);
-                    }
-                    ValueKind::Vector => {}
                 }
             }
         }

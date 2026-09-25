@@ -47,3 +47,26 @@ int after_seven(int a0, int a1, int a2, int a3, int a4, int a5, int a6, ...) {
     va_end(list);
     return result;
 }
+
+struct four_longs { long values[4]; };
+
+int after_large_struct(struct four_longs fixed, ...) {
+    va_list list;
+    va_start(list, fixed);
+    int result = 0;
+    for (int index = 0; index < 7; ++index)
+        result += va_arg(list, int);
+    va_end(list);
+    return result;
+}
+
+struct two_longs { long values[2]; };
+
+int after_spilled_struct(int a0, int a1, int a2, int a3, int a4,
+                         struct two_longs fixed, ...) {
+    va_list list;
+    va_start(list, fixed);
+    int result = va_arg(list, int);
+    va_end(list);
+    return result;
+}

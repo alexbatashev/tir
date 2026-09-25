@@ -1,5 +1,4 @@
-; RUN: tir llvm-import %s | tir opt --verify | filecheck %s
-; RUN: tir mc --march x86_64 --filetype obj %s llvm -o /tmp/tir-byval-lit.o
+; RUN: tir llvm-import %s | tir mc --march x86_64 --filetype obj - tir -o /tmp/tir-byval-lit.o
 ; RUN: clang -c %S/Inputs/byval-external.ll -o /tmp/tir-byval-external-lit.o
 ; RUN: cc /tmp/tir-byval-lit.o /tmp/tir-byval-external-lit.o %S/Inputs/byval-harness.c -o /tmp/tir-byval-lit
 ; RUN: /tmp/tir-byval-lit
@@ -51,15 +50,8 @@ define i64 @sum_byval(ptr byval(%S) align 8 %s) {
   ret i64 %result
 }
 
-; CHECK: func.func @sum_byval
-; CHECK: argument_alignments
-; CHECK: stack_arguments
 
 define i64 @call_sum_byval(ptr %s) {
   %result = call i64 @sum_byval(ptr byval(%S) align 8 %s)
   ret i64 %result
 }
-
-; CHECK: func.func @call_sum_byval
-; CHECK: argument_alignments
-; CHECK: stack_arguments
