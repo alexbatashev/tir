@@ -68,6 +68,8 @@ register_class XMM for [SSE2] : XMM128 {
 }
 
 /// Low 64-bit XMM view for packed values and bitwise transfers.
+///
+/// See [Intel SDM, Volume 2, MOVQ](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html).
 register_class XMM64 for [SSE2] : XMM128 {
     param ENCODING_LEN: Integer = 4;
     param WIDTH: Integer = 64;
