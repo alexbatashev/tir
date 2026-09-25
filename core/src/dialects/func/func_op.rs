@@ -121,6 +121,19 @@ impl FuncOpBuilder {
             ),
         )
     }
+
+    pub fn stack_arguments(self, arguments: &[usize]) -> Self {
+        self.attr(
+            "stack_arguments",
+            tir::attributes::AttributeValue::Array(
+                arguments
+                    .iter()
+                    .map(|&argument| tir::attributes::AttributeValue::UInt(argument as u64))
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
+        )
+    }
 }
 
 impl Callable for FuncOp {
@@ -216,6 +229,10 @@ impl FuncOp {
         super::argument_alignments(self)
     }
 
+    pub fn stack_arguments(&self) -> Vec<usize> {
+        super::stack_arguments(self)
+    }
+
     /// The parameters the caller guarantees name memory nothing else the
     /// function reaches names: a `restrict`-qualified pointer, by index.
     pub fn noalias_arguments(&self) -> Vec<usize> {
@@ -304,6 +321,7 @@ impl FuncOp {
             fmt.write(format!(" entry_sp %{}", entry_sp.number()))?;
         }
         super::print_keyed_list(fmt, "argument_alignments", &self.argument_alignments())?;
+        super::print_keyed_list(fmt, "stack_arguments", &self.stack_arguments())?;
         super::print_keyed_list(fmt, "noalias", &self.noalias_arguments())?;
 
         tir::region_format::print_op_region(fmt, &context, self, 0)?;
@@ -395,6 +413,8 @@ impl FuncOp {
         };
         let argument_alignments =
             super::parse_keyed_array(parser, context, "argument_alignments", "alignment list")?;
+        let stack_arguments =
+            super::parse_keyed_array(parser, context, "stack_arguments", "argument list")?;
         let noalias = super::parse_keyed_array(parser, context, "noalias", "argument list")?;
 
         let public_count = block_args
@@ -425,6 +445,9 @@ impl FuncOp {
         }
         if let Some(argument_alignments) = argument_alignments {
             builder = builder.attr("argument_alignments", argument_alignments);
+        }
+        if let Some(stack_arguments) = stack_arguments {
+            builder = builder.attr("stack_arguments", stack_arguments);
         }
         if let Some(noalias) = noalias {
             builder = builder.attr("noalias", noalias);
@@ -483,6 +506,7 @@ impl FuncOp {
 impl tir::Verifiable for FuncOp {
     fn verify_impl(&self, context: &Context) -> Result<(), Error> {
         super::verify_argument_alignments(self, self.parameters().len(), "function")?;
+        super::verify_stack_arguments(self, self.parameters().len(), "function")?;
         let body_parameters = self.parameters();
         let implicit_count = match self.attr("implicit_arguments") {
             None => 0,
@@ -526,6 +550,11 @@ impl tir::Verifiable for FuncOp {
         {
             return Err(Error::VerificationError(
                 "function entry stack pointer must be a value".to_string(),
+            ));
+        }
+        if self.attr("entry_sp").is_some() && self.entry_sp_argument().is_none() {
+            return Err(Error::VerificationError(
+                "function entry stack pointer must name an implicit argument".to_string(),
             ));
         }
         if let Some(entry_sp) = self.entry_sp_argument() {

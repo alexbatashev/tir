@@ -181,6 +181,14 @@ impl CallGraph {
                 };
                 let op = call.op().clone().as_op::<CallOp>().expect("a call");
                 let args = op.args();
+                let function = context
+                    .get_op(nodes[callee].func)
+                    .as_op::<FuncOp>()
+                    .expect("a function");
+                // ABI-supplied parameters cannot be bound to call operands.
+                if function.implicit_argument_count() != 0 {
+                    continue;
+                }
                 let named = context
                     .get_region(nodes[callee].body)
                     .value_arguments()

@@ -180,7 +180,14 @@ A variadic definition may declare trailing body-only arguments with
 `implicit_arguments`. These arguments are absent from its public `!fn` type and
 receive normal ABI placement. An `entry_sp` attribute may name one implicit
 pointer argument. ABI binding materializes the stack pointer value as it was
-on entry, accounting for the frame and callee-saved register area.
+on entry, accounting for the frame and callee-saved register area. Functions
+with implicit arguments are not inlined because those arguments depend on
+the callee's ABI entry state.
+
+`func.func` and `func.call` may mark parameter indices with `stack_arguments`.
+ABI placement then keeps each marked argument group on the stack, including
+tuples whose elements would otherwise fit in registers. The indices refer to
+the complete argument list, including a result-address argument when present.
 
 ```mermaid
 flowchart TD

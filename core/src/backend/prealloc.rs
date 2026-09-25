@@ -389,7 +389,14 @@ impl Pass for AbiPrecolorPass {
                 Some(AttributeValue::Value(value)) => Some(value),
                 _ => None,
             };
-            let plan = plan_arguments(context, &info, self.abi, &args, result_address)?;
+            let plan = plan_arguments(
+                context,
+                &info,
+                self.target.as_ref(),
+                self.abi,
+                &args,
+                result_address,
+            )?;
             let entry = blocks
                 .first()
                 .and_then(|block| context.get_block(*block).op_ids().first().copied())
@@ -545,6 +552,7 @@ struct ArgumentPlan {
 fn plan_arguments(
     context: &Context,
     info: &RegisterInfo,
+    target: &dyn TargetRegAlloc,
     abi: &crate::backend::abi::AbiInfo,
     args: &[AttributeValue],
     result_address: Option<ValueId>,
@@ -562,7 +570,8 @@ fn plan_arguments(
     for attribute in args {
         let group = decode_argument_group(attribute)?;
         let members = match group {
-            Some((members, _)) => members
+            Some(group) => group
+                .members
                 .iter()
                 .map(|member| {
                     let AttributeValue::Value(value) = member else {
@@ -598,9 +607,13 @@ fn plan_arguments(
                 .map(|&(value, class)| ArgumentMember {
                     kind: value_kind(context, abi, value),
                     class: Some(class),
+                    stack_slots: target
+                        .spill_slot_size(class, abi)
+                        .div_ceil(abi.stack.slot_size) as usize,
                 })
                 .collect(),
-            alignment: group.map_or(1, |(_, alignment)| alignment),
+            alignment: group.map_or(1, |group| group.alignment),
+            force_stack: group.is_some_and(|group| group.force_stack),
         });
         placed.extend(members);
     }

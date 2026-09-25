@@ -131,7 +131,7 @@ pub enum Inst {
         result: String,
         aggregate: Type,
         value: Operand,
-        index: u32,
+        indices: Vec<u32>,
     },
     InsertValue {
         result: String,

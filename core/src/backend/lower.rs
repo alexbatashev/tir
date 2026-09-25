@@ -80,6 +80,8 @@ pub fn lower_function_and_return(
         }
         let mut function_arguments = function_arguments.into_iter();
         let mut argument_alignments = argument_alignments.into_iter();
+        let stack_arguments = func.stack_arguments();
+        let mut argument_index = 0;
         let result_address = if func.has_result_address() {
             let (argument, ty) = function_arguments.next().ok_or_else(|| {
                 PassError::InvalidRuleSet(
@@ -87,6 +89,7 @@ pub fn lower_function_and_return(
                 )
             })?;
             argument_alignments.next();
+            argument_index += 1;
             let class = argument_class(ty)?;
             retype(context, argument.id(), class);
             Some(AttributeValue::Value(argument.id()))
@@ -94,6 +97,8 @@ pub fn lower_function_and_return(
             None
         };
         for ((argument, ty), alignment) in function_arguments.zip(argument_alignments) {
+            let force_stack = stack_arguments.binary_search(&argument_index).is_ok();
+            argument_index += 1;
             if Some(argument.id()) == entry_sp {
                 let class = argument_class(ty)?;
                 retype(context, argument.id(), class);
@@ -104,7 +109,12 @@ pub fn lower_function_and_return(
             else {
                 let class = argument_class(context.get_type_id(ty))?;
                 retype(context, argument.id(), class);
-                arguments.push(AttributeValue::Value(argument.id()));
+                let value = AttributeValue::Value(argument.id());
+                arguments.push(if force_stack {
+                    encode_argument_group(vec![value], alignment, true)
+                } else {
+                    value
+                });
                 continue;
             };
 
@@ -146,7 +156,7 @@ pub fn lower_function_and_return(
                     Ok(AttributeValue::Value(element))
                 })
                 .collect::<Result<Vec<_>, PassError>>()?;
-            arguments.push(encode_argument_group(group, alignment));
+            arguments.push(encode_argument_group(group, alignment, force_stack));
         }
         // Block parameters carrying a region's results are the other values that
         // reach machine instructions without being defined by one, so they are

@@ -150,9 +150,20 @@ fn normalize_switches(src: &str) -> Result<String, Error> {
     let mut index = 0;
     let mut next_switch = 0;
     let mut current_label = "0".to_string();
+    let mut signature = String::new();
     while index < lines.len() {
         let trimmed = lines[index].trim();
         if !trimmed.starts_with("switch ") {
+            if trimmed.starts_with("define ") {
+                signature.clear();
+            }
+            if trimmed.starts_with("define ") || !signature.is_empty() {
+                signature.push_str(trimmed);
+                if let Some(label) = implicit_entry_label(&signature) {
+                    current_label = label;
+                    signature.clear();
+                }
+            }
             if let Some((label, _)) = trimmed
                 .split_once(':')
                 .filter(|(label, _)| !label.contains(' '))
@@ -210,6 +221,51 @@ fn normalize_switches(src: &str) -> Result<String, Error> {
         next_switch += 1;
     }
     Ok(output)
+}
+
+fn implicit_entry_label(signature: &str) -> Option<String> {
+    let params = signature
+        .split_once('@')
+        .and_then(|(_, rest)| rest.split_once('('))?;
+    let mut parens = 1;
+    let mut braces = 0;
+    let mut brackets = 0;
+    let mut angles = 0;
+    let mut start = 0;
+    let mut numbered = Vec::new();
+    for (index, byte) in params.1.bytes().enumerate() {
+        match byte {
+            b'(' => parens += 1,
+            b')' if parens == 1 => {
+                numbered.push(&params.1[start..index]);
+                return Some(
+                    numbered
+                        .into_iter()
+                        .filter_map(|param| param.rsplit_once('%'))
+                        .filter_map(|(_, name)| {
+                            let digits = name.bytes().take_while(u8::is_ascii_digit).count();
+                            name[..digits].parse::<u64>().ok()
+                        })
+                        .max()
+                        .map_or(0, |value| value + 1)
+                        .to_string(),
+                );
+            }
+            b')' => parens -= 1,
+            b'{' => braces += 1,
+            b'}' => braces -= 1,
+            b'[' => brackets += 1,
+            b']' => brackets -= 1,
+            b'<' => angles += 1,
+            b'>' => angles -= 1,
+            b',' if parens == 1 && braces == 0 && brackets == 0 && angles == 0 => {
+                numbered.push(&params.1[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn normalize_constant_geps(src: &str) -> String {
@@ -613,15 +669,20 @@ where
         .then_ignore(just(Token::Ident("extractvalue")))
         .then(ty.clone())
         .then(operand.clone())
-        .then_ignore(just(Token::Comma))
         .then(
-            select! { Token::Int(index) if index >= 0 && index <= u32::MAX as i64 => index as u32 },
+            just(Token::Comma)
+                .ignore_then(
+                    select! { Token::Int(index) if index >= 0 && index <= u32::MAX as i64 => index as u32 },
+                )
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<_>>(),
         )
-        .map(|(((result, aggregate), value), index)| Inst::ExtractValue {
+        .map(|(((result, aggregate), value), indices)| Inst::ExtractValue {
             result,
             aggregate,
             value,
-            index,
+            indices,
         });
     let insertvalue = binding
         .clone()

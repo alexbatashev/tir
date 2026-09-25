@@ -1,4 +1,7 @@
 ; RUN: tir llvm-import %s | tir opt --verify | filecheck %s
+; RUN: tir mc --march x86_64 --filetype obj %s llvm -o /tmp/tir-vector-elements-lit.o
+; RUN: cc /tmp/tir-vector-elements-lit.o %S/Inputs/vector-elements-harness.c -o /tmp/tir-vector-elements-lit
+; RUN: /tmp/tir-vector-elements-lit
 
 define float @vector_elements(<2 x float> %value, float %replacement) {
   %squared = fmul <2 x float> %value, %value
@@ -14,7 +17,14 @@ define <2 x float> @build_vector(float %real, float %imaginary) {
   ret <2 x float> %result
 }
 
+define i32 @vector_gep(ptr %base, i64 %row, i64 %lane) {
+  %slot = getelementptr <4 x i32>, ptr %base, i64 %row, i64 %lane
+  %value = load i32, ptr %slot
+  ret i32 %value
+}
+
 ; CHECK: func.func @vector_elements
 ; CHECK: fp.mul
 ; CHECK: xori
 ; CHECK: func.func @build_vector
+; CHECK: func.func @vector_gep

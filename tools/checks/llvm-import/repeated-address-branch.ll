@@ -1,4 +1,6 @@
 ; RUN: tir mc --march x86_64 --filetype obj %s llvm -o /tmp/tir-repeated-address-branch-lit.o
+; RUN: cc /tmp/tir-repeated-address-branch-lit.o %S/Inputs/repeated-address-branch-harness.c -o /tmp/tir-repeated-address-branch-lit
+; RUN: /tmp/tir-repeated-address-branch-lit
 
 target triple = "x86_64-pc-linux-gnu"
 %s = type {ptr, ptr}
@@ -19,7 +21,12 @@ outer:
 yes:
   ret i32 0
 no:
-  ret i32 0
+  ret i32 1
 exit:
-  ret i32 0
+  ret i32 2
+}
+
+define i32 @call_branch(ptr %p, i64 %i) {
+  %result = call i32 @f(ptr byval(%s) %p, i64 %i)
+  ret i32 %result
 }

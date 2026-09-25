@@ -173,20 +173,13 @@ fn lower_type(context: &Context, ty: &Type) -> Result<TypeId, Error> {
                 "LLVM named aggregate value %{name}"
             )));
         }
-        Type::Struct(fields)
-            if fields.len() == 2
-                && fields
-                    .iter()
-                    .all(|field| matches!(field, Type::Int(_) | Type::Float(_) | Type::Ptr(_))) =>
-        {
-            TupleType::new(
-                context,
-                fields
-                    .iter()
-                    .map(|field| lower_type(context, field))
-                    .collect::<Result<_, _>>()?,
-            )
-        }
+        Type::Struct(fields) if fields.len() == 2 => TupleType::new(
+            context,
+            fields
+                .iter()
+                .map(|field| lower_type(context, field))
+                .collect::<Result<_, _>>()?,
+        ),
         Type::Struct(_) => return Err(Error::Unsupported("LLVM struct value".into())),
     })
 }
@@ -699,6 +692,15 @@ fn lower_function(
         .collect::<Vec<_>>();
     if alignments.iter().any(|&alignment| alignment > 1) {
         op = op.argument_alignments(&alignments);
+    }
+    let stack_arguments = func
+        .params
+        .iter()
+        .enumerate()
+        .filter_map(|(index, param)| param.abi.byval.as_ref().map(|_| index))
+        .collect::<Vec<_>>();
+    if !stack_arguments.is_empty() {
+        op = op.stack_arguments(&stack_arguments);
     }
     let op = op.build();
 
@@ -1554,13 +1556,22 @@ fn lower_inst(
             result,
             aggregate,
             value,
-            index,
+            indices,
         } => {
-            let tuple = val!(value, aggregate);
-            values.insert(
-                result.clone(),
-                lower_extract_value(context, body, aggregate, tuple, *index)?,
-            );
+            let mut extracted = val!(value, aggregate);
+            let mut current = aggregate;
+            for &index in indices {
+                extracted = lower_extract_value(context, body, current, extracted, index)?;
+                let Type::Struct(fields) = current else {
+                    return Err(Error::Unsupported(
+                        "extractvalue on non-struct aggregate".into(),
+                    ));
+                };
+                current = fields
+                    .get(index as usize)
+                    .ok_or_else(|| Error::Parse("extractvalue index out of range".into()))?;
+            }
+            values.insert(result.clone(), extracted);
         }
         Inst::InsertValue {
             result,
@@ -1792,13 +1803,14 @@ fn lower_inst(
         } => {
             let mut arg_ids = Vec::with_capacity(args.len());
             let mut argument_alignments = Vec::with_capacity(args.len());
+            let mut stack_arguments = Vec::new();
             let result_address = args.first().is_some_and(|arg| arg.abi.sret.is_some());
             if args.iter().skip(1).any(|arg| arg.abi.sret.is_some()) {
                 return Err(Error::Unsupported(
                     "sret call argument outside first position".into(),
                 ));
             }
-            for arg in args {
+            for (index, arg) in args.iter().enumerate() {
                 let value = val!(&arg.value, &arg.ty);
                 if let Some(byval) = &arg.abi.byval {
                     if !matches!(arg.ty, Type::Ptr(_)) {
@@ -1810,6 +1822,7 @@ fn lower_inst(
                         lower_byval_call_arg(context, body, value, byval, arg.abi.align, named)?;
                     arg_ids.push(carrier);
                     argument_alignments.push(align);
+                    stack_arguments.push(index);
                 } else {
                     arg_ids.push(value);
                     argument_alignments.push(1);
@@ -1866,6 +1879,9 @@ fn lower_inst(
             }
             if argument_alignments.iter().any(|&alignment| alignment > 1) {
                 call = call.argument_alignments(&argument_alignments);
+            }
+            if !stack_arguments.is_empty() {
+                call = call.stack_arguments(&stack_arguments);
             }
             let o = call.build();
             if let Some(name) = result {
@@ -2061,6 +2077,8 @@ fn lower_intrinsic(
     }
     let integer_extremum = if name.starts_with("llvm.umax.") {
         Some("uge")
+    } else if name.starts_with("llvm.umin.") {
+        Some("ule")
     } else if name.starts_with("llvm.smax.") {
         Some("sge")
     } else if name.starts_with("llvm.smin.") {
@@ -2073,10 +2091,6 @@ fn lower_intrinsic(
         && matches!(ret, Type::Int(_))
     {
         let cmp = lower_icmp(context, body, predicate, ret, args[0], args[1])?;
-        return lower_select(context, body, cmp, args[0], args[1], ret).map(Some);
-    }
-    if name.starts_with("llvm.smax.") {
-        let cmp = lower_icmp(context, body, "sge", ret, args[0], args[1])?;
         return lower_select(context, body, cmp, args[0], args[1], ret).map(Some);
     }
     if name == "llvm.load.relative.i64" {
@@ -2490,7 +2504,9 @@ fn gep_step(
         other => other,
     };
     match current {
-        Type::Array(_, elem) => Ok((type_size(elem, named)?, (**elem).clone(), false)),
+        Type::Array(_, elem) | Type::Vector(_, elem) => {
+            Ok((type_size(elem, named)?, (**elem).clone(), false))
+        }
         Type::Struct(fields) => {
             let ast::Operand::ConstInt(field) = index else {
                 return Err(Error::Unsupported(
