@@ -56,6 +56,9 @@ device, and queue handles. Finish relevant Nisyros work before using those
 handles, finish external work before returning its memory to Nisyros, and do
 not submit externally to a Nisyros-owned queue concurrently. These tables do
 not load replaceable backend plugins.
+`nisyros_diagnostic_get` copies the calling thread's last recorded backend
+failure into caller storage, including the Vulkan result code when one was
+returned. Read it on the thread that received the failed status.
 `nisyros_submit_batch` accepts up to 256 sealed recordings on one queue, with
 per-recording slot bindings and shared prerequisite and completion points.
 It validates the whole batch before one Vulkan submit call. A batch boundary

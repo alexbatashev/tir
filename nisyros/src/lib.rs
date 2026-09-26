@@ -1,6 +1,7 @@
 //! Nisyros C ABI. The only backend implemented by this crate is Vulkan.
 
 mod communication;
+mod diagnostic;
 mod interop;
 pub mod package;
 mod submission;
@@ -47,6 +48,7 @@ pub fn capture_vulkan_package(
         .map_err(|error| format!("pipeline capture failed: {error:?}"))
 }
 
+use diagnostic::set_backend_diagnostic;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, c_char, c_void};
 use std::net::SocketAddr;
@@ -428,6 +430,7 @@ fn event_failure(event: &Event) -> i32 {
 }
 
 fn timeline_error(event: &Event, error: i32) -> i32 {
+    set_backend_diagnostic(DEVICE_LOST, error, "Vulkan timeline operation failed");
     if error == -4 {
         unsafe { &*event.owner }.lost.store(true, Ordering::Release);
     }
@@ -2169,8 +2172,16 @@ pub unsafe extern "C" fn nisyros_executable_load(
     }
     let pipeline = match device_ref.backend.import_pipeline(&package) {
         Ok(pipeline) => pipeline,
-        Err(vulkan::PipelineError::Backend(-4)) => return DEVICE_LOST,
+        Err(vulkan::PipelineError::Backend(-4)) => {
+            device_ref.lost.store(true, Ordering::Release);
+            set_backend_diagnostic(DEVICE_LOST, -4, "Vulkan pipeline import lost the device");
+            return DEVICE_LOST;
+        }
         Err(vulkan::PipelineError::Unsupported) => return UNSUPPORTED,
+        Err(vulkan::PipelineError::Backend(code)) => {
+            set_backend_diagnostic(INCOMPATIBLE_BINARY, code, "Vulkan pipeline import failed");
+            return INCOMPATIBLE_BINARY;
+        }
         Err(_) => return INCOMPATIBLE_BINARY,
     };
     let mut executable = Box::new(Executable {

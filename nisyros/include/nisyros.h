@@ -70,6 +70,17 @@ typedef struct {
 } nisyros_descriptor_header;
 
 typedef struct {
+    nisyros_descriptor_header header;
+    nisyros_status status;
+    int32_t backend_code;
+} nisyros_diagnostic_info;
+
+/* `bytes` is input capacity and output required size, including the NUL. */
+NISYROS_API nisyros_status NISYROS_CALL
+nisyros_diagnostic_get(nisyros_diagnostic_info *out, uint32_t *bytes,
+                       char *message);
+
+typedef struct {
     uint64_t epoch;
     uint32_t index;
     uint32_t backend;

@@ -4,6 +4,21 @@
 #include <stdio.h>
 #include <string.h>
 
+static void check_diagnostic(nisyros_status status, int32_t backend_code) {
+    nisyros_diagnostic_info info = {.header = {sizeof(info), NISYROS_ABI_VERSION, NULL}};
+    uint32_t required = 0;
+    assert(nisyros_diagnostic_get(&info, &required, NULL) == NISYROS_SUCCESS);
+    assert(info.status == status && info.backend_code == backend_code && required > 4);
+    char short_message[4];
+    uint32_t capacity = sizeof(short_message);
+    assert(nisyros_diagnostic_get(&info, &capacity, short_message) == NISYROS_INCOMPLETE);
+    assert(capacity == required && short_message[3] == 0);
+    char message[128];
+    capacity = sizeof(message);
+    assert(nisyros_diagnostic_get(&info, &capacity, message) == NISYROS_SUCCESS);
+    assert(capacity == required && message[0] != 0);
+}
+
 int main(int argc, char **argv) {
     int wait_loss = argc == 2 && strcmp(argv[1], "wait") == 0;
     int oom = argc == 2 && strcmp(argv[1], "oom") == 0;
@@ -58,6 +73,7 @@ int main(int argc, char **argv) {
     nisyros_status submit_status = nisyros_submit(queue, command, NULL, &returned);
     if (oom) {
         assert(submit_status == NISYROS_OUT_OF_MEMORY && returned.event == NULL);
+        check_diagnostic(NISYROS_OUT_OF_MEMORY, -1);
         uint64_t value = UINT64_MAX;
         assert(nisyros_event_query(event, &value) == NISYROS_SUCCESS && value == 0);
         assert(nisyros_device_abort(device) == NISYROS_INVALID_ARGUMENT);
@@ -76,9 +92,11 @@ int main(int argc, char **argv) {
     if (wait_loss) {
         assert(submit_status == NISYROS_SUCCESS && returned.event != NULL);
         assert(nisyros_wait(returned, NISYROS_TIMEOUT_INFINITE) == NISYROS_DEVICE_LOST);
+        check_diagnostic(NISYROS_DEVICE_LOST, -4);
         assert(nisyros_wait((nisyros_point){event, 1}, 0) == NISYROS_DEVICE_LOST);
     } else {
         assert(submit_status == NISYROS_SUBMISSION_FAILED);
+        check_diagnostic(NISYROS_SUBMISSION_FAILED, -4);
         assert(returned.event == NULL);
         assert(nisyros_wait((nisyros_point){event, 1}, 0) == NISYROS_SUBMISSION_FAILED);
     }

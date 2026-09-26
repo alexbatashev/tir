@@ -327,6 +327,11 @@ fn submit_recordings(
         .submit_segments(queue_ref.backend_index, &segments)
     {
         if error == -1 || error == -2 {
+            set_backend_diagnostic(
+                OUT_OF_MEMORY,
+                error,
+                "Vulkan queue submission ran out of memory",
+            );
             for (&event_address, &(reserved, last_queue)) in &original_signals {
                 let event = unsafe { &*(event_address as *const Event) };
                 let mut state = event
@@ -353,6 +358,7 @@ fn submit_recordings(
         if error == -4 {
             device.lost.store(true, Ordering::Release);
         }
+        set_backend_diagnostic(SUBMISSION_FAILED, error, "Vulkan queue submission failed");
         queue_state.poisoned = true;
         queue_ref
             .completion
