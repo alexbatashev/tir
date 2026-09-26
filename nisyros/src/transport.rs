@@ -1,5 +1,7 @@
 //! Fixed-membership bootstrap framing for two Nisyros processes.
 
+use crate::CooperativeMatrixTuple;
+
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::thread;
@@ -8,10 +10,11 @@ use std::time::{Duration, Instant};
 const MAGIC: &[u8; 8] = b"NISYROS1";
 const GROUP_MAGIC: &[u8; 8] = b"NISYRG01";
 const FRAME_MAGIC: &[u8; 8] = b"NISYRF01";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const MAX_DEVICES: usize = 32;
 const MAX_FAMILIES: usize = 32;
 const MAX_HEAPS: usize = 16;
+const MAX_MATRIX_TUPLES: usize = 256;
 pub const MAX_MESSAGE_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -85,6 +88,12 @@ pub struct DeviceAnnouncement {
     pub driver_name: [u8; 256],
     pub queue_families: Vec<QueueAnnouncement>,
     pub memory_heaps: Vec<MemoryHeapAnnouncement>,
+    pub features: u64,
+    pub cooperative_matrix_revision: u32,
+    pub shader_bfloat16_revision: u32,
+    pub shader_enqueue_revision: u32,
+    pub cooperative_matrix_stages: u32,
+    pub cooperative_matrices: Vec<CooperativeMatrixTuple>,
 }
 
 #[derive(Debug)]
@@ -347,6 +356,12 @@ fn write_announcement(
         write_u32(writer, u32::from(device.strict_profile_supported))?;
         write_u32(writer, device.queue_families.len() as u32)?;
         write_u32(writer, device.memory_heaps.len() as u32)?;
+        write_u64(writer, device.features)?;
+        write_u32(writer, device.cooperative_matrix_revision)?;
+        write_u32(writer, device.shader_bfloat16_revision)?;
+        write_u32(writer, device.shader_enqueue_revision)?;
+        write_u32(writer, device.cooperative_matrix_stages)?;
+        write_u32(writer, device.cooperative_matrices.len() as u32)?;
         writer.write_all(&device.name)?;
         writer.write_all(&device.device_uuid)?;
         writer.write_all(&device.driver_uuid)?;
@@ -358,6 +373,21 @@ fn write_announcement(
         for heap in &device.memory_heaps {
             write_u64(writer, heap.bytes)?;
             write_u32(writer, heap.flags)?;
+        }
+        for tuple in &device.cooperative_matrices {
+            for value in [
+                tuple.m,
+                tuple.n,
+                tuple.k,
+                tuple.a_type,
+                tuple.b_type,
+                tuple.c_type,
+                tuple.result_type,
+                tuple.saturating_accumulation,
+                tuple.scope,
+            ] {
+                write_u32(writer, value)?;
+            }
         }
     }
     writer.flush()
@@ -392,7 +422,24 @@ fn read_announcement(
         let strict = read_u32(reader).map_err(map_read)?;
         let family_count = read_u32(reader).map_err(map_read)? as usize;
         let heap_count = read_u32(reader).map_err(map_read)? as usize;
-        if backend != 1 || strict > 1 || family_count > MAX_FAMILIES || heap_count > MAX_HEAPS {
+        let features = read_u64(reader).map_err(map_read)?;
+        let cooperative_matrix_revision = read_u32(reader).map_err(map_read)?;
+        let shader_bfloat16_revision = read_u32(reader).map_err(map_read)?;
+        let shader_enqueue_revision = read_u32(reader).map_err(map_read)?;
+        let cooperative_matrix_stages = read_u32(reader).map_err(map_read)?;
+        let tuple_count = read_u32(reader).map_err(map_read)? as usize;
+        if backend != 1
+            || strict > 1
+            || family_count > MAX_FAMILIES
+            || heap_count > MAX_HEAPS
+            || tuple_count > MAX_MATRIX_TUPLES
+            || features & !0x3f != 0
+            || (features & 1 != 0) != (tuple_count != 0)
+            || (features & 1 != 0) != (cooperative_matrix_revision != 0)
+            || (features & 1 != 0) != (cooperative_matrix_stages & 0x20 != 0)
+            || (features & 2 != 0) != (shader_bfloat16_revision != 0)
+            || (features & 0xc != 0 && features & 2 == 0)
+        {
             return Err(JoinError::Invalid);
         }
         let mut name = [0; 256];
@@ -424,6 +471,24 @@ fn read_announcement(
                 flags: read_u32(reader).map_err(map_read)?,
             });
         }
+        let mut cooperative_matrices = Vec::with_capacity(tuple_count);
+        for _ in 0..tuple_count {
+            let tuple = CooperativeMatrixTuple {
+                m: read_u32(reader).map_err(map_read)?,
+                n: read_u32(reader).map_err(map_read)?,
+                k: read_u32(reader).map_err(map_read)?,
+                a_type: read_u32(reader).map_err(map_read)?,
+                b_type: read_u32(reader).map_err(map_read)?,
+                c_type: read_u32(reader).map_err(map_read)?,
+                result_type: read_u32(reader).map_err(map_read)?,
+                saturating_accumulation: read_u32(reader).map_err(map_read)?,
+                scope: read_u32(reader).map_err(map_read)?,
+            };
+            if tuple.m == 0 || tuple.n == 0 || tuple.k == 0 || tuple.saturating_accumulation > 1 {
+                return Err(JoinError::Invalid);
+            }
+            cooperative_matrices.push(tuple);
+        }
         devices.push(DeviceAnnouncement {
             backend,
             api_version,
@@ -438,6 +503,12 @@ fn read_announcement(
             driver_name,
             queue_families,
             memory_heaps,
+            features,
+            cooperative_matrix_revision,
+            shader_bfloat16_revision,
+            shader_enqueue_revision,
+            cooperative_matrix_stages,
+            cooperative_matrices,
         });
     }
     Ok(devices)
@@ -474,6 +545,12 @@ mod tests {
                 bytes: 1 << 30,
                 flags: 1,
             }],
+            features: 0,
+            cooperative_matrix_revision: 0,
+            shader_bfloat16_revision: 0,
+            shader_enqueue_revision: 0,
+            cooperative_matrix_stages: 0,
+            cooperative_matrices: Vec::new(),
         };
         let mut encoded = Vec::new();
         write_announcement(&mut encoded, 42, 1, std::slice::from_ref(&device)).unwrap();

@@ -138,6 +138,40 @@ int main(int argc, char **argv) {
     assert((info.strict_profile_supported != 0) == expect_strict);
     printf("%s driver=%s strict=%u families=%u\n", info.name, info.driver_name,
            info.strict_profile_supported, info.queue_family_count);
+    nisyros_device_capabilities capabilities = {
+        .header = {sizeof(capabilities), NISYROS_ABI_VERSION, NULL},
+    };
+    assert(nisyros_cluster_device_capabilities(cluster, ids[0], &capabilities) == NISYROS_SUCCESS);
+    uint32_t tuple_count = 0;
+    assert(nisyros_cluster_cooperative_matrices(cluster, ids[0], &tuple_count, NULL) == NISYROS_SUCCESS);
+    assert(tuple_count <= 256);
+    if (capabilities.features & NISYROS_FEATURE_COOPERATIVE_MATRIX) {
+        assert(capabilities.cooperative_matrix_revision != 0);
+        assert(capabilities.cooperative_matrix_stages & NISYROS_STAGE_COMPUTE);
+        assert(tuple_count > 0);
+        nisyros_cooperative_matrix_tuple tuples[256];
+        uint32_t capacity = 256;
+        assert(nisyros_cluster_cooperative_matrices(cluster, ids[0], &capacity, tuples) == NISYROS_SUCCESS);
+        assert(capacity == tuple_count);
+        for (uint32_t i = 0; i < tuple_count; ++i) {
+            assert(tuples[i].m && tuples[i].n && tuples[i].k);
+            assert(tuples[i].saturating_accumulation <= 1);
+        }
+        printf("cooperative matrices=%u first=%ux%ux%u types=%u,%u,%u,%u scope=%u\n",
+               tuple_count, tuples[0].m, tuples[0].n, tuples[0].k,
+               tuples[0].a_type, tuples[0].b_type, tuples[0].c_type,
+               tuples[0].result_type, tuples[0].scope);
+        if (getenv("NISYROS_PRINT_MATRICES")) {
+            for (uint32_t i = 0; i < tuple_count; ++i) {
+                printf("matrix %u: %ux%ux%u types=%u,%u,%u,%u saturation=%u scope=%u\n",
+                       i, tuples[i].m, tuples[i].n, tuples[i].k, tuples[i].a_type,
+                       tuples[i].b_type, tuples[i].c_type, tuples[i].result_type,
+                       tuples[i].saturating_accumulation, tuples[i].scope);
+            }
+        }
+    } else {
+        assert(tuple_count == 0);
+    }
     uint32_t heap_count = 0;
     assert(nisyros_cluster_memory_heaps(cluster, ids[0], &heap_count, NULL) == NISYROS_SUCCESS);
     assert(heap_count > 0 && heap_count <= 16);

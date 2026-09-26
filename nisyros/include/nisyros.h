@@ -79,6 +79,23 @@ typedef struct {
 #define NISYROS_BACKEND_ABI_VERSION 1u
 #define NISYROS_VULKAN_INTEROP_ABI_VERSION 1u
 
+#define NISYROS_FEATURE_COOPERATIVE_MATRIX UINT64_C(0x1)
+#define NISYROS_FEATURE_BFLOAT16_TYPE UINT64_C(0x2)
+#define NISYROS_FEATURE_BFLOAT16_DOT UINT64_C(0x4)
+#define NISYROS_FEATURE_BFLOAT16_MATRIX UINT64_C(0x8)
+#define NISYROS_FEATURE_SHADER_FLOAT16 UINT64_C(0x10)
+#define NISYROS_FEATURE_VULKAN_MEMORY_MODEL UINT64_C(0x20)
+
+#define NISYROS_COMPONENT_FLOAT16 0u
+#define NISYROS_COMPONENT_FLOAT32 1u
+#define NISYROS_COMPONENT_SINT8 3u
+#define NISYROS_COMPONENT_SINT32 5u
+#define NISYROS_COMPONENT_UINT8 7u
+#define NISYROS_COMPONENT_UINT32 9u
+#define NISYROS_COMPONENT_BFLOAT16 1000141000u
+#define NISYROS_SCOPE_SUBGROUP 3u
+#define NISYROS_STAGE_COMPUTE 0x20u
+
 typedef struct {
     nisyros_descriptor_header header;
     uint32_t backend;
@@ -96,6 +113,27 @@ typedef struct {
     uint32_t node_index;
     uint32_t is_local;
 } nisyros_device_info;
+
+typedef struct {
+    nisyros_descriptor_header header;
+    uint64_t features;
+    uint32_t cooperative_matrix_revision;
+    uint32_t shader_bfloat16_revision;
+    uint32_t shader_enqueue_revision;
+    uint32_t cooperative_matrix_stages;
+} nisyros_device_capabilities;
+
+typedef struct {
+    uint32_t m;
+    uint32_t n;
+    uint32_t k;
+    uint32_t a_type;
+    uint32_t b_type;
+    uint32_t c_type;
+    uint32_t result_type;
+    uint32_t saturating_accumulation;
+    uint32_t scope;
+} nisyros_cooperative_matrix_tuple;
 
 typedef struct {
     uint32_t node_index;
@@ -342,6 +380,13 @@ nisyros_cluster_devices(nisyros_cluster cluster, uint32_t *count,
 NISYROS_API nisyros_status NISYROS_CALL
 nisyros_cluster_device_info(nisyros_cluster cluster, nisyros_device_id id,
                             nisyros_device_info *out);
+NISYROS_API nisyros_status NISYROS_CALL
+nisyros_cluster_device_capabilities(nisyros_cluster cluster, nisyros_device_id id,
+                                    nisyros_device_capabilities *out);
+NISYROS_API nisyros_status NISYROS_CALL
+nisyros_cluster_cooperative_matrices(nisyros_cluster cluster, nisyros_device_id id,
+                                     uint32_t *count,
+                                     nisyros_cooperative_matrix_tuple *out);
 NISYROS_API nisyros_status NISYROS_CALL
 nisyros_cluster_queue_family_info(nisyros_cluster cluster, nisyros_device_id id,
                                   uint32_t family,

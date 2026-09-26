@@ -75,6 +75,11 @@ layer, and a device with the strict Vulkan profile. CI runs C and Python ABI
 checks against a software Vulkan ICD. A software device lacking the mandatory
 extensions must be reported as unsupported. CI also starts two processes to
 check fixed-membership discovery, stable cluster IDs, and ordered group ranks.
+The hardware script probes cooperative-matrix tuples and, where the FP16 input
+and FP32 accumulation tuple is available, captures and executes a separate
+version-two package. Package loading checks exact tuple membership and enabled
+feature bits before importing the binary. Bfloat16 and shader enqueue remain
+unavailable when their device capabilities are absent.
 
 The peer script duplicates one ICD manifest and verifies FD-backed memory and
 timeline sharing between two logical views of the same GPU. It does not test

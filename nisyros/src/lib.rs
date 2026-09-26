@@ -70,6 +70,12 @@ const PEER_LOST: i32 = -10;
 const ABI_VERSION: u32 = 1;
 const BACKEND_VULKAN: u32 = 1;
 const EXT_ALLOC_HEAP: u32 = 1;
+pub const FEATURE_COOPERATIVE_MATRIX: u64 = 1;
+pub const FEATURE_BFLOAT16_TYPE: u64 = 2;
+pub const FEATURE_BFLOAT16_DOT: u64 = 4;
+pub const FEATURE_BFLOAT16_MATRIX: u64 = 8;
+pub const FEATURE_SHADER_FLOAT16: u64 = 16;
+pub const FEATURE_VULKAN_MEMORY_MODEL: u64 = 32;
 
 static NEXT_EPOCH: AtomicU64 = AtomicU64::new(1);
 
@@ -158,6 +164,30 @@ pub struct DeviceInfo {
     driver_name: [c_char; 256],
     node_index: u32,
     is_local: u32,
+}
+
+#[repr(C)]
+pub struct DeviceCapabilities {
+    header: DescriptorHeader,
+    features: u64,
+    cooperative_matrix_revision: u32,
+    shader_bfloat16_revision: u32,
+    shader_enqueue_revision: u32,
+    cooperative_matrix_stages: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CooperativeMatrixTuple {
+    pub m: u32,
+    pub n: u32,
+    pub k: u32,
+    pub a_type: u32,
+    pub b_type: u32,
+    pub c_type: u32,
+    pub result_type: u32,
+    pub saturating_accumulation: u32,
+    pub scope: u32,
 }
 
 #[repr(C)]
@@ -554,6 +584,12 @@ fn announce_device(record: &vulkan::DeviceRecord) -> transport::DeviceAnnounceme
             .iter()
             .map(|&(bytes, flags)| transport::MemoryHeapAnnouncement { bytes, flags })
             .collect(),
+        features: record.features,
+        cooperative_matrix_revision: record.cooperative_matrix_revision,
+        shader_bfloat16_revision: record.shader_bfloat16_revision,
+        shader_enqueue_revision: record.shader_enqueue_revision,
+        cooperative_matrix_stages: record.cooperative_matrix_stages,
+        cooperative_matrices: record.cooperative_matrices.clone(),
     }
 }
 
@@ -782,6 +818,84 @@ pub unsafe extern "C" fn nisyros_cluster_device_info(
     info.node_index = device.node_index;
     info.is_local = u32::from(device.local_index.is_some());
     SUCCESS
+}
+
+/// Reports optional features usable by Nisyros on this device.
+///
+/// # Safety
+/// `cluster` must be live and `out` a complete initialized output struct.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nisyros_cluster_device_capabilities(
+    cluster: *mut Cluster,
+    id: DeviceId,
+    out: *mut DeviceCapabilities,
+) -> i32 {
+    if cluster.is_null() || out.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    let out = unsafe { &mut *out };
+    let status = validate_header(&out.header, std::mem::size_of::<DeviceCapabilities>());
+    if status != SUCCESS {
+        return status;
+    }
+    let cluster = unsafe { &*cluster };
+    if id.epoch != cluster.epoch || id.backend != BACKEND_VULKAN {
+        return INVALID_ARGUMENT;
+    }
+    let Some(entry) = cluster.inventory.get(id.index as usize) else {
+        return INVALID_ARGUMENT;
+    };
+    let snapshot = &entry.snapshot;
+    out.features = snapshot.features;
+    out.cooperative_matrix_revision = snapshot.cooperative_matrix_revision;
+    out.shader_bfloat16_revision = snapshot.shader_bfloat16_revision;
+    out.shader_enqueue_revision = snapshot.shader_enqueue_revision;
+    out.cooperative_matrix_stages = snapshot.cooperative_matrix_stages;
+    SUCCESS
+}
+
+/// Enumerates exact cooperative-matrix tuples, preserving driver order.
+///
+/// # Safety
+/// `cluster` must be live, `count` writable, and nonnull `out` must hold the
+/// input capacity of `CooperativeMatrixTuple` values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nisyros_cluster_cooperative_matrices(
+    cluster: *mut Cluster,
+    id: DeviceId,
+    count: *mut u32,
+    out: *mut CooperativeMatrixTuple,
+) -> i32 {
+    if cluster.is_null() || count.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    let cluster = unsafe { &*cluster };
+    if id.epoch != cluster.epoch || id.backend != BACKEND_VULKAN {
+        return INVALID_ARGUMENT;
+    }
+    let Some(entry) = cluster.inventory.get(id.index as usize) else {
+        return INVALID_ARGUMENT;
+    };
+    let capacity = unsafe { *count };
+    let total = entry.snapshot.cooperative_matrices.len() as u32;
+    unsafe { *count = total };
+    if out.is_null() {
+        return SUCCESS;
+    }
+    for (index, &tuple) in entry
+        .snapshot
+        .cooperative_matrices
+        .iter()
+        .take(capacity as usize)
+        .enumerate()
+    {
+        unsafe { *out.add(index) = tuple };
+    }
+    if capacity < total {
+        INCOMPLETE
+    } else {
+        SUCCESS
+    }
 }
 
 /// Queries a Vulkan queue family. Physical engine identity and enforceable
@@ -1942,6 +2056,7 @@ pub unsafe extern "C" fn nisyros_executable_load(
     let pipeline = match device_ref.backend.import_pipeline(&package) {
         Ok(pipeline) => pipeline,
         Err(vulkan::PipelineError::Backend(-4)) => return DEVICE_LOST,
+        Err(vulkan::PipelineError::Unsupported) => return UNSUPPORTED,
         Err(_) => return INCOMPATIBLE_BINARY,
     };
     let mut executable = Box::new(Executable {
