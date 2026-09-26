@@ -311,6 +311,24 @@ typedef struct {
 } nisyros_submit_desc;
 
 typedef struct {
+    nisyros_cmd cmd;
+    const nisyros_submit_desc *submit;
+} nisyros_batch_entry;
+
+typedef struct {
+    nisyros_descriptor_header header;
+    uint32_t command_count;
+    const nisyros_batch_entry *commands;
+    uint32_t wait_count;
+    const nisyros_point *waits;
+    uint32_t signal_count;
+    const nisyros_point *signals;
+} nisyros_batch_submit_desc;
+
+#define NISYROS_BATCH_SUBMIT_DESC_INIT \
+    { { sizeof(nisyros_batch_submit_desc), NISYROS_ABI_VERSION, 0 }, 0, 0, 0, 0, 0, 0 }
+
+typedef struct {
     nisyros_descriptor_header header;
     uint32_t native_segment_count;
     uint32_t requires_host_progress;
@@ -563,6 +581,9 @@ NISYROS_API nisyros_status NISYROS_CALL
 nisyros_submit(nisyros_queue queue, nisyros_cmd cmd,
                const nisyros_submit_desc *submit_desc,
                nisyros_point *out);
+NISYROS_API nisyros_status NISYROS_CALL
+nisyros_submit_batch(nisyros_queue queue, const nisyros_batch_submit_desc *desc,
+                     nisyros_point *out);
 NISYROS_API nisyros_status NISYROS_CALL
 nisyros_wait(nisyros_point point, uint64_t timeout_ns);
 NISYROS_API nisyros_status NISYROS_CALL

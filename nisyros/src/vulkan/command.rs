@@ -558,7 +558,7 @@ pub struct Timeline {
 }
 
 pub struct SubmitSegment<'a> {
-    pub command: &'a Command,
+    pub command: Option<&'a Command>,
     pub waits: Vec<(&'a Timeline, u64)>,
     pub signals: Vec<(&'a Timeline, u64)>,
 }
@@ -769,11 +769,13 @@ impl Device {
             .collect();
         let commands: Vec<_> = segments
             .iter()
-            .map(|segment| CommandBufferSubmitInfo {
-                s_type: VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-                p_next: ptr::null(),
-                command_buffer: segment.command.buffer(),
-                device_mask: 0,
+            .map(|segment| {
+                segment.command.map(|command| CommandBufferSubmitInfo {
+                    s_type: VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+                    p_next: ptr::null(),
+                    command_buffer: command.buffer(),
+                    device_mask: 0,
+                })
             })
             .collect();
         let submits: Vec<_> = segments
@@ -785,8 +787,10 @@ impl Device {
                 flags: 0,
                 wait_count: waits[index].len() as u32,
                 waits: waits[index].as_ptr(),
-                command_count: 1,
-                commands: &commands[index],
+                command_count: u32::from(commands[index].is_some()),
+                commands: commands[index].as_ref().map_or(ptr::null(), |command| {
+                    command as *const CommandBufferSubmitInfo
+                }),
                 signal_count: signals[index].len() as u32,
                 signals: signals[index].as_ptr(),
             })

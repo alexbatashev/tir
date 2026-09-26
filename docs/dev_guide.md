@@ -54,6 +54,12 @@ device, and queue handles. Finish relevant Nisyros work before using those
 handles, finish external work before returning its memory to Nisyros, and do
 not submit externally to a Nisyros-owned queue concurrently. These tables do
 not load replaceable backend plugins.
+`nisyros_submit_batch` accepts up to 256 sealed recordings on one queue, with
+per-recording slot bindings and shared prerequisite and completion points.
+It validates the whole batch before one Vulkan submit call. A batch boundary
+does not add a memory barrier between independent recordings. If the native
+submit reports failure, Nisyros retains the affected recordings and their
+resources because the driver may have accepted some work.
 
 Run the package parser and Vulkan FFI layout checks with `cargo test -p nisyros`.
 The physical GPU check compiles its shader, captures a native

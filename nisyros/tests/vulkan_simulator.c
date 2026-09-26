@@ -56,6 +56,7 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
 static device *devices[16];
 static size_t device_count;
+static uint64_t submit_calls;
 
 static int physical_count(void) {
     const char *value = getenv("NISYROS_SIM_DEVICES");
@@ -334,7 +335,7 @@ static void drain(void) {
                 queue *endpoint = &devices[d]->queues[q];
                 pending *head = endpoint->head;
                 if (!head || !ready(head)) continue;
-                execute(head->cmd);
+                if (head->cmd) execute(head->cmd);
                 for (uint32_t i = 0; i < head->signal_count; ++i) {
                     semaphore *target = (semaphore *)(uintptr_t)head->signals[i].semaphore;
                     if (target->value < head->signals[i].value) target->value = head->signals[i].value;
@@ -352,20 +353,27 @@ int vkQueueSubmit2(void *raw_queue, uint32_t count, const submit_info *submits, 
     (void)fence;
     queue *endpoint = raw_queue;
     pthread_mutex_lock(&lock);
+    uint64_t call = ++submit_calls;
+    const char *fail_at = getenv("NISYROS_SIM_FAIL_SUBMIT_AT");
+    uint64_t failure_call = fail_at ? strtoull(fail_at, NULL, 10) : 0;
     for (uint32_t i = 0; i < count; ++i) {
         const submit_info *src = &submits[i];
-        if (src->wait_count > 16 || src->signal_count > 16 || src->command_count != 1) {
+        if (src->wait_count > 16 || src->signal_count > 16 || src->command_count > 1) {
             pthread_mutex_unlock(&lock); return -3;
         }
         pending *item = calloc(1, sizeof(*item));
         if (!item) { pthread_mutex_unlock(&lock); return -1; }
-        item->cmd = src->commands[0].command;
+        item->cmd = src->command_count ? src->commands[0].command : NULL;
         item->wait_count = src->wait_count;
         item->signal_count = src->signal_count;
         memcpy(item->waits, src->waits, src->wait_count * sizeof(semaphore_submit));
         memcpy(item->signals, src->signals, src->signal_count * sizeof(semaphore_submit));
         if (endpoint->tail) endpoint->tail->next = item; else endpoint->head = item;
         endpoint->tail = item;
+        if (call == failure_call) {
+            pthread_mutex_unlock(&lock);
+            return -4;
+        }
     }
     drain();
     pthread_mutex_unlock(&lock);
