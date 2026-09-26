@@ -53,7 +53,7 @@ use std::net::SocketAddr;
 use std::os::fd::OwnedFd;
 use std::ptr;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use submission::nisyros_submit;
 
@@ -367,6 +367,8 @@ pub struct Device {
     live_executables: AtomicUsize,
     live_endpoints: AtomicUsize,
     submission_lock: Mutex<()>,
+    lost: AtomicBool,
+    quiescent: AtomicBool,
     vendor_id: u32,
     device_id: u32,
     api_version: u32,
@@ -423,6 +425,13 @@ fn event_failure(event: &Event) -> i32 {
     }
     // SAFETY: An imported event retains its source until destruction.
     unsafe { (*event.source_event).failure.load(Ordering::Acquire) }
+}
+
+fn timeline_error(event: &Event, error: i32) -> i32 {
+    if error == -4 {
+        unsafe { &*event.owner }.lost.store(true, Ordering::Release);
+    }
+    DEVICE_LOST
 }
 
 struct SignalState {
@@ -1327,6 +1336,8 @@ pub unsafe extern "C" fn nisyros_device_open(
         live_executables: AtomicUsize::new(0),
         live_endpoints: AtomicUsize::new(0),
         submission_lock: Mutex::new(()),
+        lost: AtomicBool::new(false),
+        quiescent: AtomicBool::new(false),
         vendor_id: record.vendor_id,
         device_id: record.device_id,
         api_version: record.api_version,
@@ -1414,6 +1425,35 @@ pub unsafe extern "C" fn nisyros_device_close(device: *mut Device) -> i32 {
     unsafe { drop(Box::from_raw(device)) };
     unsafe { (*cluster).live_devices.fetch_sub(1, Ordering::Release) };
     SUCCESS
+}
+
+/// Marks a lost logical device quiescent so retained children can be released.
+/// This does not recover the device or preserve its allocation contents.
+///
+/// # Safety
+/// `device` must be a live handle returned by `nisyros_device_open`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nisyros_device_abort(device: *mut Device) -> i32 {
+    if device.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    let device = unsafe { &*device };
+    let Ok(_submission) = device.submission_lock.lock() else {
+        return DEVICE_LOST;
+    };
+    if device.quiescent.load(Ordering::Acquire) {
+        return SUCCESS;
+    }
+    if !device.lost.load(Ordering::Acquire) {
+        return INVALID_ARGUMENT;
+    }
+    match device.backend.wait_idle() {
+        Ok(()) | Err(-4) => {
+            device.quiescent.store(true, Ordering::Release);
+            SUCCESS
+        }
+        Err(_) => DEVICE_LOST,
+    }
 }
 
 fn allocation_status(error: vulkan::AllocError) -> i32 {
@@ -2199,6 +2239,11 @@ fn refresh_command(state: &mut CommandState) -> i32 {
         .expect("pending command has a completion point");
     // SAFETY: The command retains its device, whose queue owns this event.
     let event = unsafe { &*point.event };
+    if unsafe { &*event.owner }.quiescent.load(Ordering::Acquire) {
+        state.state = RecordingState::Executable;
+        state.pending = None;
+        return SUCCESS;
+    }
     let failure = event_failure(event);
     if failure != 0 {
         return failure;
@@ -2210,7 +2255,7 @@ fn refresh_command(state: &mut CommandState) -> i32 {
             SUCCESS
         }
         Ok(_) => BUSY,
-        Err(_) => DEVICE_LOST,
+        Err(error) => timeline_error(event, error),
     }
 }
 
@@ -3032,13 +3077,18 @@ pub unsafe extern "C" fn nisyros_event_destroy(event: *mut Event) -> i32 {
     let Ok(mut inflight) = event_ref.inflight.lock() else {
         return DEVICE_LOST;
     };
-    inflight.retain(|point| {
-        // SAFETY: Queue-owned completion points outlive explicit events.
-        match unsafe { &*point.event }.timeline.query() {
-            Ok(completed) => completed < point.value,
-            Err(_) => true,
-        }
-    });
+    let quiescent = owner.quiescent.load(Ordering::Acquire);
+    if quiescent {
+        inflight.clear();
+    } else {
+        inflight.retain(|point| {
+            // SAFETY: Queue-owned completion points outlive explicit events.
+            match unsafe { &*point.event }.timeline.query() {
+                Ok(completed) => completed < point.value,
+                Err(_) => true,
+            }
+        });
+    }
     if !inflight.is_empty() {
         return BUSY;
     }
@@ -3046,9 +3096,10 @@ pub unsafe extern "C" fn nisyros_event_destroy(event: *mut Event) -> i32 {
     let Ok(state) = event_ref.signal_state.lock() else {
         return DEVICE_LOST;
     };
-    if event_failure(event_ref) == 0 {
-        let Ok(completed) = event_ref.timeline.query() else {
-            return DEVICE_LOST;
+    if !quiescent && event_failure(event_ref) == 0 {
+        let completed = match event_ref.timeline.query() {
+            Ok(completed) => completed,
+            Err(error) => return timeline_error(event_ref, error),
         };
         if completed < state.last_reserved {
             return BUSY;
@@ -3182,21 +3233,25 @@ pub unsafe extern "C" fn nisyros_event_host_signal(event: *mut Event, value: u64
     let Ok(_submission) = device.submission_lock.lock() else {
         return DEVICE_LOST;
     };
+    if device.lost.load(Ordering::Acquire) || device.quiescent.load(Ordering::Acquire) {
+        return DEVICE_LOST;
+    }
     let Ok(mut state) = event.signal_state.lock() else {
         return DEVICE_LOST;
     };
     if value <= state.last_reserved {
         return INVALID_ARGUMENT;
     }
-    let Ok(completed) = event.timeline.query() else {
-        return DEVICE_LOST;
+    let completed = match event.timeline.query() {
+        Ok(completed) => completed,
+        Err(error) => return timeline_error(event, error),
     };
     if completed < state.last_reserved {
         return BUSY;
     }
-    if event.timeline.signal(value).is_err() {
+    if let Err(error) = event.timeline.signal(value) {
         event.failure.store(DEVICE_LOST, Ordering::Release);
-        return DEVICE_LOST;
+        return timeline_error(event, error);
     }
     state.last_reserved = value;
     state.last_queue = ptr::null_mut();
@@ -3485,6 +3540,9 @@ pub unsafe extern "C" fn nisyros_wait(point: Point, timeout_ns: u64) -> i32 {
         if failure != 0 {
             return failure;
         }
+        if unsafe { &*event.owner }.lost.load(Ordering::Acquire) {
+            return DEVICE_LOST;
+        }
         let remaining = if timeout_ns == u64::MAX {
             u64::MAX
         } else {
@@ -3495,7 +3553,7 @@ pub unsafe extern "C" fn nisyros_wait(point: Point, timeout_ns: u64) -> i32 {
             Ok(true) => return SUCCESS,
             Ok(false) if remaining == 0 || slice == remaining => return TIMEOUT,
             Ok(false) => {}
-            Err(_) => return DEVICE_LOST,
+            Err(error) => return timeline_error(event, error),
         }
     }
 }
@@ -3537,13 +3595,17 @@ pub unsafe extern "C" fn nisyros_wait_many(
                 failure = event_failure;
                 continue;
             }
+            if unsafe { &*event.owner }.lost.load(Ordering::Acquire) {
+                failure = DEVICE_LOST;
+                continue;
+            }
             match event.timeline.query() {
                 Ok(value) if value >= point.value => {
                     satisfied += 1;
                     first.get_or_insert(index as u32);
                 }
                 Ok(_) => {}
-                Err(_) => failure = DEVICE_LOST,
+                Err(error) => failure = timeline_error(event, error),
             }
         }
         if (mode == 0 && satisfied == count) || (mode == 1 && first.is_some()) {
@@ -3582,11 +3644,14 @@ pub unsafe extern "C" fn nisyros_event_query(event: *mut Event, value: *mut u64)
     if failure != 0 {
         return failure;
     }
+    if unsafe { &*event.owner }.lost.load(Ordering::Acquire) {
+        return DEVICE_LOST;
+    }
     match event.timeline.query() {
         Ok(completed) => {
             unsafe { *value = completed };
             SUCCESS
         }
-        Err(_) => DEVICE_LOST,
+        Err(error) => timeline_error(event, error),
     }
 }

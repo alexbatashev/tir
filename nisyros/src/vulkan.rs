@@ -118,6 +118,7 @@ type CreateDevice = unsafe extern "system" fn(
 ) -> VkResult;
 type GetDeviceProcAddr = unsafe extern "system" fn(VkDevice, *const c_char) -> *const c_void;
 type DestroyDevice = unsafe extern "system" fn(VkDevice, *const c_void);
+type DeviceWaitIdle = unsafe extern "system" fn(VkDevice) -> VkResult;
 type GetDeviceQueue = unsafe extern "system" fn(VkDevice, u32, u32, *mut VkQueue);
 
 #[repr(C)]
@@ -453,6 +454,7 @@ pub struct Queue {
 pub struct Device {
     handle: VkDevice,
     destroy: DestroyDevice,
+    wait_idle: DeviceWaitIdle,
     pub queues: Vec<Queue>,
     memory: memory::MemoryFns,
     memory_properties: memory::MemoryProperties,
@@ -470,6 +472,13 @@ pub struct Device {
 impl Device {
     pub fn native_handle(&self) -> *mut c_void {
         self.handle
+    }
+
+    pub fn wait_idle(&self) -> Result<(), VkResult> {
+        match unsafe { (self.wait_idle)(self.handle) } {
+            VK_SUCCESS => Ok(()),
+            error => Err(error),
+        }
     }
 }
 
@@ -813,6 +822,12 @@ impl Instance {
                 destroy(handle, ptr::null());
                 return Err(());
             };
+            let Some(wait_idle): Option<DeviceWaitIdle> =
+                load_device(get_device_proc, handle, c"vkDeviceWaitIdle")
+            else {
+                destroy(handle, ptr::null());
+                return Err(());
+            };
             let Some(memory) = memory::MemoryFns::load(get_device_proc, handle) else {
                 destroy(handle, ptr::null());
                 return Err(());
@@ -844,6 +859,7 @@ impl Instance {
             Ok(Device {
                 handle,
                 destroy,
+                wait_idle,
                 queues,
                 memory,
                 memory_properties: record.memory_properties,

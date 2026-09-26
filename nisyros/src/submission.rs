@@ -20,7 +20,7 @@ fn validate_wait(point: Point, owner: *mut Device) -> i32 {
     if event.requires_host_progress {
         match event.timeline.query() {
             Ok(current) if current < point.value => return UNSUPPORTED,
-            Err(_) => return DEVICE_LOST,
+            Err(error) => return timeline_error(event, error),
             _ => {}
         }
     }
@@ -123,6 +123,9 @@ fn submit_recordings(
     let Ok(_submission) = device.submission_lock.lock() else {
         return DEVICE_LOST;
     };
+    if device.lost.load(Ordering::Acquire) || device.quiescent.load(Ordering::Acquire) {
+        return DEVICE_LOST;
+    }
     let mut guards = Vec::with_capacity(commands.len());
     for command in &commands {
         let Ok(mut state) = command.inner.lock() else {
@@ -209,7 +212,9 @@ fn submit_recordings(
     let Some(value) = queue_state.next_value.checked_add(1) else {
         return INVALID_ARGUMENT;
     };
+    let previous_queue_value = queue_state.next_value;
     let mut expected_signals: BTreeMap<usize, (u64, *mut Queue)> = BTreeMap::new();
+    let mut original_signals: BTreeMap<usize, (u64, *mut Queue)> = BTreeMap::new();
     let mut prior_waits: BTreeMap<usize, u64> = BTreeMap::new();
     for segment in &resolved {
         for point in &segment.waits {
@@ -226,7 +231,9 @@ fn submit_recordings(
                     .signal_state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                (state.last_reserved, state.last_queue)
+                let previous = (state.last_reserved, state.last_queue);
+                original_signals.insert(key, previous);
+                previous
             };
             if point.value <= previous.0
                 || (previous.0 != 0
@@ -315,11 +322,37 @@ fn submit_recordings(
             }
         }
     }
-    if device
+    if let Err(error) = device
         .backend
         .submit_segments(queue_ref.backend_index, &segments)
-        .is_err()
     {
+        if error == -1 || error == -2 {
+            for (&event_address, &(reserved, last_queue)) in &original_signals {
+                let event = unsafe { &*(event_address as *const Event) };
+                let mut state = event
+                    .signal_state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.last_reserved = reserved;
+                state.last_queue = last_queue;
+            }
+            queue_state.next_value = previous_queue_value;
+            for event_address in retained {
+                let event = unsafe { &*(event_address as *const Event) };
+                if !event.queue_owned {
+                    let mut inflight = event
+                        .inflight
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    inflight
+                        .retain(|prior| prior.event != point.event || prior.value != point.value);
+                }
+            }
+            return OUT_OF_MEMORY;
+        }
+        if error == -4 {
+            device.lost.store(true, Ordering::Release);
+        }
         queue_state.poisoned = true;
         queue_ref
             .completion

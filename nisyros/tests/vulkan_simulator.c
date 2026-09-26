@@ -59,6 +59,8 @@ static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
 static device *devices[16];
 static size_t device_count;
 static uint64_t submit_calls;
+static int simulator_device_lost;
+static uint64_t wait_calls;
 
 static int physical_count(void) {
     const char *value = getenv("NISYROS_SIM_DEVICES");
@@ -392,9 +394,15 @@ int vkQueueSubmit2(void *raw_queue, uint32_t count, const submit_info *submits, 
     (void)fence;
     queue *endpoint = raw_queue;
     pthread_mutex_lock(&lock);
+    if (simulator_device_lost) { pthread_mutex_unlock(&lock); return -4; }
     uint64_t call = ++submit_calls;
     const char *fail_at = getenv("NISYROS_SIM_FAIL_SUBMIT_AT");
     uint64_t failure_call = fail_at ? strtoull(fail_at, NULL, 10) : 0;
+    const char *oom_at = getenv("NISYROS_SIM_FAIL_SUBMIT_OOM_AT");
+    if (oom_at && call == strtoull(oom_at, NULL, 10)) {
+        pthread_mutex_unlock(&lock);
+        return -1;
+    }
     for (uint32_t i = 0; i < count; ++i) {
         const submit_info *src = &submits[i];
         if (src->wait_count > 16 || src->signal_count > 16 || src->command_count > 1) {
@@ -410,6 +418,7 @@ int vkQueueSubmit2(void *raw_queue, uint32_t count, const submit_info *submits, 
         if (endpoint->tail) endpoint->tail->next = item; else endpoint->head = item;
         endpoint->tail = item;
         if (call == failure_call) {
+            simulator_device_lost = 1;
             pthread_mutex_unlock(&lock);
             return -4;
         }
@@ -428,9 +437,29 @@ int vkQueueWaitIdle(void *raw_queue) {
     pthread_mutex_unlock(&lock);
     return 0;
 }
+int vkDeviceWaitIdle(void *handle) {
+    (void)handle;
+    pthread_mutex_lock(&lock);
+    if (simulator_device_lost) {
+        for (size_t d = 0; d < device_count; ++d) if (devices[d]) {
+            for (int q = 0; q < 2; ++q) {
+                pending *item = devices[d]->queues[q].head;
+                while (item) { pending *next = item->next; free(item); item = next; }
+                devices[d]->queues[q].head = devices[d]->queues[q].tail = NULL;
+            }
+        }
+        pthread_cond_broadcast(&changed);
+        pthread_mutex_unlock(&lock);
+        return -4;
+    }
+    drain();
+    pthread_mutex_unlock(&lock);
+    return 0;
+}
 int vkGetSemaphoreCounterValue(void *handle, uint64_t raw, uint64_t *out) {
     (void)handle;
     pthread_mutex_lock(&lock);
+    if (simulator_device_lost) { pthread_mutex_unlock(&lock); return -4; }
     drain();
     *out = ((semaphore *)(uintptr_t)raw)->value;
     pthread_mutex_unlock(&lock);
@@ -456,7 +485,15 @@ int vkWaitSemaphores(void *handle, const wait_info *info, uint64_t timeout) {
         if (deadline.tv_nsec >= 1000000000) { deadline.tv_sec++; deadline.tv_nsec -= 1000000000; }
     }
     pthread_mutex_lock(&lock);
+    uint64_t call = ++wait_calls;
+    const char *fail_at = getenv("NISYROS_SIM_FAIL_WAIT_AT");
+    if (fail_at && call == strtoull(fail_at, NULL, 10)) {
+        simulator_device_lost = 1;
+        pthread_mutex_unlock(&lock);
+        return -4;
+    }
     for (;;) {
+        if (simulator_device_lost) { pthread_mutex_unlock(&lock); return -4; }
         drain();
         int complete = 1;
         for (uint32_t i = 0; i < info->count; ++i)

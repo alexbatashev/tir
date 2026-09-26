@@ -2,8 +2,12 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
-int main(void) {
+int main(int argc, char **argv) {
+    int wait_loss = argc == 2 && strcmp(argv[1], "wait") == 0;
+    int oom = argc == 2 && strcmp(argv[1], "oom") == 0;
+    assert(argc == 1 || wait_loss || oom);
     nisyros_cluster cluster = NULL;
     assert(nisyros_cluster_open_local(&cluster) == NISYROS_SUCCESS);
     uint32_t count = 1;
@@ -27,6 +31,7 @@ int main(void) {
     };
     nisyros_device device = NULL;
     assert(nisyros_device_open(cluster, id, &open, &device) == NISYROS_SUCCESS);
+    assert(nisyros_device_abort(device) == NISYROS_INVALID_ARGUMENT);
     nisyros_queue queue = NULL;
     assert(nisyros_queue_get(device, family, 0, &queue) == NISYROS_SUCCESS);
     nisyros_alloc_desc allocation = {
@@ -50,15 +55,48 @@ int main(void) {
     assert(nisyros_cmd_signal(command, (nisyros_point){event, 1}) == NISYROS_SUCCESS);
     assert(nisyros_cmd_end(command) == NISYROS_SUCCESS);
     nisyros_point returned = {0};
-    assert(nisyros_submit(queue, command, NULL, &returned) == NISYROS_SUBMISSION_FAILED);
-    assert(returned.event == NULL);
-    assert(nisyros_wait((nisyros_point){event, 1}, 0) == NISYROS_SUBMISSION_FAILED);
+    nisyros_status submit_status = nisyros_submit(queue, command, NULL, &returned);
+    if (oom) {
+        assert(submit_status == NISYROS_OUT_OF_MEMORY && returned.event == NULL);
+        uint64_t value = UINT64_MAX;
+        assert(nisyros_event_query(event, &value) == NISYROS_SUCCESS && value == 0);
+        assert(nisyros_device_abort(device) == NISYROS_INVALID_ARGUMENT);
+        assert(nisyros_submit(queue, command, NULL, &returned) == NISYROS_SUCCESS);
+        assert(returned.event != NULL && returned.value == 1);
+        assert(nisyros_wait(returned, NISYROS_TIMEOUT_INFINITE) == NISYROS_SUCCESS);
+        assert(nisyros_wait((nisyros_point){event, 1}, 0) == NISYROS_SUCCESS);
+        assert(nisyros_cmd_destroy(command) == NISYROS_SUCCESS);
+        assert(nisyros_event_destroy(event) == NISYROS_SUCCESS);
+        assert(nisyros_free(device, address) == NISYROS_SUCCESS);
+        assert(nisyros_device_close(device) == NISYROS_SUCCESS);
+        assert(nisyros_cluster_close(cluster) == NISYROS_SUCCESS);
+        puts("out-of-memory submit rolled back and retried without poisoned state");
+        return 0;
+    }
+    if (wait_loss) {
+        assert(submit_status == NISYROS_SUCCESS && returned.event != NULL);
+        assert(nisyros_wait(returned, NISYROS_TIMEOUT_INFINITE) == NISYROS_DEVICE_LOST);
+        assert(nisyros_wait((nisyros_point){event, 1}, 0) == NISYROS_DEVICE_LOST);
+    } else {
+        assert(submit_status == NISYROS_SUBMISSION_FAILED);
+        assert(returned.event == NULL);
+        assert(nisyros_wait((nisyros_point){event, 1}, 0) == NISYROS_SUBMISSION_FAILED);
+    }
     uint64_t value = 0;
-    assert(nisyros_event_query(event, &value) == NISYROS_SUBMISSION_FAILED);
-    assert(nisyros_cmd_destroy(command) == NISYROS_SUBMISSION_FAILED);
+    assert(nisyros_event_query(event, &value) ==
+           (wait_loss ? NISYROS_DEVICE_LOST : NISYROS_SUBMISSION_FAILED));
+    assert(nisyros_cmd_destroy(command) ==
+           (wait_loss ? NISYROS_DEVICE_LOST : NISYROS_SUBMISSION_FAILED));
     assert(nisyros_event_destroy(event) == NISYROS_BUSY);
     assert(nisyros_free(device, address) == NISYROS_BUSY);
     assert(nisyros_device_close(device) == NISYROS_BUSY);
-    puts("uncertain native submission retained command and allocation resources");
+    assert(nisyros_device_abort(device) == NISYROS_SUCCESS);
+    assert(nisyros_device_abort(device) == NISYROS_SUCCESS);
+    assert(nisyros_cmd_destroy(command) == NISYROS_SUCCESS);
+    assert(nisyros_event_destroy(event) == NISYROS_SUCCESS);
+    assert(nisyros_free(device, address) == NISYROS_SUCCESS);
+    assert(nisyros_device_close(device) == NISYROS_SUCCESS);
+    assert(nisyros_cluster_close(cluster) == NISYROS_SUCCESS);
+    puts("lost device aborted and retained resources released after idle");
     return 0;
 }

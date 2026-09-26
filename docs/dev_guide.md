@@ -59,9 +59,10 @@ not load replaceable backend plugins.
 `nisyros_submit_batch` accepts up to 256 sealed recordings on one queue, with
 per-recording slot bindings and shared prerequisite and completion points.
 It validates the whole batch before one Vulkan submit call. A batch boundary
-does not add a memory barrier between independent recordings. If the native
-submit reports failure, Nisyros retains the affected recordings and their
-resources because the driver may have accepted some work.
+does not add a memory barrier between independent recordings. A native
+out-of-memory submit rolls back reservations and can be retried. Device loss
+retains the affected recordings and resources until `nisyros_device_abort`
+reaches quiescence; callers can then destroy the children and close the device.
 `nisyros_cmd_write_timestamp` stores a 64-bit device-domain counter at a
 device address. Queue-family discovery reports its valid bits and nanoseconds
 per tick. A later device read of that address still needs an explicit memory

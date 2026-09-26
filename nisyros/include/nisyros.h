@@ -508,6 +508,8 @@ nisyros_queue_get(nisyros_device device, uint32_t family, uint32_t index,
 NISYROS_API nisyros_status NISYROS_CALL
 nisyros_device_close(nisyros_device device);
 NISYROS_API nisyros_status NISYROS_CALL
+nisyros_device_abort(nisyros_device device);
+NISYROS_API nisyros_status NISYROS_CALL
 nisyros_alloc(nisyros_device device, const nisyros_alloc_desc *desc,
               nisyros_addr *out);
 NISYROS_API nisyros_status NISYROS_CALL

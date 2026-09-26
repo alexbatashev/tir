@@ -118,6 +118,12 @@ jobs:
           NISYROS_SIM_FAIL_SUBMIT_AT=1 \
             LD_LIBRARY_PATH="$PWD/target/debug/nisyros-vulkan-sim:${LD_LIBRARY_PATH:-}" \
             target/debug/nisyros-submission-failure
+          NISYROS_SIM_FAIL_WAIT_AT=1 \
+            LD_LIBRARY_PATH="$PWD/target/debug/nisyros-vulkan-sim:${LD_LIBRARY_PATH:-}" \
+            target/debug/nisyros-submission-failure wait
+          NISYROS_SIM_FAIL_SUBMIT_OOM_AT=1 \
+            LD_LIBRARY_PATH="$PWD/target/debug/nisyros-vulkan-sim:${LD_LIBRARY_PATH:-}" \
+            target/debug/nisyros-submission-failure oom
           cc -std=c11 -Wall -Wextra -Werror -I nisyros/include \
             nisyros/tests/local_communication.c -L target/debug -lnisyros \
             -Wl,-rpath,"$PWD/target/debug" -o target/debug/nisyros-local-communication
