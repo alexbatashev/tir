@@ -667,15 +667,15 @@ pub unsafe extern "C" fn nisyros_queue_get(
     }
     unsafe { *out = ptr::null_mut() };
     // SAFETY: The caller owns the live device and writable output storage.
-    let device = unsafe { &mut *device };
+    let device = unsafe { &*device };
     let Some(queue) = device
         .queues
-        .iter_mut()
+        .iter()
         .find(|queue| queue.family == family && queue.index == index)
     else {
         return INVALID_ARGUMENT;
     };
-    unsafe { *out = queue as *mut Queue };
+    unsafe { *out = (queue as *const Queue).cast_mut() };
     SUCCESS
 }
 
@@ -1193,12 +1193,12 @@ pub unsafe extern "C" fn nisyros_kernel_lookup(
         return INVALID_ARGUMENT;
     }
     unsafe { *out = ptr::null_mut() };
-    let executable = unsafe { &mut *executable };
+    let executable = unsafe { &*executable };
     let name = unsafe { CStr::from_ptr(entry) };
     if name.to_bytes() != executable.package.entry.as_bytes() {
         return INVALID_ARGUMENT;
     }
-    unsafe { *out = &raw mut executable.kernel };
+    unsafe { *out = (&raw const executable.kernel).cast_mut() };
     SUCCESS
 }
 
