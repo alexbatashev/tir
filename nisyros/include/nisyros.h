@@ -201,6 +201,7 @@ typedef struct {
 
 #define NISYROS_QUEUE_COMPUTE 0x00000002u
 #define NISYROS_QUEUE_TRANSFER 0x00000004u
+#define NISYROS_CLOCK_DEVICE 1u
 
 typedef struct {
     uint32_t family;
@@ -208,6 +209,9 @@ typedef struct {
     uint32_t flags;
     uint32_t engine_identity_known;
     uint32_t affinity_enforceable;
+    uint32_t timestamp_valid_bits;
+    float timestamp_period_ns;
+    uint32_t timestamp_domain;
 } nisyros_queue_family_info;
 
 typedef struct {
@@ -551,6 +555,8 @@ NISYROS_API nisyros_status NISYROS_CALL nisyros_cmd_barrier_all(nisyros_cmd cmd)
 NISYROS_API nisyros_status NISYROS_CALL
 nisyros_cmd_barrier_range(nisyros_cmd cmd, nisyros_addr address,
                           uint64_t bytes);
+NISYROS_API nisyros_status NISYROS_CALL
+nisyros_cmd_write_timestamp(nisyros_cmd cmd, nisyros_addr destination);
 NISYROS_API nisyros_status NISYROS_CALL
 nisyros_event_create(nisyros_device device, const nisyros_event_desc *desc,
                      nisyros_event *out);

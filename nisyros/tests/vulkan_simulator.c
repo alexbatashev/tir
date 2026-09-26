@@ -10,6 +10,7 @@
 
 typedef struct { int32_t type; void *next; } header;
 typedef struct { uint64_t address, size; } range;
+typedef struct { uint64_t address, size, stride; } strided_range;
 typedef struct { int32_t type; const void *next; uint32_t flags; uint64_t size; uint32_t usage, sharing, family_count; const uint32_t *families; } buffer_info;
 typedef struct { uint64_t size, alignment; uint32_t types; } requirements;
 typedef struct { int32_t type; const void *next; uint64_t size; uint32_t memory_type; } memory_info;
@@ -29,11 +30,12 @@ typedef struct { uint64_t size; uint32_t flags, pad; } memory_heap;
 typedef struct { uint32_t count; memory_type types[32]; uint32_t heap_count; memory_heap heaps[16]; } memory_properties;
 typedef struct { int32_t type; void *next; uint8_t uuid[16], driver_uuid[16], luid[8]; uint32_t node_mask, valid; } id_properties;
 typedef struct { int32_t type; void *next; int32_t driver_id; char name[256], info[256]; uint8_t conformance[4]; } driver_properties;
-typedef struct { uint32_t api, driver, vendor, device, device_type; char name[256]; uint8_t cache_uuid[16]; uint32_t pad; uint8_t before_grid[220]; uint32_t grid[3]; } properties_prefix;
+typedef struct { uint32_t api, driver, vendor, device, device_type; char name[256]; uint8_t cache_uuid[16]; uint32_t pad; uint8_t before_grid[220]; uint32_t grid[3]; uint64_t before_timestamp[24]; float timestamp_period; } properties_prefix;
 
 typedef struct { size_t size; unsigned char *data; } memory;
 typedef struct { size_t size; memory *bound; uint64_t offset; } buffer;
 typedef struct { uint64_t value; } semaphore;
+typedef struct { uint64_t value; int available; } query_pool;
 typedef struct { int kind; uint64_t dst, src, bytes, pipeline; uint32_t pattern, grid[3]; } operation;
 typedef struct { operation ops[256]; size_t count; uint64_t pipeline, arguments; } command;
 typedef struct { int32_t type; const void *next; uint32_t flags; size_t code_size; const uint32_t *code; } shader_info;
@@ -113,6 +115,7 @@ void vkGetPhysicalDeviceProperties(void *physical, properties_prefix *out) {
     out->cache_uuid[0] = 0xA5;
     out->cache_uuid[1] = (uint8_t)index;
     out->grid[0] = out->grid[1] = out->grid[2] = 65535;
+    out->timestamp_period = 1.0f;
 }
 void vkGetPhysicalDeviceProperties2(void *physical, void *raw) {
     header *head = raw;
@@ -144,7 +147,7 @@ void vkGetPhysicalDeviceFeatures2(void *physical, void *raw) {
 void vkGetPhysicalDeviceQueueFamilyProperties(void *physical, uint32_t *count, queue_family *out) {
     (void)physical;
     if (!out) { *count = 1; return; }
-    if (*count) { out[0] = (queue_family){.flags = 7, .count = 2, .granularity = {1, 1, 1}}; *count = 1; }
+    if (*count) { out[0] = (queue_family){.flags = 7, .count = 2, .timestamp_bits = 64, .granularity = {1, 1, 1}}; *count = 1; }
 }
 void vkGetPhysicalDeviceMemoryProperties(void *physical, memory_properties *out) {
     (void)physical;
@@ -288,6 +291,30 @@ void vkCmdDispatchIndirect2KHR(void *raw, const void *info) {
     record(cmd, (operation){.kind = 4, .dst = address_range->address,
                             .src = cmd->arguments, .pipeline = cmd->pipeline});
 }
+int vkCreateQueryPool(void *handle, const void *info, const void *allocator, uint64_t *out) {
+    (void)handle; (void)info; (void)allocator;
+    query_pool *created = calloc(1, sizeof(*created));
+    if (!created) return -1;
+    *out = (uint64_t)(uintptr_t)created;
+    return 0;
+}
+void vkDestroyQueryPool(void *handle, uint64_t raw, const void *allocator) {
+    (void)handle; (void)allocator; free((void *)(uintptr_t)raw);
+}
+void vkCmdResetQueryPool(void *raw, uint64_t pool, uint32_t first, uint32_t count) {
+    (void)first; (void)count;
+    record(raw, (operation){.kind = 7, .pipeline = pool});
+}
+void vkCmdWriteTimestamp2(void *raw, uint64_t stage, uint64_t pool, uint32_t query) {
+    (void)stage; (void)query;
+    record(raw, (operation){.kind = 5, .pipeline = pool});
+}
+void vkCmdCopyQueryPoolResultsToMemoryKHR(void *raw, uint64_t pool, uint32_t first,
+                                           uint32_t count, const strided_range *target,
+                                           uint32_t address_flags, uint32_t query_flags) {
+    (void)first; (void)count; (void)address_flags; (void)query_flags;
+    record(raw, (operation){.kind = 6, .src = pool, .dst = target->address});
+}
 
 int vkCreateSemaphore(void *handle, const void *raw_info, const void *allocator, uint64_t *out) {
     (void)handle; (void)allocator;
@@ -323,6 +350,18 @@ static void execute(const command *cmd) {
             uint32_t *destination = (uint32_t *)(uintptr_t)args->destination;
             const uint32_t *source = (const uint32_t *)(uintptr_t)args->source;
             for (uint64_t j = 0; j < args->count && j < limit; ++j) destination[j] = source[j] + 1;
+        } else if (op->kind == 7) {
+            ((query_pool *)(uintptr_t)op->pipeline)->available = 0;
+        } else if (op->kind == 5) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            query_pool *pool = (query_pool *)(uintptr_t)op->pipeline;
+            pool->value = (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
+            pool->available = 1;
+        } else if (op->kind == 6) {
+            query_pool *pool = (query_pool *)(uintptr_t)op->src;
+            uint64_t value = pool->available ? pool->value : 0;
+            memcpy((void *)(uintptr_t)op->dst, &value, sizeof(value));
         }
     }
 }

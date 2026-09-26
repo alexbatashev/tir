@@ -60,6 +60,10 @@ It validates the whole batch before one Vulkan submit call. A batch boundary
 does not add a memory barrier between independent recordings. If the native
 submit reports failure, Nisyros retains the affected recordings and their
 resources because the driver may have accepted some work.
+`nisyros_cmd_write_timestamp` stores a 64-bit device-domain counter at a
+device address. Queue-family discovery reports its valid bits and nanoseconds
+per tick. A later device read of that address still needs an explicit memory
+dependency.
 
 Run the package parser and Vulkan FFI layout checks with `cargo test -p nisyros`.
 The physical GPU check compiles its shader, captures a native

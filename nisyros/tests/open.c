@@ -200,6 +200,13 @@ int main(int argc, char **argv) {
         }
     }
     assert(selected != UINT32_MAX);
+    nisyros_queue_family_info clock_info;
+    assert(nisyros_cluster_queue_family_info(cluster, ids[0], selected, &clock_info) == NISYROS_SUCCESS);
+    if (clock_info.timestamp_valid_bits) {
+        assert(clock_info.timestamp_valid_bits >= 36 && clock_info.timestamp_valid_bits <= 64);
+        assert(clock_info.timestamp_period_ns > 0.0f);
+        assert(clock_info.timestamp_domain == NISYROS_CLOCK_DEVICE);
+    }
 
     nisyros_queue_request request = {selected, queue_count < 2 ? 1 : 2, 1.0f, 0};
     nisyros_device_open_desc desc = {
@@ -363,6 +370,31 @@ int main(int argc, char **argv) {
         uint32_t pattern[2] = {0x01020304, 0x01020304};
         assert(memcmp((unsigned char *)destination_host + 24, pattern, sizeof(pattern)) == 0);
         assert(nisyros_cmd_destroy(cmd) == NISYROS_SUCCESS);
+        if (clock_info.timestamp_valid_bits) {
+            nisyros_cmd timestamp = NULL;
+            assert(nisyros_cmd_create(device, selected, &timestamp) == NISYROS_SUCCESS);
+            assert(nisyros_cmd_begin(timestamp) == NISYROS_SUCCESS);
+            assert(nisyros_cmd_write_timestamp(timestamp, destination + 32) == NISYROS_SUCCESS);
+            assert(nisyros_cmd_end(timestamp) == NISYROS_SUCCESS);
+            nisyros_point timestamp_done = {0};
+            assert(nisyros_submit(queue, timestamp, NULL, &timestamp_done) == NISYROS_SUCCESS);
+            assert(nisyros_wait(timestamp_done, NISYROS_TIMEOUT_INFINITE) == NISYROS_SUCCESS);
+            assert(nisyros_invalidate(device, destination + 32, 8) == NISYROS_SUCCESS);
+            uint64_t first_timestamp = *(uint64_t *)((unsigned char *)destination_host + 32);
+            assert(first_timestamp != 0);
+            nisyros_cmd_info timestamp_info = {
+                .header = {sizeof(timestamp_info), NISYROS_ABI_VERSION, NULL},
+            };
+            assert(nisyros_cmd_query(timestamp, &timestamp_info) == NISYROS_SUCCESS);
+            assert(timestamp_info.native_record_count == 1);
+            assert(nisyros_submit(queue, timestamp, NULL, &timestamp_done) == NISYROS_SUCCESS);
+            assert(nisyros_wait(timestamp_done, NISYROS_TIMEOUT_INFINITE) == NISYROS_SUCCESS);
+            assert(nisyros_invalidate(device, destination + 32, 8) == NISYROS_SUCCESS);
+            assert(*(uint64_t *)((unsigned char *)destination_host + 32) >= first_timestamp);
+            assert(nisyros_cmd_query(timestamp, &timestamp_info) == NISYROS_SUCCESS);
+            assert(timestamp_info.native_record_count == 1);
+            assert(nisyros_cmd_destroy(timestamp) == NISYROS_SUCCESS);
+        }
         if (request.count >= 2) {
             nisyros_event_desc event_desc = {
                 .header = {sizeof(event_desc), NISYROS_ABI_VERSION, NULL},

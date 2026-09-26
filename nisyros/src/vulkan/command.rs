@@ -6,12 +6,14 @@ use std::ptr;
 type VkCommandPool = u64;
 type VkCommandBuffer = *mut c_void;
 type VkSemaphore = u64;
+type VkQueryPool = u64;
 
 const VK_TIMEOUT: VkResult = 2;
 const VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO: i32 = 9;
 const VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO: i32 = 39;
 const VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO: i32 = 40;
 const VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO: i32 = 42;
+const VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO: i32 = 11;
 const VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO: i32 = 1_000_207_002;
 const VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO: i32 = 1_000_207_004;
 const VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO: i32 = 1_000_207_005;
@@ -37,6 +39,9 @@ const VK_ADDRESS_COMMAND_STORAGE_BUFFER_USAGE_BIT_KHR: u32 = 4;
 const VK_QUEUE_FAMILY_IGNORED: u32 = u32::MAX;
 const VK_PIPELINE_BIND_POINT_COMPUTE: i32 = 1;
 const VK_SHADER_STAGE_COMPUTE_BIT: u32 = 0x20;
+const VK_QUERY_TYPE_TIMESTAMP: i32 = 2;
+const VK_QUERY_RESULT_64_BIT: u32 = 1;
+const VK_QUERY_RESULT_WAIT_BIT: u32 = 2;
 
 type CreateCommandPool = unsafe extern "system" fn(
     VkDevice,
@@ -80,6 +85,24 @@ type GetSemaphoreFd =
     unsafe extern "system" fn(VkDevice, *const SemaphoreGetFdInfo, *mut i32) -> VkResult;
 type ImportSemaphoreFd =
     unsafe extern "system" fn(VkDevice, *const ImportSemaphoreFdInfo) -> VkResult;
+type CreateQueryPool = unsafe extern "system" fn(
+    VkDevice,
+    *const QueryPoolCreateInfo,
+    *const c_void,
+    *mut VkQueryPool,
+) -> VkResult;
+type DestroyQueryPool = unsafe extern "system" fn(VkDevice, VkQueryPool, *const c_void);
+type CmdResetQueryPool = unsafe extern "system" fn(VkCommandBuffer, VkQueryPool, u32, u32);
+type CmdWriteTimestamp2 = unsafe extern "system" fn(VkCommandBuffer, u64, VkQueryPool, u32);
+type CmdCopyQueryPoolResultsToMemory = unsafe extern "system" fn(
+    VkCommandBuffer,
+    VkQueryPool,
+    u32,
+    u32,
+    *const StridedDeviceAddressRange,
+    u32,
+    u32,
+);
 
 #[repr(C)]
 struct CommandPoolCreateInfo {
@@ -110,6 +133,23 @@ struct CommandBufferBeginInfo {
 struct DeviceAddressRange {
     address: u64,
     size: u64,
+}
+
+#[repr(C)]
+struct StridedDeviceAddressRange {
+    address: u64,
+    size: u64,
+    stride: u64,
+}
+
+#[repr(C)]
+struct QueryPoolCreateInfo {
+    s_type: i32,
+    p_next: *const c_void,
+    flags: u32,
+    query_type: i32,
+    query_count: u32,
+    pipeline_statistics: u32,
 }
 
 #[repr(C)]
@@ -294,6 +334,11 @@ pub(super) struct CommandFns {
     queue_submit2: QueueSubmit2,
     get_semaphore_fd: Option<GetSemaphoreFd>,
     import_semaphore_fd: Option<ImportSemaphoreFd>,
+    create_query_pool: CreateQueryPool,
+    destroy_query_pool: DestroyQueryPool,
+    reset_query_pool: CmdResetQueryPool,
+    write_timestamp2: CmdWriteTimestamp2,
+    copy_query_results: CmdCopyQueryPoolResultsToMemory,
 }
 
 impl CommandFns {
@@ -321,6 +366,15 @@ impl CommandFns {
                 queue_submit2: load_device(get_proc, device, c"vkQueueSubmit2")?,
                 get_semaphore_fd: load_device(get_proc, device, c"vkGetSemaphoreFdKHR"),
                 import_semaphore_fd: load_device(get_proc, device, c"vkImportSemaphoreFdKHR"),
+                create_query_pool: load_device(get_proc, device, c"vkCreateQueryPool")?,
+                destroy_query_pool: load_device(get_proc, device, c"vkDestroyQueryPool")?,
+                reset_query_pool: load_device(get_proc, device, c"vkCmdResetQueryPool")?,
+                write_timestamp2: load_device(get_proc, device, c"vkCmdWriteTimestamp2")?,
+                copy_query_results: load_device(
+                    get_proc,
+                    device,
+                    c"vkCmdCopyQueryPoolResultsToMemoryKHR",
+                )?,
             })
         }
     }
@@ -354,6 +408,10 @@ pub enum CommandOp {
         layout: u64,
         grid_address: u64,
         arguments: u64,
+    },
+    Timestamp {
+        pool: VkQueryPool,
+        destination: u64,
     },
 }
 
@@ -531,6 +589,29 @@ impl Command {
                         };
                         (self.functions.dispatch_indirect2)(self.buffer, &info);
                     }
+                    CommandOp::Timestamp { pool, destination } => {
+                        (self.functions.reset_query_pool)(self.buffer, pool, 0, 1);
+                        (self.functions.write_timestamp2)(
+                            self.buffer,
+                            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                            pool,
+                            0,
+                        );
+                        let range = StridedDeviceAddressRange {
+                            address: destination,
+                            size: 8,
+                            stride: 8,
+                        };
+                        (self.functions.copy_query_results)(
+                            self.buffer,
+                            pool,
+                            0,
+                            1,
+                            &range,
+                            VK_ADDRESS_COMMAND_STORAGE_BUFFER_USAGE_BIT_KHR,
+                            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT,
+                        );
+                    }
                 }
             }
             let result = (self.functions.end_buffer)(self.buffer);
@@ -547,6 +628,26 @@ impl Drop for Command {
     fn drop(&mut self) {
         // SAFETY: The caller has established that this command is not pending.
         unsafe { (self.functions.destroy_pool)(self.device, self.pool, ptr::null()) };
+    }
+}
+
+pub struct QueryPool {
+    device: VkDevice,
+    handle: VkQueryPool,
+    destroy: DestroyQueryPool,
+}
+
+impl QueryPool {
+    pub fn handle(&self) -> VkQueryPool {
+        self.handle
+    }
+}
+
+impl Drop for QueryPool {
+    fn drop(&mut self) {
+        // SAFETY: The recording keeps the query pool alive through its last
+        // accepted submission and drops native command buffers first.
+        unsafe { (self.destroy)(self.device, self.handle, ptr::null()) };
     }
 }
 
@@ -643,6 +744,30 @@ impl Drop for Timeline {
 }
 
 impl Device {
+    pub fn create_timestamp_query(&self) -> Result<QueryPool, VkResult> {
+        let info = QueryPoolCreateInfo {
+            s_type: VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: 0,
+            query_type: VK_QUERY_TYPE_TIMESTAMP,
+            query_count: 1,
+            pipeline_statistics: 0,
+        };
+        let mut handle = 0;
+        let result = unsafe {
+            (self.command.create_query_pool)(self.handle, &info, ptr::null(), &mut handle)
+        };
+        if result == VK_SUCCESS && handle != 0 {
+            Ok(QueryPool {
+                device: self.handle,
+                handle,
+                destroy: self.command.destroy_query_pool,
+            })
+        } else {
+            Err(result)
+        }
+    }
+
     pub fn create_command(&self, family: u32) -> Result<Command, VkResult> {
         let info = CommandPoolCreateInfo {
             s_type: VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -834,6 +959,8 @@ mod layout_tests {
             (48, 64)
         );
         assert_eq!(size_of::<DispatchIndirect2Info>(), 40);
+        assert_eq!(size_of::<QueryPoolCreateInfo>(), 32);
+        assert_eq!(size_of::<StridedDeviceAddressRange>(), 24);
         assert_eq!(
             (
                 size_of::<CommandPoolCreateInfo>(),

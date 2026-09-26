@@ -224,6 +224,9 @@ pub struct QueueFamilyInfo {
     flags: u32,
     engine_identity_known: u32,
     affinity_enforceable: u32,
+    timestamp_valid_bits: u32,
+    timestamp_period_ns: f32,
+    timestamp_domain: u32,
 }
 
 #[repr(C)]
@@ -538,6 +541,7 @@ struct CommandState {
     executable_references: BTreeSet<usize>,
     signal_slots: BTreeSet<u32>,
     inline_arguments: Vec<vulkan::Allocation>,
+    query_pools: Vec<vulkan::QueryPool>,
     native: Vec<vulkan::Command>,
     native_record_count: u64,
     pending: Option<Point>,
@@ -603,6 +607,7 @@ fn announce_device(record: &vulkan::DeviceRecord) -> transport::DeviceAnnounceme
             .map(|family| transport::QueueAnnouncement {
                 flags: family.flags,
                 count: family.count,
+                timestamp_valid_bits: family.timestamp_valid_bits,
             })
             .collect(),
         memory_heaps: record
@@ -616,6 +621,7 @@ fn announce_device(record: &vulkan::DeviceRecord) -> transport::DeviceAnnounceme
         shader_enqueue_revision: record.shader_enqueue_revision,
         cooperative_matrix_stages: record.cooperative_matrix_stages,
         cooperative_matrices: record.cooperative_matrices.clone(),
+        timestamp_period_bits: record.timestamp_period_ns.to_bits(),
     }
 }
 
@@ -944,11 +950,10 @@ pub unsafe extern "C" fn nisyros_cluster_queue_family_info(
     if id.epoch != cluster.epoch || id.backend != BACKEND_VULKAN {
         return INVALID_ARGUMENT;
     }
-    let Some(info) = cluster
-        .inventory
-        .get(id.index as usize)
-        .and_then(|device| device.snapshot.queue_families.get(family as usize))
-    else {
+    let Some(device) = cluster.inventory.get(id.index as usize) else {
+        return INVALID_ARGUMENT;
+    };
+    let Some(info) = device.snapshot.queue_families.get(family as usize) else {
         return INVALID_ARGUMENT;
     };
     unsafe {
@@ -958,6 +963,9 @@ pub unsafe extern "C" fn nisyros_cluster_queue_family_info(
             flags: info.flags,
             engine_identity_known: 0,
             affinity_enforceable: 0,
+            timestamp_valid_bits: info.timestamp_valid_bits,
+            timestamp_period_ns: f32::from_bits(device.snapshot.timestamp_period_bits),
+            timestamp_domain: 1,
         };
     }
     SUCCESS
@@ -2197,6 +2205,7 @@ pub unsafe extern "C" fn nisyros_cmd_create(
             executable_references: BTreeSet::new(),
             signal_slots: BTreeSet::new(),
             inline_arguments: Vec::new(),
+            query_pools: Vec::new(),
             native: Vec::new(),
             native_record_count: 0,
             pending: None,
@@ -2751,6 +2760,73 @@ pub unsafe extern "C" fn nisyros_cmd_barrier_range(
     )
 }
 
+/// Records a device-domain timestamp into an aligned eight-byte address.
+///
+/// # Safety
+/// `cmd` must be live and `destination` a writable retained device range.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nisyros_cmd_write_timestamp(cmd: *mut Command, destination: u64) -> i32 {
+    if cmd.is_null() || destination == 0 || !destination.is_multiple_of(8) {
+        return invalid_recording_argument(cmd);
+    }
+    let command = unsafe { &*cmd };
+    let Ok(mut inner) = command.inner.lock() else {
+        return DEVICE_LOST;
+    };
+    if inner.state != RecordingState::Recording {
+        return INVALID_ARGUMENT;
+    }
+    let device = unsafe { &*command.device };
+    if device
+        .backend
+        .timestamp_valid_bits
+        .get(command.family as usize)
+        .copied()
+        .unwrap_or(0)
+        == 0
+    {
+        inner.state = RecordingState::Invalid;
+        return UNSUPPORTED;
+    }
+    let Ok(mut allocations) = device.allocations.lock() else {
+        inner.state = RecordingState::Invalid;
+        return DEVICE_LOST;
+    };
+    let Some((&base, allocation)) = allocations.range(..=destination).next_back() else {
+        inner.state = RecordingState::Invalid;
+        return INVALID_ARGUMENT;
+    };
+    if !allocation.backend.contains(destination, 8) || allocation.access & 2 == 0 {
+        inner.state = RecordingState::Invalid;
+        return INVALID_ARGUMENT;
+    }
+    let pool = match device.backend.create_timestamp_query() {
+        Ok(pool) => pool,
+        Err(-1 | -2) => {
+            inner.state = RecordingState::Invalid;
+            return OUT_OF_MEMORY;
+        }
+        Err(_) => {
+            inner.state = RecordingState::Invalid;
+            return DEVICE_LOST;
+        }
+    };
+    if inner.references.insert(base) {
+        allocations
+            .get_mut(&base)
+            .expect("validated timestamp allocation")
+            .recordings += 1;
+    }
+    inner
+        .actions
+        .push(RecordedAction::Operation(vulkan::CommandOp::Timestamp {
+            pool: pool.handle(),
+            destination,
+        }));
+    inner.query_pools.push(pool);
+    SUCCESS
+}
+
 /// Creates a device-signaled timeline event, initially at value zero.
 ///
 /// # Safety
@@ -3187,6 +3263,7 @@ fn reset_command(cmd: &Command) -> i32 {
         return status;
     }
     inner.native.clear();
+    inner.query_pools.clear();
     inner.plans.clear();
     inner.actions.clear();
     inner.signal_slots.clear();

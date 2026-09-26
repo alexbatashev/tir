@@ -14,7 +14,7 @@ pub use memory::{AllocError, AllocRequest, Allocation};
 mod pipeline;
 pub use pipeline::{Pipeline, PipelineError};
 mod command;
-pub use command::{Command, CommandOp, SubmitSegment, Timeline};
+pub use command::{Command, CommandOp, QueryPool, SubmitSegment, Timeline};
 
 type VkInstance = *mut c_void;
 type VkPhysicalDevice = *mut c_void;
@@ -196,7 +196,10 @@ struct PhysicalDeviceProperties {
     _alignment_padding: u32,
     _limits_before_grid: [u8; 220],
     max_compute_work_group_count: [u32; 3],
-    _tail: [u64; 64],
+    _limits_before_timestamp: [u64; 24],
+    timestamp_period: f32,
+    _timestamp_padding: u32,
+    _tail: [u64; 32],
 }
 
 #[repr(C)]
@@ -281,7 +284,7 @@ struct ExternalSemaphoreProperties {
 pub struct QueueFamilyProperties {
     pub flags: u32,
     pub count: u32,
-    timestamp_valid_bits: u32,
+    pub timestamp_valid_bits: u32,
     min_image_transfer_granularity: [u32; 3],
 }
 
@@ -418,6 +421,7 @@ pub struct DeviceRecord {
     pub cooperative_matrices: Vec<CooperativeMatrixTuple>,
     pub strict_profile_supported: bool,
     pub max_grid: [u32; 3],
+    pub timestamp_period_ns: f32,
     memory_properties: memory::MemoryProperties,
     flags_extension: Option<FlagsExtension>,
     pub external_host_alignment: Option<u64>,
@@ -458,6 +462,7 @@ pub struct Device {
     pub peer_timeline_fd: bool,
     pub enabled_features: u64,
     pub enabled_matrices: Vec<CooperativeMatrixTuple>,
+    pub timestamp_valid_bits: Vec<u32>,
 }
 
 impl Device {
@@ -848,6 +853,11 @@ impl Instance {
                 peer_timeline_fd: record.peer_timeline_fd,
                 enabled_features: record.features,
                 enabled_matrices: record.cooperative_matrices.clone(),
+                timestamp_valid_bits: record
+                    .queue_families
+                    .iter()
+                    .map(|family| family.timestamp_valid_bits)
+                    .collect(),
             })
         }
     }
@@ -1224,6 +1234,7 @@ impl Instance {
             },
             strict_profile_supported,
             max_grid: props.max_compute_work_group_count,
+            timestamp_period_ns: props.timestamp_period,
             memory_properties,
             flags_extension,
             external_host_alignment,
@@ -1315,6 +1326,7 @@ mod layout_tests {
             offset_of!(PhysicalDeviceProperties, max_compute_work_group_count),
             516
         );
+        assert_eq!(offset_of!(PhysicalDeviceProperties, timestamp_period), 720);
         assert!(size_of::<PhysicalDeviceProperties>() >= 824);
     }
 
