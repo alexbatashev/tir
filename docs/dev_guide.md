@@ -56,7 +56,8 @@ nisyros/tests/run-peer-hardware.sh
 The first script requires `glslangValidator`, `spirv-val`, the Vulkan validation
 layer, and a device with the strict Vulkan profile. CI runs C and Python ABI
 checks against a software Vulkan ICD. A software device lacking the mandatory
-extensions must be reported as unsupported.
+extensions must be reported as unsupported. CI also starts two processes to
+check fixed-membership discovery, stable cluster IDs, and ordered group ranks.
 
 The peer script duplicates one ICD manifest and verifies FD-backed memory and
 timeline sharing between two logical views of the same GPU. It does not test

@@ -37,6 +37,7 @@ typedef struct nisyros_queue_impl *nisyros_queue;
 typedef struct nisyros_cmd_impl *nisyros_cmd;
 typedef struct nisyros_event_impl *nisyros_event;
 typedef struct nisyros_event_token_impl *nisyros_event_token;
+typedef struct nisyros_group_impl *nisyros_group;
 typedef struct nisyros_executable_impl *nisyros_executable;
 typedef struct nisyros_kernel_impl *nisyros_kernel;
 typedef uint64_t nisyros_addr;
@@ -87,7 +88,31 @@ typedef struct {
     uint32_t driver_id;
     uint32_t device_type;
     char driver_name[256];
+    uint32_t node_index;
+    uint32_t is_local;
 } nisyros_device_info;
+
+typedef struct {
+    uint32_t node_index;
+    uint32_t reserved;
+    const char *address;
+} nisyros_node_address;
+
+typedef struct {
+    nisyros_descriptor_header header;
+    uint64_t session_id;
+    uint32_t local_node;
+    uint32_t node_count;
+    const nisyros_node_address *nodes;
+    uint64_t connect_timeout_ns;
+} nisyros_bootstrap_desc;
+
+typedef struct {
+    nisyros_descriptor_header header;
+    uint64_t group_epoch;
+    uint32_t member_count;
+    const nisyros_device_id *members;
+} nisyros_group_desc;
 
 #define NISYROS_QUEUE_COMPUTE 0x00000002u
 #define NISYROS_QUEUE_TRANSFER 0x00000004u
@@ -198,6 +223,9 @@ typedef struct {
 NISYROS_API nisyros_status NISYROS_CALL
 nisyros_cluster_open_local(nisyros_cluster *out);
 NISYROS_API nisyros_status NISYROS_CALL
+nisyros_cluster_join(const nisyros_bootstrap_desc *bootstrap,
+                     nisyros_cluster *out);
+NISYROS_API nisyros_status NISYROS_CALL
 nisyros_cluster_devices(nisyros_cluster cluster, uint32_t *count,
                         nisyros_device_id *ids);
 NISYROS_API nisyros_status NISYROS_CALL
@@ -209,6 +237,17 @@ nisyros_cluster_queue_family_info(nisyros_cluster cluster, nisyros_device_id id,
                                   nisyros_queue_family_info *out);
 NISYROS_API nisyros_status NISYROS_CALL
 nisyros_cluster_close(nisyros_cluster cluster);
+NISYROS_API nisyros_status NISYROS_CALL
+nisyros_group_create(nisyros_cluster cluster, const nisyros_group_desc *desc,
+                     nisyros_group *out);
+NISYROS_API nisyros_status NISYROS_CALL nisyros_group_destroy(nisyros_group group);
+NISYROS_API nisyros_status NISYROS_CALL
+nisyros_group_rank_count(nisyros_group group, uint32_t *count);
+NISYROS_API nisyros_status NISYROS_CALL
+nisyros_group_member(nisyros_group group, uint32_t rank,
+                     nisyros_device_id *out);
+NISYROS_API nisyros_status NISYROS_CALL
+nisyros_group_epoch(nisyros_group group, uint64_t *epoch);
 NISYROS_API nisyros_status NISYROS_CALL
 nisyros_device_open(nisyros_cluster cluster, nisyros_device_id id,
                     const nisyros_device_open_desc *desc, nisyros_device *out);

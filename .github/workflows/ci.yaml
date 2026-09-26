@@ -80,6 +80,7 @@ jobs:
           VK_DRIVER_FILES="$icd" target/debug/nisyros-open auto
           VK_DRIVER_FILES="$icd" python3 nisyros/tests/python_abi.py \
             target/debug/libnisyros.so
+          python3 nisyros/tests/run-join.py "$icd"
 
   # Build and package once; test shards and memory checks reuse these tools.
   build:
