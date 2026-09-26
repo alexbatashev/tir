@@ -11,7 +11,7 @@ glslangValidator -V --target-env vulkan1.3 -S comp \
   nisyros/tests/add_one.comp -o "$temp/add_one.spv"
 spirv-val --target-env vulkan1.3 "$temp/add_one.spv"
 cc -std=c11 -Wall -Wextra -Werror -I nisyros/include \
-  nisyros/tests/open.c -L target/debug -lnisyros \
+  nisyros/tests/open.c -L target/debug -lnisyros -ldl \
   -Wl,-rpath,"$repo/target/debug" -o "$temp/open"
 cc -std=c11 -Wall -Wextra -Werror -I nisyros/include \
   nisyros/tests/kernel.c -L target/debug -lnisyros \

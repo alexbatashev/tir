@@ -1,6 +1,7 @@
 //! Nisyros C ABI. The only backend implemented by this crate is Vulkan.
 
 mod communication;
+mod interop;
 pub mod package;
 mod transport;
 mod vulkan;

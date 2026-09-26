@@ -76,6 +76,8 @@ typedef struct {
 
 #define NISYROS_BACKEND_VULKAN 1u
 #define NISYROS_DEVICE_TYPE_CPU 4u
+#define NISYROS_BACKEND_ABI_VERSION 1u
+#define NISYROS_VULKAN_INTEROP_ABI_VERSION 1u
 
 typedef struct {
     nisyros_descriptor_header header;
@@ -292,6 +294,41 @@ typedef struct {
     uint32_t y;
     uint32_t z;
 } nisyros_grid;
+
+typedef struct {
+    nisyros_descriptor_header header;
+    void *instance;
+    void *physical_device;
+    void *device;
+} nisyros_vulkan_device_info;
+
+typedef struct {
+    nisyros_descriptor_header header;
+    void *queue;
+    uint32_t family;
+    uint32_t index;
+} nisyros_vulkan_queue_info;
+
+typedef struct {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    nisyros_status (NISYROS_CALL *device_query)(nisyros_device,
+                                                nisyros_vulkan_device_info *);
+    nisyros_status (NISYROS_CALL *queue_query)(nisyros_queue,
+                                               nisyros_vulkan_queue_info *);
+} nisyros_vulkan_interop_api;
+
+typedef struct {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    nisyros_status (NISYROS_CALL *get_extension)(
+        nisyros_device, const char *, uint32_t, uint32_t, void *);
+} nisyros_backend_api;
+
+/* Tables are caller-owned. `struct_size` reports the provider's full size. */
+NISYROS_API nisyros_status NISYROS_CALL
+nisyros_backend_get_api(uint32_t backend, uint32_t abi_version,
+                        uint32_t table_size, void *table);
 
 /* Count is input capacity and output total. IDs remain valid for this cluster epoch. */
 NISYROS_API nisyros_status NISYROS_CALL

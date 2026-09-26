@@ -48,6 +48,12 @@ properties of a live base address after allocation.
 `nisyros_cluster_memory_heaps` enumerates heaps for local and remote devices.
 `nisyros_alloc_heap_extension` can require or prefer one heap; `UINT32_MAX`
 means no selection for either field.
+`nisyros_backend_get_api` negotiates a sized extension table. Its
+`nisyros.vulkan` table returns borrowed Vulkan instance, physical-device,
+device, and queue handles. Finish relevant Nisyros work before using those
+handles, finish external work before returning its memory to Nisyros, and do
+not submit externally to a Nisyros-owned queue concurrently. These tables do
+not load replaceable backend plugins.
 
 Run the package parser and Vulkan FFI layout checks with `cargo test -p nisyros`.
 The physical GPU check compiles its shader, captures a native

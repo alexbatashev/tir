@@ -347,6 +347,12 @@ pub struct Device {
     pub peer_timeline_fd: bool,
 }
 
+impl Device {
+    pub fn native_handle(&self) -> *mut c_void {
+        self.handle
+    }
+}
+
 impl Drop for Device {
     fn drop(&mut self) {
         // SAFETY: The caller closes all device children before dropping Device.
@@ -371,6 +377,10 @@ pub struct Instance {
 }
 
 impl Instance {
+    pub fn native_handle(&self) -> *mut c_void {
+        self.handle
+    }
+
     pub fn open() -> Result<Self, ()> {
         // SAFETY: The library handle remains owned by Instance until after
         // vkDestroyInstance. Function signatures match vulkan_core.h.
