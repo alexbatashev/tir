@@ -65,7 +65,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: target/verify/smt/${{ matrix.isa }}/cache
-          key: smt-traces-${{ matrix.isa }}-${{ matrix.shard }}-${{ hashFiles('Cargo.lock', 'utils/verify/**', 'xtask/src/verify_smt.rs', 'xtask/verify-smt-*') }}
+          key: smt-traces-${{ matrix.isa }}-${{ matrix.shard }}-${{ hashFiles('Cargo.lock', 'utils/verify/**', 'xtask/src/verify_smt.rs', 'xtask/verify-smt-*', 'xtask/verify/**') }}
       - name: Verify
         run: cargo xtask verify ${{ matrix.isa }} --shard ${{ matrix.shard }}/4
       - name: Upload report
@@ -93,7 +93,7 @@ jobs:
       - name: Aggregate reports
         run: |
           mapfile -t files < <(find reports -name report.json -print | sort)
-          jq -s '{reports: ., totals: {verified: (map(.verified) | add), divergences: (map(.failed) | add), unknown: (map(.unknown) | add), excluded: (map(.excluded_paths) | add), wall_ms_max: (map(.wall_ms) | max)}}' "${files[@]}" > smt-report.json
+          jq -s '{reports: ., totals: {verified: (map(.verified) | add), divergences: (map(.failed) | add), unknown: (map(.unknown) | add), vacuous: (map(.vacuous) | add), excluded: (map(.excluded_paths) | add), wall_ms_max: (map(.wall_ms) | max)}}' "${files[@]}" > smt-report.json
       - uses: actions/upload-artifact@v7
         with:
           name: smt-report

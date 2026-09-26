@@ -18,14 +18,43 @@ set (x0 corner cases, register aliasing, immediate extremes):
    fully symbolic register state.
    Each execution path yields a trace of register reads/writes plus SMT
    definitions and path constraints.
-3. For every path, an SMT query asks whether the models can reach different
-   mapped architectural states from the same initial state under the path
-   constraints. `unsat` proves agreement; `sat` supplies a counterexample.
+3. For every path, an SMT query first checks that the path is reachable under
+   the modeling assumptions below, then asks whether the models can reach
+   different mapped architectural states from the same initial state under
+   the path constraints. `unsat` proves agreement; `sat` supplies a
+   counterexample. An unreachable path proves nothing and is reported as
+   vacuous; a path the solver cannot show reachable counts as unknown.
+4. Verified paths are checked again with the TMDL behavior replaced by a
+   no-op, until one of them tells the two apart. An instruction that still
+   verifies is reported: its proofs compare none of the state it writes.
    Queries are saved in `target/verify/smt/<isa>/queries/` for inspection.
 
 Sail traces are cached in `target/verify/smt/<isa>/cache/`, keyed by instruction
 word plus a fingerprint of the snapshot and isla config, so swapping either
 invalidates the cache automatically.
+
+## State map
+
+Each ISA is described by `xtask/verify/<isa>.toml`: the snapshot and its pin,
+the Isla config, the modeling assumptions that apply, and a `map` relating Sail
+locations to TMDL register slots. Every row has the same shape:
+
+```toml
+{ sail = "rflags", bits = [6, 6], class = "eflags", index = 2 }
+```
+
+`sail` names a register, a struct field (`PSTATE.N`) or a vector element
+(`_V[3]`), and `bits` optionally narrows it. `{n}` in `sail` expands over an
+inclusive range `n`, which is also the slot index (`x{n}` for the RISC-V GPRs).
+A row without `class` holds bits the architecture fixes at zero.
+
+A Sail read of a mapped location is pinned to the slot's initial value, and
+every mapped slot is compared after the instruction: TMDL's final value
+against Sail's last write, or the initial value when Sail left it alone. Rows
+marked `if_written` are compared only when the TMDL behavior writes the slot.
+A path that writes a register with no row, or reads a symbolic one, is
+excluded. Registers listed in `ignore` never exclude a path, and a read of one
+listed in `mmio` always does.
 
 ## Modeling assumptions
 
@@ -54,7 +83,8 @@ External inputs are:
 - a Sail RISC-V snapshot, e.g. `rv64d.ir` from
   [isla-snapshots](https://github.com/rems-project/isla-snapshots).
 
-The isla configurations live in `xtask/`. The RISC-V configurations disable C,
+The isla configurations live in `xtask/`, next to the state maps in
+`xtask/verify/`. The RISC-V configurations disable C,
 which the PC alignment assumptions rely on. Point the harness at the tools:
 
 ```sh
@@ -95,7 +125,7 @@ inference, the interpreter, and SMT generation consume that table.
 ## Reading the output
 
 One line per instruction, one character per checked path: `.` proven
-equivalent, `X` divergence (counterexample printed below the summary), `-`
-excluded trap/system path, `E` no Sail execution path (the word is likely
-illegal — an encoding bug), `I` isla failed or timed out on the word, `?`
-solver timeout.
+equivalent, `X` divergence (counterexample printed below the summary), `V`
+path unreachable under the modeling assumptions, `-` excluded trap/system
+path, `E` no Sail execution path (the word is likely illegal — an encoding
+bug), `I` isla failed or timed out on the word, `?` solver timeout.
