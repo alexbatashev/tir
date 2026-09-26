@@ -864,7 +864,11 @@ impl tir_relational::Externs<SemNode> for Interpretation<'_> {
                 let materializable = !(1..=64).contains(&width)
                     || self
                         .materializable
-                        .is_none_or(|test| test(&APInt::new(width, args[0])));
+                        // Read at its own width as two's complement, as the
+                        // matcher reads a signed literal: i32 `-1` fits `addi`.
+                        .is_none_or(|test| {
+                            test(&APInt::new_signed(width, sign_extend(args[0], width)))
+                        });
                 materializable == (args[2] == 0)
             }
             proof if proof >= call::VERIFY => {
