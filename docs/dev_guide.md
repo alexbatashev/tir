@@ -50,12 +50,17 @@ pipeline package, and tests the C ABI in a second process:
 
 ```sh
 nisyros/tests/run-hardware.sh
+nisyros/tests/run-peer-hardware.sh
 ```
 
-That script requires `glslangValidator`, `spirv-val`, the Vulkan validation
+The first script requires `glslangValidator`, `spirv-val`, the Vulkan validation
 layer, and a device with the strict Vulkan profile. CI runs C and Python ABI
 checks against a software Vulkan ICD. A software device lacking the mandatory
 extensions must be reported as unsupported.
+
+The peer script duplicates one ICD manifest and verifies FD-backed memory and
+timeline sharing between two logical views of the same GPU. It does not test
+two distinct physical GPUs. Set `NISYROS_VULKAN_ICD` to select another ICD.
 
 ### Working on the C frontend
 

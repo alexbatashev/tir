@@ -36,9 +36,15 @@ typedef struct nisyros_device_impl *nisyros_device;
 typedef struct nisyros_queue_impl *nisyros_queue;
 typedef struct nisyros_cmd_impl *nisyros_cmd;
 typedef struct nisyros_event_impl *nisyros_event;
+typedef struct nisyros_event_token_impl *nisyros_event_token;
 typedef struct nisyros_executable_impl *nisyros_executable;
 typedef struct nisyros_kernel_impl *nisyros_kernel;
 typedef uint64_t nisyros_addr;
+
+typedef struct {
+    nisyros_device device;
+    nisyros_addr address;
+} nisyros_location;
 
 #define NISYROS_TIMEOUT_INFINITE UINT64_MAX
 
@@ -110,6 +116,8 @@ typedef struct {
 #define NISYROS_MEMORY_DEVICE_LOCAL 0x00000001u
 #define NISYROS_MEMORY_HOST_VISIBLE 0x00000002u
 #define NISYROS_MEMORY_HOST_COHERENT 0x00000004u
+#define NISYROS_ACCESS_READ 0x00000001u
+#define NISYROS_ACCESS_WRITE 0x00000002u
 
 typedef struct {
     nisyros_descriptor_header header;
@@ -126,6 +134,14 @@ typedef struct {
     uint64_t alignment;
     uint32_t reserved[2];
 } nisyros_host_alloc_desc;
+
+typedef struct {
+    nisyros_descriptor_header header;
+    uint32_t same_physical_device;
+    uint32_t direct_mapping;
+    uint32_t event_import;
+    uint32_t host_staging;
+} nisyros_peer_info;
 
 typedef struct {
     nisyros_event event;
@@ -227,6 +243,14 @@ nisyros_host_register(nisyros_device device, void *host, uint64_t bytes);
 NISYROS_API nisyros_status NISYROS_CALL
 nisyros_host_unregister(nisyros_device device, void *host);
 NISYROS_API nisyros_status NISYROS_CALL
+nisyros_peer_capabilities(nisyros_device device, nisyros_device peer,
+                          nisyros_peer_info *out);
+NISYROS_API nisyros_status NISYROS_CALL
+nisyros_peer_map(nisyros_device device, nisyros_location source,
+                 uint64_t bytes, uint32_t access, nisyros_addr *out);
+NISYROS_API nisyros_status NISYROS_CALL
+nisyros_peer_unmap(nisyros_device device, nisyros_addr base);
+NISYROS_API nisyros_status NISYROS_CALL
 nisyros_executable_load(nisyros_device device, const nisyros_image *image,
                         nisyros_executable *out);
 NISYROS_API nisyros_status NISYROS_CALL
@@ -268,6 +292,13 @@ NISYROS_API nisyros_status NISYROS_CALL
 nisyros_event_create(nisyros_device device, const nisyros_event_desc *desc,
                      nisyros_event *out);
 NISYROS_API nisyros_status NISYROS_CALL nisyros_event_destroy(nisyros_event event);
+NISYROS_API nisyros_status NISYROS_CALL
+nisyros_event_export(nisyros_event event, nisyros_event_token *out);
+NISYROS_API nisyros_status NISYROS_CALL
+nisyros_event_import(nisyros_device device, nisyros_event_token token,
+                     nisyros_event *out);
+NISYROS_API nisyros_status NISYROS_CALL
+nisyros_event_token_destroy(nisyros_event_token token);
 NISYROS_API nisyros_status NISYROS_CALL
 nisyros_event_host_signal(nisyros_event event, uint64_t value);
 NISYROS_API nisyros_status NISYROS_CALL
