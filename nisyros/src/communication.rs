@@ -8,6 +8,12 @@ use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 
 const MAX_PENDING_MESSAGES: usize = 256;
+const COLLECTIVE_CHANNEL: u64 = u64::MAX;
+const DTYPE_U32: u32 = 1;
+const DTYPE_I32: u32 = 2;
+const REDUCE_SUM: u32 = 1;
+const REDUCE_MIN: u32 = 2;
+const REDUCE_MAX: u32 = 3;
 
 #[repr(C)]
 pub struct RankBinding {
@@ -61,6 +67,7 @@ struct Binding {
 enum TransferKind {
     Send,
     Recv,
+    AllReduce,
 }
 
 #[derive(Clone, Copy)]
@@ -79,7 +86,11 @@ struct RecordedTransfer {
     device: usize,
     queue: usize,
     address: u64,
+    destination: u64,
     bytes: u64,
+    count: u64,
+    datatype: u32,
+    reduction: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -89,7 +100,11 @@ struct TransferOp {
     device: usize,
     queue: usize,
     address: u64,
+    destination: u64,
     bytes: u64,
+    count: u64,
+    datatype: u32,
+    reduction: u32,
 }
 
 struct TransferRequest {
@@ -526,6 +541,7 @@ fn record_transfer(cmd: *mut CommCommand, kind: TransferKind, request: TransferR
     if cmd.is_null()
         || bytes == 0
         || bytes > MAX_MESSAGE_BYTES
+        || channel == COLLECTIVE_CHANNEL
         || address.checked_add(bytes).is_none()
     {
         return INVALID_ARGUMENT;
@@ -587,7 +603,11 @@ fn record_transfer(cmd: *mut CommCommand, kind: TransferKind, request: TransferR
         device: binding.device,
         queue: binding.queue,
         address,
+        destination: 0,
         bytes,
+        count: 0,
+        datatype: 0,
+        reduction: 0,
     });
     SUCCESS
 }
@@ -701,6 +721,144 @@ pub unsafe extern "C" fn nisyros_comm_cmd_recv_slot(
             address: destination,
             bytes,
         },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_all_reduce(
+    cmd: *mut CommCommand,
+    local_rank: u32,
+    sequence: SequenceRef,
+    source: u64,
+    destination: u64,
+    count: u64,
+    datatype: u32,
+    reduction: u32,
+) -> i32 {
+    let Some(bytes) = count.checked_mul(4) else {
+        return INVALID_ARGUMENT;
+    };
+    if cmd.is_null()
+        || count == 0
+        || bytes > MAX_MESSAGE_BYTES - 16
+        || !matches!(datatype, DTYPE_U32 | DTYPE_I32)
+        || !matches!(reduction, REDUCE_SUM | REDUCE_MIN | REDUCE_MAX)
+        || source.checked_add(bytes).is_none()
+        || destination.checked_add(bytes).is_none()
+        || (source != destination
+            && source < destination.saturating_add(bytes)
+            && destination < source.saturating_add(bytes))
+    {
+        return INVALID_ARGUMENT;
+    }
+    let cmd_ref = unsafe { &*cmd };
+    let endpoint = unsafe { &*cmd_ref.endpoint };
+    let Some(binding) = endpoint
+        .bindings
+        .iter()
+        .find(|binding| binding.rank == local_rank)
+    else {
+        return INVALID_ARGUMENT;
+    };
+    let Ok(mut state) = cmd_ref.state.lock() else {
+        return PEER_LOST;
+    };
+    if state.kind != CommStateKind::Recording {
+        return INVALID_ARGUMENT;
+    }
+    let device = unsafe { &*(binding.device as *mut Device) };
+    let Ok(mut allocations) = device.allocations.lock() else {
+        return DEVICE_LOST;
+    };
+    let mut bases = BTreeSet::new();
+    for (address, access) in [(source, 1), (destination, 2)] {
+        let Some((&base, allocation)) = allocations.range(..=address).next_back() else {
+            state.kind = CommStateKind::Invalid;
+            return INVALID_ARGUMENT;
+        };
+        if !allocation.backend.contains(address, bytes) || allocation.access & access != access {
+            state.kind = CommStateKind::Invalid;
+            return INVALID_ARGUMENT;
+        }
+        bases.insert(base);
+    }
+    for base in bases {
+        if state.references.insert((binding.device, base)) {
+            allocations
+                .get_mut(&base)
+                .expect("validated reduction allocation")
+                .recordings += 1;
+        }
+    }
+    state.operations.push(RecordedTransfer {
+        kind: TransferKind::AllReduce,
+        source_rank: local_rank,
+        destination_rank: 0,
+        channel: COLLECTIVE_CHANNEL,
+        sequence,
+        device: binding.device,
+        queue: binding.queue,
+        address: source,
+        destination,
+        bytes,
+        count,
+        datatype,
+        reduction,
+    });
+    SUCCESS
+}
+
+/// Records a group-wide 32-bit integer reduction for one local rank.
+///
+/// # Safety
+/// `cmd` must be live and both address ranges retained until reset.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nisyros_comm_cmd_all_reduce(
+    cmd: *mut CommCommand,
+    local_rank: u32,
+    sequence: u64,
+    source: u64,
+    destination: u64,
+    count: u64,
+    datatype: u32,
+    reduction: u32,
+) -> i32 {
+    record_all_reduce(
+        cmd,
+        local_rank,
+        SequenceRef::Static(sequence),
+        source,
+        destination,
+        count,
+        datatype,
+        reduction,
+    )
+}
+
+/// Records a group reduction whose sequence is bound at submission.
+///
+/// # Safety
+/// `cmd` must be live and both address ranges retained until reset.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nisyros_comm_cmd_all_reduce_slot(
+    cmd: *mut CommCommand,
+    local_rank: u32,
+    slot: u32,
+    source: u64,
+    destination: u64,
+    count: u64,
+    datatype: u32,
+    reduction: u32,
+) -> i32 {
+    record_all_reduce(
+        cmd,
+        local_rank,
+        SequenceRef::Slot(slot),
+        source,
+        destination,
+        count,
+        datatype,
+        reduction,
     )
 }
 
@@ -902,7 +1060,11 @@ pub unsafe extern "C" fn nisyros_endpoint_submit(
                 device: recorded.device,
                 queue: recorded.queue,
                 address: recorded.address,
+                destination: recorded.destination,
                 bytes: recorded.bytes,
+                count: recorded.count,
+                datatype: recorded.datatype,
+                reduction: recorded.reduction,
             }
         })
         .collect();
@@ -913,7 +1075,17 @@ pub unsafe extern "C" fn nisyros_endpoint_submit(
         return PEER_LOST;
     };
     let mut keys = BTreeMap::new();
+    let mut collective_shapes = BTreeMap::new();
     for operation in &operations {
+        if operation.kind == TransferKind::AllReduce {
+            let shape = (operation.count, operation.datatype, operation.reduction);
+            if collective_shapes
+                .insert(operation.key.sequence, shape)
+                .is_some_and(|previous| previous != shape)
+            {
+                return INVALID_ARGUMENT;
+            }
+        }
         let local_pair = endpoint_ref
             .bindings
             .iter()
@@ -927,10 +1099,10 @@ pub unsafe extern "C" fn nisyros_endpoint_submit(
             .copied()
             .or_else(|| state.used_keys.get(&operation.key).copied())
             .unwrap_or((0, operation.bytes));
-        let bit = if operation.kind == TransferKind::Send {
-            1
-        } else {
-            2
+        let bit = match operation.kind {
+            TransferKind::Send => 1,
+            TransferKind::Recv => 2,
+            TransferKind::AllReduce => 4,
         };
         if prior.0 & bit != 0 || prior.1 != operation.bytes || (!local_pair && prior.0 != 0) {
             return INVALID_ARGUMENT;
@@ -977,6 +1149,15 @@ struct PendingTransfer {
     ready: bool,
 }
 
+struct RootCollective {
+    count: u64,
+    datatype: u32,
+    reduction: u32,
+    seen: BTreeSet<u32>,
+    result: Vec<u8>,
+    local: BTreeMap<u32, PendingTransfer>,
+}
+
 struct ProgressState {
     group_epoch: u64,
     rank_count: u32,
@@ -985,8 +1166,12 @@ struct ProgressState {
     recvs: BTreeMap<MessageKey, PendingTransfer>,
     offers: BTreeMap<MessageKey, u64>,
     awaiting_ack: BTreeMap<MessageKey, PendingTransfer>,
+    collectives: BTreeMap<u64, RootCollective>,
+    completed_collectives: BTreeSet<u64>,
+    awaiting_result: BTreeMap<(u64, u32), PendingTransfer>,
     deferred: Vec<Task>,
     remaining: BTreeMap<u64, usize>,
+    started: BTreeMap<u64, Instant>,
     finished: BTreeSet<u64>,
     completed: u64,
 }
@@ -1001,8 +1186,12 @@ impl ProgressState {
             recvs: BTreeMap::new(),
             offers: BTreeMap::new(),
             awaiting_ack: BTreeMap::new(),
+            collectives: BTreeMap::new(),
+            completed_collectives: BTreeSet::new(),
+            awaiting_result: BTreeMap::new(),
             deferred: Vec::new(),
             remaining: BTreeMap::new(),
+            started: BTreeMap::new(),
             finished: BTreeSet::new(),
             completed: 0,
         }
@@ -1070,6 +1259,7 @@ impl ProgressState {
             return Err(BUSY);
         }
         self.remaining.insert(task.value, task.operations.len());
+        self.started.insert(task.value, Instant::now());
         for operation in task.operations {
             let key = operation.key;
             let pending = PendingTransfer {
@@ -1077,6 +1267,10 @@ impl ProgressState {
                 submission: task.value,
                 ready: false,
             };
+            if operation.kind == TransferKind::AllReduce {
+                self.submit_collective(pending, writer.as_deref_mut(), shared)?;
+                continue;
+            }
             let local_pair = self.local_ranks.contains(&key.source_rank)
                 && self.local_ranks.contains(&key.destination_rank);
             if operation.kind == TransferKind::Send {
@@ -1141,6 +1335,134 @@ impl ProgressState {
         self.complete(receive, shared)
     }
 
+    fn submit_collective(
+        &mut self,
+        pending: PendingTransfer,
+        writer: Option<&mut TcpStream>,
+        shared: &Shared,
+    ) -> Result<(), i32> {
+        let operation = pending.operation;
+        let data = gpu_copy(&operation, None)?;
+        if self.local_ranks.contains(&0) {
+            self.root_contribution(
+                operation.key.sequence,
+                operation.key.source_rank,
+                operation.count,
+                operation.datatype,
+                operation.reduction,
+                data,
+                Some(pending),
+                writer,
+                shared,
+            )
+        } else {
+            let mut payload = Vec::with_capacity(16 + data.len());
+            payload.extend_from_slice(&operation.datatype.to_be_bytes());
+            payload.extend_from_slice(&operation.reduction.to_be_bytes());
+            payload.extend_from_slice(&operation.count.to_be_bytes());
+            payload.extend_from_slice(&data);
+            transport::write_frame(
+                writer.ok_or(PEER_LOST)?,
+                &Frame {
+                    kind: FrameKind::CollectiveContribution,
+                    key: operation.key,
+                    bytes: operation.bytes,
+                    payload,
+                },
+            )
+            .map_err(|_| PEER_LOST)?;
+            if self
+                .awaiting_result
+                .insert((operation.key.sequence, operation.key.source_rank), pending)
+                .is_some()
+            {
+                return Err(PEER_LOST);
+            }
+            Ok(())
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn root_contribution(
+        &mut self,
+        sequence: u64,
+        rank: u32,
+        count: u64,
+        datatype: u32,
+        reduction: u32,
+        data: Vec<u8>,
+        local: Option<PendingTransfer>,
+        mut writer: Option<&mut TcpStream>,
+        shared: &Shared,
+    ) -> Result<(), i32> {
+        if self.completed_collectives.contains(&sequence) {
+            return Err(PEER_LOST);
+        }
+        let state = self
+            .collectives
+            .entry(sequence)
+            .or_insert_with(|| RootCollective {
+                count,
+                datatype,
+                reduction,
+                seen: BTreeSet::new(),
+                result: Vec::new(),
+                local: BTreeMap::new(),
+            });
+        if state.count != count
+            || state.datatype != datatype
+            || state.reduction != reduction
+            || data.len() as u64 != count * 4
+            || !state.seen.insert(rank)
+        {
+            return Err(PEER_LOST);
+        }
+        if state.result.is_empty() {
+            state.result = data;
+        } else {
+            reduce_into(&mut state.result, &data, datatype, reduction);
+        }
+        if let Some(local) = local {
+            state.local.insert(rank, local);
+        }
+        if state.seen.len() != self.rank_count as usize {
+            return Ok(());
+        }
+        let state = self
+            .collectives
+            .remove(&sequence)
+            .expect("complete collective");
+        self.completed_collectives.insert(sequence);
+        let result = state.result;
+        for rank in 0..self.rank_count {
+            if !self.local_ranks.contains(&rank) {
+                transport::write_frame(
+                    writer.as_deref_mut().ok_or(PEER_LOST)?,
+                    &Frame {
+                        kind: FrameKind::CollectiveResult,
+                        key: MessageKey {
+                            group_epoch: self.group_epoch,
+                            source_rank: 0,
+                            destination_rank: rank,
+                            channel: COLLECTIVE_CHANNEL,
+                            sequence,
+                        },
+                        bytes: result.len() as u64,
+                        payload: result.clone(),
+                    },
+                )
+                .map_err(|_| PEER_LOST)?;
+            }
+        }
+        for pending in state.local.into_values() {
+            let mut output = pending.operation;
+            output.address = output.destination;
+            gpu_copy(&output, Some(&result))?;
+            self.complete(pending, shared)?;
+        }
+        Ok(())
+    }
+
     fn remote(&mut self, frame: Frame, writer: &mut TcpStream, shared: &Shared) -> Result<(), i32> {
         let key = frame.key;
         if frame.kind != FrameKind::Heartbeat {
@@ -1150,7 +1472,10 @@ impl ProgressState {
                 || key.source_rank >= self.rank_count
                 || key.destination_rank >= self.rank_count
                 || match frame.kind {
-                    FrameKind::Offer | FrameKind::Data => source_local || !destination_local,
+                    FrameKind::Offer
+                    | FrameKind::Data
+                    | FrameKind::CollectiveContribution
+                    | FrameKind::CollectiveResult => source_local || !destination_local,
                     FrameKind::Ready | FrameKind::Ack => !source_local || destination_local,
                     FrameKind::Heartbeat => false,
                 }
@@ -1160,6 +1485,54 @@ impl ProgressState {
         }
         match frame.kind {
             FrameKind::Heartbeat => return Ok(()),
+            FrameKind::CollectiveContribution => {
+                if key.channel != COLLECTIVE_CHANNEL
+                    || key.destination_rank != 0
+                    || !self.local_ranks.contains(&0)
+                    || frame.payload.len() < 16
+                {
+                    return Err(PEER_LOST);
+                }
+                let datatype = u32::from_be_bytes(frame.payload[0..4].try_into().unwrap());
+                let reduction = u32::from_be_bytes(frame.payload[4..8].try_into().unwrap());
+                let count = u64::from_be_bytes(frame.payload[8..16].try_into().unwrap());
+                if !matches!(datatype, DTYPE_U32 | DTYPE_I32)
+                    || !matches!(reduction, REDUCE_SUM | REDUCE_MIN | REDUCE_MAX)
+                    || count == 0
+                    || count.checked_mul(4) != Some(frame.bytes)
+                {
+                    return Err(PEER_LOST);
+                }
+                self.root_contribution(
+                    key.sequence,
+                    key.source_rank,
+                    count,
+                    datatype,
+                    reduction,
+                    frame.payload[16..].to_vec(),
+                    None,
+                    Some(writer),
+                    shared,
+                )?;
+            }
+            FrameKind::CollectiveResult => {
+                if key.channel != COLLECTIVE_CHANNEL || key.source_rank != 0 {
+                    return Err(PEER_LOST);
+                }
+                let Some(pending) = self
+                    .awaiting_result
+                    .remove(&(key.sequence, key.destination_rank))
+                else {
+                    return Err(PEER_LOST);
+                };
+                if pending.operation.bytes != frame.bytes {
+                    return Err(PEER_LOST);
+                }
+                let mut output = pending.operation;
+                output.address = output.destination;
+                gpu_copy(&output, Some(&frame.payload))?;
+                self.complete(pending, shared)?;
+            }
             FrameKind::Offer => {
                 if let Some(receive) = self.recvs.get_mut(&key) {
                     if receive.ready || receive.operation.bytes != frame.bytes {
@@ -1242,6 +1615,7 @@ impl ProgressState {
         *remaining -= 1;
         if *remaining == 0 {
             self.remaining.remove(&transfer.submission);
+            self.started.remove(&transfer.submission);
             self.finished.insert(transfer.submission);
         }
         while self.finished.remove(&(self.completed + 1)) {
@@ -1257,6 +1631,27 @@ impl ProgressState {
             shared.pending.fetch_sub(1, Ordering::Release);
         }
         Ok(())
+    }
+}
+
+fn reduce_into(result: &mut [u8], input: &[u8], datatype: u32, reduction: u32) {
+    for (left, right) in result
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(input.as_chunks::<4>().0.iter())
+    {
+        let value = u32::from_le_bytes(*left);
+        let next = u32::from_le_bytes(*right);
+        let combined = match reduction {
+            REDUCE_SUM => value.wrapping_add(next),
+            REDUCE_MIN if datatype == DTYPE_I32 => (value as i32).min(next as i32) as u32,
+            REDUCE_MAX if datatype == DTYPE_I32 => (value as i32).max(next as i32) as u32,
+            REDUCE_MIN => value.min(next),
+            REDUCE_MAX => value.max(next),
+            _ => unreachable!("validated reduction"),
+        };
+        *left = combined.to_le_bytes();
     }
 }
 
@@ -1361,6 +1756,14 @@ fn progress_loop(
         }
         if let Err(status) = progress.poll_deferred(writer.as_mut(), &shared) {
             mark_failed(&shared, status);
+            break;
+        }
+        if progress
+            .started
+            .values()
+            .any(|started| started.elapsed() >= timeout)
+        {
+            mark_failed(&shared, PEER_LOST);
             break;
         }
     }

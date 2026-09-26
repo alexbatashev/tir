@@ -108,6 +108,8 @@ jobs:
           python3 nisyros/tests/run-communication.py simulator --replay
           python3 nisyros/tests/run-communication.py simulator --peer-loss
           python3 nisyros/tests/run-communication.py simulator --mismatch
+          python3 nisyros/tests/run-communication.py simulator --collective-mismatch
+          python3 nisyros/tests/run-communication.py simulator --collective-timeout
 
   # Build and package once; test shards and memory checks reuse these tools.
   build:

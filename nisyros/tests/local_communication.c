@@ -91,6 +91,41 @@ int main(void) {
     assert(nisyros_invalidate(local[1].device, local[1].address, 64) == NISYROS_SUCCESS);
     for (int i = 0; i < 64; ++i) assert(((unsigned char *)local[1].host)[i] == 0x67);
     assert(nisyros_comm_cmd_destroy(command) == NISYROS_SUCCESS);
+    for (int rank = 0; rank < 2; ++rank) {
+        for (int word = 0; word < 4; ++word) ((uint32_t *)local[rank].host)[word] = (uint32_t)rank + 1;
+        assert(nisyros_flush(local[rank].device, local[rank].address, 16) == NISYROS_SUCCESS);
+    }
+    nisyros_comm_cmd collective = NULL;
+    assert(nisyros_comm_cmd_create(endpoint, &collective) == NISYROS_SUCCESS);
+    assert(nisyros_comm_cmd_begin(collective) == NISYROS_SUCCESS);
+    for (uint32_t rank = 0; rank < 2; ++rank) {
+        assert(nisyros_comm_cmd_all_reduce(collective, rank, 2, local[rank].address,
+                                            local[rank].address, 4, NISYROS_DTYPE_U32,
+                                            NISYROS_REDUCE_SUM) == NISYROS_SUCCESS);
+    }
+    assert(nisyros_comm_cmd_end(collective) == NISYROS_SUCCESS);
+    nisyros_point collective_done = {0};
+    assert(nisyros_endpoint_submit(endpoint, collective, NULL, &collective_done) == NISYROS_SUCCESS);
+    assert(nisyros_wait(collective_done, NISYROS_TIMEOUT_INFINITE) == NISYROS_SUCCESS);
+    for (int rank = 0; rank < 2; ++rank) {
+        assert(nisyros_invalidate(local[rank].device, local[rank].address, 16) == NISYROS_SUCCESS);
+        for (int word = 0; word < 4; ++word) assert(((uint32_t *)local[rank].host)[word] == 3);
+    }
+    assert(nisyros_comm_cmd_destroy(collective) == NISYROS_SUCCESS);
+    nisyros_comm_cmd invalid = NULL;
+    assert(nisyros_comm_cmd_create(endpoint, &invalid) == NISYROS_SUCCESS);
+    assert(nisyros_comm_cmd_begin(invalid) == NISYROS_SUCCESS);
+    assert(nisyros_comm_cmd_all_reduce(invalid, 0, 3, local[0].address,
+                                        local[0].address, 4, NISYROS_DTYPE_U32,
+                                        NISYROS_REDUCE_SUM) == NISYROS_SUCCESS);
+    assert(nisyros_comm_cmd_all_reduce(invalid, 1, 3, local[1].address,
+                                        local[1].address, 3, NISYROS_DTYPE_U32,
+                                        NISYROS_REDUCE_SUM) == NISYROS_SUCCESS);
+    assert(nisyros_comm_cmd_end(invalid) == NISYROS_SUCCESS);
+    nisyros_point rejected = {0};
+    assert(nisyros_endpoint_submit(endpoint, invalid, NULL, &rejected) == NISYROS_INVALID_ARGUMENT);
+    assert(rejected.event == NULL);
+    assert(nisyros_comm_cmd_destroy(invalid) == NISYROS_SUCCESS);
     assert(nisyros_endpoint_close(endpoint) == NISYROS_SUCCESS);
     for (int i = 0; i < 2; ++i) {
         assert(nisyros_unmap(local[i].device, local[i].host) == NISYROS_SUCCESS);
@@ -99,6 +134,6 @@ int main(void) {
     }
     assert(nisyros_group_destroy(group) == NISYROS_SUCCESS);
     assert(nisyros_cluster_close(cluster) == NISYROS_SUCCESS);
-    printf("two local ranks exchanged data without a network worker\n");
+    printf("two local ranks exchanged data and reduced in place without a network worker\n");
     return 0;
 }

@@ -152,6 +152,12 @@ typedef struct {
     const nisyros_sequence_binding *bindings;
 } nisyros_comm_submit_desc;
 
+#define NISYROS_DTYPE_U32 1u
+#define NISYROS_DTYPE_I32 2u
+#define NISYROS_REDUCE_SUM 1u
+#define NISYROS_REDUCE_MIN 2u
+#define NISYROS_REDUCE_MAX 3u
+
 #define NISYROS_QUEUE_COMPUTE 0x00000002u
 #define NISYROS_QUEUE_TRANSFER 0x00000004u
 
@@ -314,6 +320,16 @@ NISYROS_API nisyros_status NISYROS_CALL
 nisyros_comm_cmd_recv_slot(nisyros_comm_cmd cmd, uint32_t local_rank,
                            uint32_t peer_rank, uint64_t channel, uint32_t slot,
                            nisyros_addr destination, uint64_t bytes);
+NISYROS_API nisyros_status NISYROS_CALL
+nisyros_comm_cmd_all_reduce(nisyros_comm_cmd cmd, uint32_t local_rank,
+                            uint64_t sequence, nisyros_addr source,
+                            nisyros_addr destination, uint64_t count,
+                            uint32_t datatype, uint32_t operation);
+NISYROS_API nisyros_status NISYROS_CALL
+nisyros_comm_cmd_all_reduce_slot(nisyros_comm_cmd cmd, uint32_t local_rank,
+                                 uint32_t slot, nisyros_addr source,
+                                 nisyros_addr destination, uint64_t count,
+                                 uint32_t datatype, uint32_t operation);
 NISYROS_API nisyros_status NISYROS_CALL nisyros_comm_cmd_end(nisyros_comm_cmd cmd);
 NISYROS_API nisyros_status NISYROS_CALL nisyros_comm_cmd_reset(nisyros_comm_cmd cmd);
 NISYROS_API nisyros_status NISYROS_CALL nisyros_comm_cmd_destroy(nisyros_comm_cmd cmd);

@@ -43,7 +43,7 @@ static void open_rank(nisyros_cluster cluster, nisyros_group group, uint32_t ran
     assert(nisyros_queue_get(local->device, family, 0, &local->queue) == NISYROS_SUCCESS);
     nisyros_alloc_desc allocation = {
         .header = {sizeof(allocation), NISYROS_ABI_VERSION, NULL},
-        .bytes = rank == 0 ? 64 : 128,
+        .bytes = 128,
         .alignment = 64,
         .required_properties = NISYROS_MEMORY_HOST_VISIBLE,
         .preferred_properties = NISYROS_MEMORY_HOST_COHERENT,
@@ -60,6 +60,8 @@ int main(int argc, char **argv) {
     int peer_loss = argc == 5 && strcmp(argv[4], "peer-loss") == 0;
     int mismatch = argc == 5 && strcmp(argv[4], "mismatch") == 0;
     int replay = argc == 5 && strcmp(argv[4], "replay") == 0;
+    int collective_mismatch = argc == 5 && strcmp(argv[4], "collective-mismatch") == 0;
+    int collective_timeout = argc == 5 && strcmp(argv[4], "collective-timeout") == 0;
     uint32_t node = (uint32_t)strtoul(argv[1], NULL, 10);
     uint64_t session_id = strtoull(argv[2], NULL, 10);
     nisyros_node_address nodes[2] = {{0, 0, argv[3]}, {1, 0, NULL}};
@@ -100,7 +102,7 @@ int main(int argc, char **argv) {
         .binding_count = local_count,
         .bindings = bindings,
         .allow_host_staging = 1,
-        .failure_timeout_ns = UINT64_C(10000000000),
+        .failure_timeout_ns = collective_timeout ? UINT64_C(1000000000) : UINT64_C(10000000000),
     };
     nisyros_endpoint endpoint = NULL;
     assert(nisyros_endpoint_open(group, &endpoint_desc, &endpoint) == NISYROS_SUCCESS);
@@ -201,7 +203,43 @@ int main(int argc, char **argv) {
                 for (int byte = 64; byte < 128; ++byte) assert(((unsigned char *)local[0].host)[byte] == 0x42);
             }
         }
-        if (node == 1) printf("node 1 replayed five bound communication sequences\n");
+        nisyros_comm_cmd collective_replay = NULL;
+        assert(nisyros_comm_cmd_create(endpoint, &collective_replay) == NISYROS_SUCCESS);
+        assert(nisyros_comm_cmd_begin(collective_replay) == NISYROS_SUCCESS);
+        for (uint32_t i = 0; i < local_count; ++i) {
+            assert(nisyros_comm_cmd_all_reduce_slot(collective_replay, local[i].rank, 1,
+                                                     local[i].address, local[i].address + 64,
+                                                     4, NISYROS_DTYPE_U32,
+                                                     NISYROS_REDUCE_SUM) == NISYROS_SUCCESS);
+        }
+        assert(nisyros_comm_cmd_end(collective_replay) == NISYROS_SUCCESS);
+        for (uint64_t iteration = 1; iteration <= 5; ++iteration) {
+            for (uint32_t i = 0; i < local_count; ++i) {
+                for (int word = 0; word < 4; ++word) {
+                    ((uint32_t *)local[i].host)[word] = local[i].rank + 1;
+                    ((uint32_t *)((unsigned char *)local[i].host + 64))[word] = 0;
+                }
+                assert(nisyros_flush(local[i].device, local[i].address, 80) == NISYROS_SUCCESS);
+            }
+            nisyros_sequence_binding binding = {1, 0, iteration + 100};
+            nisyros_comm_submit_desc submit_desc = {
+                .header = {sizeof(submit_desc), NISYROS_ABI_VERSION, NULL},
+                .binding_count = 1,
+                .bindings = &binding,
+            };
+            nisyros_point reduced = {0};
+            assert(nisyros_endpoint_submit(endpoint, collective_replay, &submit_desc,
+                                           &reduced) == NISYROS_SUCCESS);
+            assert(nisyros_wait(reduced, NISYROS_TIMEOUT_INFINITE) == NISYROS_SUCCESS);
+            for (uint32_t i = 0; i < local_count; ++i) {
+                assert(nisyros_invalidate(local[i].device, local[i].address + 64, 16) == NISYROS_SUCCESS);
+                for (int word = 0; word < 4; ++word) {
+                    assert(((uint32_t *)((unsigned char *)local[i].host + 64))[word] == 6);
+                }
+            }
+        }
+        assert(nisyros_comm_cmd_destroy(collective_replay) == NISYROS_SUCCESS);
+        if (node == 1) printf("node 1 replayed five bound communication and reduction sequences\n");
         goto cleanup;
     }
     if (node == 1) {
@@ -280,6 +318,57 @@ int main(int argc, char **argv) {
         assert(nisyros_free(local[0].device, consumed) == NISYROS_SUCCESS);
         printf("node 1 received two matched messages while host work continued\n");
     }
+    for (uint32_t i = 0; i < local_count; ++i) {
+        uint32_t value = local[i].rank == 0 ? UINT32_MAX : local[i].rank + 1;
+        for (int word = 0; word < 4; ++word) ((uint32_t *)local[i].host)[word] = value;
+        memset((unsigned char *)local[i].host + 64, 0, 64);
+        assert(nisyros_flush(local[i].device, local[i].address, 128) == NISYROS_SUCCESS);
+    }
+    if (collective_timeout && node == 1) {
+        struct timespec delay = {2, 0};
+        nanosleep(&delay, NULL);
+        goto cleanup;
+    }
+    nisyros_comm_cmd collective = NULL;
+    assert(nisyros_comm_cmd_create(endpoint, &collective) == NISYROS_SUCCESS);
+    assert(nisyros_comm_cmd_begin(collective) == NISYROS_SUCCESS);
+    const uint32_t types[4] = {NISYROS_DTYPE_U32, NISYROS_DTYPE_U32,
+                               NISYROS_DTYPE_U32, NISYROS_DTYPE_I32};
+    const uint32_t reductions[4] = {NISYROS_REDUCE_SUM, NISYROS_REDUCE_MIN,
+                                    NISYROS_REDUCE_MAX, NISYROS_REDUCE_MIN};
+    for (uint32_t op = 0; op < 4; ++op) {
+        for (uint32_t i = 0; i < local_count; ++i) {
+            uint64_t count = collective_mismatch && node == 1 && op == 0 ? 3 : 4;
+            assert(nisyros_comm_cmd_all_reduce(collective, local[i].rank, op + 5,
+                                                local[i].address, local[i].address + 64 + 16 * op,
+                                                count, types[op], reductions[op]) == NISYROS_SUCCESS);
+        }
+    }
+    assert(nisyros_comm_cmd_end(collective) == NISYROS_SUCCESS);
+    nisyros_point collective_done = {0};
+    assert(nisyros_endpoint_submit(endpoint, collective, NULL, &collective_done) == NISYROS_SUCCESS);
+    nisyros_status collective_status = nisyros_wait(collective_done, NISYROS_TIMEOUT_INFINITE);
+    if (collective_mismatch || collective_timeout) {
+        assert(collective_status == NISYROS_PEER_LOST);
+        uint64_t value = 0;
+        assert(nisyros_event_query(collective_done.event, &value) == NISYROS_PEER_LOST);
+        assert(nisyros_comm_cmd_destroy(collective) == NISYROS_SUCCESS);
+        printf("%s terminated the collective wait without success\n",
+               collective_mismatch ? "collective mismatch" : "collective timeout");
+        goto cleanup;
+    }
+    assert(collective_status == NISYROS_SUCCESS);
+    const uint32_t expected[4] = {4, 2, UINT32_MAX, UINT32_MAX};
+    for (uint32_t i = 0; i < local_count; ++i) {
+        assert(nisyros_invalidate(local[i].device, local[i].address + 64, 64) == NISYROS_SUCCESS);
+        for (uint32_t op = 0; op < 4; ++op) {
+            for (int word = 0; word < 4; ++word) {
+                assert(((uint32_t *)((unsigned char *)local[i].host + 64 + 16 * op))[word] == expected[op]);
+            }
+        }
+    }
+    assert(nisyros_comm_cmd_destroy(collective) == NISYROS_SUCCESS);
+    if (node == 1) printf("three ranks completed integer reductions\n");
 cleanup:
     if (dependent != NULL) assert(nisyros_cmd_destroy(dependent) == NISYROS_SUCCESS);
     assert(nisyros_comm_cmd_destroy(cmd) == NISYROS_SUCCESS);

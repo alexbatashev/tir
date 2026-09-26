@@ -15,6 +15,8 @@ icd = None if simulator else Path(sys.argv[1]).resolve()
 peer_loss = len(sys.argv) > 2 and sys.argv[2] == "--peer-loss"
 mismatch = len(sys.argv) > 2 and sys.argv[2] == "--mismatch"
 replay = len(sys.argv) > 2 and sys.argv[2] == "--replay"
+collective_mismatch = len(sys.argv) > 2 and sys.argv[2] == "--collective-mismatch"
+collective_timeout = len(sys.argv) > 2 and sys.argv[2] == "--collective-timeout"
 subprocess.run(["cargo", "build", "--locked", "-p", "nisyros"], cwd=repo, check=True)
 
 with tempfile.TemporaryDirectory() as directory:
@@ -61,7 +63,9 @@ with tempfile.TemporaryDirectory() as directory:
         env1["VK_DRIVER_FILES"] = str(icd)
         env0["VK_INSTANCE_LAYERS"] = "VK_LAYER_KHRONOS_validation"
         env1["VK_INSTANCE_LAYERS"] = "VK_LAYER_KHRONOS_validation"
-    extra = ["peer-loss"] if peer_loss else ["mismatch"] if mismatch else ["replay"] if replay else []
+    extra = (["peer-loss"] if peer_loss else ["mismatch"] if mismatch else
+             ["replay"] if replay else ["collective-mismatch"] if collective_mismatch else
+             ["collective-timeout"] if collective_timeout else [])
     node0 = subprocess.Popen(
         [str(binary), "0", session_id, address, *extra],
         cwd=repo, env=env0, text=True,
@@ -91,8 +95,14 @@ with tempfile.TemporaryDirectory() as directory:
             f"node 1: {node1.returncode}\n{errors1}"
         )
     if replay:
-        assert "node 1 replayed five bound communication sequences" in output1
+        assert "node 1 replayed five bound communication and reduction sequences" in output1
         print(output1.strip())
+    elif collective_mismatch or collective_timeout:
+        expected = "collective mismatch" if collective_mismatch else "collective timeout"
+        assert f"{expected} terminated the collective wait" in output0
+        if collective_mismatch:
+            assert f"{expected} terminated the collective wait" in output1
+        print(output0.strip())
     elif peer_loss or mismatch:
         expected = "peer loss" if peer_loss else "byte-count mismatch"
         assert f"{expected} terminated the pending wait" in output0
@@ -101,4 +111,5 @@ with tempfile.TemporaryDirectory() as directory:
         print(output0.strip())
     else:
         assert "node 1 received two matched messages" in output1
+        assert "three ranks completed integer reductions" in output1
         print(output1.strip())

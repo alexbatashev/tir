@@ -29,6 +29,8 @@ pub enum FrameKind {
     Data = 3,
     Ack = 4,
     Heartbeat = 5,
+    CollectiveContribution = 6,
+    CollectiveResult = 7,
 }
 
 pub struct Frame {
@@ -149,8 +151,7 @@ impl Connection {
 pub fn write_frame(writer: &mut impl Write, frame: &Frame) -> io::Result<()> {
     if frame.bytes > MAX_MESSAGE_BYTES
         || frame.payload.len() as u64 > MAX_MESSAGE_BYTES
-        || (frame.kind == FrameKind::Data && frame.payload.len() as u64 != frame.bytes)
-        || (frame.kind != FrameKind::Data && !frame.payload.is_empty())
+        || !valid_payload(frame.kind, frame.bytes, frame.payload.len() as u64)
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -181,6 +182,8 @@ pub fn read_frame(reader: &mut impl Read) -> Result<Frame, JoinError> {
         3 => FrameKind::Data,
         4 => FrameKind::Ack,
         5 => FrameKind::Heartbeat,
+        6 => FrameKind::CollectiveContribution,
+        7 => FrameKind::CollectiveResult,
         _ => return Err(JoinError::Invalid),
     };
     let key = MessageKey {
@@ -196,8 +199,7 @@ pub fn read_frame(reader: &mut impl Read) -> Result<Frame, JoinError> {
         || version != VERSION
         || bytes > MAX_MESSAGE_BYTES
         || payload_len > MAX_MESSAGE_BYTES
-        || (kind == FrameKind::Data && payload_len != bytes)
-        || (kind != FrameKind::Data && payload_len != 0)
+        || !valid_payload(kind, bytes, payload_len)
         || (kind == FrameKind::Heartbeat
             && (key.group_epoch != 0
                 || key.source_rank != 0
@@ -216,6 +218,18 @@ pub fn read_frame(reader: &mut impl Read) -> Result<Frame, JoinError> {
         bytes,
         payload,
     })
+}
+
+fn valid_payload(kind: FrameKind, bytes: u64, payload_len: u64) -> bool {
+    match kind {
+        FrameKind::Data | FrameKind::CollectiveResult => payload_len == bytes,
+        FrameKind::CollectiveContribution => bytes
+            .checked_add(16)
+            .is_some_and(|length| payload_len == length),
+        FrameKind::Offer | FrameKind::Ready | FrameKind::Ack | FrameKind::Heartbeat => {
+            payload_len == 0
+        }
+    }
 }
 
 pub fn join(
