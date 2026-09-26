@@ -16,6 +16,8 @@ extern "C" {
 #endif
 
 #define NISYROS_ABI_VERSION 1u
+#define NISYROS_DESC_INIT(type) \
+    { .header = { sizeof(type), NISYROS_ABI_VERSION, 0 } }
 
 typedef int32_t nisyros_status;
 #define NISYROS_SUCCESS 0
@@ -258,6 +260,13 @@ typedef struct {
 #define NISYROS_QUEUE_FAMILY_IGNORED UINT32_MAX
 #define NISYROS_SHARING_DEFAULT 0u
 #define NISYROS_SHARING_EXCLUSIVE 1u
+#define NISYROS_ALLOC_HEAP_EXTENSION_INIT \
+    { .base = { sizeof(nisyros_alloc_heap_extension), NISYROS_EXTENSION_ALLOC_HEAP, 0, 0, 0 }, \
+      .required_heap = UINT32_MAX, .preferred_heap = UINT32_MAX }
+#define NISYROS_BARRIER_DESC_INIT \
+    { .header = { sizeof(nisyros_barrier_desc), NISYROS_ABI_VERSION, 0 }, \
+      .src_family = NISYROS_QUEUE_FAMILY_IGNORED, \
+      .dst_family = NISYROS_QUEUE_FAMILY_IGNORED }
 
 typedef struct {
     nisyros_descriptor_header header;

@@ -120,9 +120,7 @@ int main(int argc, char **argv) {
     capacity = 16;
     assert(nisyros_cluster_devices(cluster, &capacity, ids) == NISYROS_SUCCESS);
 
-    nisyros_device_info info = {
-        .header = {sizeof(info), NISYROS_ABI_VERSION, NULL},
-    };
+    nisyros_device_info info = NISYROS_DESC_INIT(nisyros_device_info);
     assert(nisyros_cluster_device_info(cluster, ids[0], &info) == NISYROS_SUCCESS);
     nisyros_extension unknown = {sizeof(unknown), 0xfeed, NISYROS_EXTENSION_OPTIONAL, 0, NULL};
     info.header.extensions = &unknown;
@@ -273,11 +271,8 @@ int main(int argc, char **argv) {
         assert(allocation_info.mapped == 0 && allocation_info.peer_imported == 0);
         assert(allocation_info.access == (NISYROS_ACCESS_READ | NISYROS_ACCESS_WRITE));
         assert(nisyros_allocation_query(device, address + 4, &allocation_info) == NISYROS_INVALID_ARGUMENT);
-        nisyros_alloc_heap_extension heap_choice = {
-            .base = {sizeof(heap_choice), NISYROS_EXTENSION_ALLOC_HEAP, 0, 0, NULL},
-            .required_heap = allocation_info.heap_index,
-            .preferred_heap = UINT32_MAX,
-        };
+        nisyros_alloc_heap_extension heap_choice = NISYROS_ALLOC_HEAP_EXTENSION_INIT;
+        heap_choice.required_heap = allocation_info.heap_index;
         allocation.header.extensions = &heap_choice.base;
         nisyros_addr selected_heap_address = 0;
         assert(nisyros_alloc(device, &allocation, &selected_heap_address) == NISYROS_SUCCESS);
@@ -359,15 +354,13 @@ int main(int argc, char **argv) {
         assert(nisyros_cmd_reset(cmd) == NISYROS_SUCCESS);
         assert(nisyros_cmd_begin(cmd) == NISYROS_SUCCESS);
         assert(nisyros_cmd_copy(cmd, destination + 8, source + 4, 16) == NISYROS_SUCCESS);
-        nisyros_barrier_desc scoped = {
-            .header = {sizeof(scoped), NISYROS_ABI_VERSION, NULL},
-            .address = destination + 8,
-            .bytes = 16,
-            .src_stages = NISYROS_BARRIER_STAGE_TRANSFER,
-            .src_access = NISYROS_ACCESS_WRITE,
-            .dst_stages = NISYROS_BARRIER_STAGE_TRANSFER,
-            .dst_access = NISYROS_ACCESS_READ,
-        };
+        nisyros_barrier_desc scoped = NISYROS_BARRIER_DESC_INIT;
+        scoped.address = destination + 8;
+        scoped.bytes = 16;
+        scoped.src_stages = NISYROS_BARRIER_STAGE_TRANSFER;
+        scoped.src_access = NISYROS_ACCESS_WRITE;
+        scoped.dst_stages = NISYROS_BARRIER_STAGE_TRANSFER;
+        scoped.dst_access = NISYROS_ACCESS_READ;
         assert(nisyros_cmd_barrier_scoped(cmd, &scoped) == NISYROS_SUCCESS);
         assert(nisyros_cmd_copy(cmd, destination + 40, destination + 8, 16) == NISYROS_SUCCESS);
         assert(nisyros_cmd_barrier_all(cmd) == NISYROS_SUCCESS);

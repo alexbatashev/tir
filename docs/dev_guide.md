@@ -43,6 +43,8 @@ include the pinned GCC torture corpus, use `cargo xtask test --profile ci --tort
 time and requires `VK_KHR_pipeline_binary` and
 `VK_KHR_device_address_commands`. Pipeline packages are created offline;
 runtime loading does not accept SPIR-V as a fallback.
+Use `NISYROS_DESC_INIT(type)` for versioned C descriptors; the heap and barrier
+helpers set their required sentinel defaults.
 `nisyros_allocation_query` reports the realized memory type, heap, and
 properties of a live base address after allocation.
 `nisyros_cluster_memory_heaps` enumerates heaps for local and remote devices.
