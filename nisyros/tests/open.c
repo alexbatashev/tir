@@ -86,10 +86,23 @@ int main(int argc, char **argv) {
         nisyros_addr address = 0;
         assert(nisyros_alloc(device, &allocation, &address) == NISYROS_SUCCESS);
         assert(address != 0 && address % 256 == 0);
+        nisyros_allocation_info allocation_info = {
+            .header = {sizeof(allocation_info), NISYROS_ABI_VERSION, NULL},
+        };
+        assert(nisyros_allocation_query(device, address, &allocation_info) == NISYROS_SUCCESS);
+        assert(allocation_info.base == address && allocation_info.bytes == 64);
+        assert(allocation_info.backing_bytes >= allocation_info.bytes);
+        assert(allocation_info.heap_bytes >= allocation_info.backing_bytes);
+        assert((allocation_info.properties & NISYROS_MEMORY_HOST_VISIBLE) != 0);
+        assert(allocation_info.mapped == 0 && allocation_info.peer_imported == 0);
+        assert(allocation_info.access == (NISYROS_ACCESS_READ | NISYROS_ACCESS_WRITE));
+        assert(nisyros_allocation_query(device, address + 4, &allocation_info) == NISYROS_INVALID_ARGUMENT);
         assert(nisyros_device_close(device) == NISYROS_BUSY);
         void *host = NULL;
         assert(nisyros_map(device, address + 4, 4, &host) == NISYROS_SUCCESS);
         assert(host != NULL);
+        assert(nisyros_allocation_query(device, address, &allocation_info) == NISYROS_SUCCESS);
+        assert(allocation_info.mapped == 1);
         memset(host, 0xa5, 4);
         assert(nisyros_flush(device, address + 4, 4) == NISYROS_SUCCESS);
         assert(nisyros_invalidate(device, address + 4, 4) == NISYROS_SUCCESS);
@@ -102,7 +115,10 @@ int main(int argc, char **argv) {
         assert(nisyros_free(device, address + 4) == NISYROS_INVALID_ARGUMENT);
         assert(nisyros_unmap(device, (void *)(uintptr_t)1) == NISYROS_INVALID_ARGUMENT);
         assert(nisyros_unmap(device, mapped) == NISYROS_SUCCESS);
+        assert(nisyros_allocation_query(device, address, &allocation_info) == NISYROS_SUCCESS);
+        assert(allocation_info.mapped == 0);
         assert(nisyros_free(device, address) == NISYROS_SUCCESS);
+        assert(nisyros_allocation_query(device, address, &allocation_info) == NISYROS_INVALID_ARGUMENT);
 
         nisyros_addr source = 0, destination = 0;
         assert(nisyros_alloc(device, &allocation, &source) == NISYROS_SUCCESS);

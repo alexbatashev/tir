@@ -43,6 +43,8 @@ include the pinned GCC torture corpus, use `cargo xtask test --profile ci --tort
 time and requires `VK_KHR_pipeline_binary` and
 `VK_KHR_device_address_commands`. Pipeline packages are created offline;
 runtime loading does not accept SPIR-V as a fallback.
+`nisyros_allocation_query` reports the realized memory type, heap, and
+properties of a live base address after allocation.
 
 Run the package parser and Vulkan FFI layout checks with `cargo test -p nisyros`.
 The physical GPU check compiles its shader, captures a native

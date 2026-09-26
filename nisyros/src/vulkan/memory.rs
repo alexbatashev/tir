@@ -288,6 +288,18 @@ pub struct Allocation {
 }
 
 impl Allocation {
+    pub fn memory_info(&self, device: &Device) -> (u64, u64, u32, u32, u32) {
+        let memory_type = self.memory_type_index;
+        let heap = device.memory_properties.types[memory_type as usize].heap_index;
+        (
+            self.allocation_size,
+            device.memory_properties.heaps[heap as usize].size,
+            memory_type,
+            heap,
+            self.memory_properties & 7,
+        )
+    }
+
     pub fn contains(&self, address: u64, bytes: u64) -> bool {
         address >= self.base
             && address

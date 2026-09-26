@@ -202,6 +202,21 @@ pub struct AllocDesc {
 }
 
 #[repr(C)]
+pub struct AllocationInfo {
+    header: DescriptorHeader,
+    base: u64,
+    bytes: u64,
+    backing_bytes: u64,
+    heap_bytes: u64,
+    memory_type_index: u32,
+    heap_index: u32,
+    properties: u32,
+    mapped: u32,
+    peer_imported: u32,
+    access: u32,
+}
+
+#[repr(C)]
 pub struct HostAllocDesc {
     header: DescriptorHeader,
     bytes: u64,
@@ -1211,6 +1226,46 @@ pub unsafe extern "C" fn nisyros_alloc(
         },
     );
     unsafe { *out = base };
+    SUCCESS
+}
+
+/// Reports the actual memory type, heap, and properties of a live allocation.
+///
+/// # Safety
+/// `device` must be live and `out` a complete initialized output struct.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nisyros_allocation_query(
+    device: *mut Device,
+    base: u64,
+    out: *mut AllocationInfo,
+) -> i32 {
+    if device.is_null() || base == 0 || out.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    let out = unsafe { &mut *out };
+    let status = validate_header(&out.header, std::mem::size_of::<AllocationInfo>());
+    if status != SUCCESS {
+        return status;
+    }
+    let device = unsafe { &*device };
+    let Ok(allocations) = device.allocations.lock() else {
+        return DEVICE_LOST;
+    };
+    let Some(allocation) = allocations.get(&base) else {
+        return INVALID_ARGUMENT;
+    };
+    let (backing_bytes, heap_bytes, memory_type_index, heap_index, properties) =
+        allocation.backend.memory_info(&device.backend);
+    out.base = base;
+    out.bytes = allocation.backend.bytes;
+    out.backing_bytes = backing_bytes;
+    out.heap_bytes = heap_bytes;
+    out.memory_type_index = memory_type_index;
+    out.heap_index = heap_index;
+    out.properties = properties;
+    out.mapped = u32::from(allocation.backend.is_mapped());
+    out.peer_imported = u32::from(allocation.peer_source.is_some());
+    out.access = allocation.access;
     SUCCESS
 }
 

@@ -199,6 +199,20 @@ typedef struct {
 
 typedef struct {
     nisyros_descriptor_header header;
+    nisyros_addr base;
+    uint64_t bytes;
+    uint64_t backing_bytes;
+    uint64_t heap_bytes;
+    uint32_t memory_type_index;
+    uint32_t heap_index;
+    uint32_t properties;
+    uint32_t mapped;
+    uint32_t peer_imported;
+    uint32_t access;
+} nisyros_allocation_info;
+
+typedef struct {
+    nisyros_descriptor_header header;
     uint64_t bytes;
     uint64_t alignment;
     uint32_t reserved[2];
@@ -347,6 +361,9 @@ nisyros_device_close(nisyros_device device);
 NISYROS_API nisyros_status NISYROS_CALL
 nisyros_alloc(nisyros_device device, const nisyros_alloc_desc *desc,
               nisyros_addr *out);
+NISYROS_API nisyros_status NISYROS_CALL
+nisyros_allocation_query(nisyros_device device, nisyros_addr base,
+                         nisyros_allocation_info *out);
 NISYROS_API nisyros_status NISYROS_CALL
 nisyros_free(nisyros_device device, nisyros_addr base);
 NISYROS_API nisyros_status NISYROS_CALL
