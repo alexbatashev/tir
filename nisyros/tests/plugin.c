@@ -34,6 +34,8 @@ int main(int argc, char **argv) {
     assert(api.instance_open && api.instance_close && api.device_count && api.device_info);
     assert(api.queue_family_info && api.memory_heap_info && api.cooperative_matrix);
     assert(api.device_open && api.device_close);
+    assert(api.allocation_create && api.allocation_destroy && api.allocation_map);
+    assert(api.allocation_unmap && api.allocation_visibility);
     nisyros_plugin_api unsupported = api;
     assert(nisyros_plugin_get_api(999, &services, sizeof(unsupported),
                                   &unsupported) == NISYROS_UNSUPPORTED);
@@ -79,6 +81,32 @@ int main(int argc, char **argv) {
     nisyros_status opened = api.device_open(instance, 0, 1, &request, &device);
     if (info.strict_profile_supported) {
         assert(opened == NISYROS_SUCCESS && device != NULL);
+        uint32_t family_index = family;
+        nisyros_plugin_alloc_request allocation_request = {
+            .bytes = 64,
+            .alignment = 64,
+            .required_properties = NISYROS_MEMORY_HOST_VISIBLE,
+            .preferred_properties = NISYROS_MEMORY_HOST_COHERENT,
+            .required_heap = UINT32_MAX,
+            .preferred_heap = UINT32_MAX,
+            .queue_family_count = 1,
+            .queue_families = &family_index,
+        };
+        nisyros_plugin_allocation_info allocation_info = {0};
+        void *allocation = NULL;
+        assert(api.allocation_create(device, &allocation_request, &allocation,
+                                     &allocation_info) == NISYROS_SUCCESS);
+        assert(allocation != NULL && allocation_info.base != 0 && allocation_info.bytes == 64);
+        assert(allocation_info.properties & NISYROS_MEMORY_HOST_VISIBLE);
+        void *host = NULL;
+        assert(api.allocation_map(device, allocation, allocation_info.base,
+                                  &host) == NISYROS_SUCCESS);
+        assert(host != NULL);
+        memset(host, 0x5a, 64);
+        assert(api.allocation_visibility(device, allocation, 1) == NISYROS_SUCCESS);
+        assert(api.allocation_visibility(device, allocation, 0) == NISYROS_SUCCESS);
+        api.allocation_unmap(device, allocation);
+        api.allocation_destroy(device, allocation);
         api.device_close(device);
     } else {
         assert(opened == NISYROS_UNSUPPORTED && device == NULL);

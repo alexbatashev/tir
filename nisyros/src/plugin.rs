@@ -64,6 +64,31 @@ struct PluginQueueRequest {
     priority: f32,
 }
 
+#[repr(C)]
+struct PluginAllocRequest {
+    bytes: u64,
+    alignment: u64,
+    required_properties: u32,
+    preferred_properties: u32,
+    required_heap: u32,
+    preferred_heap: u32,
+    exclusive: u32,
+    queue_family_count: u32,
+    queue_families: *const u32,
+}
+
+#[repr(C)]
+struct PluginAllocationInfo {
+    base: u64,
+    bytes: u64,
+    backing_bytes: u64,
+    heap_bytes: u64,
+    memory_type_index: u32,
+    heap_index: u32,
+    properties: u32,
+    exclusive: u32,
+}
+
 type InstanceOpen = unsafe extern "C" fn(*const PluginServices, *mut *mut c_void) -> i32;
 type InstanceClose = unsafe extern "C" fn(*mut c_void);
 type DeviceCount = unsafe extern "C" fn(*mut c_void, *mut u32) -> i32;
@@ -76,6 +101,16 @@ type MatrixQuery = unsafe extern "C" fn(*mut c_void, u32, u32, *mut CooperativeM
 type DeviceOpen =
     unsafe extern "C" fn(*mut c_void, u32, u32, *const PluginQueueRequest, *mut *mut c_void) -> i32;
 type DeviceClose = unsafe extern "C" fn(*mut c_void);
+type AllocationCreate = unsafe extern "C" fn(
+    *mut c_void,
+    *const PluginAllocRequest,
+    *mut *mut c_void,
+    *mut PluginAllocationInfo,
+) -> i32;
+type AllocationDestroy = unsafe extern "C" fn(*mut c_void, *mut c_void);
+type AllocationMap = unsafe extern "C" fn(*mut c_void, *mut c_void, u64, *mut *mut c_void) -> i32;
+type AllocationUnmap = unsafe extern "C" fn(*mut c_void, *mut c_void);
+type AllocationVisibility = unsafe extern "C" fn(*mut c_void, *mut c_void, u32) -> i32;
 
 #[repr(C)]
 struct PluginApi {
@@ -90,6 +125,11 @@ struct PluginApi {
     cooperative_matrix: Option<MatrixQuery>,
     device_open: Option<DeviceOpen>,
     device_close: Option<DeviceClose>,
+    allocation_create: Option<AllocationCreate>,
+    allocation_destroy: Option<AllocationDestroy>,
+    allocation_map: Option<AllocationMap>,
+    allocation_unmap: Option<AllocationUnmap>,
+    allocation_visibility: Option<AllocationVisibility>,
 }
 
 struct VulkanInstance {
@@ -167,6 +207,11 @@ pub unsafe extern "C" fn nisyros_plugin_get_api(
         api.cooperative_matrix = Some(cooperative_matrix);
         api.device_open = Some(device_open);
         api.device_close = Some(device_close);
+        api.allocation_create = Some(allocation_create);
+        api.allocation_destroy = Some(allocation_destroy);
+        api.allocation_map = Some(allocation_map);
+        api.allocation_unmap = Some(allocation_unmap);
+        api.allocation_visibility = Some(allocation_visibility);
     }
     SUCCESS
 }
@@ -381,5 +426,130 @@ unsafe extern "C" fn device_open(
 unsafe extern "C" fn device_close(device: *mut c_void) {
     if !device.is_null() {
         unsafe { drop(Box::from_raw(device.cast::<vulkan::Device>())) };
+    }
+}
+
+unsafe extern "C" fn allocation_create(
+    device: *mut c_void,
+    request: *const PluginAllocRequest,
+    out: *mut *mut c_void,
+    info: *mut PluginAllocationInfo,
+) -> i32 {
+    if device.is_null() || request.is_null() || out.is_null() || info.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    unsafe { *out = ptr::null_mut() };
+    let device = unsafe { &*device.cast::<vulkan::Device>() };
+    let request = unsafe { &*request };
+    if request.bytes == 0
+        || !request.alignment.is_power_of_two()
+        || request.exclusive > 1
+        || request.queue_family_count == 0
+        || request.queue_family_count > 32
+        || request.queue_families.is_null()
+        || (request.required_properties | request.preferred_properties) & !7 != 0
+    {
+        return INVALID_ARGUMENT;
+    }
+    let families = unsafe {
+        std::slice::from_raw_parts(request.queue_families, request.queue_family_count as usize)
+    };
+    if families
+        .iter()
+        .any(|family| !device.queues.iter().any(|queue| queue.family == *family))
+    {
+        return INVALID_ARGUMENT;
+    }
+    let required_heap = (request.required_heap != u32::MAX).then_some(request.required_heap);
+    let preferred_heap = (request.preferred_heap != u32::MAX).then_some(request.preferred_heap);
+    if required_heap.is_some_and(|heap| heap >= device.memory_heap_count())
+        || preferred_heap.is_some_and(|heap| heap >= device.memory_heap_count())
+    {
+        return UNSUPPORTED;
+    }
+    let backend_request = vulkan::AllocRequest {
+        bytes: request.bytes,
+        alignment: request.alignment,
+        required_properties: request.required_properties,
+        preferred_properties: request.preferred_properties,
+        queue_families: families,
+        required_heap,
+        preferred_heap,
+        exclusive: request.exclusive != 0,
+    };
+    let allocation = match device.allocate(&backend_request) {
+        Ok(allocation) => allocation,
+        Err(error) => return allocation_status(error),
+    };
+    let (backing_bytes, heap_bytes, memory_type_index, heap_index, properties) =
+        allocation.memory_info(device);
+    unsafe {
+        *info = PluginAllocationInfo {
+            base: allocation.base,
+            bytes: allocation.bytes,
+            backing_bytes,
+            heap_bytes,
+            memory_type_index,
+            heap_index,
+            properties,
+            exclusive: u32::from(allocation.exclusive()),
+        };
+        *out = Box::into_raw(Box::new(allocation)).cast();
+    }
+    SUCCESS
+}
+
+unsafe extern "C" fn allocation_destroy(device: *mut c_void, allocation: *mut c_void) {
+    if device.is_null() || allocation.is_null() {
+        return;
+    }
+    let device = unsafe { &*device.cast::<vulkan::Device>() };
+    let allocation = unsafe { *Box::from_raw(allocation.cast::<vulkan::Allocation>()) };
+    device.free_allocation(allocation);
+}
+
+unsafe extern "C" fn allocation_map(
+    device: *mut c_void,
+    allocation: *mut c_void,
+    address: u64,
+    out: *mut *mut c_void,
+) -> i32 {
+    if device.is_null() || allocation.is_null() || out.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    unsafe { *out = ptr::null_mut() };
+    let device = unsafe { &*device.cast::<vulkan::Device>() };
+    let allocation = unsafe { &mut *allocation.cast::<vulkan::Allocation>() };
+    match device.map_allocation(allocation, address) {
+        Ok(host) => {
+            unsafe { *out = host };
+            SUCCESS
+        }
+        Err(error) => allocation_status(error),
+    }
+}
+
+unsafe extern "C" fn allocation_unmap(device: *mut c_void, allocation: *mut c_void) {
+    if device.is_null() || allocation.is_null() {
+        return;
+    }
+    let device = unsafe { &*device.cast::<vulkan::Device>() };
+    let allocation = unsafe { &mut *allocation.cast::<vulkan::Allocation>() };
+    device.unmap_allocation(allocation);
+}
+
+unsafe extern "C" fn allocation_visibility(
+    device: *mut c_void,
+    allocation: *mut c_void,
+    flush: u32,
+) -> i32 {
+    if device.is_null() || allocation.is_null() || flush > 1 {
+        return INVALID_ARGUMENT;
+    }
+    let device = unsafe { &*device.cast::<vulkan::Device>() };
+    let allocation = unsafe { &*allocation.cast::<vulkan::Allocation>() };
+    match device.visibility(allocation, flush != 0) {
+        Ok(()) => SUCCESS,
+        Err(error) => allocation_status(error),
     }
 }

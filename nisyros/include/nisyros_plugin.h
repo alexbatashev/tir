@@ -67,6 +67,29 @@ typedef struct {
 } nisyros_plugin_queue_request;
 
 typedef struct {
+    uint64_t bytes;
+    uint64_t alignment;
+    uint32_t required_properties;
+    uint32_t preferred_properties;
+    uint32_t required_heap;
+    uint32_t preferred_heap;
+    uint32_t exclusive;
+    uint32_t queue_family_count;
+    const uint32_t *queue_families;
+} nisyros_plugin_alloc_request;
+
+typedef struct {
+    uint64_t base;
+    uint64_t bytes;
+    uint64_t backing_bytes;
+    uint64_t heap_bytes;
+    uint32_t memory_type_index;
+    uint32_t heap_index;
+    uint32_t properties;
+    uint32_t exclusive;
+} nisyros_plugin_allocation_info;
+
+typedef struct {
     uint32_t struct_size;
     uint32_t abi_version;
     nisyros_status (NISYROS_CALL *instance_open)(
@@ -88,6 +111,15 @@ typedef struct {
         void *instance, uint32_t index, uint32_t request_count,
         const nisyros_plugin_queue_request *requests, void **out);
     void (NISYROS_CALL *device_close)(void *device);
+    nisyros_status (NISYROS_CALL *allocation_create)(
+        void *device, const nisyros_plugin_alloc_request *request,
+        void **out, nisyros_plugin_allocation_info *info);
+    void (NISYROS_CALL *allocation_destroy)(void *device, void *allocation);
+    nisyros_status (NISYROS_CALL *allocation_map)(
+        void *device, void *allocation, uint64_t address, void **out);
+    void (NISYROS_CALL *allocation_unmap)(void *device, void *allocation);
+    nisyros_status (NISYROS_CALL *allocation_visibility)(
+        void *device, void *allocation, uint32_t flush);
 } nisyros_plugin_api;
 
 /* All handles and callback storage belong to the provider that returned them. */
