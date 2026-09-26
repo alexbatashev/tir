@@ -100,6 +100,8 @@ python3 nisyros/tests/run-communication.py /usr/share/vulkan/icd.d/radeon_icd.js
 python3 nisyros/tests/run-communication.py /usr/share/vulkan/icd.d/radeon_icd.json --mismatch
 python3 nisyros/tests/run-communication.py /usr/share/vulkan/icd.d/radeon_icd.json --collective-mismatch
 python3 nisyros/tests/run-communication.py /usr/share/vulkan/icd.d/radeon_icd.json --collective-timeout
+python3 nisyros/tests/run-three-node.py /usr/share/vulkan/icd.d/radeon_icd.json
+python3 nisyros/tests/run-three-node.py /usr/share/vulkan/icd.d/radeon_icd.json --nonparticipant
 ```
 
 The first script requires `glslangValidator`, `spirv-val`, the Vulkan validation
@@ -122,6 +124,13 @@ sequence-bound replay, and error propagation for peer loss and byte-count
 disagreement. It also checks three-rank unsigned and signed 32-bit reductions,
 five sequence-bound collective replays, metadata mismatch, and unmatched
 collective timeout.
+The three-node script checks direct node-one/node-two traffic, reduction
+across all three nodes, and a group that omits node zero. The bootstrap accepts
+2 to 16 fixed-membership nodes. Node zero distributes the inventory; each
+lower-indexed node except the final one needs a listening address for direct
+peer connections. Nodes without group members do not open an endpoint.
+The collective root completes only after remote ranks acknowledge that their
+results are visible.
 Pass `simulator` in place of the ICD path to run the same communication cases
 against `nisyros/tests/vulkan_simulator.c`. CI also packages the checked-in
 `add_one.spv` fixture and runs the C kernel test through strict binary loading.
