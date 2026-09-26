@@ -113,6 +113,7 @@ type AllocationUnmap = unsafe extern "C" fn(*mut c_void, *mut c_void);
 type AllocationVisibility = unsafe extern "C" fn(*mut c_void, *mut c_void, u32) -> i32;
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct PluginApi {
     struct_size: u32,
     abi_version: u32,
@@ -135,6 +136,37 @@ struct PluginApi {
 struct VulkanInstance {
     instance: vulkan::Instance,
     devices: Vec<vulkan::DeviceRecord>,
+}
+
+#[derive(Clone, Copy)]
+pub struct QueueFamilyProperties {
+    pub flags: u32,
+    pub count: u32,
+    pub timestamp_valid_bits: u32,
+}
+
+pub struct DeviceRecord {
+    pub index: u32,
+    pub backend: u32,
+    pub api_version: u32,
+    pub vendor_id: u32,
+    pub device_id: u32,
+    pub device_type: u32,
+    pub driver_id: u32,
+    pub strict_profile_supported: bool,
+    pub name: [c_char; 256],
+    pub device_uuid: [u8; 16],
+    pub driver_uuid: [u8; 16],
+    pub driver_name: [c_char; 256],
+    pub queue_families: Vec<QueueFamilyProperties>,
+    pub memory_heaps: Vec<(u64, u32)>,
+    pub features: u64,
+    pub cooperative_matrix_revision: u32,
+    pub shader_bfloat16_revision: u32,
+    pub shader_enqueue_revision: u32,
+    pub cooperative_matrix_stages: u32,
+    pub cooperative_matrices: Vec<CooperativeMatrixTuple>,
+    pub timestamp_period_ns: f32,
 }
 
 fn valid_services(services: *const PluginServices) -> bool {
@@ -551,5 +583,253 @@ unsafe extern "C" fn allocation_visibility(
     match device.visibility(allocation, flush != 0) {
         Ok(()) => SUCCESS,
         Err(error) => allocation_status(error),
+    }
+}
+
+unsafe extern "C" fn core_report_error(
+    _context: *mut c_void,
+    status: i32,
+    backend_code: i32,
+    _message: *const c_char,
+    _message_bytes: u32,
+) {
+    set_backend_diagnostic(status, backend_code, "Execution provider failed");
+}
+
+/// Core-owned handle to the linked provider's inventory session.
+pub struct Instance {
+    api: PluginApi,
+    handle: *mut c_void,
+}
+
+impl Instance {
+    pub fn open() -> Result<Self, ()> {
+        let services = PluginServices {
+            struct_size: std::mem::size_of::<PluginServices>() as u32,
+            abi_version: SERVICES_ABI_VERSION,
+            context: ptr::null_mut(),
+            report_error: Some(core_report_error),
+        };
+        let mut api: PluginApi = unsafe { std::mem::zeroed() };
+        let status = unsafe {
+            nisyros_plugin_get_api(
+                PLUGIN_ABI_VERSION,
+                &services,
+                std::mem::size_of::<PluginApi>() as u32,
+                (&raw mut api).cast(),
+            )
+        };
+        if status != SUCCESS
+            || api.instance_open.is_none()
+            || api.instance_close.is_none()
+            || api.device_count.is_none()
+            || api.device_info.is_none()
+            || api.queue_family_info.is_none()
+            || api.memory_heap_info.is_none()
+            || api.cooperative_matrix.is_none()
+            || api.device_open.is_none()
+            || api.device_close.is_none()
+        {
+            return Err(());
+        }
+        let mut handle = ptr::null_mut();
+        if unsafe { api.instance_open.expect("checked provider callback")(&services, &mut handle) }
+            != SUCCESS
+            || handle.is_null()
+        {
+            return Err(());
+        }
+        Ok(Self { api, handle })
+    }
+
+    pub fn devices(&self) -> Result<Vec<DeviceRecord>, ()> {
+        let mut count = 0;
+        if unsafe {
+            self.api.device_count.expect("checked provider callback")(self.handle, &mut count)
+        } != SUCCESS
+            || count > 32
+        {
+            return Err(());
+        }
+        let mut devices = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let mut info: PluginDeviceInfo = unsafe { std::mem::zeroed() };
+            info.struct_size = std::mem::size_of::<PluginDeviceInfo>() as u32;
+            info.abi_version = PLUGIN_ABI_VERSION;
+            if unsafe {
+                self.api.device_info.expect("checked provider callback")(
+                    self.handle,
+                    index,
+                    &mut info,
+                )
+            } != SUCCESS
+                || info.backend != BACKEND_VULKAN
+                || info.strict_profile_supported > 1
+                || info.peer_memory_fd > 1
+                || info.peer_timeline_fd > 1
+                || info.queue_family_count > 32
+                || info.memory_heap_count > 16
+                || info.cooperative_matrix_count > 256
+                || !info.name.contains(&0)
+                || !info.driver_name.contains(&0)
+            {
+                return Err(());
+            }
+            let mut queue_families = Vec::with_capacity(info.queue_family_count as usize);
+            for family in 0..info.queue_family_count {
+                let mut queue: PluginQueueFamilyInfo = unsafe { std::mem::zeroed() };
+                if unsafe {
+                    self.api
+                        .queue_family_info
+                        .expect("checked provider callback")(
+                        self.handle, index, family, &mut queue
+                    )
+                } != SUCCESS
+                    || queue.count == 0
+                    || (queue.timestamp_valid_bits != 0
+                        && !(36..=64).contains(&queue.timestamp_valid_bits))
+                {
+                    return Err(());
+                }
+                queue_families.push(QueueFamilyProperties {
+                    flags: queue.flags,
+                    count: queue.count,
+                    timestamp_valid_bits: queue.timestamp_valid_bits,
+                });
+            }
+            let mut memory_heaps = Vec::with_capacity(info.memory_heap_count as usize);
+            for heap in 0..info.memory_heap_count {
+                let mut value: PluginMemoryHeapInfo = unsafe { std::mem::zeroed() };
+                if unsafe {
+                    self.api
+                        .memory_heap_info
+                        .expect("checked provider callback")(
+                        self.handle, index, heap, &mut value
+                    )
+                } != SUCCESS
+                    || value.bytes == 0
+                    || value.reserved != 0
+                {
+                    return Err(());
+                }
+                memory_heaps.push((value.bytes, value.flags));
+            }
+            let mut cooperative_matrices =
+                Vec::with_capacity(info.cooperative_matrix_count as usize);
+            for tuple in 0..info.cooperative_matrix_count {
+                let mut value: CooperativeMatrixTuple = unsafe { std::mem::zeroed() };
+                if unsafe {
+                    self.api
+                        .cooperative_matrix
+                        .expect("checked provider callback")(
+                        self.handle, index, tuple, &mut value
+                    )
+                } != SUCCESS
+                    || value.m == 0
+                    || value.n == 0
+                    || value.k == 0
+                    || value.saturating_accumulation > 1
+                {
+                    return Err(());
+                }
+                cooperative_matrices.push(value);
+            }
+            devices.push(DeviceRecord {
+                index,
+                backend: info.backend,
+                api_version: info.api_version,
+                vendor_id: info.vendor_id,
+                device_id: info.device_id,
+                device_type: info.device_type,
+                driver_id: info.driver_id,
+                strict_profile_supported: info.strict_profile_supported != 0,
+                name: info.name,
+                device_uuid: info.device_uuid,
+                driver_uuid: info.driver_uuid,
+                driver_name: info.driver_name,
+                queue_families,
+                memory_heaps,
+                features: info.features,
+                cooperative_matrix_revision: info.cooperative_matrix_revision,
+                shader_bfloat16_revision: info.shader_bfloat16_revision,
+                shader_enqueue_revision: info.shader_enqueue_revision,
+                cooperative_matrix_stages: info.cooperative_matrix_stages,
+                cooperative_matrices,
+                timestamp_period_ns: info.timestamp_period_ns,
+            });
+        }
+        Ok(devices)
+    }
+
+    pub fn native_handle(&self) -> *mut c_void {
+        unsafe { &*self.handle.cast::<VulkanInstance>() }
+            .instance
+            .native_handle()
+    }
+
+    pub fn native_physical_handle(&self, index: usize) -> Option<*mut c_void> {
+        unsafe { &*self.handle.cast::<VulkanInstance>() }
+            .devices
+            .get(index)
+            .map(|record| record.physical)
+    }
+
+    pub fn open_device(
+        &self,
+        record: &DeviceRecord,
+        requests: &[vulkan::QueueRequest],
+    ) -> Result<Device, ()> {
+        let converted: Vec<_> = requests
+            .iter()
+            .map(|request| PluginQueueRequest {
+                family: request.family,
+                count: request.count,
+                priority: request.priority,
+            })
+            .collect();
+        let mut handle = ptr::null_mut();
+        let status = unsafe {
+            self.api.device_open.expect("checked provider callback")(
+                self.handle,
+                record.index,
+                converted.len() as u32,
+                converted.as_ptr(),
+                &mut handle,
+            )
+        };
+        if status != SUCCESS || handle.is_null() {
+            return Err(());
+        }
+        Ok(Device {
+            api: self.api,
+            handle,
+        })
+    }
+}
+
+impl Drop for Instance {
+    fn drop(&mut self) {
+        unsafe { self.api.instance_close.expect("checked provider callback")(self.handle) };
+    }
+}
+
+/// Opaque provider device. Unmigrated operations still use the linked Vulkan
+/// implementation through this wrapper until the execution table covers them.
+pub struct Device {
+    api: PluginApi,
+    handle: *mut c_void,
+}
+
+impl std::ops::Deref for Device {
+    type Target = vulkan::Device;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.handle.cast::<vulkan::Device>() }
+    }
+}
+
+impl Drop for Device {
+    fn drop(&mut self) {
+        unsafe { self.api.device_close.expect("checked provider callback")(self.handle) };
     }
 }

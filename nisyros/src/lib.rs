@@ -337,8 +337,8 @@ pub struct PeerInfo {
 }
 
 pub struct Cluster {
-    instance: vulkan::Instance,
-    devices: Vec<vulkan::DeviceRecord>,
+    instance: plugin::Instance,
+    devices: Vec<plugin::DeviceRecord>,
     inventory: Vec<InventoryEntry>,
     network: Mutex<Option<transport::Connection>>,
     distributed: bool,
@@ -378,7 +378,7 @@ pub struct Device {
     device_uuid: [u8; 16],
     driver_uuid: [u8; 16],
     inventory_index: u32,
-    backend: vulkan::Device,
+    backend: plugin::Device,
 }
 
 pub struct Executable {
@@ -625,9 +625,9 @@ pub struct Command {
     inner: Mutex<CommandState>,
 }
 
-fn announce_device(record: &vulkan::DeviceRecord) -> transport::DeviceAnnouncement {
+fn announce_device(record: &plugin::DeviceRecord) -> transport::DeviceAnnouncement {
     transport::DeviceAnnouncement {
-        backend: BACKEND_VULKAN,
+        backend: record.backend,
         api_version: record.api_version,
         vendor_id: record.vendor_id,
         device_id: record.device_id,
@@ -673,7 +673,7 @@ pub unsafe extern "C" fn nisyros_cluster_open_local(out: *mut *mut Cluster) -> i
     }
     // SAFETY: The caller supplied writable output storage.
     unsafe { *out = ptr::null_mut() };
-    let Ok(instance) = vulkan::Instance::open() else {
+    let Ok(instance) = plugin::Instance::open() else {
         return NO_DEVICE;
     };
     let Ok(devices) = instance.devices() else {
@@ -746,7 +746,7 @@ pub unsafe extern "C" fn nisyros_cluster_join(
     let Ok(address) = address.parse::<SocketAddr>() else {
         return INVALID_ARGUMENT;
     };
-    let Ok(instance) = vulkan::Instance::open() else {
+    let Ok(instance) = plugin::Instance::open() else {
         return NO_DEVICE;
     };
     let Ok(devices) = instance.devices() else {

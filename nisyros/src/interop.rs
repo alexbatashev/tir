@@ -165,7 +165,10 @@ unsafe extern "C" fn nisyros_vulkan_device_query(
         return DEVICE_LOST;
     };
     out.instance = cluster.instance.native_handle();
-    out.physical_device = cluster.devices[local_index].physical;
+    let Some(physical) = cluster.instance.native_physical_handle(local_index) else {
+        return DEVICE_LOST;
+    };
+    out.physical_device = physical;
     out.device = device.backend.native_handle();
     SUCCESS
 }

@@ -60,9 +60,9 @@ not submit externally to a Nisyros-owned queue concurrently. These tables do
 not load replaceable backend plugins.
 `nisyros_plugin.h` defines a separate provider ABI. The linked Vulkan provider
 currently implements sized negotiation, device inventory, and device opening
-and allocation lifecycle through opaque handles. Core execution still calls
-Vulkan directly, so this is
-not yet a replaceable execution backend.
+and allocation lifecycle through opaque handles. Core discovery and device
+opening use that table. Command recording, submission, and event operations
+still call Vulkan directly, so this is not yet a replaceable execution backend.
 `nisyros_diagnostic_get` copies the calling thread's last recorded backend
 failure into caller storage, including the Vulkan result code when one was
 returned. Read it on the thread that received the failed status.

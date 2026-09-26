@@ -403,6 +403,7 @@ impl VulkanCooperativeMatrixTuple {
     }
 }
 
+#[derive(Clone)]
 pub struct DeviceRecord {
     pub physical: VkPhysicalDevice,
     pub api_version: u32,
