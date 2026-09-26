@@ -43,7 +43,7 @@ static void open_rank(nisyros_cluster cluster, nisyros_group group, uint32_t ran
     assert(nisyros_queue_get(local->device, family, 0, &local->queue) == NISYROS_SUCCESS);
     nisyros_alloc_desc allocation = {
         .header = {sizeof(allocation), NISYROS_ABI_VERSION, NULL},
-        .bytes = rank == 2 ? 128 : 64,
+        .bytes = rank == 0 ? 64 : 128,
         .alignment = 64,
         .required_properties = NISYROS_MEMORY_HOST_VISIBLE,
         .preferred_properties = NISYROS_MEMORY_HOST_COHERENT,
@@ -152,6 +152,8 @@ int main(int argc, char **argv) {
             assert(nisyros_comm_cmd_send(cmd, 0, 2, 7, 1, local[0].address, 64) == NISYROS_SUCCESS);
             if (!peer_loss && !mismatch) {
                 assert(nisyros_comm_cmd_send(cmd, 1, 2, 7, 1, local[1].address, 64) == NISYROS_SUCCESS);
+                assert(nisyros_comm_cmd_send(cmd, 0, 1, 8, 1, local[0].address, 64) == NISYROS_SUCCESS);
+                assert(nisyros_comm_cmd_recv(cmd, 1, 0, 8, 1, local[1].address + 64, 64) == NISYROS_SUCCESS);
             }
         }
     } else {
@@ -240,6 +242,10 @@ int main(int argc, char **argv) {
         nisyros_point dependent_done = {0};
         assert(nisyros_submit(local[0].queue, dependent, NULL, &dependent_done) == NISYROS_SUCCESS);
         assert(nisyros_wait(dependent_done, NISYROS_TIMEOUT_INFINITE) == NISYROS_SUCCESS);
+    }
+    if (node == 0) {
+        assert(nisyros_invalidate(local[1].device, local[1].address + 64, 64) == NISYROS_SUCCESS);
+        for (int byte = 64; byte < 128; ++byte) assert(((unsigned char *)local[1].host)[byte] == 0x31);
     }
     if (node == 1) {
         assert(nisyros_invalidate(local[0].device, local[0].address, 128) == NISYROS_SUCCESS);

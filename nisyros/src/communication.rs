@@ -116,8 +116,7 @@ enum ProgressMessage {
 
 struct EndpointState {
     next_value: u64,
-    used_keys: BTreeSet<MessageKey>,
-    active_keys: BTreeSet<MessageKey>,
+    used_keys: BTreeMap<MessageKey, (u8, u64)>,
 }
 
 struct Shared {
@@ -189,8 +188,7 @@ pub unsafe extern "C" fn nisyros_endpoint_open(
     if status != SUCCESS {
         return status;
     }
-    if !cluster.distributed
-        || desc.allow_host_staging != 1
+    if desc.allow_host_staging != 1
         || desc.reserved != 0
         || desc.binding_count == 0
         || desc.binding_count > 64
@@ -277,10 +275,11 @@ pub unsafe extern "C" fn nisyros_endpoint_open(
         unsafe { nisyros_event_destroy(completion) };
         return PEER_LOST;
     };
-    let Some(network_connection) = connection.take() else {
+    let network_connection = connection.take();
+    if cluster.distributed && network_connection.is_none() {
         unsafe { nisyros_event_destroy(completion) };
         return BUSY;
-    };
+    }
     drop(connection);
     let (sender, receiver) = mpsc::channel();
     let shared = Arc::new(Shared {
@@ -289,8 +288,7 @@ pub unsafe extern "C" fn nisyros_endpoint_open(
         pending: AtomicUsize::new(0),
         state: Mutex::new(EndpointState {
             next_value: 0,
-            used_keys: BTreeSet::new(),
-            active_keys: BTreeSet::new(),
+            used_keys: BTreeMap::new(),
         }),
     });
     let worker_shared = Arc::clone(&shared);
@@ -301,7 +299,7 @@ pub unsafe extern "C" fn nisyros_endpoint_open(
         rank_count: group_ref.members.len() as u32,
         timeout: Duration::from_nanos(desc.failure_timeout_ns),
     };
-    let connection_cell = Arc::new(Mutex::new(Some(network_connection)));
+    let connection_cell = Arc::new(Mutex::new(network_connection));
     let worker_cell = Arc::clone(&connection_cell);
     let panic_shared = Arc::clone(&shared);
     let worker = match thread::Builder::new()
@@ -310,11 +308,10 @@ pub unsafe extern "C" fn nisyros_endpoint_open(
             let connection = worker_cell
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take()
-                .expect("reserved connection");
+                .take();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 progress_loop(
-                    connection.into_stream(),
+                    connection.map(|connection| connection.into_stream()),
                     receiver,
                     worker_sender,
                     worker_shared,
@@ -381,7 +378,13 @@ pub unsafe extern "C" fn nisyros_endpoint_query(
         return status;
     }
     out.software_progress = 1;
-    out.worker_threads = 2;
+    let endpoint = unsafe { &*endpoint };
+    let group = unsafe { &*endpoint.group };
+    out.worker_threads = if unsafe { &*group.cluster }.distributed {
+        2
+    } else {
+        1
+    };
     out.uses_host_staging = 1;
     out.pending_limit = MAX_PENDING_MESSAGES as u32;
     SUCCESS
@@ -529,8 +532,6 @@ fn record_transfer(cmd: *mut CommCommand, kind: TransferKind, request: TransferR
     }
     let cmd_ref = unsafe { &*cmd };
     let endpoint = unsafe { &*cmd_ref.endpoint };
-    let group = unsafe { &*endpoint.group };
-    let cluster = unsafe { &*group.cluster };
     let Some(binding) = endpoint
         .bindings
         .iter()
@@ -538,14 +539,8 @@ fn record_transfer(cmd: *mut CommCommand, kind: TransferKind, request: TransferR
     else {
         return INVALID_ARGUMENT;
     };
-    let Some(peer) = group.members.get(peer_rank as usize) else {
+    if (peer_rank as usize) >= unsafe { &*endpoint.group }.members.len() {
         return INVALID_ARGUMENT;
-    };
-    let local_node =
-        cluster.inventory[group.members[local_rank as usize].index as usize].node_index;
-    let peer_node = cluster.inventory[peer.index as usize].node_index;
-    if local_node == peer_node {
-        return UNSUPPORTED;
     }
     let Ok(mut state) = cmd_ref.state.lock() else {
         return PEER_LOST;
@@ -917,21 +912,36 @@ pub unsafe extern "C" fn nisyros_endpoint_submit(
     let Ok(mut state) = endpoint_ref.shared.state.lock() else {
         return PEER_LOST;
     };
-    let mut keys = BTreeSet::new();
+    let mut keys = BTreeMap::new();
     for operation in &operations {
-        if !keys.insert(operation.key)
-            || state.used_keys.contains(&operation.key)
-            || state.active_keys.contains(&operation.key)
-        {
+        let local_pair = endpoint_ref
+            .bindings
+            .iter()
+            .any(|binding| binding.rank == operation.key.source_rank)
+            && endpoint_ref
+                .bindings
+                .iter()
+                .any(|binding| binding.rank == operation.key.destination_rank);
+        let prior = keys
+            .get(&operation.key)
+            .copied()
+            .or_else(|| state.used_keys.get(&operation.key).copied())
+            .unwrap_or((0, operation.bytes));
+        let bit = if operation.kind == TransferKind::Send {
+            1
+        } else {
+            2
+        };
+        if prior.0 & bit != 0 || prior.1 != operation.bytes || (!local_pair && prior.0 != 0) {
             return INVALID_ARGUMENT;
         }
+        keys.insert(operation.key, (prior.0 | bit, operation.bytes));
     }
     let Some(value) = state.next_value.checked_add(1) else {
         return INVALID_ARGUMENT;
     };
     state.next_value = value;
-    state.used_keys.extend(&keys);
-    state.active_keys.extend(keys);
+    state.used_keys.extend(keys);
     endpoint_ref.shared.pending.fetch_add(1, Ordering::Release);
     let point = Point {
         event: endpoint_ref.shared.completion as *mut Event,
@@ -1016,24 +1026,33 @@ impl ProgressState {
         Ok(true)
     }
 
-    fn enqueue(&mut self, task: Task, writer: &mut TcpStream) -> Result<(), i32> {
+    fn enqueue(
+        &mut self,
+        task: Task,
+        writer: Option<&mut TcpStream>,
+        shared: &Shared,
+    ) -> Result<(), i32> {
         if self.deferred.len() + self.remaining.len() >= MAX_PENDING_MESSAGES {
             return Err(BUSY);
         }
         if Self::prerequisites_ready(&task)? {
-            self.submit(task, writer)
+            self.submit(task, writer, shared)
         } else {
             self.deferred.push(task);
             Ok(())
         }
     }
 
-    fn poll_deferred(&mut self, writer: &mut TcpStream) -> Result<(), i32> {
+    fn poll_deferred(
+        &mut self,
+        mut writer: Option<&mut TcpStream>,
+        shared: &Shared,
+    ) -> Result<(), i32> {
         let mut index = 0;
         while index < self.deferred.len() {
             if Self::prerequisites_ready(&self.deferred[index])? {
                 let task = self.deferred.remove(index);
-                self.submit(task, writer)?;
+                self.submit(task, writer.as_deref_mut(), shared)?;
             } else {
                 index += 1;
             }
@@ -1041,7 +1060,12 @@ impl ProgressState {
         Ok(())
     }
 
-    fn submit(&mut self, task: Task, writer: &mut TcpStream) -> Result<(), i32> {
+    fn submit(
+        &mut self,
+        task: Task,
+        mut writer: Option<&mut TcpStream>,
+        shared: &Shared,
+    ) -> Result<(), i32> {
         if self.remaining.len() >= MAX_PENDING_MESSAGES {
             return Err(BUSY);
         }
@@ -1053,12 +1077,18 @@ impl ProgressState {
                 submission: task.value,
                 ready: false,
             };
+            let local_pair = self.local_ranks.contains(&key.source_rank)
+                && self.local_ranks.contains(&key.destination_rank);
             if operation.kind == TransferKind::Send {
                 if self.sends.insert(key, pending).is_some() {
                     return Err(PEER_LOST);
                 }
+                if local_pair {
+                    self.complete_local(key, shared)?;
+                    continue;
+                }
                 transport::write_frame(
-                    writer,
+                    writer.as_deref_mut().ok_or(PEER_LOST)?,
                     &Frame {
                         kind: FrameKind::Offer,
                         key,
@@ -1071,13 +1101,17 @@ impl ProgressState {
                 if self.recvs.insert(key, pending).is_some() {
                     return Err(PEER_LOST);
                 }
+                if local_pair {
+                    self.complete_local(key, shared)?;
+                    continue;
+                }
                 if let Some(offered_bytes) = self.offers.remove(&key) {
                     if offered_bytes != operation.bytes {
                         return Err(PEER_LOST);
                     }
                     self.recvs.get_mut(&key).expect("inserted receive").ready = true;
                     transport::write_frame(
-                        writer,
+                        writer.as_deref_mut().ok_or(PEER_LOST)?,
                         &Frame {
                             kind: FrameKind::Ready,
                             key,
@@ -1090,6 +1124,21 @@ impl ProgressState {
             }
         }
         Ok(())
+    }
+
+    fn complete_local(&mut self, key: MessageKey, shared: &Shared) -> Result<(), i32> {
+        let (Some(send), Some(receive)) = (self.sends.get(&key), self.recvs.get(&key)) else {
+            return Ok(());
+        };
+        if send.operation.bytes != receive.operation.bytes {
+            return Err(PEER_LOST);
+        }
+        let data = gpu_copy(&send.operation, None)?;
+        gpu_copy(&receive.operation, Some(&data))?;
+        let send = self.sends.remove(&key).expect("matched local send");
+        let receive = self.recvs.remove(&key).expect("matched local receive");
+        self.complete(send, shared)?;
+        self.complete(receive, shared)
     }
 
     fn remote(&mut self, frame: Frame, writer: &mut TcpStream, shared: &Shared) -> Result<(), i32> {
@@ -1191,12 +1240,6 @@ impl ProgressState {
             return Err(PEER_LOST);
         };
         *remaining -= 1;
-        shared
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .active_keys
-            .remove(&transfer.operation.key);
         if *remaining == 0 {
             self.remaining.remove(&transfer.submission);
             self.finished.insert(transfer.submission);
@@ -1233,7 +1276,7 @@ fn mark_failed(shared: &Shared, status: i32) {
 }
 
 fn progress_loop(
-    mut writer: TcpStream,
+    mut writer: Option<TcpStream>,
     receiver: mpsc::Receiver<ProgressMessage>,
     sender: mpsc::Sender<ProgressMessage>,
     shared: Arc<Shared>,
@@ -1245,38 +1288,42 @@ fn progress_loop(
         rank_count,
         timeout,
     } = config;
-    let Ok(mut reader_stream) = writer.try_clone() else {
-        mark_failed(&shared, PEER_LOST);
-        return;
-    };
-    if reader_stream.set_read_timeout(Some(timeout)).is_err()
-        || writer.set_write_timeout(Some(timeout)).is_err()
-    {
-        mark_failed(&shared, PEER_LOST);
-        return;
-    }
-    let reader = match thread::Builder::new()
-        .name("nisyros-reader".into())
-        .spawn(move || {
-            loop {
-                match transport::read_frame(&mut reader_stream) {
-                    Ok(frame) => {
-                        if sender.send(ProgressMessage::Remote(frame)).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => {
-                        let _ = sender.send(ProgressMessage::PeerFailed);
-                        break;
-                    }
-                }
-            }
-        }) {
-        Ok(reader) => reader,
-        Err(_) => {
+    let reader = if let Some(stream) = writer.as_mut() {
+        let Ok(mut reader_stream) = stream.try_clone() else {
+            mark_failed(&shared, PEER_LOST);
+            return;
+        };
+        if reader_stream.set_read_timeout(Some(timeout)).is_err()
+            || stream.set_write_timeout(Some(timeout)).is_err()
+        {
             mark_failed(&shared, PEER_LOST);
             return;
         }
+        match thread::Builder::new()
+            .name("nisyros-reader".into())
+            .spawn(move || {
+                loop {
+                    match transport::read_frame(&mut reader_stream) {
+                        Ok(frame) => {
+                            if sender.send(ProgressMessage::Remote(frame)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            let _ = sender.send(ProgressMessage::PeerFailed);
+                            break;
+                        }
+                    }
+                }
+            }) {
+            Ok(reader) => Some(reader),
+            Err(_) => {
+                mark_failed(&shared, PEER_LOST);
+                return;
+            }
+        }
+    } else {
+        None
     };
     let local_ranks = bindings.iter().map(|binding| binding.rank).collect();
     let mut progress = ProgressState::new(group_epoch, rank_count, local_ranks);
@@ -1289,13 +1336,21 @@ fn progress_loop(
             Duration::from_millis(2)
         };
         let result = match receiver.recv_timeout(wait) {
-            Ok(ProgressMessage::Submit(task)) => progress.enqueue(task, &mut writer),
-            Ok(ProgressMessage::Remote(frame)) => progress.remote(frame, &mut writer, &shared),
+            Ok(ProgressMessage::Submit(task)) => progress.enqueue(task, writer.as_mut(), &shared),
+            Ok(ProgressMessage::Remote(frame)) => {
+                writer.as_mut().map_or(Err(PEER_LOST), |stream| {
+                    progress.remote(frame, stream, &shared)
+                })
+            }
             Ok(ProgressMessage::PeerFailed) => Err(PEER_LOST),
             Ok(ProgressMessage::Shutdown) => break,
             Err(mpsc::RecvTimeoutError::Timeout) if last_heartbeat.elapsed() >= heartbeat => {
                 last_heartbeat = Instant::now();
-                transport::write_frame(&mut writer, &Frame::heartbeat()).map_err(|_| PEER_LOST)
+                if let Some(stream) = writer.as_mut() {
+                    transport::write_frame(stream, &Frame::heartbeat()).map_err(|_| PEER_LOST)
+                } else {
+                    Ok(())
+                }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => Ok(()),
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -1304,13 +1359,17 @@ fn progress_loop(
             mark_failed(&shared, status);
             break;
         }
-        if let Err(status) = progress.poll_deferred(&mut writer) {
+        if let Err(status) = progress.poll_deferred(writer.as_mut(), &shared) {
             mark_failed(&shared, status);
             break;
         }
     }
-    let _ = writer.shutdown(Shutdown::Both);
-    let _ = reader.join();
+    if let Some(stream) = writer {
+        let _ = stream.shutdown(Shutdown::Both);
+    }
+    if let Some(reader) = reader {
+        let _ = reader.join();
+    }
 }
 
 fn gpu_copy(operation: &TransferOp, incoming: Option<&[u8]>) -> Result<Vec<u8>, i32> {

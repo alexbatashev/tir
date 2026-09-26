@@ -71,10 +71,13 @@ It checks matched transfers, device visibility after receive completion,
 sequence-bound replay, and error propagation for peer loss and byte-count
 disagreement.
 Pass `simulator` in place of the ICD path to run the same communication cases
-against `nisyros/tests/vulkan_simulator.c`. CI uses this test-only loader to
-exercise successful strict-profile submissions and TCP progress. Its memory
-is coherent host storage; it does not test driver conformance, GPU cache
-visibility, or pipeline execution.
+against `nisyros/tests/vulkan_simulator.c`. CI also packages the checked-in
+`add_one.spv` fixture and runs the C kernel test through strict binary loading.
+The simulator recognizes only that fixture and models its result on coherent
+host storage. It does not test driver conformance, GPU cache visibility, or
+actual shader execution.
+`local_communication.c` runs a two-rank group in one process with no network
+worker. The same local matching path also runs inside the two-node test.
 
 ### Working on the C frontend
 
