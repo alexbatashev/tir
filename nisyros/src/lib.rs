@@ -430,12 +430,16 @@ fn event_failure(event: &Event) -> i32 {
     unsafe { (*event.source_event).failure.load(Ordering::Acquire) }
 }
 
-fn timeline_error(event: &Event, error: i32) -> i32 {
-    set_backend_diagnostic(DEVICE_LOST, error, "Vulkan timeline operation failed");
-    if error == -4 {
+fn timeline_error(event: &Event, error: plugin::BackendError) -> i32 {
+    set_backend_diagnostic(
+        error.status,
+        error.code,
+        "Execution provider timeline operation failed",
+    );
+    if error.status == DEVICE_LOST {
         unsafe { &*event.owner }.lost.store(true, Ordering::Release);
     }
-    DEVICE_LOST
+    error.status
 }
 
 struct SignalState {
@@ -865,12 +869,15 @@ pub unsafe extern "C" fn nisyros_cluster_device_info(
     if status != SUCCESS {
         return status;
     }
-    if id.epoch != cluster.epoch || id.backend != BACKEND_VULKAN {
+    if id.epoch != cluster.epoch {
         return INVALID_ARGUMENT;
     }
     let Some(device) = cluster.inventory.get(id.index as usize) else {
         return INVALID_ARGUMENT;
     };
+    if id.backend != device.snapshot.backend {
+        return INVALID_ARGUMENT;
+    }
     let snapshot = &device.snapshot;
     info.backend = snapshot.backend;
     info.api_version = snapshot.api_version;
@@ -908,12 +915,15 @@ pub unsafe extern "C" fn nisyros_cluster_device_capabilities(
         return status;
     }
     let cluster = unsafe { &*cluster };
-    if id.epoch != cluster.epoch || id.backend != BACKEND_VULKAN {
+    if id.epoch != cluster.epoch {
         return INVALID_ARGUMENT;
     }
     let Some(entry) = cluster.inventory.get(id.index as usize) else {
         return INVALID_ARGUMENT;
     };
+    if id.backend != entry.snapshot.backend {
+        return INVALID_ARGUMENT;
+    }
     let snapshot = &entry.snapshot;
     out.features = snapshot.features;
     out.cooperative_matrix_revision = snapshot.cooperative_matrix_revision;
@@ -939,12 +949,15 @@ pub unsafe extern "C" fn nisyros_cluster_cooperative_matrices(
         return INVALID_ARGUMENT;
     }
     let cluster = unsafe { &*cluster };
-    if id.epoch != cluster.epoch || id.backend != BACKEND_VULKAN {
+    if id.epoch != cluster.epoch {
         return INVALID_ARGUMENT;
     }
     let Some(entry) = cluster.inventory.get(id.index as usize) else {
         return INVALID_ARGUMENT;
     };
+    if id.backend != entry.snapshot.backend {
+        return INVALID_ARGUMENT;
+    }
     let capacity = unsafe { *count };
     let total = entry.snapshot.cooperative_matrices.len() as u32;
     unsafe { *count = total };
@@ -984,12 +997,15 @@ pub unsafe extern "C" fn nisyros_cluster_queue_family_info(
     }
     // SAFETY: The caller owns the live handle and output storage.
     let cluster = unsafe { &*cluster };
-    if id.epoch != cluster.epoch || id.backend != BACKEND_VULKAN {
+    if id.epoch != cluster.epoch {
         return INVALID_ARGUMENT;
     }
     let Some(device) = cluster.inventory.get(id.index as usize) else {
         return INVALID_ARGUMENT;
     };
+    if id.backend != device.snapshot.backend {
+        return INVALID_ARGUMENT;
+    }
     let Some(info) = device.snapshot.queue_families.get(family as usize) else {
         return INVALID_ARGUMENT;
     };
@@ -1024,12 +1040,15 @@ pub unsafe extern "C" fn nisyros_cluster_memory_heaps(
         return INVALID_ARGUMENT;
     }
     let cluster = unsafe { &*cluster };
-    if id.epoch != cluster.epoch || id.backend != BACKEND_VULKAN {
+    if id.epoch != cluster.epoch {
         return INVALID_ARGUMENT;
     }
     let Some(device) = cluster.inventory.get(id.index as usize) else {
         return INVALID_ARGUMENT;
     };
+    if id.backend != device.snapshot.backend {
+        return INVALID_ARGUMENT;
+    }
     let capacity = unsafe { *count };
     let total = device.snapshot.memory_heaps.len() as u32;
     unsafe { *count = total };
@@ -1254,7 +1273,6 @@ pub unsafe extern "C" fn nisyros_device_open(
         return status;
     }
     if id.epoch != cluster_ref.epoch
-        || id.backend != BACKEND_VULKAN
         || desc.queue_request_count == 0
         || desc.queue_requests.is_null()
     {
@@ -1263,6 +1281,9 @@ pub unsafe extern "C" fn nisyros_device_open(
     let Some(entry) = cluster_ref.inventory.get(id.index as usize) else {
         return INVALID_ARGUMENT;
     };
+    if id.backend != entry.snapshot.backend {
+        return INVALID_ARGUMENT;
+    }
     let Some(local_index) = entry.local_index else {
         return UNSUPPORTED;
     };
@@ -1289,7 +1310,7 @@ pub unsafe extern "C" fn nisyros_device_open(
             return INVALID_ARGUMENT;
         }
         seen[request.family as usize] = true;
-        backend_requests.push(vulkan::QueueRequest {
+        backend_requests.push(plugin::QueueRequest {
             family: request.family,
             count: request.count,
             priority: request.priority,
@@ -1452,7 +1473,11 @@ pub unsafe extern "C" fn nisyros_device_abort(device: *mut Device) -> i32 {
         return INVALID_ARGUMENT;
     }
     match device.backend.wait_idle() {
-        Ok(()) | Err(-4) => {
+        Ok(())
+        | Err(plugin::BackendError {
+            status: DEVICE_LOST,
+            ..
+        }) => {
             device.quiescent.store(true, Ordering::Release);
             SUCCESS
         }
@@ -1460,12 +1485,12 @@ pub unsafe extern "C" fn nisyros_device_abort(device: *mut Device) -> i32 {
     }
 }
 
-fn allocation_status(error: vulkan::AllocError) -> i32 {
+fn allocation_status(error: plugin::AllocError) -> i32 {
     match error {
-        vulkan::AllocError::Invalid => INVALID_ARGUMENT,
-        vulkan::AllocError::Unsupported => UNSUPPORTED,
-        vulkan::AllocError::OutOfMemory => OUT_OF_MEMORY,
-        vulkan::AllocError::Backend => DEVICE_LOST,
+        plugin::AllocError::Invalid => INVALID_ARGUMENT,
+        plugin::AllocError::Unsupported => UNSUPPORTED,
+        plugin::AllocError::OutOfMemory => OUT_OF_MEMORY,
+        plugin::AllocError::Backend => DEVICE_LOST,
     }
 }
 
@@ -1540,7 +1565,7 @@ pub unsafe extern "C" fn nisyros_alloc(
     let mut families: Vec<u32> = device.queues.iter().map(|queue| queue.family).collect();
     families.sort_unstable();
     families.dedup();
-    let request = vulkan::AllocRequest {
+    let request = plugin::AllocRequest {
         bytes: desc.bytes,
         alignment: desc.alignment,
         required_properties: desc.required_properties,
@@ -1775,7 +1800,7 @@ pub unsafe extern "C" fn nisyros_host_alloc(
     let mut families: Vec<u32> = device.queues.iter().map(|queue| queue.family).collect();
     families.sort_unstable();
     families.dedup();
-    let request = vulkan::AllocRequest {
+    let request = plugin::AllocRequest {
         bytes: desc.bytes,
         alignment: desc.alignment.max(4),
         required_properties: 2 | 4,
@@ -2173,14 +2198,22 @@ pub unsafe extern "C" fn nisyros_executable_load(
     }
     let pipeline = match device_ref.backend.import_pipeline(bytes) {
         Ok(pipeline) => pipeline,
-        Err(vulkan::PipelineError::Backend(-4)) => {
+        Err(plugin::PipelineError::Backend(error)) if error.status == DEVICE_LOST => {
             device_ref.lost.store(true, Ordering::Release);
-            set_backend_diagnostic(DEVICE_LOST, -4, "Vulkan pipeline import lost the device");
+            set_backend_diagnostic(
+                DEVICE_LOST,
+                error.code,
+                "Execution provider pipeline import lost the device",
+            );
             return DEVICE_LOST;
         }
-        Err(vulkan::PipelineError::Unsupported) => return UNSUPPORTED,
-        Err(vulkan::PipelineError::Backend(code)) => {
-            set_backend_diagnostic(INCOMPATIBLE_BINARY, code, "Vulkan pipeline import failed");
+        Err(plugin::PipelineError::Unsupported) => return UNSUPPORTED,
+        Err(plugin::PipelineError::Backend(error)) => {
+            set_backend_diagnostic(
+                INCOMPATIBLE_BINARY,
+                error.code,
+                "Execution provider pipeline import failed",
+            );
             return INCOMPATIBLE_BINARY;
         }
         Err(_) => return INCOMPATIBLE_BINARY,
@@ -2773,7 +2806,7 @@ pub unsafe extern "C" fn nisyros_cmd_dispatch(
     let mut families: Vec<u32> = device.queues.iter().map(|queue| queue.family).collect();
     families.sort_unstable();
     families.dedup();
-    let request = vulkan::AllocRequest {
+    let request = plugin::AllocRequest {
         bytes: argument_bytes,
         alignment: u64::from(executable.package.argument_alignment),
         required_properties: 2,
@@ -2884,14 +2917,20 @@ pub unsafe extern "C" fn nisyros_cmd_barrier_scoped(
         invalid_recording_argument(cmd);
         return status;
     }
-    let (Some(src_stage), Some(src_access), Some(dst_stage), Some(dst_access)) = (
-        vulkan::scoped_stage(desc.src_stages),
-        vulkan::scoped_access(desc.src_access),
-        vulkan::scoped_stage(desc.dst_stages),
-        vulkan::scoped_access(desc.dst_access),
-    ) else {
+    let valid_stage = |mask: u32| mask & !7 == 0 && (mask & 4 == 0 || mask == 4);
+    if !valid_stage(desc.src_stages)
+        || !valid_stage(desc.dst_stages)
+        || desc.src_access & !3 != 0
+        || desc.dst_access & !3 != 0
+    {
         return invalid_recording_argument(cmd);
-    };
+    }
+    let (src_stage, src_access, dst_stage, dst_access) = (
+        desc.src_stages,
+        desc.src_access,
+        desc.dst_stages,
+        desc.dst_access,
+    );
     if desc.bytes == 0 || desc.address.checked_add(desc.bytes).is_none() {
         return invalid_recording_argument(cmd);
     }
@@ -2982,7 +3021,10 @@ pub unsafe extern "C" fn nisyros_cmd_write_timestamp(cmd: *mut Command, destinat
     }
     let pool = match device.backend.create_timestamp_query() {
         Ok(pool) => pool,
-        Err(-1 | -2) => {
+        Err(plugin::BackendError {
+            status: OUT_OF_MEMORY,
+            ..
+        }) => {
             inner.state = RecordingState::Invalid;
             return OUT_OF_MEMORY;
         }
@@ -3145,8 +3187,7 @@ pub unsafe extern "C" fn nisyros_event_export(event: *mut Event, out: *mut *mut 
     }
     let fd = match event_ref.timeline.export_fd() {
         Ok(fd) => fd,
-        Err(-8) => return UNSUPPORTED,
-        Err(_) => return DEVICE_LOST,
+        Err(error) => return error.status,
     };
     let token = Box::new(EventToken { source: event, fd });
     event_ref.exports.fetch_add(1, Ordering::Release);
@@ -3181,8 +3222,7 @@ pub unsafe extern "C" fn nisyros_event_import(
     };
     let timeline = match target.backend.import_timeline_fd(fd) {
         Ok(timeline) => timeline,
-        Err(-8) => return UNSUPPORTED,
-        Err(_) => return DEVICE_LOST,
+        Err(error) => return error.status,
     };
     let imported = Box::new(Event {
         timeline,

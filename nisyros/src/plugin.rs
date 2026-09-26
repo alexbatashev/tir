@@ -1,7 +1,43 @@
 //! Independently versioned execution-provider ABI. The first provider is linked Vulkan.
 
 use super::*;
+use std::ffi::CString;
 use std::os::fd::{FromRawFd, IntoRawFd};
+use std::os::unix::ffi::OsStrExt;
+
+#[link(name = "dl")]
+unsafe extern "C" {
+    fn dlopen(path: *const c_char, flags: i32) -> *mut c_void;
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    fn dlclose(handle: *mut c_void) -> i32;
+}
+
+type PluginGetApi = unsafe extern "C" fn(u32, *const PluginServices, u32, *mut c_void) -> i32;
+
+struct DynamicLibrary(*mut c_void);
+
+impl DynamicLibrary {
+    fn open(path: &std::ffi::OsStr) -> Option<(Self, PluginGetApi)> {
+        let path = CString::new(path.as_bytes()).ok()?;
+        let handle = unsafe { dlopen(path.as_ptr(), 2) };
+        if handle.is_null() {
+            return None;
+        }
+        let library = Self(handle);
+        let symbol = unsafe { dlsym(handle, c"nisyros_plugin_get_api".as_ptr()) };
+        if symbol.is_null() {
+            return None;
+        }
+        let getter = unsafe { std::mem::transmute::<*mut c_void, PluginGetApi>(symbol) };
+        Some((library, getter))
+    }
+}
+
+impl Drop for DynamicLibrary {
+    fn drop(&mut self) {
+        unsafe { dlclose(self.0) };
+    }
+}
 
 const PLUGIN_ABI_VERSION: u32 = 1;
 const SERVICES_ABI_VERSION: u32 = 1;
@@ -97,6 +133,27 @@ struct PluginCommandOp {
     args: [u64; 8],
 }
 
+#[repr(C)]
+struct PluginSubmitPoint {
+    timeline: *mut c_void,
+    value: u64,
+}
+
+#[repr(C)]
+struct PluginSubmitSegment {
+    command: *mut c_void,
+    wait_count: u32,
+    waits: *const PluginSubmitPoint,
+    signal_count: u32,
+    signals: *const PluginSubmitPoint,
+}
+
+pub struct SubmitSegment<'a> {
+    pub command: Option<&'a Command>,
+    pub waits: Vec<(&'a Timeline, u64)>,
+    pub signals: Vec<(&'a Timeline, u64)>,
+}
+
 #[derive(Clone, Copy)]
 pub enum CommandOp {
     Copy {
@@ -117,10 +174,10 @@ pub enum CommandOp {
     BarrierRangeScoped {
         address: u64,
         bytes: u64,
-        src_stage: u64,
-        src_access: u64,
-        dst_stage: u64,
-        dst_access: u64,
+        src_stage: u32,
+        src_access: u32,
+        dst_stage: u32,
+        dst_access: u32,
         src_family: u32,
         dst_family: u32,
     },
@@ -174,10 +231,10 @@ impl CommandOp {
                 args = [
                     address,
                     bytes,
-                    src_stage,
-                    src_access,
-                    dst_stage,
-                    dst_access,
+                    u64::from(src_stage),
+                    u64::from(src_access),
+                    u64::from(dst_stage),
+                    u64::from(dst_access),
                     u64::from(src_family),
                     u64::from(dst_family),
                 ];
@@ -274,6 +331,12 @@ type CommandCreate = unsafe extern "C" fn(*mut c_void, u32, *mut *mut c_void, *m
 type CommandDestroy = unsafe extern "C" fn(*mut c_void, *mut c_void);
 type CommandRecord =
     unsafe extern "C" fn(*mut c_void, u32, *const PluginCommandOp, *mut i32) -> i32;
+type QueueSubmit =
+    unsafe extern "C" fn(*mut c_void, u32, u32, *const PluginSubmitSegment, *mut i32) -> i32;
+type InstanceNativeHandles =
+    unsafe extern "C" fn(*mut c_void, u32, *mut *mut c_void, *mut *mut c_void) -> i32;
+type DeviceNativeHandles =
+    unsafe extern "C" fn(*mut c_void, u32, *mut *mut c_void, *mut *mut c_void) -> i32;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -312,6 +375,9 @@ struct PluginApi {
     command_create: Option<CommandCreate>,
     command_destroy: Option<CommandDestroy>,
     command_record: Option<CommandRecord>,
+    queue_submit: Option<QueueSubmit>,
+    instance_native_handles: Option<InstanceNativeHandles>,
+    device_native_handles: Option<DeviceNativeHandles>,
 }
 
 struct VulkanInstance {
@@ -324,6 +390,48 @@ pub struct QueueFamilyProperties {
     pub flags: u32,
     pub count: u32,
     pub timestamp_valid_bits: u32,
+}
+
+pub struct QueueMetadata {
+    pub family: u32,
+    pub index: u32,
+}
+
+pub struct QueueRequest {
+    pub family: u32,
+    pub count: u32,
+    pub priority: f32,
+}
+
+pub struct AllocRequest<'a> {
+    pub bytes: u64,
+    pub alignment: u64,
+    pub required_properties: u32,
+    pub preferred_properties: u32,
+    pub queue_families: &'a [u32],
+    pub required_heap: Option<u32>,
+    pub preferred_heap: Option<u32>,
+    pub exclusive: bool,
+}
+
+#[derive(Clone, Copy)]
+pub enum AllocError {
+    Invalid,
+    Unsupported,
+    OutOfMemory,
+    Backend,
+}
+
+pub enum PipelineError {
+    Incompatible,
+    Unsupported,
+    Backend(BackendError),
+}
+
+#[derive(Clone, Copy)]
+pub struct BackendError {
+    pub status: i32,
+    pub code: i32,
 }
 
 pub struct DeviceRecord {
@@ -348,6 +456,10 @@ pub struct DeviceRecord {
     pub cooperative_matrix_stages: u32,
     pub cooperative_matrices: Vec<CooperativeMatrixTuple>,
     pub timestamp_period_ns: f32,
+    pub external_host_alignment: Option<u64>,
+    pub max_grid: [u32; 3],
+    pub peer_memory_fd: bool,
+    pub peer_timeline_fd: bool,
 }
 
 fn valid_services(services: *const PluginServices) -> bool {
@@ -443,6 +555,9 @@ pub unsafe extern "C" fn nisyros_plugin_get_api(
         api.command_create = Some(command_create);
         api.command_destroy = Some(command_destroy);
         api.command_record = Some(command_record);
+        api.queue_submit = Some(queue_submit);
+        api.instance_native_handles = Some(instance_native_handles);
+        api.device_native_handles = Some(device_native_handles);
     }
     SUCCESS
 }
@@ -660,6 +775,15 @@ unsafe extern "C" fn device_close(device: *mut c_void) {
     }
 }
 
+fn vulkan_allocation_status(error: vulkan::AllocError) -> i32 {
+    match error {
+        vulkan::AllocError::Invalid => INVALID_ARGUMENT,
+        vulkan::AllocError::Unsupported => UNSUPPORTED,
+        vulkan::AllocError::OutOfMemory => OUT_OF_MEMORY,
+        vulkan::AllocError::Backend => DEVICE_LOST,
+    }
+}
+
 fn allocation_info(
     device: &vulkan::Device,
     allocation: &vulkan::Allocation,
@@ -728,7 +852,7 @@ unsafe extern "C" fn allocation_create(
     };
     let allocation = match device.allocate(&backend_request) {
         Ok(allocation) => allocation,
-        Err(error) => return allocation_status(error),
+        Err(error) => return vulkan_allocation_status(error),
     };
     unsafe {
         *info = allocation_info(device, &allocation);
@@ -763,7 +887,7 @@ unsafe extern "C" fn allocation_map(
             unsafe { *out = host };
             SUCCESS
         }
-        Err(error) => allocation_status(error),
+        Err(error) => vulkan_allocation_status(error),
     }
 }
 
@@ -788,7 +912,7 @@ unsafe extern "C" fn allocation_visibility(
     let allocation = unsafe { &*allocation.cast::<vulkan::Allocation>() };
     match device.visibility(allocation, flush != 0) {
         Ok(()) => SUCCESS,
-        Err(error) => allocation_status(error),
+        Err(error) => vulkan_allocation_status(error),
     }
 }
 
@@ -806,7 +930,7 @@ unsafe extern "C" fn allocation_register_host(
     let device = unsafe { &*device.cast::<vulkan::Device>() };
     let allocation = match device.register_host_pointer(host, bytes) {
         Ok(allocation) => allocation,
-        Err(error) => return allocation_status(error),
+        Err(error) => return vulkan_allocation_status(error),
     };
     unsafe {
         *info = allocation_info(device, &allocation);
@@ -831,7 +955,7 @@ unsafe extern "C" fn allocation_export_fd(
             unsafe { *out_fd = fd.into_raw_fd() };
             SUCCESS
         }
-        Err(error) => allocation_status(error),
+        Err(error) => vulkan_allocation_status(error),
     }
 }
 
@@ -857,7 +981,7 @@ unsafe extern "C" fn allocation_import_fd(
     let source = unsafe { &*source_allocation.cast::<vulkan::Allocation>() };
     let allocation = match device.import_peer_fd(source, source_offset, bytes, fd) {
         Ok(allocation) => allocation,
-        Err(error) => return allocation_status(error),
+        Err(error) => return vulkan_allocation_status(error),
     };
     unsafe {
         *info = allocation_info(device, &allocation);
@@ -1134,10 +1258,10 @@ fn decode_command_op(op: &PluginCommandOp) -> Option<vulkan::CommandOp> {
         5 => vulkan::CommandOp::BarrierRangeScoped {
             address: a[0],
             bytes: a[1],
-            src_stage: a[2],
-            src_access: a[3],
-            dst_stage: a[4],
-            dst_access: a[5],
+            src_stage: vulkan::scoped_stage(u32_arg(2)?)?,
+            src_access: vulkan::scoped_access(u32_arg(3)?)?,
+            dst_stage: vulkan::scoped_stage(u32_arg(4)?)?,
+            dst_access: vulkan::scoped_access(u32_arg(5)?)?,
             src_family: u32_arg(6)?,
             dst_family: u32_arg(7)?,
         },
@@ -1208,6 +1332,133 @@ unsafe extern "C" fn command_record(
     }
 }
 
+unsafe extern "C" fn queue_submit(
+    device: *mut c_void,
+    queue_index: u32,
+    segment_count: u32,
+    segments: *const PluginSubmitSegment,
+    backend_code: *mut i32,
+) -> i32 {
+    if device.is_null()
+        || backend_code.is_null()
+        || segments.is_null()
+        || segment_count == 0
+        || segment_count > 65_536
+    {
+        return INVALID_ARGUMENT;
+    }
+    let device = unsafe { &*device.cast::<vulkan::Device>() };
+    if device.queues.get(queue_index as usize).is_none() {
+        return INVALID_ARGUMENT;
+    }
+    let input = unsafe { std::slice::from_raw_parts(segments, segment_count as usize) };
+    let mut waits = Vec::with_capacity(input.len());
+    let mut signals = Vec::with_capacity(input.len());
+    for segment in input {
+        if segment.wait_count > 1_000_000
+            || segment.signal_count > 1_000_000
+            || (segment.wait_count != 0 && segment.waits.is_null())
+            || (segment.signal_count != 0 && segment.signals.is_null())
+        {
+            return INVALID_ARGUMENT;
+        }
+        let wait_points = if segment.wait_count == 0 {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(segment.waits, segment.wait_count as usize) }
+        };
+        let signal_points = if segment.signal_count == 0 {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(segment.signals, segment.signal_count as usize) }
+        };
+        if wait_points
+            .iter()
+            .chain(signal_points)
+            .any(|point| point.timeline.is_null())
+        {
+            return INVALID_ARGUMENT;
+        }
+        waits.push(
+            wait_points
+                .iter()
+                .map(|point| {
+                    (
+                        unsafe { &*point.timeline.cast::<vulkan::Timeline>() },
+                        point.value,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
+        signals.push(
+            signal_points
+                .iter()
+                .map(|point| {
+                    (
+                        unsafe { &*point.timeline.cast::<vulkan::Timeline>() },
+                        point.value,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+    let decoded: Vec<_> = input
+        .iter()
+        .zip(waits)
+        .zip(signals)
+        .map(|((segment, waits), signals)| vulkan::SubmitSegment {
+            command: (!segment.command.is_null())
+                .then(|| unsafe { &*segment.command.cast::<vulkan::Command>() }),
+            waits,
+            signals,
+        })
+        .collect();
+    match device.submit_segments(queue_index as usize, &decoded) {
+        Ok(()) => SUCCESS,
+        Err(error) => timeline_status(error, backend_code),
+    }
+}
+
+unsafe extern "C" fn instance_native_handles(
+    instance: *mut c_void,
+    index: u32,
+    native_instance: *mut *mut c_void,
+    native_physical_device: *mut *mut c_void,
+) -> i32 {
+    if instance.is_null() || native_instance.is_null() || native_physical_device.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    let instance = unsafe { &*instance.cast::<VulkanInstance>() };
+    let Some(record) = instance.devices.get(index as usize) else {
+        return INVALID_ARGUMENT;
+    };
+    unsafe {
+        *native_instance = instance.instance.native_handle();
+        *native_physical_device = record.physical;
+    }
+    SUCCESS
+}
+
+unsafe extern "C" fn device_native_handles(
+    device: *mut c_void,
+    queue_index: u32,
+    native_device: *mut *mut c_void,
+    native_queue: *mut *mut c_void,
+) -> i32 {
+    if device.is_null() || native_device.is_null() || native_queue.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    let device = unsafe { &*device.cast::<vulkan::Device>() };
+    let Some(queue) = device.queues.get(queue_index as usize) else {
+        return INVALID_ARGUMENT;
+    };
+    unsafe {
+        *native_device = device.native_handle();
+        *native_queue = queue._handle;
+    }
+    SUCCESS
+}
+
 unsafe extern "C" fn core_report_error(
     _context: *mut c_void,
     status: i32,
@@ -1222,26 +1473,37 @@ unsafe extern "C" fn core_report_error(
 pub struct Instance {
     api: PluginApi,
     handle: *mut c_void,
+    _services: Box<PluginServices>,
+    _library: Option<DynamicLibrary>,
 }
 
 impl Instance {
     pub fn open() -> Result<Self, ()> {
-        let services = PluginServices {
+        let services = Box::new(PluginServices {
             struct_size: std::mem::size_of::<PluginServices>() as u32,
             abi_version: SERVICES_ABI_VERSION,
             context: ptr::null_mut(),
             report_error: Some(core_report_error),
-        };
+        });
+        let (library, getter): (Option<DynamicLibrary>, PluginGetApi) =
+            if let Some(path) = std::env::var_os("NISYROS_PLUGIN_LIBRARY") {
+                let (library, getter) = DynamicLibrary::open(&path).ok_or(())?;
+                (Some(library), getter)
+            } else {
+                (None, nisyros_plugin_get_api)
+            };
         let mut api: PluginApi = unsafe { std::mem::zeroed() };
         let status = unsafe {
-            nisyros_plugin_get_api(
+            getter(
                 PLUGIN_ABI_VERSION,
-                &services,
+                &*services,
                 std::mem::size_of::<PluginApi>() as u32,
                 (&raw mut api).cast(),
             )
         };
         if status != SUCCESS
+            || api.struct_size as usize != std::mem::size_of::<PluginApi>()
+            || api.abi_version != PLUGIN_ABI_VERSION
             || api.instance_open.is_none()
             || api.instance_close.is_none()
             || api.device_count.is_none()
@@ -1274,17 +1536,28 @@ impl Instance {
             || api.command_create.is_none()
             || api.command_destroy.is_none()
             || api.command_record.is_none()
+            || api.queue_submit.is_none()
+            || api.instance_native_handles.is_none()
+            || api.device_native_handles.is_none()
         {
             return Err(());
         }
         let mut handle = ptr::null_mut();
-        if unsafe { api.instance_open.expect("checked provider callback")(&services, &mut handle) }
-            != SUCCESS
-            || handle.is_null()
-        {
+        let status = unsafe {
+            api.instance_open.expect("checked provider callback")(&*services, &mut handle)
+        };
+        if status != SUCCESS || handle.is_null() {
+            if !handle.is_null() {
+                unsafe { api.instance_close.expect("checked provider callback")(handle) };
+            }
             return Err(());
         }
-        Ok(Self { api, handle })
+        Ok(Self {
+            api,
+            handle,
+            _services: services,
+            _library: library,
+        })
     }
 
     pub fn devices(&self) -> Result<Vec<DeviceRecord>, ()> {
@@ -1308,13 +1581,14 @@ impl Instance {
                     &mut info,
                 )
             } != SUCCESS
-                || info.backend != BACKEND_VULKAN
+                || info.backend == 0
                 || info.strict_profile_supported > 1
                 || info.peer_memory_fd > 1
                 || info.peer_timeline_fd > 1
                 || info.queue_family_count > 32
                 || info.memory_heap_count > 16
                 || info.cooperative_matrix_count > 256
+                || info.max_grid.contains(&0)
                 || !info.name.contains(&0)
                 || !info.driver_name.contains(&0)
             {
@@ -1401,28 +1675,37 @@ impl Instance {
                 cooperative_matrix_stages: info.cooperative_matrix_stages,
                 cooperative_matrices,
                 timestamp_period_ns: info.timestamp_period_ns,
+                external_host_alignment: (info.external_host_alignment != 0)
+                    .then_some(info.external_host_alignment),
+                max_grid: info.max_grid,
+                peer_memory_fd: info.peer_memory_fd != 0,
+                peer_timeline_fd: info.peer_timeline_fd != 0,
             });
         }
         Ok(devices)
     }
 
-    pub fn native_handle(&self) -> *mut c_void {
-        unsafe { &*self.handle.cast::<VulkanInstance>() }
-            .instance
-            .native_handle()
-    }
-
-    pub fn native_physical_handle(&self, index: usize) -> Option<*mut c_void> {
-        unsafe { &*self.handle.cast::<VulkanInstance>() }
-            .devices
-            .get(index)
-            .map(|record| record.physical)
+    pub fn native_handles(&self, index: usize) -> Option<(*mut c_void, *mut c_void)> {
+        let mut instance = ptr::null_mut();
+        let mut physical = ptr::null_mut();
+        let status = unsafe {
+            self.api
+                .instance_native_handles
+                .expect("checked provider callback")(
+                self.handle,
+                u32::try_from(index).ok()?,
+                &mut instance,
+                &mut physical,
+            )
+        };
+        (status == SUCCESS && !instance.is_null() && !physical.is_null())
+            .then_some((instance, physical))
     }
 
     pub fn open_device(
         &self,
         record: &DeviceRecord,
-        requests: &[vulkan::QueueRequest],
+        requests: &[QueueRequest],
     ) -> Result<Device, ()> {
         let converted: Vec<_> = requests
             .iter()
@@ -1445,9 +1728,29 @@ impl Instance {
         if status != SUCCESS || handle.is_null() {
             return Err(());
         }
+        let queues = requests
+            .iter()
+            .flat_map(|request| {
+                (0..request.count).map(|index| QueueMetadata {
+                    family: request.family,
+                    index,
+                })
+            })
+            .collect();
         Ok(Device {
             api: self.api,
             handle,
+            queues,
+            max_grid: record.max_grid,
+            external_host_alignment: record.external_host_alignment,
+            peer_memory_fd: record.peer_memory_fd,
+            peer_timeline_fd: record.peer_timeline_fd,
+            memory_heap_count: record.memory_heaps.len() as u32,
+            timestamp_valid_bits: record
+                .queue_families
+                .iter()
+                .map(|family| family.timestamp_valid_bits)
+                .collect(),
         })
     }
 }
@@ -1458,19 +1761,17 @@ impl Drop for Instance {
     }
 }
 
-/// Opaque provider device. Unmigrated operations still use the linked Vulkan
-/// implementation through this wrapper until the execution table covers them.
+/// Opaque provider device with negotiated inventory properties.
 pub struct Device {
     api: PluginApi,
     handle: *mut c_void,
-}
-
-impl std::ops::Deref for Device {
-    type Target = vulkan::Device;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { &*self.handle.cast::<vulkan::Device>() }
-    }
+    pub queues: Vec<QueueMetadata>,
+    pub max_grid: [u32; 3],
+    pub external_host_alignment: Option<u64>,
+    pub peer_memory_fd: bool,
+    pub peer_timeline_fd: bool,
+    memory_heap_count: u32,
+    pub timestamp_valid_bits: Vec<u32>,
 }
 
 impl Drop for Device {
@@ -1561,17 +1862,102 @@ impl Drop for Allocation {
     }
 }
 
-fn allocation_error(status: i32) -> vulkan::AllocError {
+fn allocation_error(status: i32) -> AllocError {
     match status {
-        INVALID_ARGUMENT => vulkan::AllocError::Invalid,
-        UNSUPPORTED => vulkan::AllocError::Unsupported,
-        OUT_OF_MEMORY => vulkan::AllocError::OutOfMemory,
-        _ => vulkan::AllocError::Backend,
+        INVALID_ARGUMENT => AllocError::Invalid,
+        UNSUPPORTED => AllocError::Unsupported,
+        OUT_OF_MEMORY => AllocError::OutOfMemory,
+        _ => AllocError::Backend,
     }
 }
 
 impl Device {
-    pub fn create_timestamp_query(&self) -> Result<QueryPool, i32> {
+    pub fn memory_heap_count(&self) -> u32 {
+        self.memory_heap_count
+    }
+
+    pub fn native_handles(&self, queue_index: usize) -> Option<(*mut c_void, *mut c_void)> {
+        let mut device = ptr::null_mut();
+        let mut queue = ptr::null_mut();
+        let status = unsafe {
+            self.api
+                .device_native_handles
+                .expect("checked provider callback")(
+                self.handle,
+                u32::try_from(queue_index).ok()?,
+                &mut device,
+                &mut queue,
+            )
+        };
+        (status == SUCCESS && !device.is_null() && !queue.is_null()).then_some((device, queue))
+    }
+
+    pub fn submit_segments(
+        &self,
+        queue_index: usize,
+        segments: &[SubmitSegment<'_>],
+    ) -> Result<(), BackendError> {
+        let queue_index =
+            u32::try_from(queue_index).map_err(|_| provider_error(INVALID_ARGUMENT, 0))?;
+        let segment_count =
+            u32::try_from(segments.len()).map_err(|_| provider_error(INVALID_ARGUMENT, 0))?;
+        let waits: Vec<Vec<_>> = segments
+            .iter()
+            .map(|segment| {
+                segment
+                    .waits
+                    .iter()
+                    .map(|(timeline, value)| PluginSubmitPoint {
+                        timeline: timeline.handle,
+                        value: *value,
+                    })
+                    .collect()
+            })
+            .collect();
+        let signals: Vec<Vec<_>> = segments
+            .iter()
+            .map(|segment| {
+                segment
+                    .signals
+                    .iter()
+                    .map(|(timeline, value)| PluginSubmitPoint {
+                        timeline: timeline.handle,
+                        value: *value,
+                    })
+                    .collect()
+            })
+            .collect();
+        let input: Vec<_> = segments
+            .iter()
+            .enumerate()
+            .map(|(index, segment)| PluginSubmitSegment {
+                command: segment
+                    .command
+                    .map_or(ptr::null_mut(), |command| command.handle),
+                wait_count: waits[index].len() as u32,
+                waits: waits[index].as_ptr(),
+                signal_count: signals[index].len() as u32,
+                signals: signals[index].as_ptr(),
+            })
+            .collect();
+        let mut backend_code = 0;
+        let status = unsafe {
+            self.api.queue_submit.expect("checked provider callback")(
+                self.handle,
+                queue_index,
+                segment_count,
+                input.as_ptr(),
+                &mut backend_code,
+            )
+        };
+        if status == SUCCESS {
+            Ok(())
+        } else {
+            Err(provider_error(status, backend_code))
+        }
+    }
+
+    pub fn create_timestamp_query(&self) -> Result<QueryPool, BackendError> {
         let mut handle = ptr::null_mut();
         let mut backend_code = 0;
         let status = unsafe {
@@ -1587,7 +1973,7 @@ impl Device {
                     self.api.query_destroy.expect("checked provider callback")(self.handle, handle)
                 };
             }
-            return Err(provider_backend_error(backend_code));
+            return Err(provider_error(status, backend_code));
         }
         Ok(QueryPool {
             api: self.api,
@@ -1596,7 +1982,7 @@ impl Device {
         })
     }
 
-    pub fn create_command(&self, family: u32) -> Result<Command, i32> {
+    pub fn create_command(&self, family: u32) -> Result<Command, BackendError> {
         let mut handle = ptr::null_mut();
         let mut backend_code = 0;
         let status = unsafe {
@@ -1616,7 +2002,7 @@ impl Device {
                     )
                 };
             }
-            return Err(provider_backend_error(backend_code));
+            return Err(provider_error(status, backend_code));
         }
         Ok(Command {
             api: self.api,
@@ -1625,7 +2011,7 @@ impl Device {
         })
     }
 
-    pub fn import_pipeline(&self, image: &[u8]) -> Result<Pipeline, vulkan::PipelineError> {
+    pub fn import_pipeline(&self, image: &[u8]) -> Result<Pipeline, PipelineError> {
         let mut handle = ptr::null_mut();
         let mut backend_code = 0;
         let status = unsafe {
@@ -1645,12 +2031,12 @@ impl Device {
                         .expect("checked provider callback")(self.handle, handle)
                 };
             }
-            return Err(if backend_code != 0 {
-                vulkan::PipelineError::Backend(backend_code)
+            return Err(if backend_code != 0 || status == DEVICE_LOST {
+                PipelineError::Backend(provider_error(status, backend_code))
             } else if status == UNSUPPORTED {
-                vulkan::PipelineError::Unsupported
+                PipelineError::Unsupported
             } else {
-                vulkan::PipelineError::Incompatible
+                PipelineError::Incompatible
             });
         }
         Ok(Pipeline {
@@ -1660,7 +2046,7 @@ impl Device {
         })
     }
 
-    pub fn wait_idle(&self) -> Result<(), i32> {
+    pub fn wait_idle(&self) -> Result<(), BackendError> {
         let mut backend_code = 0;
         let status = unsafe {
             self.api
@@ -1670,11 +2056,11 @@ impl Device {
         if status == SUCCESS {
             Ok(())
         } else {
-            Err(provider_backend_error(backend_code))
+            Err(provider_error(status, backend_code))
         }
     }
 
-    pub fn create_timeline(&self, exportable: bool) -> Result<Timeline, i32> {
+    pub fn create_timeline(&self, exportable: bool) -> Result<Timeline, BackendError> {
         let mut handle = ptr::null_mut();
         let mut backend_code = 0;
         let status = unsafe {
@@ -1693,7 +2079,7 @@ impl Device {
                         .expect("checked provider callback")(self.handle, handle)
                 };
             }
-            return Err(provider_backend_error(backend_code));
+            return Err(provider_error(status, backend_code));
         }
         Ok(Timeline {
             api: self.api,
@@ -1702,7 +2088,7 @@ impl Device {
         })
     }
 
-    pub fn import_timeline_fd(&self, fd: OwnedFd) -> Result<Timeline, i32> {
+    pub fn import_timeline_fd(&self, fd: OwnedFd) -> Result<Timeline, BackendError> {
         let mut handle = ptr::null_mut();
         let mut backend_code = 0;
         let status = unsafe {
@@ -1723,7 +2109,7 @@ impl Device {
                         .expect("checked provider callback")(self.handle, handle)
                 };
             }
-            return Err(provider_backend_error(backend_code));
+            return Err(provider_error(status, backend_code));
         }
         Ok(Timeline {
             api: self.api,
@@ -1732,10 +2118,7 @@ impl Device {
         })
     }
 
-    pub fn allocate(
-        &self,
-        request: &vulkan::AllocRequest<'_>,
-    ) -> Result<Allocation, vulkan::AllocError> {
+    pub fn allocate(&self, request: &AllocRequest<'_>) -> Result<Allocation, AllocError> {
         let input = PluginAllocRequest {
             bytes: request.bytes,
             alignment: request.alignment,
@@ -1767,7 +2150,7 @@ impl Device {
                         .expect("checked provider callback")(self.handle, handle)
                 };
             }
-            return Err(vulkan::AllocError::Backend);
+            return Err(AllocError::Backend);
         }
         Ok(Allocation::new(
             self.api,
@@ -1782,7 +2165,7 @@ impl Device {
         &self,
         host: *mut c_void,
         bytes: u64,
-    ) -> Result<Allocation, vulkan::AllocError> {
+    ) -> Result<Allocation, AllocError> {
         let mut handle = ptr::null_mut();
         let mut info: PluginAllocationInfo = unsafe { std::mem::zeroed() };
         let status = unsafe {
@@ -1807,15 +2190,12 @@ impl Device {
                         .expect("checked provider callback")(self.handle, handle)
                 };
             }
-            return Err(vulkan::AllocError::Backend);
+            return Err(AllocError::Backend);
         }
         Ok(Allocation::new(self.api, self.handle, handle, info, host))
     }
 
-    pub fn export_allocation_fd(
-        &self,
-        allocation: &Allocation,
-    ) -> Result<OwnedFd, vulkan::AllocError> {
+    pub fn export_allocation_fd(&self, allocation: &Allocation) -> Result<OwnedFd, AllocError> {
         let mut fd = -1;
         let status = unsafe {
             self.api
@@ -1828,7 +2208,7 @@ impl Device {
             return Err(allocation_error(status));
         }
         if fd < 0 {
-            return Err(vulkan::AllocError::Backend);
+            return Err(AllocError::Backend);
         }
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
@@ -1839,7 +2219,7 @@ impl Device {
         source_offset: u64,
         bytes: u64,
         fd: OwnedFd,
-    ) -> Result<Allocation, vulkan::AllocError> {
+    ) -> Result<Allocation, AllocError> {
         let mut handle = ptr::null_mut();
         let mut info: PluginAllocationInfo = unsafe { std::mem::zeroed() };
         let status = unsafe {
@@ -1866,7 +2246,7 @@ impl Device {
                         .expect("checked provider callback")(self.handle, handle)
                 };
             }
-            return Err(vulkan::AllocError::Backend);
+            return Err(AllocError::Backend);
         }
         Ok(Allocation::new(
             self.api,
@@ -1881,7 +2261,7 @@ impl Device {
         &self,
         allocation: &mut Allocation,
         address: u64,
-    ) -> Result<*mut c_void, vulkan::AllocError> {
+    ) -> Result<*mut c_void, AllocError> {
         let mut host = ptr::null_mut();
         let status = unsafe {
             self.api.allocation_map.expect("checked provider callback")(
@@ -1895,7 +2275,7 @@ impl Device {
             return Err(allocation_error(status));
         }
         if host.is_null() {
-            return Err(vulkan::AllocError::Backend);
+            return Err(AllocError::Backend);
         }
         allocation.mapped = true;
         allocation.mapped_host = host;
@@ -1912,11 +2292,7 @@ impl Device {
         allocation.mapped_host = ptr::null_mut();
     }
 
-    pub fn visibility(
-        &self,
-        allocation: &Allocation,
-        flush: bool,
-    ) -> Result<(), vulkan::AllocError> {
+    pub fn visibility(&self, allocation: &Allocation, flush: bool) -> Result<(), AllocError> {
         let status = unsafe {
             self.api
                 .allocation_visibility
@@ -1943,14 +2319,6 @@ pub struct Pipeline {
     api: PluginApi,
     device: *mut c_void,
     handle: *mut c_void,
-}
-
-impl std::ops::Deref for Pipeline {
-    type Target = vulkan::Pipeline;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { &*self.handle.cast::<vulkan::Pipeline>() }
-    }
 }
 
 impl Drop for Pipeline {
@@ -1996,7 +2364,7 @@ pub struct Command {
 }
 
 impl Command {
-    pub fn record(&self, operations: &[CommandOp]) -> Result<(), i32> {
+    pub fn record(&self, operations: &[CommandOp]) -> Result<(), BackendError> {
         let encoded: Vec<_> = operations.iter().copied().map(CommandOp::encode).collect();
         let mut backend_code = 0;
         let status = unsafe {
@@ -2010,16 +2378,8 @@ impl Command {
         if status == SUCCESS {
             Ok(())
         } else {
-            Err(provider_backend_error(backend_code))
+            Err(provider_error(status, backend_code))
         }
-    }
-}
-
-impl std::ops::Deref for Command {
-    type Target = vulkan::Command;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { &*self.handle.cast::<vulkan::Command>() }
     }
 }
 
@@ -2031,8 +2391,8 @@ impl Drop for Command {
     }
 }
 
-fn provider_backend_error(code: i32) -> i32 {
-    if code == 0 { -4 } else { code }
+fn provider_error(status: i32, code: i32) -> BackendError {
+    BackendError { status, code }
 }
 
 pub struct Timeline {
@@ -2041,16 +2401,8 @@ pub struct Timeline {
     handle: *mut c_void,
 }
 
-impl std::ops::Deref for Timeline {
-    type Target = vulkan::Timeline;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { &*self.handle.cast::<vulkan::Timeline>() }
-    }
-}
-
 impl Timeline {
-    pub fn query(&self) -> Result<u64, i32> {
+    pub fn query(&self) -> Result<u64, BackendError> {
         let mut value = 0;
         let mut backend_code = 0;
         let status = unsafe {
@@ -2063,11 +2415,11 @@ impl Timeline {
         if status == SUCCESS {
             Ok(value)
         } else {
-            Err(provider_backend_error(backend_code))
+            Err(provider_error(status, backend_code))
         }
     }
 
-    pub fn wait(&self, value: u64, timeout_ns: u64) -> Result<bool, i32> {
+    pub fn wait(&self, value: u64, timeout_ns: u64) -> Result<bool, BackendError> {
         let mut completed = 0;
         let mut backend_code = 0;
         let status = unsafe {
@@ -2082,11 +2434,11 @@ impl Timeline {
         if status == SUCCESS && completed <= 1 {
             Ok(completed != 0)
         } else {
-            Err(provider_backend_error(backend_code))
+            Err(provider_error(status, backend_code))
         }
     }
 
-    pub fn signal(&self, value: u64) -> Result<(), i32> {
+    pub fn signal(&self, value: u64) -> Result<(), BackendError> {
         let mut backend_code = 0;
         let status = unsafe {
             self.api.timeline_signal.expect("checked provider callback")(
@@ -2098,11 +2450,11 @@ impl Timeline {
         if status == SUCCESS {
             Ok(())
         } else {
-            Err(provider_backend_error(backend_code))
+            Err(provider_error(status, backend_code))
         }
     }
 
-    pub fn export_fd(&self) -> Result<OwnedFd, i32> {
+    pub fn export_fd(&self) -> Result<OwnedFd, BackendError> {
         let mut fd = -1;
         let mut backend_code = 0;
         let status = unsafe {
@@ -2113,7 +2465,7 @@ impl Timeline {
             )
         };
         if status != SUCCESS || fd < 0 {
-            return Err(provider_backend_error(backend_code));
+            return Err(provider_error(status, backend_code));
         }
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }

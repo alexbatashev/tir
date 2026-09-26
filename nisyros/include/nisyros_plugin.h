@@ -95,7 +95,7 @@ typedef struct {
  * BARRIER_ALL: none
  * BARRIER_RANGE: address, bytes
  * BARRIER_SCOPED: address, bytes, src_stage, src_access, dst_stage,
- *                 dst_access, src_family, dst_family
+ *                 dst_access, src_family, dst_family (public Nisyros masks)
  * DISPATCH: pipeline handle, grid_x, grid_y, grid_z, argument address
  * DISPATCH_INDIRECT: pipeline handle, grid address, argument address
  * TIMESTAMP: query handle, destination address
@@ -115,6 +115,19 @@ typedef struct {
 #define NISYROS_PLUGIN_OP_DISPATCH 6u
 #define NISYROS_PLUGIN_OP_DISPATCH_INDIRECT 7u
 #define NISYROS_PLUGIN_OP_TIMESTAMP 8u
+
+typedef struct {
+    void *timeline;
+    uint64_t value;
+} nisyros_plugin_submit_point;
+
+typedef struct {
+    void *command;
+    uint32_t wait_count;
+    const nisyros_plugin_submit_point *waits;
+    uint32_t signal_count;
+    const nisyros_plugin_submit_point *signals;
+} nisyros_plugin_submit_segment;
 
 typedef struct {
     uint32_t struct_size;
@@ -187,6 +200,15 @@ typedef struct {
     nisyros_status (NISYROS_CALL *command_record)(
         void *command, uint32_t operation_count,
         const nisyros_plugin_command_op *operations, int32_t *backend_code);
+    nisyros_status (NISYROS_CALL *queue_submit)(
+        void *device, uint32_t queue_index, uint32_t segment_count,
+        const nisyros_plugin_submit_segment *segments, int32_t *backend_code);
+    nisyros_status (NISYROS_CALL *instance_native_handles)(
+        void *instance, uint32_t device_index, void **native_instance,
+        void **native_physical_device);
+    nisyros_status (NISYROS_CALL *device_native_handles)(
+        void *device, uint32_t queue_index, void **native_device,
+        void **native_queue);
 } nisyros_plugin_api;
 
 /* All handles and callback storage belong to the provider that returned them. */

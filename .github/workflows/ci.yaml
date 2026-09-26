@@ -70,6 +70,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libvulkan1 mesa-vulkan-drivers
       - run: cargo test -p nisyros --locked
       - run: cargo build -p nisyros --locked
+      - run: bash nisyros/tests/run-external-provider.sh
       - name: Exercise the C ABI through a software Vulkan ICD
         run: |
           cc -std=c11 -Wall -Wextra -Werror -I nisyros/include \

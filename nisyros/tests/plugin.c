@@ -44,6 +44,7 @@ int main(int argc, char **argv) {
     assert(api.pipeline_import && api.pipeline_destroy);
     assert(api.query_create && api.query_destroy);
     assert(api.command_create && api.command_destroy && api.command_record);
+    assert(api.queue_submit);
     assert(sizeof(nisyros_plugin_command_op) == 72);
     nisyros_plugin_api unsupported = api;
     assert(nisyros_plugin_get_api(999, &services, sizeof(unsupported),
@@ -129,7 +130,6 @@ int main(int argc, char **argv) {
         assert(api.timeline_signal(timeline, 1, &backend_code) == NISYROS_SUCCESS);
         assert(api.timeline_wait(timeline, 1, 0, &completed, &backend_code) == NISYROS_SUCCESS);
         assert(completed == 1);
-        api.timeline_destroy(device, timeline);
         void *query = NULL;
         assert(api.query_create(device, &query, &backend_code) == NISYROS_SUCCESS);
         assert(query != NULL);
@@ -138,8 +138,15 @@ int main(int argc, char **argv) {
         assert(api.command_create(device, family, &command, &backend_code) == NISYROS_SUCCESS);
         assert(command != NULL);
         assert(api.command_record(command, 0, NULL, &backend_code) == NISYROS_SUCCESS);
+        nisyros_plugin_submit_point signal = {timeline, 2};
+        nisyros_plugin_submit_segment segment = {command, 0, NULL, 1, &signal};
+        assert(api.queue_submit(device, 0, 1, &segment, &backend_code) == NISYROS_SUCCESS);
+        assert(api.timeline_wait(timeline, 2, 1000000000, &completed,
+                                 &backend_code) == NISYROS_SUCCESS);
+        assert(completed == 1);
         api.command_destroy(device, command);
         assert(api.device_wait_idle(device, &backend_code) == NISYROS_SUCCESS);
+        api.timeline_destroy(device, timeline);
         api.device_close(device);
     } else {
         assert(opened == NISYROS_UNSUPPORTED && device == NULL);
