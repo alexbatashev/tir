@@ -7,9 +7,53 @@ use std::time::{Duration, Instant};
 
 const MAGIC: &[u8; 8] = b"NISYROS1";
 const GROUP_MAGIC: &[u8; 8] = b"NISYRG01";
+const FRAME_MAGIC: &[u8; 8] = b"NISYRF01";
 const VERSION: u32 = 1;
 const MAX_DEVICES: usize = 32;
 const MAX_FAMILIES: usize = 32;
+pub const MAX_MESSAGE_BYTES: u64 = 16 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MessageKey {
+    pub group_epoch: u64,
+    pub source_rank: u32,
+    pub destination_rank: u32,
+    pub channel: u64,
+    pub sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameKind {
+    Offer = 1,
+    Ready = 2,
+    Data = 3,
+    Ack = 4,
+    Heartbeat = 5,
+}
+
+pub struct Frame {
+    pub kind: FrameKind,
+    pub key: MessageKey,
+    pub bytes: u64,
+    pub payload: Vec<u8>,
+}
+
+impl Frame {
+    pub fn heartbeat() -> Self {
+        Self {
+            kind: FrameKind::Heartbeat,
+            key: MessageKey {
+                group_epoch: 0,
+                source_rank: 0,
+                destination_rank: 0,
+                channel: 0,
+                sequence: 0,
+            },
+            bytes: 0,
+            payload: Vec::new(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueueAnnouncement {
@@ -46,6 +90,9 @@ pub struct Connection {
 }
 
 impl Connection {
+    pub fn into_stream(self) -> TcpStream {
+        self.stream
+    }
     pub fn exchange_group(
         &mut self,
         epoch: u64,
@@ -97,6 +144,78 @@ impl Connection {
     pub fn shutdown(self) {
         let _ = self.stream.shutdown(Shutdown::Both);
     }
+}
+
+pub fn write_frame(writer: &mut impl Write, frame: &Frame) -> io::Result<()> {
+    if frame.bytes > MAX_MESSAGE_BYTES
+        || frame.payload.len() as u64 > MAX_MESSAGE_BYTES
+        || (frame.kind == FrameKind::Data && frame.payload.len() as u64 != frame.bytes)
+        || (frame.kind != FrameKind::Data && !frame.payload.is_empty())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid frame length",
+        ));
+    }
+    writer.write_all(FRAME_MAGIC)?;
+    write_u32(writer, VERSION)?;
+    write_u32(writer, frame.kind as u32)?;
+    write_u64(writer, frame.key.group_epoch)?;
+    write_u32(writer, frame.key.source_rank)?;
+    write_u32(writer, frame.key.destination_rank)?;
+    write_u64(writer, frame.key.channel)?;
+    write_u64(writer, frame.key.sequence)?;
+    write_u64(writer, frame.bytes)?;
+    write_u32(writer, frame.payload.len() as u32)?;
+    writer.write_all(&frame.payload)?;
+    writer.flush()
+}
+
+pub fn read_frame(reader: &mut impl Read) -> Result<Frame, JoinError> {
+    let mut magic = [0; 8];
+    reader.read_exact(&mut magic).map_err(map_read)?;
+    let version = read_u32(reader).map_err(map_read)?;
+    let kind = match read_u32(reader).map_err(map_read)? {
+        1 => FrameKind::Offer,
+        2 => FrameKind::Ready,
+        3 => FrameKind::Data,
+        4 => FrameKind::Ack,
+        5 => FrameKind::Heartbeat,
+        _ => return Err(JoinError::Invalid),
+    };
+    let key = MessageKey {
+        group_epoch: read_u64(reader).map_err(map_read)?,
+        source_rank: read_u32(reader).map_err(map_read)?,
+        destination_rank: read_u32(reader).map_err(map_read)?,
+        channel: read_u64(reader).map_err(map_read)?,
+        sequence: read_u64(reader).map_err(map_read)?,
+    };
+    let bytes = read_u64(reader).map_err(map_read)?;
+    let payload_len = read_u32(reader).map_err(map_read)? as u64;
+    if &magic != FRAME_MAGIC
+        || version != VERSION
+        || bytes > MAX_MESSAGE_BYTES
+        || payload_len > MAX_MESSAGE_BYTES
+        || (kind == FrameKind::Data && payload_len != bytes)
+        || (kind != FrameKind::Data && payload_len != 0)
+        || (kind == FrameKind::Heartbeat
+            && (key.group_epoch != 0
+                || key.source_rank != 0
+                || key.destination_rank != 0
+                || key.channel != 0
+                || key.sequence != 0
+                || bytes != 0))
+    {
+        return Err(JoinError::Invalid);
+    }
+    let mut payload = vec![0; payload_len as usize];
+    reader.read_exact(&mut payload).map_err(map_read)?;
+    Ok(Frame {
+        kind,
+        key,
+        bytes,
+        payload,
+    })
 }
 
 pub fn join(
@@ -325,6 +444,36 @@ mod tests {
         assert!(matches!(
             read_announcement(&mut &encoded[..encoded.len() - 1], 42, 1),
             Err(JoinError::PeerLost)
+        ));
+    }
+
+    #[test]
+    fn framed_messages_keep_match_keys_and_reject_bad_lengths() {
+        let frame = Frame {
+            kind: FrameKind::Data,
+            key: MessageKey {
+                group_epoch: 9,
+                source_rank: 0,
+                destination_rank: 2,
+                channel: 4,
+                sequence: 7,
+            },
+            bytes: 3,
+            payload: vec![1, 2, 3],
+        };
+        let mut encoded = Vec::new();
+        write_frame(&mut encoded, &frame).unwrap();
+        let decoded = read_frame(&mut encoded.as_slice()).unwrap();
+        assert_eq!(decoded.key, frame.key);
+        assert_eq!(decoded.payload, frame.payload);
+        assert!(matches!(
+            read_frame(&mut &encoded[..encoded.len() - 1]),
+            Err(JoinError::PeerLost)
+        ));
+        encoded[56..60].copy_from_slice(&4_u32.to_be_bytes());
+        assert!(matches!(
+            read_frame(&mut encoded.as_slice()),
+            Err(JoinError::Invalid)
         ));
     }
 }

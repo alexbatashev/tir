@@ -1,5 +1,6 @@
 //! Nisyros C ABI. The only backend implemented by this crate is Vulkan.
 
+mod communication;
 pub mod package;
 mod transport;
 mod vulkan;
@@ -229,6 +230,7 @@ pub struct Cluster {
     devices: Vec<vulkan::DeviceRecord>,
     inventory: Vec<InventoryEntry>,
     network: Mutex<Option<transport::Connection>>,
+    distributed: bool,
     epoch: u64,
     live_devices: AtomicUsize,
     live_groups: AtomicUsize,
@@ -255,12 +257,14 @@ pub struct Device {
     live_commands: AtomicUsize,
     live_events: AtomicUsize,
     live_executables: AtomicUsize,
+    live_endpoints: AtomicUsize,
     submission_lock: Mutex<()>,
     vendor_id: u32,
     device_id: u32,
     api_version: u32,
     device_uuid: [u8; 16],
     driver_uuid: [u8; 16],
+    inventory_index: u32,
     backend: vulkan::Device,
 }
 
@@ -296,6 +300,7 @@ pub struct Event {
     failure: AtomicI32,
     source_event: *mut Event,
     exports: AtomicUsize,
+    requires_host_progress: bool,
 }
 
 pub struct EventToken {
@@ -529,6 +534,7 @@ pub unsafe extern "C" fn nisyros_cluster_open_local(out: *mut *mut Cluster) -> i
         devices,
         inventory,
         network: Mutex::new(None),
+        distributed: false,
         epoch: NEXT_EPOCH.fetch_add(1, Ordering::Relaxed),
         live_devices: AtomicUsize::new(0),
         live_groups: AtomicUsize::new(0),
@@ -628,6 +634,7 @@ pub unsafe extern "C" fn nisyros_cluster_join(
         devices,
         inventory,
         network: Mutex::new(Some(network)),
+        distributed: true,
         epoch: bootstrap.session_id ^ 0x4e49_5359_524f_5300,
         live_devices: AtomicUsize::new(0),
         live_groups: AtomicUsize::new(0),
@@ -846,6 +853,9 @@ pub unsafe extern "C" fn nisyros_group_create(
     let Ok(mut network) = cluster_ref.network.lock() else {
         return PEER_LOST;
     };
+    if cluster_ref.distributed && network.is_none() {
+        return BUSY;
+    }
     if let Some(connection) = network.as_mut() {
         match connection.exchange_group(desc.group_epoch, &ordered) {
             Ok(()) => {}
@@ -1023,6 +1033,7 @@ pub unsafe extern "C" fn nisyros_device_open(
                 failure: AtomicI32::new(0),
                 source_event: ptr::null_mut(),
                 exports: AtomicUsize::new(0),
+                requires_host_progress: false,
             },
             state: Mutex::new(QueueState {
                 next_value: 0,
@@ -1038,12 +1049,14 @@ pub unsafe extern "C" fn nisyros_device_open(
         live_commands: AtomicUsize::new(0),
         live_events: AtomicUsize::new(0),
         live_executables: AtomicUsize::new(0),
+        live_endpoints: AtomicUsize::new(0),
         submission_lock: Mutex::new(()),
         vendor_id: record.vendor_id,
         device_id: record.device_id,
         api_version: record.api_version,
         device_uuid: record.device_uuid,
         driver_uuid: record.driver_uuid,
+        inventory_index: id.index,
         backend,
     });
     let device_ptr: *mut Device = &raw mut *device;
@@ -1101,6 +1114,9 @@ pub unsafe extern "C" fn nisyros_device_close(device: *mut Device) -> i32 {
         return BUSY;
     }
     if device_ref.live_executables.load(Ordering::Acquire) != 0 {
+        return BUSY;
+    }
+    if device_ref.live_endpoints.load(Ordering::Acquire) != 0 {
         return BUSY;
     }
     let Ok(allocations) = device_ref.allocations.lock() else {
@@ -2461,6 +2477,7 @@ pub unsafe extern "C" fn nisyros_event_create(
         failure: AtomicI32::new(0),
         source_event: ptr::null_mut(),
         exports: AtomicUsize::new(0),
+        requires_host_progress: false,
     });
     device_ref.live_events.fetch_add(1, Ordering::Release);
     unsafe { *out = Box::into_raw(event) };
@@ -2599,6 +2616,7 @@ pub unsafe extern "C" fn nisyros_event_import(
         failure: AtomicI32::new(0),
         source_event: token_ref.source,
         exports: AtomicUsize::new(0),
+        requires_host_progress: false,
     });
     source.exports.fetch_add(1, Ordering::Release);
     target.live_events.fetch_add(1, Ordering::Release);
@@ -2829,7 +2847,13 @@ pub unsafe extern "C" fn nisyros_cmd_query(cmd: *mut Command, out: *mut CommandI
         return DEVICE_LOST;
     };
     out.native_segment_count = inner.native.len() as u32;
-    out.requires_host_progress = 0;
+    out.requires_host_progress = u32::from(inner.actions.iter().any(|action| match action {
+        RecordedAction::Wait(EventRef::Point(point)) => unsafe {
+            (*point.event).requires_host_progress
+        },
+        RecordedAction::Wait(EventRef::Slot(_)) => true,
+        _ => false,
+    }));
     out.native_record_count = inner.native_record_count;
     SUCCESS
 }
@@ -3016,6 +3040,13 @@ pub unsafe extern "C" fn nisyros_submit(
             let failure = event_failure(event);
             if failure != 0 {
                 return failure;
+            }
+            if event.requires_host_progress {
+                match event.timeline.query() {
+                    Ok(current) if current < point.value => return UNSUPPORTED,
+                    Err(_) => return DEVICE_LOST,
+                    _ => {}
+                }
             }
         }
         for point in &signals {

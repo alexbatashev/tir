@@ -51,6 +51,10 @@ pipeline package, and tests the C ABI in a second process:
 ```sh
 nisyros/tests/run-hardware.sh
 nisyros/tests/run-peer-hardware.sh
+python3 nisyros/tests/run-communication.py /usr/share/vulkan/icd.d/radeon_icd.json
+python3 nisyros/tests/run-communication.py /usr/share/vulkan/icd.d/radeon_icd.json --replay
+python3 nisyros/tests/run-communication.py /usr/share/vulkan/icd.d/radeon_icd.json --peer-loss
+python3 nisyros/tests/run-communication.py /usr/share/vulkan/icd.d/radeon_icd.json --mismatch
 ```
 
 The first script requires `glslangValidator`, `spirv-val`, the Vulkan validation
@@ -62,6 +66,10 @@ check fixed-membership discovery, stable cluster IDs, and ordered group ranks.
 The peer script duplicates one ICD manifest and verifies FD-backed memory and
 timeline sharing between two logical views of the same GPU. It does not test
 two distinct physical GPUs. Set `NISYROS_VULKAN_ICD` to select another ICD.
+The communication script runs two processes, with two local ranks on node zero.
+It checks matched transfers, device visibility after receive completion,
+sequence-bound replay, and error propagation for peer loss and byte-count
+disagreement.
 
 ### Working on the C frontend
 
