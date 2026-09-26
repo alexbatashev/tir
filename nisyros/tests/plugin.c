@@ -36,6 +36,8 @@ int main(int argc, char **argv) {
     assert(api.device_open && api.device_close);
     assert(api.allocation_create && api.allocation_destroy && api.allocation_map);
     assert(api.allocation_unmap && api.allocation_visibility);
+    assert(api.allocation_register_host && api.allocation_export_fd &&
+           api.allocation_import_fd);
     nisyros_plugin_api unsupported = api;
     assert(nisyros_plugin_get_api(999, &services, sizeof(unsupported),
                                   &unsupported) == NISYROS_UNSUPPORTED);

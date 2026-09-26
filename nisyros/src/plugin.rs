@@ -1,6 +1,7 @@
 //! Independently versioned execution-provider ABI. The first provider is linked Vulkan.
 
 use super::*;
+use std::os::fd::{FromRawFd, IntoRawFd};
 
 const PLUGIN_ABI_VERSION: u32 = 1;
 const SERVICES_ABI_VERSION: u32 = 1;
@@ -111,6 +112,23 @@ type AllocationDestroy = unsafe extern "C" fn(*mut c_void, *mut c_void);
 type AllocationMap = unsafe extern "C" fn(*mut c_void, *mut c_void, u64, *mut *mut c_void) -> i32;
 type AllocationUnmap = unsafe extern "C" fn(*mut c_void, *mut c_void);
 type AllocationVisibility = unsafe extern "C" fn(*mut c_void, *mut c_void, u32) -> i32;
+type AllocationRegisterHost = unsafe extern "C" fn(
+    *mut c_void,
+    *mut c_void,
+    u64,
+    *mut *mut c_void,
+    *mut PluginAllocationInfo,
+) -> i32;
+type AllocationExportFd = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut i32) -> i32;
+type AllocationImportFd = unsafe extern "C" fn(
+    *mut c_void,
+    *mut c_void,
+    u64,
+    u64,
+    i32,
+    *mut *mut c_void,
+    *mut PluginAllocationInfo,
+) -> i32;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -131,6 +149,9 @@ struct PluginApi {
     allocation_map: Option<AllocationMap>,
     allocation_unmap: Option<AllocationUnmap>,
     allocation_visibility: Option<AllocationVisibility>,
+    allocation_register_host: Option<AllocationRegisterHost>,
+    allocation_export_fd: Option<AllocationExportFd>,
+    allocation_import_fd: Option<AllocationImportFd>,
 }
 
 struct VulkanInstance {
@@ -244,6 +265,9 @@ pub unsafe extern "C" fn nisyros_plugin_get_api(
         api.allocation_map = Some(allocation_map);
         api.allocation_unmap = Some(allocation_unmap);
         api.allocation_visibility = Some(allocation_visibility);
+        api.allocation_register_host = Some(allocation_register_host);
+        api.allocation_export_fd = Some(allocation_export_fd);
+        api.allocation_import_fd = Some(allocation_import_fd);
     }
     SUCCESS
 }
@@ -461,6 +485,24 @@ unsafe extern "C" fn device_close(device: *mut c_void) {
     }
 }
 
+fn allocation_info(
+    device: &vulkan::Device,
+    allocation: &vulkan::Allocation,
+) -> PluginAllocationInfo {
+    let (backing_bytes, heap_bytes, memory_type_index, heap_index, properties) =
+        allocation.memory_info(device);
+    PluginAllocationInfo {
+        base: allocation.base,
+        bytes: allocation.bytes,
+        backing_bytes,
+        heap_bytes,
+        memory_type_index,
+        heap_index,
+        properties,
+        exclusive: u32::from(allocation.exclusive()),
+    }
+}
+
 unsafe extern "C" fn allocation_create(
     device: *mut c_void,
     request: *const PluginAllocRequest,
@@ -513,19 +555,8 @@ unsafe extern "C" fn allocation_create(
         Ok(allocation) => allocation,
         Err(error) => return allocation_status(error),
     };
-    let (backing_bytes, heap_bytes, memory_type_index, heap_index, properties) =
-        allocation.memory_info(device);
     unsafe {
-        *info = PluginAllocationInfo {
-            base: allocation.base,
-            bytes: allocation.bytes,
-            backing_bytes,
-            heap_bytes,
-            memory_type_index,
-            heap_index,
-            properties,
-            exclusive: u32::from(allocation.exclusive()),
-        };
+        *info = allocation_info(device, &allocation);
         *out = Box::into_raw(Box::new(allocation)).cast();
     }
     SUCCESS
@@ -586,6 +617,80 @@ unsafe extern "C" fn allocation_visibility(
     }
 }
 
+unsafe extern "C" fn allocation_register_host(
+    device: *mut c_void,
+    host: *mut c_void,
+    bytes: u64,
+    out: *mut *mut c_void,
+    info: *mut PluginAllocationInfo,
+) -> i32 {
+    if device.is_null() || host.is_null() || bytes == 0 || out.is_null() || info.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    unsafe { *out = ptr::null_mut() };
+    let device = unsafe { &*device.cast::<vulkan::Device>() };
+    let allocation = match device.register_host_pointer(host, bytes) {
+        Ok(allocation) => allocation,
+        Err(error) => return allocation_status(error),
+    };
+    unsafe {
+        *info = allocation_info(device, &allocation);
+        *out = Box::into_raw(Box::new(allocation)).cast();
+    }
+    SUCCESS
+}
+
+unsafe extern "C" fn allocation_export_fd(
+    device: *mut c_void,
+    allocation: *mut c_void,
+    out_fd: *mut i32,
+) -> i32 {
+    if device.is_null() || allocation.is_null() || out_fd.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    unsafe { *out_fd = -1 };
+    let device = unsafe { &*device.cast::<vulkan::Device>() };
+    let allocation = unsafe { &*allocation.cast::<vulkan::Allocation>() };
+    match device.export_allocation_fd(allocation) {
+        Ok(fd) => {
+            unsafe { *out_fd = fd.into_raw_fd() };
+            SUCCESS
+        }
+        Err(error) => allocation_status(error),
+    }
+}
+
+unsafe extern "C" fn allocation_import_fd(
+    device: *mut c_void,
+    source_allocation: *mut c_void,
+    source_offset: u64,
+    bytes: u64,
+    fd: i32,
+    out: *mut *mut c_void,
+    info: *mut PluginAllocationInfo,
+) -> i32 {
+    if fd < 0 {
+        return INVALID_ARGUMENT;
+    }
+    // SAFETY: The plugin call takes ownership of this descriptor on every path.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    if device.is_null() || source_allocation.is_null() || out.is_null() || info.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    unsafe { *out = ptr::null_mut() };
+    let device = unsafe { &*device.cast::<vulkan::Device>() };
+    let source = unsafe { &*source_allocation.cast::<vulkan::Allocation>() };
+    let allocation = match device.import_peer_fd(source, source_offset, bytes, fd) {
+        Ok(allocation) => allocation,
+        Err(error) => return allocation_status(error),
+    };
+    unsafe {
+        *info = allocation_info(device, &allocation);
+        *out = Box::into_raw(Box::new(allocation)).cast();
+    }
+    SUCCESS
+}
+
 unsafe extern "C" fn core_report_error(
     _context: *mut c_void,
     status: i32,
@@ -629,6 +734,14 @@ impl Instance {
             || api.cooperative_matrix.is_none()
             || api.device_open.is_none()
             || api.device_close.is_none()
+            || api.allocation_create.is_none()
+            || api.allocation_destroy.is_none()
+            || api.allocation_map.is_none()
+            || api.allocation_unmap.is_none()
+            || api.allocation_visibility.is_none()
+            || api.allocation_register_host.is_none()
+            || api.allocation_export_fd.is_none()
+            || api.allocation_import_fd.is_none()
         {
             return Err(());
         }
@@ -831,5 +944,304 @@ impl std::ops::Deref for Device {
 impl Drop for Device {
     fn drop(&mut self) {
         unsafe { self.api.device_close.expect("checked provider callback")(self.handle) };
+    }
+}
+
+pub struct Allocation {
+    api: PluginApi,
+    device: *mut c_void,
+    handle: *mut c_void,
+    pub base: u64,
+    pub bytes: u64,
+    backing_bytes: u64,
+    heap_bytes: u64,
+    memory_type_index: u32,
+    heap_index: u32,
+    properties: u32,
+    exclusive: bool,
+    mapped: bool,
+    mapped_host: *mut c_void,
+}
+
+impl Allocation {
+    fn new(
+        api: PluginApi,
+        device: *mut c_void,
+        handle: *mut c_void,
+        info: PluginAllocationInfo,
+        mapped_host: *mut c_void,
+    ) -> Self {
+        Self {
+            api,
+            device,
+            handle,
+            base: info.base,
+            bytes: info.bytes,
+            backing_bytes: info.backing_bytes,
+            heap_bytes: info.heap_bytes,
+            memory_type_index: info.memory_type_index,
+            heap_index: info.heap_index,
+            properties: info.properties,
+            exclusive: info.exclusive != 0,
+            mapped: false,
+            mapped_host,
+        }
+    }
+
+    pub fn contains(&self, address: u64, bytes: u64) -> bool {
+        address >= self.base
+            && address
+                .checked_sub(self.base)
+                .and_then(|offset| offset.checked_add(bytes))
+                .is_some_and(|end| end <= self.bytes)
+    }
+
+    pub fn is_mapped(&self) -> bool {
+        self.mapped
+    }
+
+    pub fn mapped_host(&self) -> *mut c_void {
+        self.mapped_host
+    }
+
+    pub fn exclusive(&self) -> bool {
+        self.exclusive
+    }
+
+    pub fn memory_info(&self, _device: &Device) -> (u64, u64, u32, u32, u32) {
+        (
+            self.backing_bytes,
+            self.heap_bytes,
+            self.memory_type_index,
+            self.heap_index,
+            self.properties,
+        )
+    }
+}
+
+impl Drop for Allocation {
+    fn drop(&mut self) {
+        unsafe {
+            self.api
+                .allocation_destroy
+                .expect("checked provider callback")(self.device, self.handle)
+        };
+    }
+}
+
+fn allocation_error(status: i32) -> vulkan::AllocError {
+    match status {
+        INVALID_ARGUMENT => vulkan::AllocError::Invalid,
+        UNSUPPORTED => vulkan::AllocError::Unsupported,
+        OUT_OF_MEMORY => vulkan::AllocError::OutOfMemory,
+        _ => vulkan::AllocError::Backend,
+    }
+}
+
+impl Device {
+    pub fn allocate(
+        &self,
+        request: &vulkan::AllocRequest<'_>,
+    ) -> Result<Allocation, vulkan::AllocError> {
+        let input = PluginAllocRequest {
+            bytes: request.bytes,
+            alignment: request.alignment,
+            required_properties: request.required_properties,
+            preferred_properties: request.preferred_properties,
+            required_heap: request.required_heap.unwrap_or(u32::MAX),
+            preferred_heap: request.preferred_heap.unwrap_or(u32::MAX),
+            exclusive: u32::from(request.exclusive),
+            queue_family_count: request.queue_families.len() as u32,
+            queue_families: request.queue_families.as_ptr(),
+        };
+        let mut handle = ptr::null_mut();
+        let mut info: PluginAllocationInfo = unsafe { std::mem::zeroed() };
+        let status = unsafe {
+            self.api
+                .allocation_create
+                .expect("checked provider callback")(
+                self.handle, &input, &mut handle, &mut info
+            )
+        };
+        if status != SUCCESS {
+            return Err(allocation_error(status));
+        }
+        if handle.is_null() || info.base == 0 || info.bytes != request.bytes {
+            if !handle.is_null() {
+                unsafe {
+                    self.api
+                        .allocation_destroy
+                        .expect("checked provider callback")(self.handle, handle)
+                };
+            }
+            return Err(vulkan::AllocError::Backend);
+        }
+        Ok(Allocation::new(
+            self.api,
+            self.handle,
+            handle,
+            info,
+            ptr::null_mut(),
+        ))
+    }
+
+    pub fn register_host_pointer(
+        &self,
+        host: *mut c_void,
+        bytes: u64,
+    ) -> Result<Allocation, vulkan::AllocError> {
+        let mut handle = ptr::null_mut();
+        let mut info: PluginAllocationInfo = unsafe { std::mem::zeroed() };
+        let status = unsafe {
+            self.api
+                .allocation_register_host
+                .expect("checked provider callback")(
+                self.handle,
+                host,
+                bytes,
+                &mut handle,
+                &mut info,
+            )
+        };
+        if status != SUCCESS {
+            return Err(allocation_error(status));
+        }
+        if handle.is_null() || info.base == 0 || info.bytes != bytes {
+            if !handle.is_null() {
+                unsafe {
+                    self.api
+                        .allocation_destroy
+                        .expect("checked provider callback")(self.handle, handle)
+                };
+            }
+            return Err(vulkan::AllocError::Backend);
+        }
+        Ok(Allocation::new(self.api, self.handle, handle, info, host))
+    }
+
+    pub fn export_allocation_fd(
+        &self,
+        allocation: &Allocation,
+    ) -> Result<OwnedFd, vulkan::AllocError> {
+        let mut fd = -1;
+        let status = unsafe {
+            self.api
+                .allocation_export_fd
+                .expect("checked provider callback")(
+                self.handle, allocation.handle, &mut fd
+            )
+        };
+        if status != SUCCESS {
+            return Err(allocation_error(status));
+        }
+        if fd < 0 {
+            return Err(vulkan::AllocError::Backend);
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    pub fn import_peer_fd(
+        &self,
+        source: &Allocation,
+        source_offset: u64,
+        bytes: u64,
+        fd: OwnedFd,
+    ) -> Result<Allocation, vulkan::AllocError> {
+        let mut handle = ptr::null_mut();
+        let mut info: PluginAllocationInfo = unsafe { std::mem::zeroed() };
+        let status = unsafe {
+            self.api
+                .allocation_import_fd
+                .expect("checked provider callback")(
+                self.handle,
+                source.handle,
+                source_offset,
+                bytes,
+                fd.into_raw_fd(),
+                &mut handle,
+                &mut info,
+            )
+        };
+        if status != SUCCESS {
+            return Err(allocation_error(status));
+        }
+        if handle.is_null() || info.base == 0 || info.bytes != bytes {
+            if !handle.is_null() {
+                unsafe {
+                    self.api
+                        .allocation_destroy
+                        .expect("checked provider callback")(self.handle, handle)
+                };
+            }
+            return Err(vulkan::AllocError::Backend);
+        }
+        Ok(Allocation::new(
+            self.api,
+            self.handle,
+            handle,
+            info,
+            ptr::null_mut(),
+        ))
+    }
+
+    pub fn map_allocation(
+        &self,
+        allocation: &mut Allocation,
+        address: u64,
+    ) -> Result<*mut c_void, vulkan::AllocError> {
+        let mut host = ptr::null_mut();
+        let status = unsafe {
+            self.api.allocation_map.expect("checked provider callback")(
+                self.handle,
+                allocation.handle,
+                address,
+                &mut host,
+            )
+        };
+        if status != SUCCESS {
+            return Err(allocation_error(status));
+        }
+        if host.is_null() {
+            return Err(vulkan::AllocError::Backend);
+        }
+        allocation.mapped = true;
+        allocation.mapped_host = host;
+        Ok(host)
+    }
+
+    pub fn unmap_allocation(&self, allocation: &mut Allocation) {
+        unsafe {
+            self.api
+                .allocation_unmap
+                .expect("checked provider callback")(self.handle, allocation.handle)
+        };
+        allocation.mapped = false;
+        allocation.mapped_host = ptr::null_mut();
+    }
+
+    pub fn visibility(
+        &self,
+        allocation: &Allocation,
+        flush: bool,
+    ) -> Result<(), vulkan::AllocError> {
+        let status = unsafe {
+            self.api
+                .allocation_visibility
+                .expect("checked provider callback")(
+                self.handle,
+                allocation.handle,
+                u32::from(flush),
+            )
+        };
+        if status == SUCCESS {
+            Ok(())
+        } else {
+            Err(allocation_error(status))
+        }
+    }
+
+    pub fn free_allocation(&self, allocation: Allocation) {
+        debug_assert_eq!(allocation.device, self.handle);
+        drop(allocation);
     }
 }

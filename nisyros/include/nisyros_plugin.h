@@ -120,6 +120,16 @@ typedef struct {
     void (NISYROS_CALL *allocation_unmap)(void *device, void *allocation);
     nisyros_status (NISYROS_CALL *allocation_visibility)(
         void *device, void *allocation, uint32_t flush);
+    nisyros_status (NISYROS_CALL *allocation_register_host)(
+        void *device, void *host, uint64_t bytes, void **out,
+        nisyros_plugin_allocation_info *info);
+    nisyros_status (NISYROS_CALL *allocation_export_fd)(
+        void *device, void *allocation, int32_t *out_fd);
+    /* The import callback owns `fd` after the call, including on failure. */
+    nisyros_status (NISYROS_CALL *allocation_import_fd)(
+        void *device, void *source_allocation, uint64_t source_offset,
+        uint64_t bytes, int32_t fd, void **out,
+        nisyros_plugin_allocation_info *info);
 } nisyros_plugin_api;
 
 /* All handles and callback storage belong to the provider that returned them. */

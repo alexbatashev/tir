@@ -521,7 +521,7 @@ struct QueueState {
 }
 
 struct TrackedAllocation {
-    backend: vulkan::Allocation,
+    backend: plugin::Allocation,
     recordings: usize,
     peer_mappings: usize,
     peer_source: Option<PeerSource>,
@@ -553,7 +553,7 @@ struct PeerSource {
 }
 
 struct TrackedHostAllocation {
-    backend: vulkan::Allocation,
+    backend: plugin::Allocation,
     bytes: u64,
     recordings: usize,
     registered: bool,
@@ -577,7 +577,7 @@ struct CommandState {
     event_references: BTreeSet<usize>,
     executable_references: BTreeSet<usize>,
     signal_slots: BTreeSet<u32>,
-    inline_arguments: Vec<vulkan::Allocation>,
+    inline_arguments: Vec<plugin::Allocation>,
     query_pools: Vec<vulkan::QueryPool>,
     native: Vec<vulkan::Command>,
     native_record_count: u64,
