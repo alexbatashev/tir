@@ -147,6 +147,10 @@ typedef struct {
         void *timeline, uint64_t value, int32_t *backend_code);
     nisyros_status (NISYROS_CALL *timeline_export_fd)(
         void *timeline, int32_t *out_fd, int32_t *backend_code);
+    nisyros_status (NISYROS_CALL *pipeline_import)(
+        void *device, const uint8_t *image, uint64_t image_bytes,
+        void **out, int32_t *backend_code);
+    void (NISYROS_CALL *pipeline_destroy)(void *device, void *pipeline);
 } nisyros_plugin_api;
 
 /* All handles and callback storage belong to the provider that returned them. */

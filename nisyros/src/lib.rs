@@ -385,7 +385,7 @@ pub struct Executable {
     owner: *mut Device,
     package: package::Package,
     kernel: Kernel,
-    pipeline: vulkan::Pipeline,
+    pipeline: plugin::Pipeline,
     recordings: AtomicUsize,
 }
 
@@ -2171,7 +2171,7 @@ pub unsafe extern "C" fn nisyros_executable_load(
     {
         return INCOMPATIBLE_BINARY;
     }
-    let pipeline = match device_ref.backend.import_pipeline(&package) {
+    let pipeline = match device_ref.backend.import_pipeline(bytes) {
         Ok(pipeline) => pipeline,
         Err(vulkan::PipelineError::Backend(-4)) => {
             device_ref.lost.store(true, Ordering::Release);

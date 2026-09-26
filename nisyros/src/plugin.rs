@@ -137,6 +137,9 @@ type TimelineQuery = unsafe extern "C" fn(*mut c_void, *mut u64, *mut i32) -> i3
 type TimelineWait = unsafe extern "C" fn(*mut c_void, u64, u64, *mut u32, *mut i32) -> i32;
 type TimelineSignal = unsafe extern "C" fn(*mut c_void, u64, *mut i32) -> i32;
 type TimelineExportFd = unsafe extern "C" fn(*mut c_void, *mut i32, *mut i32) -> i32;
+type PipelineImport =
+    unsafe extern "C" fn(*mut c_void, *const u8, u64, *mut *mut c_void, *mut i32) -> i32;
+type PipelineDestroy = unsafe extern "C" fn(*mut c_void, *mut c_void);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -168,6 +171,8 @@ struct PluginApi {
     timeline_wait: Option<TimelineWait>,
     timeline_signal: Option<TimelineSignal>,
     timeline_export_fd: Option<TimelineExportFd>,
+    pipeline_import: Option<PipelineImport>,
+    pipeline_destroy: Option<PipelineDestroy>,
 }
 
 struct VulkanInstance {
@@ -292,6 +297,8 @@ pub unsafe extern "C" fn nisyros_plugin_get_api(
         api.timeline_wait = Some(timeline_wait);
         api.timeline_signal = Some(timeline_signal);
         api.timeline_export_fd = Some(timeline_export_fd);
+        api.pipeline_import = Some(pipeline_import);
+        api.pipeline_destroy = Some(pipeline_destroy);
     }
     SUCCESS
 }
@@ -859,6 +866,54 @@ unsafe extern "C" fn timeline_export_fd(
     }
 }
 
+unsafe extern "C" fn pipeline_import(
+    device: *mut c_void,
+    image: *const u8,
+    image_bytes: u64,
+    out: *mut *mut c_void,
+    backend_code: *mut i32,
+) -> i32 {
+    if device.is_null()
+        || image.is_null()
+        || image_bytes == 0
+        || image_bytes > 128 * 1024 * 1024
+        || out.is_null()
+        || backend_code.is_null()
+    {
+        return INVALID_ARGUMENT;
+    }
+    unsafe { *out = ptr::null_mut() };
+    let image = unsafe { std::slice::from_raw_parts(image, image_bytes as usize) };
+    let package = match package::Package::parse(image) {
+        Ok(package) => package,
+        Err(package::PackageError::UnsupportedFeature) => return UNSUPPORTED,
+        Err(_) => return INCOMPATIBLE_BINARY,
+    };
+    let device = unsafe { &*device.cast::<vulkan::Device>() };
+    match device.import_pipeline(&package) {
+        Ok(pipeline) => {
+            unsafe { *out = Box::into_raw(Box::new(pipeline)).cast() };
+            SUCCESS
+        }
+        Err(vulkan::PipelineError::Unsupported) => UNSUPPORTED,
+        Err(vulkan::PipelineError::Backend(error)) => {
+            unsafe { *backend_code = error };
+            if error == -4 {
+                DEVICE_LOST
+            } else {
+                INCOMPATIBLE_BINARY
+            }
+        }
+        Err(_) => INCOMPATIBLE_BINARY,
+    }
+}
+
+unsafe extern "C" fn pipeline_destroy(_device: *mut c_void, pipeline: *mut c_void) {
+    if !pipeline.is_null() {
+        unsafe { drop(Box::from_raw(pipeline.cast::<vulkan::Pipeline>())) };
+    }
+}
+
 unsafe extern "C" fn core_report_error(
     _context: *mut c_void,
     status: i32,
@@ -918,6 +973,8 @@ impl Instance {
             || api.timeline_wait.is_none()
             || api.timeline_signal.is_none()
             || api.timeline_export_fd.is_none()
+            || api.pipeline_import.is_none()
+            || api.pipeline_destroy.is_none()
         {
             return Err(());
         }
@@ -1215,6 +1272,41 @@ fn allocation_error(status: i32) -> vulkan::AllocError {
 }
 
 impl Device {
+    pub fn import_pipeline(&self, image: &[u8]) -> Result<Pipeline, vulkan::PipelineError> {
+        let mut handle = ptr::null_mut();
+        let mut backend_code = 0;
+        let status = unsafe {
+            self.api.pipeline_import.expect("checked provider callback")(
+                self.handle,
+                image.as_ptr(),
+                image.len() as u64,
+                &mut handle,
+                &mut backend_code,
+            )
+        };
+        if status != SUCCESS || handle.is_null() {
+            if !handle.is_null() {
+                unsafe {
+                    self.api
+                        .pipeline_destroy
+                        .expect("checked provider callback")(self.handle, handle)
+                };
+            }
+            return Err(if backend_code != 0 {
+                vulkan::PipelineError::Backend(backend_code)
+            } else if status == UNSUPPORTED {
+                vulkan::PipelineError::Unsupported
+            } else {
+                vulkan::PipelineError::Incompatible
+            });
+        }
+        Ok(Pipeline {
+            api: self.api,
+            device: self.handle,
+            handle,
+        })
+    }
+
     pub fn wait_idle(&self) -> Result<(), i32> {
         let mut backend_code = 0;
         let status = unsafe {
@@ -1491,6 +1583,30 @@ impl Device {
     pub fn free_allocation(&self, allocation: Allocation) {
         debug_assert_eq!(allocation.device, self.handle);
         drop(allocation);
+    }
+}
+
+pub struct Pipeline {
+    api: PluginApi,
+    device: *mut c_void,
+    handle: *mut c_void,
+}
+
+impl std::ops::Deref for Pipeline {
+    type Target = vulkan::Pipeline;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.handle.cast::<vulkan::Pipeline>() }
+    }
+}
+
+impl Drop for Pipeline {
+    fn drop(&mut self) {
+        unsafe {
+            self.api
+                .pipeline_destroy
+                .expect("checked provider callback")(self.device, self.handle)
+        };
     }
 }
 

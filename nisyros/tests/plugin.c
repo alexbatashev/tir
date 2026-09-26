@@ -41,6 +41,7 @@ int main(int argc, char **argv) {
     assert(api.device_wait_idle && api.timeline_create && api.timeline_import_fd);
     assert(api.timeline_destroy && api.timeline_query && api.timeline_wait);
     assert(api.timeline_signal && api.timeline_export_fd);
+    assert(api.pipeline_import && api.pipeline_destroy);
     nisyros_plugin_api unsupported = api;
     assert(nisyros_plugin_get_api(999, &services, sizeof(unsupported),
                                   &unsupported) == NISYROS_UNSUPPORTED);
