@@ -13,6 +13,7 @@ typedef struct { uint64_t address, size; } range;
 typedef struct { uint64_t address, size, stride; } strided_range;
 typedef struct { int32_t type; const void *next; uint32_t flags; uint64_t size; uint32_t usage, sharing, family_count; const uint32_t *families; } buffer_info;
 typedef struct { uint64_t size, alignment; uint32_t types; } requirements;
+typedef struct { int32_t type; const void *next; uint64_t memory, offset, size; } mapped_range;
 typedef struct { int32_t type; const void *next; uint64_t size; uint32_t memory_type; } memory_info;
 typedef struct { int32_t type; const void *next; uint64_t buffer; } address_info;
 typedef struct { int32_t type; const void *next; range source; uint32_t source_flags; range destination; uint32_t destination_flags; } copy_region;
@@ -32,7 +33,7 @@ typedef struct { int32_t type; void *next; uint8_t uuid[16], driver_uuid[16], lu
 typedef struct { int32_t type; void *next; int32_t driver_id; char name[256], info[256]; uint8_t conformance[4]; } driver_properties;
 typedef struct { uint32_t api, driver, vendor, device, device_type; char name[256]; uint8_t cache_uuid[16]; uint32_t pad; uint8_t before_grid[220]; uint32_t grid[3]; uint64_t before_timestamp[24]; float timestamp_period; } properties_prefix;
 
-typedef struct { size_t size; unsigned char *data; } memory;
+typedef struct { size_t size; unsigned char *data, *host_data; } memory;
 typedef struct { size_t size; memory *bound; uint64_t offset; } buffer;
 typedef struct { uint64_t value; } semaphore;
 typedef struct { uint64_t value; int available; } query_pool;
@@ -154,8 +155,9 @@ void vkGetPhysicalDeviceQueueFamilyProperties(void *physical, uint32_t *count, q
 void vkGetPhysicalDeviceMemoryProperties(void *physical, memory_properties *out) {
     (void)physical;
     memset(out, 0, sizeof(*out));
-    out->count = 1;
+    out->count = 2;
     out->types[0] = (memory_type){7, 0};
+    out->types[1] = (memory_type){2, 0};
     out->heap_count = 1;
     out->heaps[0] = (memory_heap){UINT64_C(1) << 34, 1, 0};
 }
@@ -200,7 +202,7 @@ void vkDestroyBuffer(void *handle, uint64_t raw, const void *allocator) {
 }
 void vkGetBufferMemoryRequirements(void *handle, uint64_t raw, requirements *out) {
     (void)handle;
-    *out = (requirements){((buffer *)(uintptr_t)raw)->size, 64, 1};
+    *out = (requirements){((buffer *)(uintptr_t)raw)->size, 64, 3};
 }
 int vkAllocateMemory(void *handle, const memory_info *info, const void *allocator, uint64_t *out) {
     (void)handle; (void)allocator;
@@ -209,13 +211,19 @@ int vkAllocateMemory(void *handle, const memory_info *info, const void *allocato
     created->size = (size_t)info->size;
     if (posix_memalign((void **)&created->data, 4096, created->size) != 0) { free(created); return -1; }
     memset(created->data, 0, created->size);
+    if (info->memory_type == 1) {
+        if (posix_memalign((void **)&created->host_data, 4096, created->size) != 0) {
+            free(created->data); free(created); return -1;
+        }
+        memset(created->host_data, 0, created->size);
+    }
     *out = (uint64_t)(uintptr_t)created;
     return 0;
 }
 void vkFreeMemory(void *handle, uint64_t raw, const void *allocator) {
     (void)handle; (void)allocator;
     memory *allocation = (memory *)(uintptr_t)raw;
-    free(allocation->data); free(allocation);
+    free(allocation->host_data); free(allocation->data); free(allocation);
 }
 int vkBindBufferMemory(void *handle, uint64_t raw_buffer, uint64_t raw_memory, uint64_t offset) {
     (void)handle;
@@ -231,15 +239,28 @@ uint64_t vkGetBufferDeviceAddress(void *handle, const address_info *info) {
 }
 int vkMapMemory(void *handle, uint64_t raw, uint64_t offset, uint64_t size, uint32_t flags, void **out) {
     (void)handle; (void)size; (void)flags;
-    *out = ((memory *)(uintptr_t)raw)->data + offset;
+    memory *allocation = (memory *)(uintptr_t)raw;
+    *out = (allocation->host_data ? allocation->host_data : allocation->data) + offset;
     return 0;
 }
 void vkUnmapMemory(void *handle, uint64_t raw) { (void)handle; (void)raw; }
 int vkFlushMappedMemoryRanges(void *handle, uint32_t count, const void *ranges) {
-    (void)handle; (void)count; (void)ranges; return 0;
+    (void)handle;
+    const mapped_range *mapped = ranges;
+    for (uint32_t i = 0; i < count; ++i) {
+        memory *allocation = (memory *)(uintptr_t)mapped[i].memory;
+        if (allocation->host_data) memcpy(allocation->data, allocation->host_data, allocation->size);
+    }
+    return 0;
 }
 int vkInvalidateMappedMemoryRanges(void *handle, uint32_t count, const void *ranges) {
-    (void)handle; (void)count; (void)ranges; return 0;
+    (void)handle;
+    const mapped_range *mapped = ranges;
+    for (uint32_t i = 0; i < count; ++i) {
+        memory *allocation = (memory *)(uintptr_t)mapped[i].memory;
+        if (allocation->host_data) memcpy(allocation->host_data, allocation->data, allocation->size);
+    }
+    return 0;
 }
 
 int vkCreateCommandPool(void *handle, const void *info, const void *allocator, uint64_t *out) {

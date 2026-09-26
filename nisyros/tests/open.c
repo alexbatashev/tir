@@ -322,6 +322,60 @@ int main(int argc, char **argv) {
         memset(destination_host, 0, 64);
         assert(nisyros_flush(device, source, 64) == NISYROS_SUCCESS);
         assert(nisyros_flush(device, destination, 64) == NISYROS_SUCCESS);
+        nisyros_alloc_desc noncoherent_desc = allocation;
+        noncoherent_desc.preferred_properties = 0;
+        nisyros_addr noncoherent = 0;
+        assert(nisyros_alloc(device, &noncoherent_desc, &noncoherent) == NISYROS_SUCCESS);
+        nisyros_allocation_info noncoherent_info = {
+            .header = {sizeof(noncoherent_info), NISYROS_ABI_VERSION, NULL},
+        };
+        assert(nisyros_allocation_query(device, noncoherent, &noncoherent_info) == NISYROS_SUCCESS);
+        if (getenv("NISYROS_EXPECT_NONCOHERENT")) {
+            assert((noncoherent_info.properties & NISYROS_MEMORY_HOST_COHERENT) == 0);
+        }
+        uint64_t prior_queue_submissions = 0;
+        if ((noncoherent_info.properties & NISYROS_MEMORY_HOST_COHERENT) == 0) {
+            unsigned char *noncoherent_host = NULL;
+            assert(nisyros_map(device, noncoherent, 64, (void **)&noncoherent_host) == NISYROS_SUCCESS);
+            memset(noncoherent_host, 0x7d, 16);
+            nisyros_cmd copy_noncoherent = NULL;
+            assert(nisyros_cmd_create(device, selected, &copy_noncoherent) == NISYROS_SUCCESS);
+            assert(nisyros_cmd_begin(copy_noncoherent) == NISYROS_SUCCESS);
+            assert(nisyros_cmd_copy(copy_noncoherent, destination, noncoherent, 16) == NISYROS_SUCCESS);
+            assert(nisyros_cmd_end(copy_noncoherent) == NISYROS_SUCCESS);
+            nisyros_queue test_queue = NULL;
+            assert(nisyros_queue_get(device, selected, 0, &test_queue) == NISYROS_SUCCESS);
+            nisyros_point copied = {0};
+            assert(nisyros_submit(test_queue, copy_noncoherent, NULL, &copied) == NISYROS_SUCCESS);
+            prior_queue_submissions++;
+            assert(nisyros_wait(copied, NISYROS_TIMEOUT_INFINITE) == NISYROS_SUCCESS);
+            assert(nisyros_invalidate(device, destination, 16) == NISYROS_SUCCESS);
+            for (int i = 0; i < 16; ++i) assert(((unsigned char *)destination_host)[i] == 0);
+            assert(nisyros_flush(device, noncoherent, 16) == NISYROS_SUCCESS);
+            assert(nisyros_submit(test_queue, copy_noncoherent, NULL, &copied) == NISYROS_SUCCESS);
+            prior_queue_submissions++;
+            assert(nisyros_wait(copied, NISYROS_TIMEOUT_INFINITE) == NISYROS_SUCCESS);
+            assert(nisyros_invalidate(device, destination, 16) == NISYROS_SUCCESS);
+            for (int i = 0; i < 16; ++i) assert(((unsigned char *)destination_host)[i] == 0x7d);
+            assert(nisyros_cmd_destroy(copy_noncoherent) == NISYROS_SUCCESS);
+            nisyros_cmd fill_noncoherent = NULL;
+            assert(nisyros_cmd_create(device, selected, &fill_noncoherent) == NISYROS_SUCCESS);
+            assert(nisyros_cmd_begin(fill_noncoherent) == NISYROS_SUCCESS);
+            assert(nisyros_cmd_fill(fill_noncoherent, noncoherent + 16, 16, 0x51515151) == NISYROS_SUCCESS);
+            assert(nisyros_cmd_end(fill_noncoherent) == NISYROS_SUCCESS);
+            nisyros_point filled = {0};
+            assert(nisyros_submit(test_queue, fill_noncoherent, NULL, &filled) == NISYROS_SUCCESS);
+            prior_queue_submissions++;
+            assert(nisyros_wait(filled, NISYROS_TIMEOUT_INFINITE) == NISYROS_SUCCESS);
+            for (int i = 16; i < 32; ++i) assert(noncoherent_host[i] == 0);
+            assert(nisyros_invalidate(device, noncoherent + 16, 16) == NISYROS_SUCCESS);
+            for (int i = 16; i < 32; ++i) assert(noncoherent_host[i] == 0x51);
+            assert(nisyros_cmd_destroy(fill_noncoherent) == NISYROS_SUCCESS);
+            assert(nisyros_unmap(device, noncoherent_host) == NISYROS_SUCCESS);
+            memset(destination_host, 0, 16);
+            assert(nisyros_flush(device, destination, 16) == NISYROS_SUCCESS);
+        }
+        assert(nisyros_free(device, noncoherent) == NISYROS_SUCCESS);
         nisyros_queue interop_queue = NULL;
         assert(nisyros_queue_get(device, selected, 0, &interop_queue) == NISYROS_SUCCESS);
         nisyros_vulkan_queue_info native_queue = {
@@ -372,7 +426,7 @@ int main(int argc, char **argv) {
         for (uint64_t iteration = 1; iteration <= 2; ++iteration) {
             nisyros_point done = {0};
             assert(nisyros_submit(queue, cmd, NULL, &done) == NISYROS_SUCCESS);
-            assert(done.event != NULL && done.value == iteration);
+            assert(done.event != NULL && done.value == prior_queue_submissions + iteration);
             nisyros_status poll = nisyros_wait(done, 0);
             assert(poll == NISYROS_SUCCESS || poll == NISYROS_TIMEOUT);
             assert(nisyros_wait(done, NISYROS_TIMEOUT_INFINITE) == NISYROS_SUCCESS);

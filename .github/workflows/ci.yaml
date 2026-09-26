@@ -87,7 +87,8 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -fPIC -shared \
             nisyros/tests/vulkan_simulator.c -ldl -pthread \
             -o target/debug/nisyros-vulkan-sim/libvulkan.so.1
-          LD_LIBRARY_PATH="$PWD/target/debug/nisyros-vulkan-sim:${LD_LIBRARY_PATH:-}" \
+          NISYROS_EXPECT_NONCOHERENT=1 \
+            LD_LIBRARY_PATH="$PWD/target/debug/nisyros-vulkan-sim:${LD_LIBRARY_PATH:-}" \
             target/debug/nisyros-open strict
           cc -std=c11 -Wall -Wextra -Werror -I nisyros/include \
             nisyros/tests/batch.c -L target/debug -lnisyros \

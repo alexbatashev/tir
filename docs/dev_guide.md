@@ -117,8 +117,10 @@ Pass `simulator` in place of the ICD path to run the same communication cases
 against `nisyros/tests/vulkan_simulator.c`. CI also packages the checked-in
 `add_one.spv` fixture and runs the C kernel test through strict binary loading.
 The simulator recognizes only that fixture and models its result on coherent
-host storage. It does not test driver conformance, GPU cache visibility, or
-actual shader execution.
+host storage for ordinary allocations. It also has a noncoherent memory type
+with separate host and device backing, used to check that flush and invalidate
+change visibility at the right time. It does not test driver conformance, GPU
+cache behavior, or actual shader execution.
 `local_communication.c` runs a two-rank group in one process with no network
 worker. It checks an in-place reduction. The same local matching path also
 runs inside the two-node test.
