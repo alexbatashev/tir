@@ -4,6 +4,7 @@ mod communication;
 mod diagnostic;
 mod interop;
 pub mod package;
+mod plugin;
 mod submission;
 mod transport;
 mod vulkan;

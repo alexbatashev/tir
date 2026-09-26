@@ -80,6 +80,10 @@ jobs:
           VK_DRIVER_FILES="$icd" target/debug/nisyros-open auto
           VK_DRIVER_FILES="$icd" python3 nisyros/tests/python_abi.py \
             target/debug/libnisyros.so
+          cc -std=c11 -Wall -Wextra -Werror -I nisyros/include \
+            nisyros/tests/plugin.c -L target/debug -lnisyros \
+            -Wl,-rpath,"$PWD/target/debug" -o target/debug/nisyros-plugin
+          VK_DRIVER_FILES="$icd" target/debug/nisyros-plugin unsupported
           python3 nisyros/tests/run-join.py "$icd"
       - name: Exercise strict execution and TCP progress in the Vulkan simulator
         run: |
@@ -90,6 +94,8 @@ jobs:
           NISYROS_EXPECT_NONCOHERENT=1 \
             LD_LIBRARY_PATH="$PWD/target/debug/nisyros-vulkan-sim:${LD_LIBRARY_PATH:-}" \
             target/debug/nisyros-open strict
+          LD_LIBRARY_PATH="$PWD/target/debug/nisyros-vulkan-sim:${LD_LIBRARY_PATH:-}" \
+            target/debug/nisyros-plugin strict
           cc -std=c11 -Wall -Wextra -Werror -I nisyros/include \
             nisyros/tests/batch.c -L target/debug -lnisyros \
             -Wl,-rpath,"$PWD/target/debug" -o target/debug/nisyros-batch
