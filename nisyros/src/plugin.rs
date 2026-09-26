@@ -129,6 +129,14 @@ type AllocationImportFd = unsafe extern "C" fn(
     *mut *mut c_void,
     *mut PluginAllocationInfo,
 ) -> i32;
+type DeviceWaitIdle = unsafe extern "C" fn(*mut c_void, *mut i32) -> i32;
+type TimelineCreate = unsafe extern "C" fn(*mut c_void, u32, *mut *mut c_void, *mut i32) -> i32;
+type TimelineImportFd = unsafe extern "C" fn(*mut c_void, i32, *mut *mut c_void, *mut i32) -> i32;
+type TimelineDestroy = unsafe extern "C" fn(*mut c_void, *mut c_void);
+type TimelineQuery = unsafe extern "C" fn(*mut c_void, *mut u64, *mut i32) -> i32;
+type TimelineWait = unsafe extern "C" fn(*mut c_void, u64, u64, *mut u32, *mut i32) -> i32;
+type TimelineSignal = unsafe extern "C" fn(*mut c_void, u64, *mut i32) -> i32;
+type TimelineExportFd = unsafe extern "C" fn(*mut c_void, *mut i32, *mut i32) -> i32;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -152,6 +160,14 @@ struct PluginApi {
     allocation_register_host: Option<AllocationRegisterHost>,
     allocation_export_fd: Option<AllocationExportFd>,
     allocation_import_fd: Option<AllocationImportFd>,
+    device_wait_idle: Option<DeviceWaitIdle>,
+    timeline_create: Option<TimelineCreate>,
+    timeline_import_fd: Option<TimelineImportFd>,
+    timeline_destroy: Option<TimelineDestroy>,
+    timeline_query: Option<TimelineQuery>,
+    timeline_wait: Option<TimelineWait>,
+    timeline_signal: Option<TimelineSignal>,
+    timeline_export_fd: Option<TimelineExportFd>,
 }
 
 struct VulkanInstance {
@@ -268,6 +284,14 @@ pub unsafe extern "C" fn nisyros_plugin_get_api(
         api.allocation_register_host = Some(allocation_register_host);
         api.allocation_export_fd = Some(allocation_export_fd);
         api.allocation_import_fd = Some(allocation_import_fd);
+        api.device_wait_idle = Some(device_wait_idle);
+        api.timeline_create = Some(timeline_create);
+        api.timeline_import_fd = Some(timeline_import_fd);
+        api.timeline_destroy = Some(timeline_destroy);
+        api.timeline_query = Some(timeline_query);
+        api.timeline_wait = Some(timeline_wait);
+        api.timeline_signal = Some(timeline_signal);
+        api.timeline_export_fd = Some(timeline_export_fd);
     }
     SUCCESS
 }
@@ -691,6 +715,150 @@ unsafe extern "C" fn allocation_import_fd(
     SUCCESS
 }
 
+fn timeline_status(error: i32, backend_code: *mut i32) -> i32 {
+    if !backend_code.is_null() {
+        unsafe { *backend_code = error };
+    }
+    match error {
+        -1 | -2 => OUT_OF_MEMORY,
+        -8 => UNSUPPORTED,
+        _ => DEVICE_LOST,
+    }
+}
+
+unsafe extern "C" fn device_wait_idle(device: *mut c_void, backend_code: *mut i32) -> i32 {
+    if device.is_null() || backend_code.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    let device = unsafe { &*device.cast::<vulkan::Device>() };
+    match device.wait_idle() {
+        Ok(()) => SUCCESS,
+        Err(error) => timeline_status(error, backend_code),
+    }
+}
+
+unsafe extern "C" fn timeline_create(
+    device: *mut c_void,
+    exportable: u32,
+    out: *mut *mut c_void,
+    backend_code: *mut i32,
+) -> i32 {
+    if device.is_null() || exportable > 1 || out.is_null() || backend_code.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    unsafe { *out = ptr::null_mut() };
+    let device = unsafe { &*device.cast::<vulkan::Device>() };
+    match device.create_timeline(exportable != 0) {
+        Ok(timeline) => {
+            unsafe { *out = Box::into_raw(Box::new(timeline)).cast() };
+            SUCCESS
+        }
+        Err(error) => timeline_status(error, backend_code),
+    }
+}
+
+unsafe extern "C" fn timeline_import_fd(
+    device: *mut c_void,
+    fd: i32,
+    out: *mut *mut c_void,
+    backend_code: *mut i32,
+) -> i32 {
+    if fd < 0 {
+        return INVALID_ARGUMENT;
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    if device.is_null() || out.is_null() || backend_code.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    unsafe { *out = ptr::null_mut() };
+    let device = unsafe { &*device.cast::<vulkan::Device>() };
+    match device.import_timeline_fd(fd) {
+        Ok(timeline) => {
+            unsafe { *out = Box::into_raw(Box::new(timeline)).cast() };
+            SUCCESS
+        }
+        Err(error) => timeline_status(error, backend_code),
+    }
+}
+
+unsafe extern "C" fn timeline_destroy(_device: *mut c_void, timeline: *mut c_void) {
+    if !timeline.is_null() {
+        unsafe { drop(Box::from_raw(timeline.cast::<vulkan::Timeline>())) };
+    }
+}
+
+unsafe extern "C" fn timeline_query(
+    timeline: *mut c_void,
+    out: *mut u64,
+    backend_code: *mut i32,
+) -> i32 {
+    if timeline.is_null() || out.is_null() || backend_code.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    let timeline = unsafe { &*timeline.cast::<vulkan::Timeline>() };
+    match timeline.query() {
+        Ok(value) => {
+            unsafe { *out = value };
+            SUCCESS
+        }
+        Err(error) => timeline_status(error, backend_code),
+    }
+}
+
+unsafe extern "C" fn timeline_wait(
+    timeline: *mut c_void,
+    value: u64,
+    timeout_ns: u64,
+    completed: *mut u32,
+    backend_code: *mut i32,
+) -> i32 {
+    if timeline.is_null() || completed.is_null() || backend_code.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    let timeline = unsafe { &*timeline.cast::<vulkan::Timeline>() };
+    match timeline.wait(value, timeout_ns) {
+        Ok(done) => {
+            unsafe { *completed = u32::from(done) };
+            SUCCESS
+        }
+        Err(error) => timeline_status(error, backend_code),
+    }
+}
+
+unsafe extern "C" fn timeline_signal(
+    timeline: *mut c_void,
+    value: u64,
+    backend_code: *mut i32,
+) -> i32 {
+    if timeline.is_null() || backend_code.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    let timeline = unsafe { &*timeline.cast::<vulkan::Timeline>() };
+    match timeline.signal(value) {
+        Ok(()) => SUCCESS,
+        Err(error) => timeline_status(error, backend_code),
+    }
+}
+
+unsafe extern "C" fn timeline_export_fd(
+    timeline: *mut c_void,
+    out_fd: *mut i32,
+    backend_code: *mut i32,
+) -> i32 {
+    if timeline.is_null() || out_fd.is_null() || backend_code.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    unsafe { *out_fd = -1 };
+    let timeline = unsafe { &*timeline.cast::<vulkan::Timeline>() };
+    match timeline.export_fd() {
+        Ok(fd) => {
+            unsafe { *out_fd = fd.into_raw_fd() };
+            SUCCESS
+        }
+        Err(error) => timeline_status(error, backend_code),
+    }
+}
+
 unsafe extern "C" fn core_report_error(
     _context: *mut c_void,
     status: i32,
@@ -742,6 +910,14 @@ impl Instance {
             || api.allocation_register_host.is_none()
             || api.allocation_export_fd.is_none()
             || api.allocation_import_fd.is_none()
+            || api.device_wait_idle.is_none()
+            || api.timeline_create.is_none()
+            || api.timeline_import_fd.is_none()
+            || api.timeline_destroy.is_none()
+            || api.timeline_query.is_none()
+            || api.timeline_wait.is_none()
+            || api.timeline_signal.is_none()
+            || api.timeline_export_fd.is_none()
         {
             return Err(());
         }
@@ -1039,6 +1215,78 @@ fn allocation_error(status: i32) -> vulkan::AllocError {
 }
 
 impl Device {
+    pub fn wait_idle(&self) -> Result<(), i32> {
+        let mut backend_code = 0;
+        let status = unsafe {
+            self.api
+                .device_wait_idle
+                .expect("checked provider callback")(self.handle, &mut backend_code)
+        };
+        if status == SUCCESS {
+            Ok(())
+        } else {
+            Err(provider_backend_error(backend_code))
+        }
+    }
+
+    pub fn create_timeline(&self, exportable: bool) -> Result<Timeline, i32> {
+        let mut handle = ptr::null_mut();
+        let mut backend_code = 0;
+        let status = unsafe {
+            self.api.timeline_create.expect("checked provider callback")(
+                self.handle,
+                u32::from(exportable),
+                &mut handle,
+                &mut backend_code,
+            )
+        };
+        if status != SUCCESS || handle.is_null() {
+            if !handle.is_null() {
+                unsafe {
+                    self.api
+                        .timeline_destroy
+                        .expect("checked provider callback")(self.handle, handle)
+                };
+            }
+            return Err(provider_backend_error(backend_code));
+        }
+        Ok(Timeline {
+            api: self.api,
+            device: self.handle,
+            handle,
+        })
+    }
+
+    pub fn import_timeline_fd(&self, fd: OwnedFd) -> Result<Timeline, i32> {
+        let mut handle = ptr::null_mut();
+        let mut backend_code = 0;
+        let status = unsafe {
+            self.api
+                .timeline_import_fd
+                .expect("checked provider callback")(
+                self.handle,
+                fd.into_raw_fd(),
+                &mut handle,
+                &mut backend_code,
+            )
+        };
+        if status != SUCCESS || handle.is_null() {
+            if !handle.is_null() {
+                unsafe {
+                    self.api
+                        .timeline_destroy
+                        .expect("checked provider callback")(self.handle, handle)
+                };
+            }
+            return Err(provider_backend_error(backend_code));
+        }
+        Ok(Timeline {
+            api: self.api,
+            device: self.handle,
+            handle,
+        })
+    }
+
     pub fn allocate(
         &self,
         request: &vulkan::AllocRequest<'_>,
@@ -1243,5 +1491,103 @@ impl Device {
     pub fn free_allocation(&self, allocation: Allocation) {
         debug_assert_eq!(allocation.device, self.handle);
         drop(allocation);
+    }
+}
+
+fn provider_backend_error(code: i32) -> i32 {
+    if code == 0 { -4 } else { code }
+}
+
+pub struct Timeline {
+    api: PluginApi,
+    device: *mut c_void,
+    handle: *mut c_void,
+}
+
+impl std::ops::Deref for Timeline {
+    type Target = vulkan::Timeline;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.handle.cast::<vulkan::Timeline>() }
+    }
+}
+
+impl Timeline {
+    pub fn query(&self) -> Result<u64, i32> {
+        let mut value = 0;
+        let mut backend_code = 0;
+        let status = unsafe {
+            self.api.timeline_query.expect("checked provider callback")(
+                self.handle,
+                &mut value,
+                &mut backend_code,
+            )
+        };
+        if status == SUCCESS {
+            Ok(value)
+        } else {
+            Err(provider_backend_error(backend_code))
+        }
+    }
+
+    pub fn wait(&self, value: u64, timeout_ns: u64) -> Result<bool, i32> {
+        let mut completed = 0;
+        let mut backend_code = 0;
+        let status = unsafe {
+            self.api.timeline_wait.expect("checked provider callback")(
+                self.handle,
+                value,
+                timeout_ns,
+                &mut completed,
+                &mut backend_code,
+            )
+        };
+        if status == SUCCESS && completed <= 1 {
+            Ok(completed != 0)
+        } else {
+            Err(provider_backend_error(backend_code))
+        }
+    }
+
+    pub fn signal(&self, value: u64) -> Result<(), i32> {
+        let mut backend_code = 0;
+        let status = unsafe {
+            self.api.timeline_signal.expect("checked provider callback")(
+                self.handle,
+                value,
+                &mut backend_code,
+            )
+        };
+        if status == SUCCESS {
+            Ok(())
+        } else {
+            Err(provider_backend_error(backend_code))
+        }
+    }
+
+    pub fn export_fd(&self) -> Result<OwnedFd, i32> {
+        let mut fd = -1;
+        let mut backend_code = 0;
+        let status = unsafe {
+            self.api
+                .timeline_export_fd
+                .expect("checked provider callback")(
+                self.handle, &mut fd, &mut backend_code
+            )
+        };
+        if status != SUCCESS || fd < 0 {
+            return Err(provider_backend_error(backend_code));
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+}
+
+impl Drop for Timeline {
+    fn drop(&mut self) {
+        unsafe {
+            self.api
+                .timeline_destroy
+                .expect("checked provider callback")(self.device, self.handle)
+        };
     }
 }

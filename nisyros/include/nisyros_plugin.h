@@ -130,6 +130,23 @@ typedef struct {
         void *device, void *source_allocation, uint64_t source_offset,
         uint64_t bytes, int32_t fd, void **out,
         nisyros_plugin_allocation_info *info);
+    nisyros_status (NISYROS_CALL *device_wait_idle)(
+        void *device, int32_t *backend_code);
+    nisyros_status (NISYROS_CALL *timeline_create)(
+        void *device, uint32_t exportable, void **out, int32_t *backend_code);
+    /* The import callback owns `fd` after the call, including on failure. */
+    nisyros_status (NISYROS_CALL *timeline_import_fd)(
+        void *device, int32_t fd, void **out, int32_t *backend_code);
+    void (NISYROS_CALL *timeline_destroy)(void *device, void *timeline);
+    nisyros_status (NISYROS_CALL *timeline_query)(
+        void *timeline, uint64_t *value, int32_t *backend_code);
+    nisyros_status (NISYROS_CALL *timeline_wait)(
+        void *timeline, uint64_t value, uint64_t timeout_ns,
+        uint32_t *completed, int32_t *backend_code);
+    nisyros_status (NISYROS_CALL *timeline_signal)(
+        void *timeline, uint64_t value, int32_t *backend_code);
+    nisyros_status (NISYROS_CALL *timeline_export_fd)(
+        void *timeline, int32_t *out_fd, int32_t *backend_code);
 } nisyros_plugin_api;
 
 /* All handles and callback storage belong to the provider that returned them. */

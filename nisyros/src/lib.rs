@@ -403,7 +403,7 @@ pub struct Queue {
 }
 
 pub struct Event {
-    timeline: vulkan::Timeline,
+    timeline: plugin::Timeline,
     owner: *mut Device,
     queue_owned: bool,
     signal_domain: u32,

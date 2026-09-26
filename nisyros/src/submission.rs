@@ -257,7 +257,7 @@ fn submit_recordings(
         }
         let waits = waits_by_event
             .into_iter()
-            .map(|(address, value)| (unsafe { &(*(address as *const Event)).timeline }, value))
+            .map(|(address, value)| (unsafe { &*(*(address as *const Event)).timeline }, value))
             .collect();
         let mut segment = vulkan::SubmitSegment {
             command: spec
@@ -280,14 +280,14 @@ fn submit_recordings(
             }
             segment
                 .signals
-                .push((unsafe { &(*point.event).timeline }, point.value));
+                .push((unsafe { &*(*point.event).timeline }, point.value));
         }
         segments.push(segment);
     }
     let Some(last) = segments.last_mut() else {
         return DEVICE_LOST;
     };
-    last.signals.push((&queue_ref.completion.timeline, value));
+    last.signals.push((&*queue_ref.completion.timeline, value));
     let point = Point {
         event: (&raw const queue_ref.completion).cast_mut(),
         value,
