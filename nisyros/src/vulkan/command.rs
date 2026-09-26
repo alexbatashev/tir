@@ -33,6 +33,8 @@ const VK_STRUCTURE_TYPE_MEMORY_RANGE_BARRIERS_INFO_KHR: i32 = 1_000_318_004;
 const VK_STRUCTURE_TYPE_MEMORY_RANGE_BARRIER_KHR: i32 = 1_000_318_005;
 const VK_SEMAPHORE_TYPE_TIMELINE: i32 = 1;
 const VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT: u64 = 0x1_0000;
+const VK_PIPELINE_STAGE_2_TRANSFER_BIT: u64 = 0x1000;
+const VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT: u64 = 0x800;
 const VK_ACCESS_2_MEMORY_READ_BIT: u64 = 0x8000;
 const VK_ACCESS_2_MEMORY_WRITE_BIT: u64 = 0x1_0000;
 const VK_ADDRESS_COMMAND_STORAGE_BUFFER_USAGE_BIT_KHR: u32 = 4;
@@ -42,6 +44,42 @@ const VK_SHADER_STAGE_COMPUTE_BIT: u32 = 0x20;
 const VK_QUERY_TYPE_TIMESTAMP: i32 = 2;
 const VK_QUERY_RESULT_64_BIT: u32 = 1;
 const VK_QUERY_RESULT_WAIT_BIT: u32 = 2;
+
+pub fn scoped_stage(mask: u32) -> Option<u64> {
+    if mask & !7 != 0 || (mask & 4 != 0 && mask != 4) {
+        return None;
+    }
+    Some(if mask == 4 {
+        VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT
+    } else {
+        (if mask & 1 != 0 {
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT
+        } else {
+            0
+        }) | (if mask & 2 != 0 {
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+        } else {
+            0
+        })
+    })
+}
+
+pub fn scoped_access(mask: u32) -> Option<u64> {
+    if mask & !3 != 0 {
+        return None;
+    }
+    Some(
+        (if mask & 1 != 0 {
+            VK_ACCESS_2_MEMORY_READ_BIT
+        } else {
+            0
+        }) | (if mask & 2 != 0 {
+            VK_ACCESS_2_MEMORY_WRITE_BIT
+        } else {
+            0
+        }),
+    )
+}
 
 type CreateCommandPool = unsafe extern "system" fn(
     VkDevice,
@@ -397,6 +435,16 @@ pub enum CommandOp {
         address: u64,
         bytes: u64,
     },
+    BarrierRangeScoped {
+        address: u64,
+        bytes: u64,
+        src_stage: u64,
+        src_access: u64,
+        dst_stage: u64,
+        dst_access: u64,
+        src_family: u32,
+        dst_family: u32,
+    },
     Dispatch {
         pipeline: u64,
         layout: u64,
@@ -503,16 +551,40 @@ impl Command {
                         };
                         (self.functions.barrier2)(self.buffer, &dependency);
                     }
-                    CommandOp::BarrierRange { address, bytes } => {
+                    CommandOp::BarrierRange { address, bytes }
+                    | CommandOp::BarrierRangeScoped { address, bytes, .. } => {
+                        let (src_stage, src_access, dst_stage, dst_access) = match *operation {
+                            CommandOp::BarrierRangeScoped {
+                                src_stage,
+                                src_access,
+                                dst_stage,
+                                dst_access,
+                                ..
+                            } => (src_stage, src_access, dst_stage, dst_access),
+                            _ => (
+                                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                            ),
+                        };
+                        let (src_queue_family, dst_queue_family) = match *operation {
+                            CommandOp::BarrierRangeScoped {
+                                src_family,
+                                dst_family,
+                                ..
+                            } => (src_family, dst_family),
+                            _ => (VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED),
+                        };
                         let barrier = MemoryRangeBarrier {
                             s_type: VK_STRUCTURE_TYPE_MEMORY_RANGE_BARRIER_KHR,
                             p_next: ptr::null(),
-                            src_stage: VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                            src_access: VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                            dst_stage: VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                            dst_access: VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                            src_queue_family: VK_QUEUE_FAMILY_IGNORED,
-                            dst_queue_family: VK_QUEUE_FAMILY_IGNORED,
+                            src_stage,
+                            src_access,
+                            dst_stage,
+                            dst_access,
+                            src_queue_family,
+                            dst_queue_family,
                             range: DeviceAddressRange {
                                 address,
                                 size: bytes,

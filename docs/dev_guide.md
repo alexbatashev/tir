@@ -48,6 +48,8 @@ properties of a live base address after allocation.
 `nisyros_cluster_memory_heaps` enumerates heaps for local and remote devices.
 `nisyros_alloc_heap_extension` can require or prefer one heap; `UINT32_MAX`
 means no selection for either field.
+`nisyros_alloc_sharing_extension` requests exclusive queue-family sharing.
+The default allocation uses concurrent sharing across provisioned families.
 `nisyros_backend_get_api` negotiates a sized extension table. Its
 `nisyros.vulkan` table returns borrowed Vulkan instance, physical-device,
 device, and queue handles. Finish relevant Nisyros work before using those
@@ -64,6 +66,11 @@ resources because the driver may have accepted some work.
 device address. Queue-family discovery reports its valid bits and nanoseconds
 per tick. A later device read of that address still needs an explicit memory
 dependency.
+`nisyros_cmd_barrier_scoped` limits a dependency to an address range, named
+transfer or compute stages, and read or write accesses. Its source and
+destination family fields define release and acquire barriers for an exclusive
+allocation; matching family fields mean no transfer. The hardware test moves
+one allocation between two RADV queue families under an event dependency.
 
 Run the package parser and Vulkan FFI layout checks with `cargo test -p nisyros`.
 The physical GPU check compiles its shader, captures a native

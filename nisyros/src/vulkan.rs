@@ -14,7 +14,9 @@ pub use memory::{AllocError, AllocRequest, Allocation};
 mod pipeline;
 pub use pipeline::{Pipeline, PipelineError};
 mod command;
-pub use command::{Command, CommandOp, QueryPool, SubmitSegment, Timeline};
+pub use command::{
+    Command, CommandOp, QueryPool, SubmitSegment, Timeline, scoped_access, scoped_stage,
+};
 
 type VkInstance = *mut c_void;
 type VkPhysicalDevice = *mut c_void;

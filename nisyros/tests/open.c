@@ -346,8 +346,30 @@ int main(int argc, char **argv) {
         assert(nisyros_cmd_end(cmd) == NISYROS_INVALID_ARGUMENT);
         assert(nisyros_cmd_reset(cmd) == NISYROS_SUCCESS);
         assert(nisyros_cmd_begin(cmd) == NISYROS_SUCCESS);
+        nisyros_barrier_desc invalid_scoped = {
+            .header = {sizeof(invalid_scoped), NISYROS_ABI_VERSION, NULL},
+            .address = destination + 8,
+            .bytes = 16,
+            .src_access = NISYROS_ACCESS_WRITE,
+            .dst_stages = NISYROS_BARRIER_STAGE_TRANSFER,
+            .dst_access = NISYROS_ACCESS_READ,
+        };
+        assert(nisyros_cmd_barrier_scoped(cmd, &invalid_scoped) == NISYROS_INVALID_ARGUMENT);
+        assert(nisyros_cmd_end(cmd) == NISYROS_INVALID_ARGUMENT);
+        assert(nisyros_cmd_reset(cmd) == NISYROS_SUCCESS);
+        assert(nisyros_cmd_begin(cmd) == NISYROS_SUCCESS);
         assert(nisyros_cmd_copy(cmd, destination + 8, source + 4, 16) == NISYROS_SUCCESS);
-        assert(nisyros_cmd_barrier_range(cmd, destination + 8, 16) == NISYROS_SUCCESS);
+        nisyros_barrier_desc scoped = {
+            .header = {sizeof(scoped), NISYROS_ABI_VERSION, NULL},
+            .address = destination + 8,
+            .bytes = 16,
+            .src_stages = NISYROS_BARRIER_STAGE_TRANSFER,
+            .src_access = NISYROS_ACCESS_WRITE,
+            .dst_stages = NISYROS_BARRIER_STAGE_TRANSFER,
+            .dst_access = NISYROS_ACCESS_READ,
+        };
+        assert(nisyros_cmd_barrier_scoped(cmd, &scoped) == NISYROS_SUCCESS);
+        assert(nisyros_cmd_copy(cmd, destination + 40, destination + 8, 16) == NISYROS_SUCCESS);
         assert(nisyros_cmd_barrier_all(cmd) == NISYROS_SUCCESS);
         assert(nisyros_cmd_fill(cmd, destination + 24, 8, 0x01020304) == NISYROS_SUCCESS);
         assert(nisyros_cmd_end(cmd) == NISYROS_SUCCESS);
@@ -367,6 +389,7 @@ int main(int argc, char **argv) {
         }
         assert(nisyros_invalidate(device, destination, 64) == NISYROS_SUCCESS);
         for (int i = 8; i < 24; ++i) assert(((unsigned char *)destination_host)[i] == 0x3c);
+        for (int i = 40; i < 56; ++i) assert(((unsigned char *)destination_host)[i] == 0x3c);
         uint32_t pattern[2] = {0x01020304, 0x01020304};
         assert(memcmp((unsigned char *)destination_host + 24, pattern, sizeof(pattern)) == 0);
         assert(nisyros_cmd_destroy(cmd) == NISYROS_SUCCESS);

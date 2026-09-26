@@ -61,6 +61,7 @@ typedef struct nisyros_extension {
 
 #define NISYROS_EXTENSION_OPTIONAL 1u
 #define NISYROS_EXTENSION_ALLOC_HEAP 1u
+#define NISYROS_EXTENSION_ALLOC_SHARING 2u
 
 typedef struct {
     uint32_t struct_size;
@@ -240,6 +241,12 @@ typedef struct {
 #define NISYROS_MEMORY_HOST_COHERENT 0x00000004u
 #define NISYROS_ACCESS_READ 0x00000001u
 #define NISYROS_ACCESS_WRITE 0x00000002u
+#define NISYROS_BARRIER_STAGE_TRANSFER 0x00000001u
+#define NISYROS_BARRIER_STAGE_COMPUTE 0x00000002u
+#define NISYROS_BARRIER_STAGE_ALL 0x00000004u
+#define NISYROS_QUEUE_FAMILY_IGNORED UINT32_MAX
+#define NISYROS_SHARING_DEFAULT 0u
+#define NISYROS_SHARING_EXCLUSIVE 1u
 
 typedef struct {
     nisyros_descriptor_header header;
@@ -258,6 +265,24 @@ typedef struct {
 } nisyros_alloc_heap_extension;
 
 typedef struct {
+    nisyros_extension base;
+    uint32_t mode;
+    uint32_t reserved;
+} nisyros_alloc_sharing_extension;
+
+typedef struct {
+    nisyros_descriptor_header header;
+    nisyros_addr address;
+    uint64_t bytes;
+    uint32_t src_stages;
+    uint32_t src_access;
+    uint32_t dst_stages;
+    uint32_t dst_access;
+    uint32_t src_family;
+    uint32_t dst_family;
+} nisyros_barrier_desc;
+
+typedef struct {
     nisyros_descriptor_header header;
     nisyros_addr base;
     uint64_t bytes;
@@ -269,6 +294,7 @@ typedef struct {
     uint32_t mapped;
     uint32_t peer_imported;
     uint32_t access;
+    uint32_t exclusive;
 } nisyros_allocation_info;
 
 typedef struct {
@@ -555,6 +581,8 @@ NISYROS_API nisyros_status NISYROS_CALL nisyros_cmd_barrier_all(nisyros_cmd cmd)
 NISYROS_API nisyros_status NISYROS_CALL
 nisyros_cmd_barrier_range(nisyros_cmd cmd, nisyros_addr address,
                           uint64_t bytes);
+NISYROS_API nisyros_status NISYROS_CALL
+nisyros_cmd_barrier_scoped(nisyros_cmd cmd, const nisyros_barrier_desc *desc);
 NISYROS_API nisyros_status NISYROS_CALL
 nisyros_cmd_write_timestamp(nisyros_cmd cmd, nisyros_addr destination);
 NISYROS_API nisyros_status NISYROS_CALL

@@ -72,6 +72,7 @@ const PEER_LOST: i32 = -10;
 const ABI_VERSION: u32 = 1;
 const BACKEND_VULKAN: u32 = 1;
 const EXT_ALLOC_HEAP: u32 = 1;
+const EXT_ALLOC_SHARING: u32 = 2;
 pub const FEATURE_COOPERATIVE_MATRIX: u64 = 1;
 pub const FEATURE_BFLOAT16_TYPE: u64 = 2;
 pub const FEATURE_BFLOAT16_DOT: u64 = 4;
@@ -98,19 +99,19 @@ pub struct Extension {
 }
 
 fn validate_header(header: &DescriptorHeader, expected_size: usize) -> i32 {
-    validate_header_with(header, expected_size, None)
+    validate_header_with(header, expected_size, &[])
 }
 
 fn validate_header_with(
     header: &DescriptorHeader,
     expected_size: usize,
-    recognized: Option<(u32, usize)>,
+    recognized: &[(u32, usize)],
 ) -> i32 {
     if (header.struct_size as usize) < expected_size || header.abi_version != ABI_VERSION {
         return INVALID_ARGUMENT;
     }
     let mut seen = BTreeSet::new();
-    let mut recognized_seen = false;
+    let mut recognized_seen = BTreeSet::new();
     let mut extension = header.extensions;
     while !extension.is_null() {
         if seen.len() >= 32 || !seen.insert(extension as usize) {
@@ -125,14 +126,16 @@ fn validate_header_with(
         {
             return INVALID_ARGUMENT;
         }
-        if recognized.is_some_and(|(type_id, _)| type_id == current.type_id) {
-            if recognized_seen
+        if let Some(&(_, minimum_size)) = recognized
+            .iter()
+            .find(|&&(type_id, _)| type_id == current.type_id)
+        {
+            if !recognized_seen.insert(current.type_id)
                 || current.flags != 0
-                || (current.struct_size as usize) < recognized.expect("matched type").1
+                || (current.struct_size as usize) < minimum_size
             {
                 return INVALID_ARGUMENT;
             }
-            recognized_seen = true;
         } else if current.flags & 1 == 0 {
             return UNSUPPORTED;
         }
@@ -271,6 +274,26 @@ pub struct AllocHeapExtension {
 }
 
 #[repr(C)]
+pub struct AllocSharingExtension {
+    base: Extension,
+    mode: u32,
+    reserved: u32,
+}
+
+#[repr(C)]
+pub struct BarrierDesc {
+    header: DescriptorHeader,
+    address: u64,
+    bytes: u64,
+    src_stages: u32,
+    src_access: u32,
+    dst_stages: u32,
+    dst_access: u32,
+    src_family: u32,
+    dst_family: u32,
+}
+
+#[repr(C)]
 pub struct AllocationInfo {
     header: DescriptorHeader,
     base: u64,
@@ -283,6 +306,7 @@ pub struct AllocationInfo {
     mapped: u32,
     peer_imported: u32,
     access: u32,
+    exclusive: u32,
 }
 
 #[repr(C)]
@@ -1421,7 +1445,13 @@ pub unsafe extern "C" fn nisyros_alloc(
     let status = validate_header_with(
         &desc.header,
         std::mem::size_of::<AllocDesc>(),
-        Some((EXT_ALLOC_HEAP, std::mem::size_of::<AllocHeapExtension>())),
+        &[
+            (EXT_ALLOC_HEAP, std::mem::size_of::<AllocHeapExtension>()),
+            (
+                EXT_ALLOC_SHARING,
+                std::mem::size_of::<AllocSharingExtension>(),
+            ),
+        ],
     );
     if status != SUCCESS {
         return status;
@@ -1435,6 +1465,7 @@ pub unsafe extern "C" fn nisyros_alloc(
     }
     let mut required_heap = None;
     let mut preferred_heap = None;
+    let mut exclusive = false;
     let mut extension = desc.header.extensions;
     while !extension.is_null() {
         let current = unsafe { &*extension };
@@ -1447,6 +1478,12 @@ pub unsafe extern "C" fn nisyros_alloc(
                 (preference.required_heap != u32::MAX).then_some(preference.required_heap);
             preferred_heap =
                 (preference.preferred_heap != u32::MAX).then_some(preference.preferred_heap);
+        } else if current.type_id == EXT_ALLOC_SHARING {
+            let sharing = unsafe { &*(extension as *const AllocSharingExtension) };
+            if sharing.reserved != 0 || sharing.mode > 1 {
+                return INVALID_ARGUMENT;
+            }
+            exclusive = sharing.mode == 1;
         }
         extension = current.next;
     }
@@ -1467,6 +1504,7 @@ pub unsafe extern "C" fn nisyros_alloc(
         queue_families: &families,
         required_heap,
         preferred_heap,
+        exclusive,
     };
     let allocation = match device.backend.allocate(&request) {
         Ok(allocation) => allocation,
@@ -1532,6 +1570,7 @@ pub unsafe extern "C" fn nisyros_allocation_query(
     out.mapped = u32::from(allocation.backend.is_mapped());
     out.peer_imported = u32::from(allocation.peer_source.is_some());
     out.access = allocation.access;
+    out.exclusive = u32::from(allocation.backend.exclusive());
     SUCCESS
 }
 
@@ -1700,6 +1739,7 @@ pub unsafe extern "C" fn nisyros_host_alloc(
         queue_families: &families,
         required_heap: None,
         preferred_heap: None,
+        exclusive: false,
     };
     let mut allocation = match device.backend.allocate(&request) {
         Ok(allocation) => allocation,
@@ -2268,6 +2308,17 @@ fn record_addresses(cmd: &Command, operation: vulkan::CommandOp, ranges: &[(u64,
             inner.state = RecordingState::Invalid;
             return INVALID_ARGUMENT;
         }
+        if let vulkan::CommandOp::BarrierRangeScoped {
+            src_family,
+            dst_family,
+            ..
+        } = operation
+            && src_family != dst_family
+            && !allocation.backend.exclusive()
+        {
+            inner.state = RecordingState::Invalid;
+            return UNSUPPORTED;
+        }
         bases.insert(base);
     }
     for base in bases {
@@ -2675,6 +2726,7 @@ pub unsafe extern "C" fn nisyros_cmd_dispatch(
         queue_families: &families,
         required_heap: None,
         preferred_heap: None,
+        exclusive: false,
     };
     let mut storage = match device.backend.allocate(&request) {
         Ok(storage) => storage,
@@ -2757,6 +2809,80 @@ pub unsafe extern "C" fn nisyros_cmd_barrier_range(
         cmd,
         vulkan::CommandOp::BarrierRange { address, bytes },
         &[(address, bytes)],
+    )
+}
+
+/// Records a stage- and access-scoped dependency for a device-address range.
+///
+/// # Safety
+/// `cmd` must be live and `desc` a complete readable descriptor.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nisyros_cmd_barrier_scoped(
+    cmd: *mut Command,
+    desc: *const BarrierDesc,
+) -> i32 {
+    if cmd.is_null() || desc.is_null() {
+        return invalid_recording_argument(cmd);
+    }
+    let desc = unsafe { &*desc };
+    let status = validate_header(&desc.header, std::mem::size_of::<BarrierDesc>());
+    if status != SUCCESS {
+        invalid_recording_argument(cmd);
+        return status;
+    }
+    let (Some(src_stage), Some(src_access), Some(dst_stage), Some(dst_access)) = (
+        vulkan::scoped_stage(desc.src_stages),
+        vulkan::scoped_access(desc.src_access),
+        vulkan::scoped_stage(desc.dst_stages),
+        vulkan::scoped_access(desc.dst_access),
+    ) else {
+        return invalid_recording_argument(cmd);
+    };
+    if desc.bytes == 0 || desc.address.checked_add(desc.bytes).is_none() {
+        return invalid_recording_argument(cmd);
+    }
+    let command = unsafe { &*cmd };
+    let ownership_transfer = desc.src_family != desc.dst_family;
+    let (src_family, dst_family) = if ownership_transfer {
+        let device = unsafe { &*command.device };
+        if desc.src_family == u32::MAX
+            || desc.dst_family == u32::MAX
+            || !device
+                .queues
+                .iter()
+                .any(|queue| queue.family == desc.src_family)
+            || !device
+                .queues
+                .iter()
+                .any(|queue| queue.family == desc.dst_family)
+            || (command.family != desc.src_family && command.family != desc.dst_family)
+            || (command.family == desc.src_family
+                && (src_stage == 0 || dst_stage != 0 || dst_access != 0))
+            || (command.family == desc.dst_family
+                && (dst_stage == 0 || src_stage != 0 || src_access != 0))
+        {
+            return invalid_recording_argument(cmd);
+        }
+        (desc.src_family, desc.dst_family)
+    } else {
+        if src_stage == 0 || dst_stage == 0 {
+            return invalid_recording_argument(cmd);
+        }
+        (u32::MAX, u32::MAX)
+    };
+    record_addresses(
+        command,
+        vulkan::CommandOp::BarrierRangeScoped {
+            address: desc.address,
+            bytes: desc.bytes,
+            src_stage,
+            src_access,
+            dst_stage,
+            dst_access,
+            src_family,
+            dst_family,
+        },
+        &[(desc.address, desc.bytes)],
     )
 }
 
