@@ -55,6 +55,7 @@ pub enum PackageError {
     Truncated,
     Invalid,
     Unsupported,
+    UnsupportedFeature,
 }
 
 impl Package {
@@ -236,7 +237,7 @@ impl Package {
             }
         }
         if self.required_features != 0 || self.scratch_bytes != 0 {
-            return Err(PackageError::Unsupported);
+            return Err(PackageError::UnsupportedFeature);
         }
         Ok(())
     }

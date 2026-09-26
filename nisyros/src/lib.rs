@@ -1808,8 +1808,10 @@ pub unsafe extern "C" fn nisyros_executable_load(
         return INVALID_ARGUMENT;
     };
     let bytes = unsafe { std::slice::from_raw_parts(image.bytes.cast::<u8>(), length) };
-    let Ok(package) = package::Package::parse(bytes) else {
-        return INCOMPATIBLE_BINARY;
+    let package = match package::Package::parse(bytes) {
+        Ok(package) => package,
+        Err(package::PackageError::UnsupportedFeature) => return UNSUPPORTED,
+        Err(_) => return INCOMPATIBLE_BINARY,
     };
     if package.vendor_id != device_ref.vendor_id
         || package.device_id != device_ref.device_id
