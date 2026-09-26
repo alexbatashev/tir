@@ -3,6 +3,7 @@
 use super::*;
 use crate::transport::{Frame, FrameKind, MAX_MESSAGE_BYTES, MessageKey};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io;
 use std::net::{Shutdown, TcpStream};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
@@ -183,6 +184,10 @@ impl NetworkWriters {
             let _ = stream.shutdown(Shutdown::Both);
         }
     }
+
+    fn into_connection(self) -> transport::Connection {
+        transport::Connection::from_streams(self.local_node, self.streams)
+    }
 }
 
 fn send_frame(writer: &mut NetworkWriters, frame: &Frame) -> Result<(), i32> {
@@ -195,7 +200,7 @@ pub struct Endpoint {
     devices: Vec<usize>,
     shared: Arc<Shared>,
     sender: mpsc::Sender<ProgressMessage>,
-    worker: Mutex<Option<JoinHandle<()>>>,
+    worker: Mutex<Option<JoinHandle<Option<transport::Connection>>>>,
     live_commands: AtomicUsize,
     worker_threads: u32,
 }
@@ -340,14 +345,24 @@ pub unsafe extern "C" fn nisyros_endpoint_open(
         return PEER_LOST;
     };
     let network_connection = if needs_network {
-        connection.take()
+        let Some(network) = connection.as_mut() else {
+            unsafe { nisyros_event_destroy(completion) };
+            return BUSY;
+        };
+        match network.take_for(&member_nodes) {
+            Ok(selected) => Some(selected),
+            Err(transport::JoinError::Busy) => {
+                unsafe { nisyros_event_destroy(completion) };
+                return BUSY;
+            }
+            Err(_) => {
+                unsafe { nisyros_event_destroy(completion) };
+                return PEER_LOST;
+            }
+        }
     } else {
         None
     };
-    if needs_network && network_connection.is_none() {
-        unsafe { nisyros_event_destroy(completion) };
-        return BUSY;
-    }
     drop(connection);
     let (sender, receiver) = mpsc::channel();
     let shared = Arc::new(Shared {
@@ -393,22 +408,26 @@ pub unsafe extern "C" fn nisyros_endpoint_open(
                     config,
                 )
             }));
-            if result.is_err() {
-                mark_failed(&panic_shared, PEER_LOST);
+            match result {
+                Ok(connection) => connection,
+                Err(_) => {
+                    mark_failed(&panic_shared, PEER_LOST);
+                    None
+                }
             }
         }) {
         Ok(worker) => worker,
         Err(_) => {
-            if let Some(connection) = connection_cell
+            let recovered = connection_cell
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take()
-            {
-                cluster
-                    .network
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .replace(connection);
+                .take();
+            let mut network = cluster
+                .network
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let (Some(connection), Some(network)) = (recovered, network.as_mut()) {
+                network.put_back(connection);
             }
             unsafe { nisyros_event_destroy(completion) };
             return OUT_OF_MEMORY;
@@ -478,13 +497,26 @@ pub unsafe extern "C" fn nisyros_endpoint_close(endpoint: *mut Endpoint) -> i32 
         return BUSY;
     }
     let _ = endpoint_ref.sender.send(ProgressMessage::Shutdown);
-    if let Some(worker) = endpoint_ref
+    let restored = if let Some(worker) = endpoint_ref
         .worker
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .take()
     {
-        let _ = worker.join();
+        worker.join().ok().flatten()
+    } else {
+        None
+    };
+    if let Some(connection) = restored {
+        let cluster = unsafe { &*(*endpoint_ref.group).cluster };
+        if let Some(network) = cluster
+            .network
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_mut()
+        {
+            network.put_back(connection);
+        }
     }
     let completion = endpoint_ref.shared.completion as *mut Event;
     let group = endpoint_ref.group;
@@ -1799,7 +1831,7 @@ fn progress_loop(
     sender: mpsc::Sender<ProgressMessage>,
     shared: Arc<Shared>,
     config: ProgressConfig,
-) {
+) -> Option<transport::Connection> {
     let ProgressConfig {
         bindings,
         group_epoch,
@@ -1814,29 +1846,69 @@ fn progress_loop(
         streams,
     });
     let mut readers = Vec::new();
+    let stop = Arc::new(AtomicBool::new(false));
     if let Some(writers) = writer.as_mut() {
         if writers.local_node != local_node {
             mark_failed(&shared, PEER_LOST);
-            return;
+            stop.store(true, Ordering::Release);
+            return None;
         }
         for (&peer, stream) in &mut writers.streams {
             let Ok(mut reader_stream) = stream.try_clone() else {
                 mark_failed(&shared, PEER_LOST);
-                return;
+                stop.store(true, Ordering::Release);
+                return None;
             };
-            if reader_stream.set_read_timeout(Some(timeout)).is_err()
+            let poll_interval = timeout.min(Duration::from_millis(100));
+            if reader_stream.set_read_timeout(Some(poll_interval)).is_err()
                 || stream.set_write_timeout(Some(timeout)).is_err()
             {
                 mark_failed(&shared, PEER_LOST);
-                return;
+                stop.store(true, Ordering::Release);
+                return None;
             }
             let sender = sender.clone();
+            let reader_stop = Arc::clone(&stop);
             let reader = thread::Builder::new()
                 .name("nisyros-reader".into())
                 .spawn(move || {
+                    let mut last_frame = Instant::now();
                     loop {
+                        if reader_stop.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let mut probe = [0; 1];
+                        match reader_stream.peek(&mut probe) {
+                            Ok(0) => {
+                                if !reader_stop.load(Ordering::Acquire) {
+                                    let _ = sender.send(ProgressMessage::PeerFailed);
+                                }
+                                break;
+                            }
+                            Ok(_) => {}
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                                ) =>
+                            {
+                                if last_frame.elapsed() >= timeout {
+                                    let _ = sender.send(ProgressMessage::PeerFailed);
+                                    break;
+                                }
+                                continue;
+                            }
+                            Err(_) => {
+                                let _ = sender.send(ProgressMessage::PeerFailed);
+                                break;
+                            }
+                        }
+                        if reader_stream.set_read_timeout(Some(timeout)).is_err() {
+                            break;
+                        }
                         match transport::read_frame(&mut reader_stream) {
                             Ok(frame) => {
+                                last_frame = Instant::now();
                                 if sender.send(ProgressMessage::Remote(peer, frame)).is_err() {
                                     break;
                                 }
@@ -1846,13 +1918,17 @@ fn progress_loop(
                                 break;
                             }
                         }
+                        if reader_stream.set_read_timeout(Some(poll_interval)).is_err() {
+                            break;
+                        }
                     }
                 });
             match reader {
                 Ok(reader) => readers.push(reader),
                 Err(_) => {
                     mark_failed(&shared, PEER_LOST);
-                    return;
+                    stop.store(true, Ordering::Release);
+                    return None;
                 }
             }
         }
@@ -1861,6 +1937,7 @@ fn progress_loop(
     let mut progress = ProgressState::new(group_epoch, rank_count, local_ranks);
     let heartbeat = (timeout / 4).min(Duration::from_secs(1));
     let mut last_heartbeat = Instant::now();
+    let mut clean_shutdown = false;
     loop {
         let wait = if progress.deferred.is_empty() {
             heartbeat
@@ -1886,7 +1963,10 @@ fn progress_loop(
                 }
             }
             Ok(ProgressMessage::PeerFailed) => Err(PEER_LOST),
-            Ok(ProgressMessage::Shutdown) => break,
+            Ok(ProgressMessage::Shutdown) => {
+                clean_shutdown = true;
+                break;
+            }
             Err(mpsc::RecvTimeoutError::Timeout) if last_heartbeat.elapsed() >= heartbeat => {
                 last_heartbeat = Instant::now();
                 if let Some(writers) = writer.as_mut() {
@@ -1915,12 +1995,27 @@ fn progress_loop(
             break;
         }
     }
-    if let Some(writers) = writer {
+    stop.store(true, Ordering::Release);
+    if (!clean_shutdown || shared.failure.load(Ordering::Acquire) != 0)
+        && let Some(writers) = writer.take()
+    {
         writers.shutdown();
     }
     for reader in readers {
         let _ = reader.join();
     }
+    if let Some(writers) = writer.as_ref() {
+        for stream in writers.streams.values() {
+            if stream.set_read_timeout(Some(timeout)).is_err() {
+                mark_failed(&shared, PEER_LOST);
+                for stream in writers.streams.values() {
+                    let _ = stream.shutdown(Shutdown::Both);
+                }
+                return None;
+            }
+        }
+    }
+    writer.map(NetworkWriters::into_connection)
 }
 
 fn gpu_copy(operation: &TransferOp, incoming: Option<&[u8]>) -> Result<Vec<u8>, i32> {

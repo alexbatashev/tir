@@ -105,6 +105,7 @@ pub struct DeviceAnnouncement {
 #[derive(Debug)]
 pub enum JoinError {
     Invalid,
+    Busy,
     Timeout,
     PeerLost,
 }
@@ -116,6 +117,44 @@ pub struct Connection {
 }
 
 impl Connection {
+    pub fn from_streams(local_node: u32, streams: BTreeMap<u32, TcpStream>) -> Self {
+        Self {
+            streams,
+            local_node,
+            failed: false,
+        }
+    }
+
+    pub fn take_for(&mut self, member_nodes: &BTreeSet<u32>) -> Result<Self, JoinError> {
+        if self.failed {
+            return Err(JoinError::PeerLost);
+        }
+        if member_nodes
+            .iter()
+            .any(|&peer| peer != self.local_node && !self.streams.contains_key(&peer))
+        {
+            return Err(JoinError::Busy);
+        }
+        let mut selected = BTreeMap::new();
+        for &peer in member_nodes {
+            if peer != self.local_node {
+                selected.insert(
+                    peer,
+                    self.streams.remove(&peer).expect("checked peer stream"),
+                );
+            }
+        }
+        Ok(Self::from_streams(self.local_node, selected))
+    }
+
+    pub fn put_back(&mut self, other: Self) {
+        debug_assert_eq!(self.local_node, other.local_node);
+        for (peer, stream) in other.streams {
+            debug_assert!(!self.streams.contains_key(&peer));
+            self.streams.insert(peer, stream);
+        }
+    }
+
     pub fn into_streams(self) -> (u32, BTreeMap<u32, TcpStream>) {
         (self.local_node, self.streams)
     }
@@ -125,8 +164,10 @@ impl Connection {
         members: &[(u64, u32, u32)],
         member_nodes: &BTreeSet<u32>,
     ) -> Result<(), JoinError> {
-        if self.failed
-            || epoch == 0
+        if self.failed {
+            return Err(JoinError::PeerLost);
+        }
+        if epoch == 0
             || members.is_empty()
             || members.len() > 64
             || !member_nodes.contains(&self.local_node)
@@ -137,7 +178,7 @@ impl Connection {
             .iter()
             .any(|&peer| peer != self.local_node && !self.streams.contains_key(&peer))
         {
-            return Err(JoinError::PeerLost);
+            return Err(JoinError::Busy);
         }
         let result = (|| {
             for (&peer, stream) in self.streams.iter_mut() {
@@ -157,9 +198,18 @@ impl Connection {
                 }
                 stream.flush().map_err(|_| JoinError::PeerLost)?;
                 let mut magic = [0; 8];
-                stream.read_exact(&mut magic).map_err(map_read)?;
-                if &magic != GROUP_MAGIC
-                    || read_u32(stream).map_err(map_read)? != VERSION
+                loop {
+                    stream.read_exact(&mut magic).map_err(map_read)?;
+                    if &magic == GROUP_MAGIC {
+                        break;
+                    }
+                    if &magic != FRAME_MAGIC
+                        || read_frame_after_magic(stream, magic)?.kind != FrameKind::Heartbeat
+                    {
+                        return Err(JoinError::Invalid);
+                    }
+                }
+                if read_u32(stream).map_err(map_read)? != VERSION
                     || read_u64(stream).map_err(map_read)? != epoch
                     || read_u32(stream).map_err(map_read)? as usize != members.len()
                 {
@@ -218,6 +268,10 @@ pub fn write_frame(writer: &mut impl Write, frame: &Frame) -> io::Result<()> {
 pub fn read_frame(reader: &mut impl Read) -> Result<Frame, JoinError> {
     let mut magic = [0; 8];
     reader.read_exact(&mut magic).map_err(map_read)?;
+    read_frame_after_magic(reader, magic)
+}
+
+fn read_frame_after_magic(reader: &mut impl Read, magic: [u8; 8]) -> Result<Frame, JoinError> {
     let version = read_u32(reader).map_err(map_read)?;
     let kind = match read_u32(reader).map_err(map_read)? {
         1 => FrameKind::Offer,

@@ -777,6 +777,7 @@ pub unsafe extern "C" fn nisyros_cluster_join(
     ) {
         Ok(joined) => joined,
         Err(transport::JoinError::Invalid) => return INVALID_ARGUMENT,
+        Err(transport::JoinError::Busy) => return BUSY,
         Err(transport::JoinError::Timeout) => return TIMEOUT,
         Err(transport::JoinError::PeerLost) => return PEER_LOST,
     };
@@ -1177,6 +1178,7 @@ pub unsafe extern "C" fn nisyros_group_create(
         match connection.exchange_group(desc.group_epoch, &ordered, &member_nodes) {
             Ok(()) => {}
             Err(transport::JoinError::Invalid) => return INVALID_ARGUMENT,
+            Err(transport::JoinError::Busy) => return BUSY,
             Err(transport::JoinError::Timeout) => return TIMEOUT,
             Err(transport::JoinError::PeerLost) => return PEER_LOST,
         }

@@ -102,6 +102,7 @@ python3 nisyros/tests/run-communication.py /usr/share/vulkan/icd.d/radeon_icd.js
 python3 nisyros/tests/run-communication.py /usr/share/vulkan/icd.d/radeon_icd.json --collective-timeout
 python3 nisyros/tests/run-three-node.py /usr/share/vulkan/icd.d/radeon_icd.json
 python3 nisyros/tests/run-three-node.py /usr/share/vulkan/icd.d/radeon_icd.json --nonparticipant
+python3 nisyros/tests/run-reopen.py /usr/share/vulkan/icd.d/radeon_icd.json
 ```
 
 The first script requires `glslangValidator`, `spirv-val`, the Vulkan validation
@@ -131,6 +132,8 @@ lower-indexed node except the final one needs a listening address for direct
 peer connections. Nodes without group members do not open an endpoint.
 The collective root completes only after remote ranks acknowledge that their
 results are visible.
+The reopen script runs two groups in sequence over the same peer connection
+after each endpoint closes cleanly.
 Pass `simulator` in place of the ICD path to run the same communication cases
 against `nisyros/tests/vulkan_simulator.c`. CI also packages the checked-in
 `add_one.spv` fixture and runs the C kernel test through strict binary loading.
