@@ -2851,7 +2851,7 @@ pub unsafe extern "C" fn nisyros_cmd_query(cmd: *mut Command, out: *mut CommandI
         RecordedAction::Wait(EventRef::Point(point)) => unsafe {
             (*point.event).requires_host_progress
         },
-        RecordedAction::Wait(EventRef::Slot(_)) => true,
+        RecordedAction::Wait(EventRef::Slot(_)) => false,
         _ => false,
     }));
     out.native_record_count = inner.native_record_count;

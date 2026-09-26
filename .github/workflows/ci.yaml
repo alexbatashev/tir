@@ -81,6 +81,18 @@ jobs:
           VK_DRIVER_FILES="$icd" python3 nisyros/tests/python_abi.py \
             target/debug/libnisyros.so
           python3 nisyros/tests/run-join.py "$icd"
+      - name: Exercise strict execution and TCP progress in the Vulkan simulator
+        run: |
+          mkdir -p target/debug/nisyros-vulkan-sim
+          cc -std=c11 -Wall -Wextra -Werror -fPIC -shared \
+            nisyros/tests/vulkan_simulator.c -ldl -pthread \
+            -o target/debug/nisyros-vulkan-sim/libvulkan.so.1
+          LD_LIBRARY_PATH="$PWD/target/debug/nisyros-vulkan-sim:${LD_LIBRARY_PATH:-}" \
+            target/debug/nisyros-open strict
+          python3 nisyros/tests/run-communication.py simulator
+          python3 nisyros/tests/run-communication.py simulator --replay
+          python3 nisyros/tests/run-communication.py simulator --peer-loss
+          python3 nisyros/tests/run-communication.py simulator --mismatch
 
   # Build and package once; test shards and memory checks reuse these tools.
   build:

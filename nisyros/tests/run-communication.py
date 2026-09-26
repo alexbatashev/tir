@@ -10,7 +10,8 @@ import time
 
 
 repo = Path(__file__).resolve().parents[2]
-icd = Path(sys.argv[1]).resolve()
+simulator = sys.argv[1] == "simulator"
+icd = None if simulator else Path(sys.argv[1]).resolve()
 peer_loss = len(sys.argv) > 2 and sys.argv[2] == "--peer-loss"
 mismatch = len(sys.argv) > 2 and sys.argv[2] == "--mismatch"
 replay = len(sys.argv) > 2 and sys.argv[2] == "--replay"
@@ -18,12 +19,20 @@ subprocess.run(["cargo", "build", "--locked", "-p", "nisyros"], cwd=repo, check=
 
 with tempfile.TemporaryDirectory() as directory:
     temporary = Path(directory)
-    data = json.loads(icd.read_text())
-    library = data["ICD"]["library_path"]
-    if not os.path.isabs(library) and "/" in library:
-        data["ICD"]["library_path"] = str((icd.parent / library).resolve())
-    duplicate = temporary / "duplicate.json"
-    duplicate.write_text(json.dumps(data))
+    if simulator:
+        subprocess.run(
+            ["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-fPIC", "-shared",
+             "nisyros/tests/vulkan_simulator.c", "-ldl", "-pthread",
+             "-o", str(temporary / "libvulkan.so.1")],
+            cwd=repo, check=True,
+        )
+    else:
+        data = json.loads(icd.read_text())
+        library = data["ICD"]["library_path"]
+        if not os.path.isabs(library) and "/" in library:
+            data["ICD"]["library_path"] = str((icd.parent / library).resolve())
+        duplicate = temporary / "duplicate.json"
+        duplicate.write_text(json.dumps(data))
     binary = temporary / "communicate"
     subprocess.run(
         [
@@ -42,10 +51,16 @@ with tempfile.TemporaryDirectory() as directory:
     session_id = str(secrets.randbits(63) or 1)
     env0 = os.environ.copy()
     env1 = os.environ.copy()
-    env0["VK_DRIVER_FILES"] = f"{icd}:{duplicate}"
-    env1["VK_DRIVER_FILES"] = str(icd)
-    env0["VK_INSTANCE_LAYERS"] = "VK_LAYER_KHRONOS_validation"
-    env1["VK_INSTANCE_LAYERS"] = "VK_LAYER_KHRONOS_validation"
+    if simulator:
+        for env, count in ((env0, "2"), (env1, "1")):
+            env["LD_LIBRARY_PATH"] = f"{temporary}:{env.get('LD_LIBRARY_PATH', '')}"
+            env["NISYROS_SIM_DEVICES"] = count
+            env.pop("VK_INSTANCE_LAYERS", None)
+    else:
+        env0["VK_DRIVER_FILES"] = f"{icd}:{duplicate}"
+        env1["VK_DRIVER_FILES"] = str(icd)
+        env0["VK_INSTANCE_LAYERS"] = "VK_LAYER_KHRONOS_validation"
+        env1["VK_INSTANCE_LAYERS"] = "VK_LAYER_KHRONOS_validation"
     extra = ["peer-loss"] if peer_loss else ["mismatch"] if mismatch else ["replay"] if replay else []
     node0 = subprocess.Popen(
         [str(binary), "0", session_id, address, *extra],

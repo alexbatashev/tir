@@ -70,6 +70,11 @@ The communication script runs two processes, with two local ranks on node zero.
 It checks matched transfers, device visibility after receive completion,
 sequence-bound replay, and error propagation for peer loss and byte-count
 disagreement.
+Pass `simulator` in place of the ICD path to run the same communication cases
+against `nisyros/tests/vulkan_simulator.c`. CI uses this test-only loader to
+exercise successful strict-profile submissions and TCP progress. Its memory
+is coherent host storage; it does not test driver conformance, GPU cache
+visibility, or pipeline execution.
 
 ### Working on the C frontend
 
