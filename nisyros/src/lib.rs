@@ -578,15 +578,15 @@ struct CommandState {
     executable_references: BTreeSet<usize>,
     signal_slots: BTreeSet<u32>,
     inline_arguments: Vec<plugin::Allocation>,
-    query_pools: Vec<vulkan::QueryPool>,
-    native: Vec<vulkan::Command>,
+    query_pools: Vec<plugin::QueryPool>,
+    native: Vec<plugin::Command>,
     native_record_count: u64,
     pending: Option<Point>,
 }
 
 #[derive(Clone, Copy)]
 enum RecordedAction {
-    Operation(vulkan::CommandOp),
+    Operation(plugin::CommandOp),
     Wait(EventRef),
     Signal(EventRef),
 }
@@ -598,7 +598,7 @@ enum EventRef {
 }
 
 struct SegmentPlan {
-    operations: Vec<vulkan::CommandOp>,
+    operations: Vec<plugin::CommandOp>,
     waits: Vec<EventRef>,
     signals: Vec<EventRef>,
 }
@@ -2333,7 +2333,7 @@ pub unsafe extern "C" fn nisyros_cmd_begin(cmd: *mut Command) -> i32 {
     SUCCESS
 }
 
-fn record_addresses(cmd: &Command, operation: vulkan::CommandOp, ranges: &[(u64, u64)]) -> i32 {
+fn record_addresses(cmd: &Command, operation: plugin::CommandOp, ranges: &[(u64, u64)]) -> i32 {
     let Ok(mut inner) = cmd.inner.lock() else {
         return DEVICE_LOST;
     };
@@ -2353,10 +2353,10 @@ fn record_addresses(cmd: &Command, operation: vulkan::CommandOp, ranges: &[(u64,
             return INVALID_ARGUMENT;
         };
         let required_access = match operation {
-            vulkan::CommandOp::Copy { dst, .. } if address == dst => 2,
-            vulkan::CommandOp::Copy { src, .. } if address == src => 1,
-            vulkan::CommandOp::Fill { dst, .. } if address == dst => 2,
-            vulkan::CommandOp::Dispatch { .. } | vulkan::CommandOp::DispatchIndirect { .. } => 1,
+            plugin::CommandOp::Copy { dst, .. } if address == dst => 2,
+            plugin::CommandOp::Copy { src, .. } if address == src => 1,
+            plugin::CommandOp::Fill { dst, .. } if address == dst => 2,
+            plugin::CommandOp::Dispatch { .. } | plugin::CommandOp::DispatchIndirect { .. } => 1,
             _ => 0,
         };
         if !allocation.backend.contains(address, bytes)
@@ -2365,7 +2365,7 @@ fn record_addresses(cmd: &Command, operation: vulkan::CommandOp, ranges: &[(u64,
             inner.state = RecordingState::Invalid;
             return INVALID_ARGUMENT;
         }
-        if let vulkan::CommandOp::BarrierRangeScoped {
+        if let plugin::CommandOp::BarrierRangeScoped {
             src_family,
             dst_family,
             ..
@@ -2442,7 +2442,7 @@ pub unsafe extern "C" fn nisyros_cmd_copy(
     let cmd = unsafe { &*cmd };
     record_addresses(
         cmd,
-        vulkan::CommandOp::Copy { dst, src, bytes },
+        plugin::CommandOp::Copy { dst, src, bytes },
         &[(src, bytes), (dst, bytes)],
     )
 }
@@ -2530,7 +2530,7 @@ fn record_host_transfer(
     };
     inner
         .actions
-        .push(RecordedAction::Operation(vulkan::CommandOp::Copy {
+        .push(RecordedAction::Operation(plugin::CommandOp::Copy {
             dst,
             src,
             bytes,
@@ -2586,7 +2586,7 @@ pub unsafe extern "C" fn nisyros_cmd_fill(
     let cmd = unsafe { &*cmd };
     record_addresses(
         cmd,
-        vulkan::CommandOp::Fill {
+        plugin::CommandOp::Fill {
             dst,
             bytes,
             pattern,
@@ -2626,9 +2626,8 @@ pub unsafe extern "C" fn nisyros_cmd_dispatch_args(
     {
         return invalid_recording_argument(cmd);
     }
-    let operation = vulkan::CommandOp::Dispatch {
-        pipeline: executable.pipeline.handle,
-        layout: executable.pipeline.layout,
+    let operation = plugin::CommandOp::Dispatch {
+        pipeline: executable.pipeline.opaque_handle(),
         grid: dimensions,
         arguments,
     };
@@ -2673,9 +2672,8 @@ pub unsafe extern "C" fn nisyros_cmd_dispatch_indirect_args(
     if executable.owner != cmd_ref.device {
         return invalid_recording_argument(cmd);
     }
-    let operation = vulkan::CommandOp::DispatchIndirect {
-        pipeline: executable.pipeline.handle,
-        layout: executable.pipeline.layout,
+    let operation = plugin::CommandOp::DispatchIndirect {
+        pipeline: executable.pipeline.opaque_handle(),
         grid_address,
         arguments,
     };
@@ -2825,9 +2823,8 @@ pub unsafe extern "C" fn nisyros_cmd_dispatch(
     }
     inner
         .actions
-        .push(RecordedAction::Operation(vulkan::CommandOp::Dispatch {
-            pipeline: executable.pipeline.handle,
-            layout: executable.pipeline.layout,
+        .push(RecordedAction::Operation(plugin::CommandOp::Dispatch {
+            pipeline: executable.pipeline.opaque_handle(),
             grid: dimensions,
             arguments: storage.base,
         }));
@@ -2845,7 +2842,7 @@ pub unsafe extern "C" fn nisyros_cmd_barrier_all(cmd: *mut Command) -> i32 {
         return INVALID_ARGUMENT;
     }
     let cmd = unsafe { &*cmd };
-    record_addresses(cmd, vulkan::CommandOp::BarrierAll, &[])
+    record_addresses(cmd, plugin::CommandOp::BarrierAll, &[])
 }
 
 /// Records an all-stage dependency restricted to one device-address range.
@@ -2864,7 +2861,7 @@ pub unsafe extern "C" fn nisyros_cmd_barrier_range(
     let cmd = unsafe { &*cmd };
     record_addresses(
         cmd,
-        vulkan::CommandOp::BarrierRange { address, bytes },
+        plugin::CommandOp::BarrierRange { address, bytes },
         &[(address, bytes)],
     )
 }
@@ -2929,7 +2926,7 @@ pub unsafe extern "C" fn nisyros_cmd_barrier_scoped(
     };
     record_addresses(
         command,
-        vulkan::CommandOp::BarrierRangeScoped {
+        plugin::CommandOp::BarrierRangeScoped {
             address: desc.address,
             bytes: desc.bytes,
             src_stage,
@@ -3002,8 +2999,8 @@ pub unsafe extern "C" fn nisyros_cmd_write_timestamp(cmd: *mut Command, destinat
     }
     inner
         .actions
-        .push(RecordedAction::Operation(vulkan::CommandOp::Timestamp {
-            pool: pool.handle(),
+        .push(RecordedAction::Operation(plugin::CommandOp::Timestamp {
+            pool: pool.opaque_handle(),
             destination,
         }));
     inner.query_pools.push(pool);

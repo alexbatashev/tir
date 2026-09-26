@@ -90,6 +90,134 @@ struct PluginAllocationInfo {
     exclusive: u32,
 }
 
+#[repr(C)]
+struct PluginCommandOp {
+    kind: u32,
+    reserved: u32,
+    args: [u64; 8],
+}
+
+#[derive(Clone, Copy)]
+pub enum CommandOp {
+    Copy {
+        dst: u64,
+        src: u64,
+        bytes: u64,
+    },
+    Fill {
+        dst: u64,
+        bytes: u64,
+        pattern: u32,
+    },
+    BarrierAll,
+    BarrierRange {
+        address: u64,
+        bytes: u64,
+    },
+    BarrierRangeScoped {
+        address: u64,
+        bytes: u64,
+        src_stage: u64,
+        src_access: u64,
+        dst_stage: u64,
+        dst_access: u64,
+        src_family: u32,
+        dst_family: u32,
+    },
+    Dispatch {
+        pipeline: *mut c_void,
+        grid: [u32; 3],
+        arguments: u64,
+    },
+    DispatchIndirect {
+        pipeline: *mut c_void,
+        grid_address: u64,
+        arguments: u64,
+    },
+    Timestamp {
+        pool: *mut c_void,
+        destination: u64,
+    },
+}
+
+impl CommandOp {
+    fn encode(self) -> PluginCommandOp {
+        let mut args = [0; 8];
+        let kind = match self {
+            Self::Copy { dst, src, bytes } => {
+                args[..3].copy_from_slice(&[dst, src, bytes]);
+                1
+            }
+            Self::Fill {
+                dst,
+                bytes,
+                pattern,
+            } => {
+                args[..3].copy_from_slice(&[dst, bytes, u64::from(pattern)]);
+                2
+            }
+            Self::BarrierAll => 3,
+            Self::BarrierRange { address, bytes } => {
+                args[..2].copy_from_slice(&[address, bytes]);
+                4
+            }
+            Self::BarrierRangeScoped {
+                address,
+                bytes,
+                src_stage,
+                src_access,
+                dst_stage,
+                dst_access,
+                src_family,
+                dst_family,
+            } => {
+                args = [
+                    address,
+                    bytes,
+                    src_stage,
+                    src_access,
+                    dst_stage,
+                    dst_access,
+                    u64::from(src_family),
+                    u64::from(dst_family),
+                ];
+                5
+            }
+            Self::Dispatch {
+                pipeline,
+                grid,
+                arguments,
+            } => {
+                args[..5].copy_from_slice(&[
+                    pipeline as u64,
+                    u64::from(grid[0]),
+                    u64::from(grid[1]),
+                    u64::from(grid[2]),
+                    arguments,
+                ]);
+                6
+            }
+            Self::DispatchIndirect {
+                pipeline,
+                grid_address,
+                arguments,
+            } => {
+                args[..3].copy_from_slice(&[pipeline as u64, grid_address, arguments]);
+                7
+            }
+            Self::Timestamp { pool, destination } => {
+                args[..2].copy_from_slice(&[pool as u64, destination]);
+                8
+            }
+        };
+        PluginCommandOp {
+            kind,
+            reserved: 0,
+            args,
+        }
+    }
+}
+
 type InstanceOpen = unsafe extern "C" fn(*const PluginServices, *mut *mut c_void) -> i32;
 type InstanceClose = unsafe extern "C" fn(*mut c_void);
 type DeviceCount = unsafe extern "C" fn(*mut c_void, *mut u32) -> i32;
@@ -140,6 +268,12 @@ type TimelineExportFd = unsafe extern "C" fn(*mut c_void, *mut i32, *mut i32) ->
 type PipelineImport =
     unsafe extern "C" fn(*mut c_void, *const u8, u64, *mut *mut c_void, *mut i32) -> i32;
 type PipelineDestroy = unsafe extern "C" fn(*mut c_void, *mut c_void);
+type QueryCreate = unsafe extern "C" fn(*mut c_void, *mut *mut c_void, *mut i32) -> i32;
+type QueryDestroy = unsafe extern "C" fn(*mut c_void, *mut c_void);
+type CommandCreate = unsafe extern "C" fn(*mut c_void, u32, *mut *mut c_void, *mut i32) -> i32;
+type CommandDestroy = unsafe extern "C" fn(*mut c_void, *mut c_void);
+type CommandRecord =
+    unsafe extern "C" fn(*mut c_void, u32, *const PluginCommandOp, *mut i32) -> i32;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -173,6 +307,11 @@ struct PluginApi {
     timeline_export_fd: Option<TimelineExportFd>,
     pipeline_import: Option<PipelineImport>,
     pipeline_destroy: Option<PipelineDestroy>,
+    query_create: Option<QueryCreate>,
+    query_destroy: Option<QueryDestroy>,
+    command_create: Option<CommandCreate>,
+    command_destroy: Option<CommandDestroy>,
+    command_record: Option<CommandRecord>,
 }
 
 struct VulkanInstance {
@@ -299,6 +438,11 @@ pub unsafe extern "C" fn nisyros_plugin_get_api(
         api.timeline_export_fd = Some(timeline_export_fd);
         api.pipeline_import = Some(pipeline_import);
         api.pipeline_destroy = Some(pipeline_destroy);
+        api.query_create = Some(query_create);
+        api.query_destroy = Some(query_destroy);
+        api.command_create = Some(command_create);
+        api.command_destroy = Some(command_destroy);
+        api.command_record = Some(command_record);
     }
     SUCCESS
 }
@@ -914,6 +1058,156 @@ unsafe extern "C" fn pipeline_destroy(_device: *mut c_void, pipeline: *mut c_voi
     }
 }
 
+unsafe extern "C" fn query_create(
+    device: *mut c_void,
+    out: *mut *mut c_void,
+    backend_code: *mut i32,
+) -> i32 {
+    if device.is_null() || out.is_null() || backend_code.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    unsafe { *out = ptr::null_mut() };
+    let device = unsafe { &*device.cast::<vulkan::Device>() };
+    match device.create_timestamp_query() {
+        Ok(query) => {
+            unsafe { *out = Box::into_raw(Box::new(query)).cast() };
+            SUCCESS
+        }
+        Err(error) => timeline_status(error, backend_code),
+    }
+}
+
+unsafe extern "C" fn query_destroy(_device: *mut c_void, query: *mut c_void) {
+    if !query.is_null() {
+        unsafe { drop(Box::from_raw(query.cast::<vulkan::QueryPool>())) };
+    }
+}
+
+unsafe extern "C" fn command_create(
+    device: *mut c_void,
+    family: u32,
+    out: *mut *mut c_void,
+    backend_code: *mut i32,
+) -> i32 {
+    if device.is_null() || out.is_null() || backend_code.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    unsafe { *out = ptr::null_mut() };
+    let device = unsafe { &*device.cast::<vulkan::Device>() };
+    match device.create_command(family) {
+        Ok(command) => {
+            unsafe { *out = Box::into_raw(Box::new(command)).cast() };
+            SUCCESS
+        }
+        Err(error) => timeline_status(error, backend_code),
+    }
+}
+
+unsafe extern "C" fn command_destroy(_device: *mut c_void, command: *mut c_void) {
+    if !command.is_null() {
+        unsafe { drop(Box::from_raw(command.cast::<vulkan::Command>())) };
+    }
+}
+
+fn decode_command_op(op: &PluginCommandOp) -> Option<vulkan::CommandOp> {
+    if op.reserved != 0 {
+        return None;
+    }
+    let a = &op.args;
+    let u32_arg = |index| u32::try_from(a[index]).ok();
+    Some(match op.kind {
+        1 => vulkan::CommandOp::Copy {
+            dst: a[0],
+            src: a[1],
+            bytes: a[2],
+        },
+        2 => vulkan::CommandOp::Fill {
+            dst: a[0],
+            bytes: a[1],
+            pattern: u32_arg(2)?,
+        },
+        3 => vulkan::CommandOp::BarrierAll,
+        4 => vulkan::CommandOp::BarrierRange {
+            address: a[0],
+            bytes: a[1],
+        },
+        5 => vulkan::CommandOp::BarrierRangeScoped {
+            address: a[0],
+            bytes: a[1],
+            src_stage: a[2],
+            src_access: a[3],
+            dst_stage: a[4],
+            dst_access: a[5],
+            src_family: u32_arg(6)?,
+            dst_family: u32_arg(7)?,
+        },
+        6 | 7 => {
+            if a[0] == 0 {
+                return None;
+            }
+            let pipeline = unsafe { &*(usize::try_from(a[0]).ok()? as *const vulkan::Pipeline) };
+            if op.kind == 6 {
+                vulkan::CommandOp::Dispatch {
+                    pipeline: pipeline.handle,
+                    layout: pipeline.layout,
+                    grid: [u32_arg(1)?, u32_arg(2)?, u32_arg(3)?],
+                    arguments: a[4],
+                }
+            } else {
+                vulkan::CommandOp::DispatchIndirect {
+                    pipeline: pipeline.handle,
+                    layout: pipeline.layout,
+                    grid_address: a[1],
+                    arguments: a[2],
+                }
+            }
+        }
+        8 => {
+            if a[0] == 0 {
+                return None;
+            }
+            let pool = unsafe { &*(usize::try_from(a[0]).ok()? as *const vulkan::QueryPool) };
+            vulkan::CommandOp::Timestamp {
+                pool: pool.handle(),
+                destination: a[1],
+            }
+        }
+        _ => return None,
+    })
+}
+
+unsafe extern "C" fn command_record(
+    command: *mut c_void,
+    operation_count: u32,
+    operations: *const PluginCommandOp,
+    backend_code: *mut i32,
+) -> i32 {
+    if command.is_null()
+        || backend_code.is_null()
+        || operation_count > 1_000_000
+        || (operation_count != 0 && operations.is_null())
+    {
+        return INVALID_ARGUMENT;
+    }
+    let operations = if operation_count == 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(operations, operation_count as usize) }
+    };
+    let Some(decoded) = operations
+        .iter()
+        .map(decode_command_op)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return INVALID_ARGUMENT;
+    };
+    let command = unsafe { &*command.cast::<vulkan::Command>() };
+    match command.record(&decoded) {
+        Ok(()) => SUCCESS,
+        Err(error) => timeline_status(error, backend_code),
+    }
+}
+
 unsafe extern "C" fn core_report_error(
     _context: *mut c_void,
     status: i32,
@@ -975,6 +1269,11 @@ impl Instance {
             || api.timeline_export_fd.is_none()
             || api.pipeline_import.is_none()
             || api.pipeline_destroy.is_none()
+            || api.query_create.is_none()
+            || api.query_destroy.is_none()
+            || api.command_create.is_none()
+            || api.command_destroy.is_none()
+            || api.command_record.is_none()
         {
             return Err(());
         }
@@ -1272,6 +1571,60 @@ fn allocation_error(status: i32) -> vulkan::AllocError {
 }
 
 impl Device {
+    pub fn create_timestamp_query(&self) -> Result<QueryPool, i32> {
+        let mut handle = ptr::null_mut();
+        let mut backend_code = 0;
+        let status = unsafe {
+            self.api.query_create.expect("checked provider callback")(
+                self.handle,
+                &mut handle,
+                &mut backend_code,
+            )
+        };
+        if status != SUCCESS || handle.is_null() {
+            if !handle.is_null() {
+                unsafe {
+                    self.api.query_destroy.expect("checked provider callback")(self.handle, handle)
+                };
+            }
+            return Err(provider_backend_error(backend_code));
+        }
+        Ok(QueryPool {
+            api: self.api,
+            device: self.handle,
+            handle,
+        })
+    }
+
+    pub fn create_command(&self, family: u32) -> Result<Command, i32> {
+        let mut handle = ptr::null_mut();
+        let mut backend_code = 0;
+        let status = unsafe {
+            self.api.command_create.expect("checked provider callback")(
+                self.handle,
+                family,
+                &mut handle,
+                &mut backend_code,
+            )
+        };
+        if status != SUCCESS || handle.is_null() {
+            if !handle.is_null() {
+                unsafe {
+                    self.api.command_destroy.expect("checked provider callback")(
+                        self.handle,
+                        handle,
+                    )
+                };
+            }
+            return Err(provider_backend_error(backend_code));
+        }
+        Ok(Command {
+            api: self.api,
+            device: self.handle,
+            handle,
+        })
+    }
+
     pub fn import_pipeline(&self, image: &[u8]) -> Result<Pipeline, vulkan::PipelineError> {
         let mut handle = ptr::null_mut();
         let mut backend_code = 0;
@@ -1606,6 +1959,74 @@ impl Drop for Pipeline {
             self.api
                 .pipeline_destroy
                 .expect("checked provider callback")(self.device, self.handle)
+        };
+    }
+}
+
+impl Pipeline {
+    pub fn opaque_handle(&self) -> *mut c_void {
+        self.handle
+    }
+}
+
+pub struct QueryPool {
+    api: PluginApi,
+    device: *mut c_void,
+    handle: *mut c_void,
+}
+
+impl QueryPool {
+    pub fn opaque_handle(&self) -> *mut c_void {
+        self.handle
+    }
+}
+
+impl Drop for QueryPool {
+    fn drop(&mut self) {
+        unsafe {
+            self.api.query_destroy.expect("checked provider callback")(self.device, self.handle)
+        };
+    }
+}
+
+pub struct Command {
+    api: PluginApi,
+    device: *mut c_void,
+    handle: *mut c_void,
+}
+
+impl Command {
+    pub fn record(&self, operations: &[CommandOp]) -> Result<(), i32> {
+        let encoded: Vec<_> = operations.iter().copied().map(CommandOp::encode).collect();
+        let mut backend_code = 0;
+        let status = unsafe {
+            self.api.command_record.expect("checked provider callback")(
+                self.handle,
+                encoded.len() as u32,
+                encoded.as_ptr(),
+                &mut backend_code,
+            )
+        };
+        if status == SUCCESS {
+            Ok(())
+        } else {
+            Err(provider_backend_error(backend_code))
+        }
+    }
+}
+
+impl std::ops::Deref for Command {
+    type Target = vulkan::Command;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.handle.cast::<vulkan::Command>() }
+    }
+}
+
+impl Drop for Command {
+    fn drop(&mut self) {
+        unsafe {
+            self.api.command_destroy.expect("checked provider callback")(self.device, self.handle)
         };
     }
 }

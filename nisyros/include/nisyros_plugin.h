@@ -89,6 +89,33 @@ typedef struct {
     uint32_t exclusive;
 } nisyros_plugin_allocation_info;
 
+/* Arguments by kind:
+ * COPY: dst, src, bytes
+ * FILL: dst, bytes, pattern
+ * BARRIER_ALL: none
+ * BARRIER_RANGE: address, bytes
+ * BARRIER_SCOPED: address, bytes, src_stage, src_access, dst_stage,
+ *                 dst_access, src_family, dst_family
+ * DISPATCH: pipeline handle, grid_x, grid_y, grid_z, argument address
+ * DISPATCH_INDIRECT: pipeline handle, grid address, argument address
+ * TIMESTAMP: query handle, destination address
+ * Handles are provider-owned opaque pointers represented as uintptr_t.
+ */
+typedef struct {
+    uint32_t kind;
+    uint32_t reserved;
+    uint64_t args[8];
+} nisyros_plugin_command_op;
+
+#define NISYROS_PLUGIN_OP_COPY 1u
+#define NISYROS_PLUGIN_OP_FILL 2u
+#define NISYROS_PLUGIN_OP_BARRIER_ALL 3u
+#define NISYROS_PLUGIN_OP_BARRIER_RANGE 4u
+#define NISYROS_PLUGIN_OP_BARRIER_SCOPED 5u
+#define NISYROS_PLUGIN_OP_DISPATCH 6u
+#define NISYROS_PLUGIN_OP_DISPATCH_INDIRECT 7u
+#define NISYROS_PLUGIN_OP_TIMESTAMP 8u
+
 typedef struct {
     uint32_t struct_size;
     uint32_t abi_version;
@@ -151,6 +178,15 @@ typedef struct {
         void *device, const uint8_t *image, uint64_t image_bytes,
         void **out, int32_t *backend_code);
     void (NISYROS_CALL *pipeline_destroy)(void *device, void *pipeline);
+    nisyros_status (NISYROS_CALL *query_create)(
+        void *device, void **out, int32_t *backend_code);
+    void (NISYROS_CALL *query_destroy)(void *device, void *query);
+    nisyros_status (NISYROS_CALL *command_create)(
+        void *device, uint32_t family, void **out, int32_t *backend_code);
+    void (NISYROS_CALL *command_destroy)(void *device, void *command);
+    nisyros_status (NISYROS_CALL *command_record)(
+        void *command, uint32_t operation_count,
+        const nisyros_plugin_command_op *operations, int32_t *backend_code);
 } nisyros_plugin_api;
 
 /* All handles and callback storage belong to the provider that returned them. */

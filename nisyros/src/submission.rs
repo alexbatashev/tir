@@ -262,7 +262,7 @@ fn submit_recordings(
         let mut segment = vulkan::SubmitSegment {
             command: spec
                 .command
-                .map(|(command, native)| &guards[command].native[native]),
+                .map(|(command, native)| &*guards[command].native[native]),
             waits,
             signals: Vec::new(),
         };

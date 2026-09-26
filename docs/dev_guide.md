@@ -62,8 +62,9 @@ not load replaceable backend plugins.
 currently implements sized negotiation, device inventory, device opening, and
 allocation lifecycle through opaque handles. Core discovery, device opening,
 allocations, timeline events, idle waits, and native pipeline import use that
-table. Command recording and submission still call Vulkan directly, so this
-is not yet a replaceable execution backend.
+table. Command encoding and timestamp query creation use provider callbacks.
+Submission still calls Vulkan directly, so this is not yet a replaceable
+execution backend.
 `nisyros_diagnostic_get` copies the calling thread's last recorded backend
 failure into caller storage, including the Vulkan result code when one was
 returned. Read it on the thread that received the failed status.
