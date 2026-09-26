@@ -35,6 +35,9 @@ int main(int argc, char **argv) {
         assert(nisyros_cluster_device_info(cluster, ids[index], &info) == NISYROS_SUCCESS);
         assert(info.node_index <= 1);
         assert(info.is_local == (info.node_index == local_node));
+        uint32_t heap_count = 0;
+        assert(nisyros_cluster_memory_heaps(cluster, ids[index], &heap_count, NULL) == NISYROS_SUCCESS);
+        assert(heap_count > 0 && heap_count <= 16);
         if (info.is_local) local_seen++;
         else {
             nisyros_queue_request request = {0, 1, 1.0f, 0};

@@ -60,6 +60,7 @@ typedef struct nisyros_extension {
 } nisyros_extension;
 
 #define NISYROS_EXTENSION_OPTIONAL 1u
+#define NISYROS_EXTENSION_ALLOC_HEAP 1u
 
 typedef struct {
     uint32_t struct_size;
@@ -170,6 +171,14 @@ typedef struct {
 } nisyros_queue_family_info;
 
 typedef struct {
+    uint64_t bytes;
+    uint32_t flags;
+    uint32_t index;
+} nisyros_memory_heap_info;
+
+#define NISYROS_HEAP_DEVICE_LOCAL 0x00000001u
+
+typedef struct {
     uint32_t family;
     uint32_t count;
     float priority;
@@ -196,6 +205,13 @@ typedef struct {
     uint32_t preferred_properties;
     uint32_t reserved[2];
 } nisyros_alloc_desc;
+
+typedef struct {
+    nisyros_extension base;
+    uint32_t required_heap;
+    uint32_t preferred_heap;
+    uint32_t reserved[2];
+} nisyros_alloc_heap_extension;
 
 typedef struct {
     nisyros_descriptor_header header;
@@ -293,6 +309,9 @@ NISYROS_API nisyros_status NISYROS_CALL
 nisyros_cluster_queue_family_info(nisyros_cluster cluster, nisyros_device_id id,
                                   uint32_t family,
                                   nisyros_queue_family_info *out);
+NISYROS_API nisyros_status NISYROS_CALL
+nisyros_cluster_memory_heaps(nisyros_cluster cluster, nisyros_device_id id,
+                             uint32_t *count, nisyros_memory_heap_info *out);
 NISYROS_API nisyros_status NISYROS_CALL
 nisyros_cluster_close(nisyros_cluster cluster);
 NISYROS_API nisyros_status NISYROS_CALL

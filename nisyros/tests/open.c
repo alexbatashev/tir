@@ -42,6 +42,18 @@ int main(int argc, char **argv) {
     assert((info.strict_profile_supported != 0) == expect_strict);
     printf("%s driver=%s strict=%u families=%u\n", info.name, info.driver_name,
            info.strict_profile_supported, info.queue_family_count);
+    uint32_t heap_count = 0;
+    assert(nisyros_cluster_memory_heaps(cluster, ids[0], &heap_count, NULL) == NISYROS_SUCCESS);
+    assert(heap_count > 0 && heap_count <= 16);
+    nisyros_memory_heap_info heaps[16];
+    uint32_t heap_capacity = 0;
+    assert(nisyros_cluster_memory_heaps(cluster, ids[0], &heap_capacity, heaps) == NISYROS_INCOMPLETE);
+    assert(heap_capacity == heap_count);
+    heap_capacity = 16;
+    assert(nisyros_cluster_memory_heaps(cluster, ids[0], &heap_capacity, heaps) == NISYROS_SUCCESS);
+    for (uint32_t index = 0; index < heap_count; ++index) {
+        assert(heaps[index].index == index && heaps[index].bytes > 0);
+    }
 
     uint32_t selected = UINT32_MAX;
     uint32_t queue_count = 0;
@@ -97,6 +109,27 @@ int main(int argc, char **argv) {
         assert(allocation_info.mapped == 0 && allocation_info.peer_imported == 0);
         assert(allocation_info.access == (NISYROS_ACCESS_READ | NISYROS_ACCESS_WRITE));
         assert(nisyros_allocation_query(device, address + 4, &allocation_info) == NISYROS_INVALID_ARGUMENT);
+        nisyros_alloc_heap_extension heap_choice = {
+            .base = {sizeof(heap_choice), NISYROS_EXTENSION_ALLOC_HEAP, 0, 0, NULL},
+            .required_heap = allocation_info.heap_index,
+            .preferred_heap = UINT32_MAX,
+        };
+        allocation.header.extensions = &heap_choice.base;
+        nisyros_addr selected_heap_address = 0;
+        assert(nisyros_alloc(device, &allocation, &selected_heap_address) == NISYROS_SUCCESS);
+        assert(nisyros_allocation_query(device, selected_heap_address, &allocation_info) == NISYROS_SUCCESS);
+        assert(allocation_info.heap_index == heap_choice.required_heap);
+        assert(nisyros_free(device, selected_heap_address) == NISYROS_SUCCESS);
+        heap_choice.preferred_heap = heap_choice.required_heap;
+        heap_choice.required_heap = UINT32_MAX;
+        assert(nisyros_alloc(device, &allocation, &selected_heap_address) == NISYROS_SUCCESS);
+        assert(nisyros_allocation_query(device, selected_heap_address, &allocation_info) == NISYROS_SUCCESS);
+        assert(allocation_info.heap_index == heap_choice.preferred_heap);
+        assert(nisyros_free(device, selected_heap_address) == NISYROS_SUCCESS);
+        heap_choice.required_heap = heap_count;
+        assert(nisyros_alloc(device, &allocation, &selected_heap_address) == NISYROS_UNSUPPORTED);
+        assert(selected_heap_address == 0);
+        allocation.header.extensions = NULL;
         assert(nisyros_device_close(device) == NISYROS_BUSY);
         void *host = NULL;
         assert(nisyros_map(device, address + 4, 4, &host) == NISYROS_SUCCESS);

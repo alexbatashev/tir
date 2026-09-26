@@ -68,6 +68,7 @@ const INCOMPATIBLE_BINARY: i32 = -9;
 const PEER_LOST: i32 = -10;
 const ABI_VERSION: u32 = 1;
 const BACKEND_VULKAN: u32 = 1;
+const EXT_ALLOC_HEAP: u32 = 1;
 
 static NEXT_EPOCH: AtomicU64 = AtomicU64::new(1);
 
@@ -88,10 +89,19 @@ pub struct Extension {
 }
 
 fn validate_header(header: &DescriptorHeader, expected_size: usize) -> i32 {
+    validate_header_with(header, expected_size, None)
+}
+
+fn validate_header_with(
+    header: &DescriptorHeader,
+    expected_size: usize,
+    recognized: Option<(u32, usize)>,
+) -> i32 {
     if (header.struct_size as usize) < expected_size || header.abi_version != ABI_VERSION {
         return INVALID_ARGUMENT;
     }
     let mut seen = BTreeSet::new();
+    let mut recognized_seen = false;
     let mut extension = header.extensions;
     while !extension.is_null() {
         if seen.len() >= 32 || !seen.insert(extension as usize) {
@@ -106,7 +116,15 @@ fn validate_header(header: &DescriptorHeader, expected_size: usize) -> i32 {
         {
             return INVALID_ARGUMENT;
         }
-        if current.flags & 1 == 0 {
+        if recognized.is_some_and(|(type_id, _)| type_id == current.type_id) {
+            if recognized_seen
+                || current.flags != 0
+                || (current.struct_size as usize) < recognized.expect("matched type").1
+            {
+                return INVALID_ARGUMENT;
+            }
+            recognized_seen = true;
+        } else if current.flags & 1 == 0 {
             return UNSUPPORTED;
         }
         extension = current.next;
@@ -176,6 +194,13 @@ pub struct QueueFamilyInfo {
 }
 
 #[repr(C)]
+pub struct MemoryHeapInfo {
+    bytes: u64,
+    flags: u32,
+    index: u32,
+}
+
+#[repr(C)]
 #[derive(Clone, Copy)]
 pub struct QueueRequest {
     family: u32,
@@ -198,6 +223,14 @@ pub struct AllocDesc {
     alignment: u64,
     required_properties: u32,
     preferred_properties: u32,
+    reserved: [u32; 2],
+}
+
+#[repr(C)]
+pub struct AllocHeapExtension {
+    base: Extension,
+    required_heap: u32,
+    preferred_heap: u32,
     reserved: [u32; 2],
 }
 
@@ -515,6 +548,11 @@ fn announce_device(record: &vulkan::DeviceRecord) -> transport::DeviceAnnounceme
                 count: family.count,
             })
             .collect(),
+        memory_heaps: record
+            .memory_heaps
+            .iter()
+            .map(|&(bytes, flags)| transport::MemoryHeapAnnouncement { bytes, flags })
+            .collect(),
     }
 }
 
@@ -782,6 +820,56 @@ pub unsafe extern "C" fn nisyros_cluster_queue_family_info(
         };
     }
     SUCCESS
+}
+
+/// Enumerates a device's memory heaps from the cluster inventory.
+///
+/// # Safety
+/// `cluster` must be live, `count` writable, and nonnull `out` must hold the
+/// input capacity of `MemoryHeapInfo` values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nisyros_cluster_memory_heaps(
+    cluster: *mut Cluster,
+    id: DeviceId,
+    count: *mut u32,
+    out: *mut MemoryHeapInfo,
+) -> i32 {
+    if cluster.is_null() || count.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    let cluster = unsafe { &*cluster };
+    if id.epoch != cluster.epoch || id.backend != BACKEND_VULKAN {
+        return INVALID_ARGUMENT;
+    }
+    let Some(device) = cluster.inventory.get(id.index as usize) else {
+        return INVALID_ARGUMENT;
+    };
+    let capacity = unsafe { *count };
+    let total = device.snapshot.memory_heaps.len() as u32;
+    unsafe { *count = total };
+    if out.is_null() {
+        return SUCCESS;
+    }
+    for (index, heap) in device
+        .snapshot
+        .memory_heaps
+        .iter()
+        .take(capacity as usize)
+        .enumerate()
+    {
+        unsafe {
+            *out.add(index) = MemoryHeapInfo {
+                bytes: heap.bytes,
+                flags: heap.flags,
+                index: index as u32,
+            }
+        };
+    }
+    if capacity < total {
+        INCOMPLETE
+    } else {
+        SUCCESS
+    }
 }
 
 /// Closes a cluster after all of its children have been released.
@@ -1181,7 +1269,11 @@ pub unsafe extern "C" fn nisyros_alloc(
     unsafe { *out = 0 };
     let device = unsafe { &*device };
     let desc = unsafe { &*desc };
-    let status = validate_header(&desc.header, std::mem::size_of::<AllocDesc>());
+    let status = validate_header_with(
+        &desc.header,
+        std::mem::size_of::<AllocDesc>(),
+        Some((EXT_ALLOC_HEAP, std::mem::size_of::<AllocHeapExtension>())),
+    );
     if status != SUCCESS {
         return status;
     }
@@ -1192,6 +1284,29 @@ pub unsafe extern "C" fn nisyros_alloc(
     {
         return INVALID_ARGUMENT;
     }
+    let mut required_heap = None;
+    let mut preferred_heap = None;
+    let mut extension = desc.header.extensions;
+    while !extension.is_null() {
+        let current = unsafe { &*extension };
+        if current.type_id == EXT_ALLOC_HEAP {
+            let preference = unsafe { &*(extension as *const AllocHeapExtension) };
+            if preference.reserved != [0; 2] {
+                return INVALID_ARGUMENT;
+            }
+            required_heap =
+                (preference.required_heap != u32::MAX).then_some(preference.required_heap);
+            preferred_heap =
+                (preference.preferred_heap != u32::MAX).then_some(preference.preferred_heap);
+        }
+        extension = current.next;
+    }
+    let heap_count = device.backend.memory_heap_count();
+    if required_heap.is_some_and(|index| index >= heap_count)
+        || preferred_heap.is_some_and(|index| index >= heap_count)
+    {
+        return UNSUPPORTED;
+    }
     let mut families: Vec<u32> = device.queues.iter().map(|queue| queue.family).collect();
     families.sort_unstable();
     families.dedup();
@@ -1201,6 +1316,8 @@ pub unsafe extern "C" fn nisyros_alloc(
         required_properties: desc.required_properties,
         preferred_properties: desc.preferred_properties,
         queue_families: &families,
+        required_heap,
+        preferred_heap,
     };
     let allocation = match device.backend.allocate(&request) {
         Ok(allocation) => allocation,
@@ -1432,6 +1549,8 @@ pub unsafe extern "C" fn nisyros_host_alloc(
         required_properties: 2 | 4,
         preferred_properties: 1,
         queue_families: &families,
+        required_heap: None,
+        preferred_heap: None,
     };
     let mut allocation = match device.backend.allocate(&request) {
         Ok(allocation) => allocation,
@@ -2403,6 +2522,8 @@ pub unsafe extern "C" fn nisyros_cmd_dispatch(
         required_properties: 2,
         preferred_properties: 4,
         queue_families: &families,
+        required_heap: None,
+        preferred_heap: None,
     };
     let mut storage = match device.backend.allocate(&request) {
         Ok(storage) => storage,

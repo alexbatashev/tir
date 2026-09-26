@@ -8,9 +8,10 @@ use std::time::{Duration, Instant};
 const MAGIC: &[u8; 8] = b"NISYROS1";
 const GROUP_MAGIC: &[u8; 8] = b"NISYRG01";
 const FRAME_MAGIC: &[u8; 8] = b"NISYRF01";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const MAX_DEVICES: usize = 32;
 const MAX_FAMILIES: usize = 32;
+const MAX_HEAPS: usize = 16;
 pub const MAX_MESSAGE_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -64,6 +65,12 @@ pub struct QueueAnnouncement {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryHeapAnnouncement {
+    pub bytes: u64,
+    pub flags: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceAnnouncement {
     pub backend: u32,
     pub api_version: u32,
@@ -77,6 +84,7 @@ pub struct DeviceAnnouncement {
     pub driver_uuid: [u8; 16],
     pub driver_name: [u8; 256],
     pub queue_families: Vec<QueueAnnouncement>,
+    pub memory_heaps: Vec<MemoryHeapAnnouncement>,
 }
 
 #[derive(Debug)]
@@ -338,6 +346,7 @@ fn write_announcement(
         write_u32(writer, device.driver_id)?;
         write_u32(writer, u32::from(device.strict_profile_supported))?;
         write_u32(writer, device.queue_families.len() as u32)?;
+        write_u32(writer, device.memory_heaps.len() as u32)?;
         writer.write_all(&device.name)?;
         writer.write_all(&device.device_uuid)?;
         writer.write_all(&device.driver_uuid)?;
@@ -345,6 +354,10 @@ fn write_announcement(
         for queue in &device.queue_families {
             write_u32(writer, queue.flags)?;
             write_u32(writer, queue.count)?;
+        }
+        for heap in &device.memory_heaps {
+            write_u64(writer, heap.bytes)?;
+            write_u32(writer, heap.flags)?;
         }
     }
     writer.flush()
@@ -378,7 +391,8 @@ fn read_announcement(
         let driver_id = read_u32(reader).map_err(map_read)?;
         let strict = read_u32(reader).map_err(map_read)?;
         let family_count = read_u32(reader).map_err(map_read)? as usize;
-        if backend != 1 || strict > 1 || family_count > MAX_FAMILIES {
+        let heap_count = read_u32(reader).map_err(map_read)? as usize;
+        if backend != 1 || strict > 1 || family_count > MAX_FAMILIES || heap_count > MAX_HEAPS {
             return Err(JoinError::Invalid);
         }
         let mut name = [0; 256];
@@ -399,6 +413,17 @@ fn read_announcement(
                 count: read_u32(reader).map_err(map_read)?,
             });
         }
+        let mut memory_heaps = Vec::with_capacity(heap_count);
+        for _ in 0..heap_count {
+            let bytes = read_u64(reader).map_err(map_read)?;
+            if bytes == 0 {
+                return Err(JoinError::Invalid);
+            }
+            memory_heaps.push(MemoryHeapAnnouncement {
+                bytes,
+                flags: read_u32(reader).map_err(map_read)?,
+            });
+        }
         devices.push(DeviceAnnouncement {
             backend,
             api_version,
@@ -412,6 +437,7 @@ fn read_announcement(
             driver_uuid,
             driver_name,
             queue_families,
+            memory_heaps,
         });
     }
     Ok(devices)
@@ -444,6 +470,10 @@ mod tests {
             driver_uuid: [2; 16],
             driver_name: [0; 256],
             queue_families: vec![QueueAnnouncement { flags: 2, count: 1 }],
+            memory_heaps: vec![MemoryHeapAnnouncement {
+                bytes: 1 << 30,
+                flags: 1,
+            }],
         };
         let mut encoded = Vec::new();
         write_announcement(&mut encoded, 42, 1, std::slice::from_ref(&device)).unwrap();

@@ -304,6 +304,7 @@ pub struct DeviceRecord {
     pub driver_id: u32,
     pub driver_name: [c_char; 256],
     pub queue_families: Vec<QueueFamilyProperties>,
+    pub memory_heaps: Vec<(u64, u32)>,
     pub strict_profile_supported: bool,
     pub max_grid: [u32; 3],
     memory_properties: memory::MemoryProperties,
@@ -833,6 +834,7 @@ impl Instance {
 
         let mut memory_properties = memory::MemoryProperties::default();
         unsafe { (self.get_memory_properties)(physical, &mut memory_properties) };
+        let memory_heaps = memory_properties.heaps();
         let mut host = ExternalMemoryHostProperties {
             s_type: VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT,
             p_next: ptr::null_mut(),
@@ -899,6 +901,7 @@ impl Instance {
             driver_id: driver.driver_id as u32,
             driver_name: driver.driver_name,
             queue_families,
+            memory_heaps,
             strict_profile_supported,
             max_grid: props.max_compute_work_group_count,
             memory_properties,

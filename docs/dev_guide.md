@@ -45,6 +45,9 @@ time and requires `VK_KHR_pipeline_binary` and
 runtime loading does not accept SPIR-V as a fallback.
 `nisyros_allocation_query` reports the realized memory type, heap, and
 properties of a live base address after allocation.
+`nisyros_cluster_memory_heaps` enumerates heaps for local and remote devices.
+`nisyros_alloc_heap_extension` can require or prefer one heap; `UINT32_MAX`
+means no selection for either field.
 
 Run the package parser and Vulkan FFI layout checks with `cargo test -p nisyros`.
 The physical GPU check compiles its shader, captures a native
