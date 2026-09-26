@@ -100,6 +100,15 @@ actual shader execution.
 worker. It checks an in-place reduction. The same local matching path also
 runs inside the two-node test.
 
+For local performance data, run `nisyros/tests/run-performance.sh <output.csv>`
+with the intended Vulkan ICD selected. It records individual empty and
+two-segment submit latencies, submit-thread CPU time, and validated 64 MiB
+transfer times. For host-staged TCP progress, run
+`python3 nisyros/tests/run-communication.py <icd.json> --performance <output-dir>`.
+That run records per-message wall and process CPU time from both processes.
+Use `python3 nisyros/tests/summarize-performance.py <output.csv> <output-dir>`
+to print medians and 95th percentiles from the retained raw samples.
+
 ### Working on the C frontend
 
 FCC keeps its public entry points in `fcc/src/parser.rs`, `sema.rs`,
