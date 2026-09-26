@@ -34,8 +34,20 @@ typedef struct { uint32_t api, driver, vendor, device, device_type; char name[25
 typedef struct { size_t size; unsigned char *data; } memory;
 typedef struct { size_t size; memory *bound; uint64_t offset; } buffer;
 typedef struct { uint64_t value; } semaphore;
-typedef struct { int kind; uint64_t dst, src, bytes; uint32_t pattern; } operation;
-typedef struct { operation ops[256]; size_t count; } command;
+typedef struct { int kind; uint64_t dst, src, bytes, pipeline; uint32_t pattern, grid[3]; } operation;
+typedef struct { operation ops[256]; size_t count; uint64_t pipeline, arguments; } command;
+typedef struct { int32_t type; const void *next; uint32_t flags; size_t code_size; const uint32_t *code; } shader_info;
+typedef struct { int32_t type; const void *next; uint32_t flags, stage; uint64_t module; const char *name; const void *specialization; } shader_stage;
+typedef struct { int32_t type; const void *next; uint32_t flags; shader_stage stage; uint64_t layout, base_pipeline; int32_t base_index; } compute_info;
+typedef struct { int32_t type; void *next; uint32_t size; uint8_t key[32]; } binary_key;
+typedef struct { size_t size; void *data; } binary_data;
+typedef struct { uint32_t count; const binary_key *keys; const binary_data *data; } keys_and_data;
+typedef struct { int32_t type; const void *next; const keys_and_data *input; uint64_t pipeline; const void *pipeline_info; } binary_create;
+typedef struct { int32_t type; const void *next; uint32_t count; const uint64_t *binaries; } binary_info;
+typedef struct { int32_t type; const void *next; uint32_t count; uint64_t *binaries; } binary_handles;
+typedef struct { int32_t type; const void *next; uint64_t binary; } binary_data_info;
+typedef struct { uint64_t destination, source; uint32_t count, padding; } kernel_arguments;
+typedef struct { uint32_t grid[3]; } grid_values;
 typedef struct pending { struct pending *next; command *cmd; uint32_t wait_count, signal_count; semaphore_submit waits[16], signals[16]; } pending;
 typedef struct { pending *head, *tail; } queue;
 typedef struct { queue queues[2]; } device;
@@ -257,12 +269,24 @@ void vkCmdFillMemoryKHR(void *raw, const range *target, uint32_t flags, uint32_t
     record(raw, (operation){.kind = 2, .dst = target->address, .bytes = target->size, .pattern = pattern});
 }
 void vkCmdPipelineBarrier2(void *raw, const void *info) { (void)raw; (void)info; }
-void vkCmdBindPipeline(void *raw, int point, uint64_t pipeline) { (void)raw; (void)point; (void)pipeline; }
-void vkCmdPushConstants(void *raw, uint64_t layout, uint32_t stages, uint32_t offset, uint32_t size, const void *data) {
-    (void)raw; (void)layout; (void)stages; (void)offset; (void)size; (void)data;
+void vkCmdBindPipeline(void *raw, int point, uint64_t pipeline) {
+    (void)point; ((command *)raw)->pipeline = pipeline;
 }
-void vkCmdDispatch(void *raw, uint32_t x, uint32_t y, uint32_t z) { (void)raw; (void)x; (void)y; (void)z; }
-void vkCmdDispatchIndirect2KHR(void *raw, const void *info) { (void)raw; (void)info; }
+void vkCmdPushConstants(void *raw, uint64_t layout, uint32_t stages, uint32_t offset, uint32_t size, const void *data) {
+    (void)layout; (void)stages;
+    if (offset == 0 && size == 8) memcpy(&((command *)raw)->arguments, data, 8);
+}
+void vkCmdDispatch(void *raw, uint32_t x, uint32_t y, uint32_t z) {
+    command *cmd = raw;
+    record(cmd, (operation){.kind = 3, .src = cmd->arguments, .pipeline = cmd->pipeline,
+                            .grid = {x, y, z}});
+}
+void vkCmdDispatchIndirect2KHR(void *raw, const void *info) {
+    command *cmd = raw;
+    const range *address_range = (const range *)((const unsigned char *)info + sizeof(header));
+    record(cmd, (operation){.kind = 4, .dst = address_range->address,
+                            .src = cmd->arguments, .pipeline = cmd->pipeline});
+}
 
 int vkCreateSemaphore(void *handle, const void *raw_info, const void *allocator, uint64_t *out) {
     (void)handle; (void)allocator;
@@ -291,6 +315,13 @@ static void execute(const command *cmd) {
         else if (op->kind == 2) {
             uint32_t *words = (uint32_t *)(uintptr_t)op->dst;
             for (uint64_t j = 0; j < op->bytes / 4; ++j) words[j] = op->pattern;
+        } else if (op->kind == 3 || op->kind == 4) {
+            const kernel_arguments *args = (const kernel_arguments *)(uintptr_t)op->src;
+            const uint32_t *grid = op->kind == 3 ? op->grid : ((const grid_values *)(uintptr_t)op->dst)->grid;
+            uint64_t limit = (uint64_t)grid[0] * grid[1] * grid[2] * 64;
+            uint32_t *destination = (uint32_t *)(uintptr_t)args->destination;
+            const uint32_t *source = (const uint32_t *)(uintptr_t)args->source;
+            for (uint64_t j = 0; j < args->count && j < limit; ++j) destination[j] = source[j] + 1;
         }
     }
 }
@@ -381,19 +412,97 @@ int vkWaitSemaphores(void *handle, const wait_info *info, uint64_t timeout) {
     }
 }
 
-// Required by Device::open, but this fixture never creates a pipeline.
-int vkCreateShaderModule(void *a, const void *b, const void *c, uint64_t *d) { (void)a; (void)b; (void)c; (void)d; return -8; }
-void vkDestroyShaderModule(void *a, uint64_t b, const void *c) { (void)a; (void)b; (void)c; }
-int vkCreatePipelineLayout(void *a, const void *b, const void *c, uint64_t *d) { (void)a; (void)b; (void)c; (void)d; return -8; }
-void vkDestroyPipelineLayout(void *a, uint64_t b, const void *c) { (void)a; (void)b; (void)c; }
-int vkCreateComputePipelines(void *a, uint64_t b, uint32_t c, const void *d, const void *e, uint64_t *f) {
-    (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; return -8;
+// The simulator recognizes only this test binary. It does not interpret SPIR-V.
+static const unsigned char simulated_binary[] = "nisyros-add-one-v1";
+static void set_key(binary_key *key, uint8_t tag) {
+    key->size = 1;
+    memset(key->key, 0, sizeof(key->key));
+    key->key[0] = tag;
 }
-void vkDestroyPipeline(void *a, uint64_t b, const void *c) { (void)a; (void)b; (void)c; }
-int vkGetPipelineKeyKHR(void *a, const void *b, void *c) { (void)a; (void)b; (void)c; return -8; }
-int vkCreatePipelineBinariesKHR(void *a, const void *b, const void *c, void *d) { (void)a; (void)b; (void)c; (void)d; return -8; }
-void vkDestroyPipelineBinaryKHR(void *a, uint64_t b, const void *c) { (void)a; (void)b; (void)c; }
-int vkGetPipelineBinaryDataKHR(void *a, const void *b, void *c, size_t *d, void *e) {
-    (void)a; (void)b; (void)c; (void)d; (void)e; return -8;
+int vkCreateShaderModule(void *handle, const shader_info *info, const void *allocator, uint64_t *out) {
+    (void)handle; (void)allocator;
+    if (info->code_size != 1624 || info->code[0] != 0x07230203) return -8;
+    uint64_t hash = UINT64_C(0xcbf29ce484222325);
+    const unsigned char *bytes = (const unsigned char *)info->code;
+    for (size_t i = 0; i < info->code_size; ++i) hash = (hash ^ bytes[i]) * UINT64_C(0x100000001b3);
+    if (hash != UINT64_C(0xe725d7a5fa3defe4)) return -8;
+    void *module = malloc(1);
+    if (!module) return -1;
+    *out = (uint64_t)(uintptr_t)module;
+    return 0;
 }
-int vkReleaseCapturedPipelineDataKHR(void *a, const void *b, const void *c) { (void)a; (void)b; (void)c; return -8; }
+void vkDestroyShaderModule(void *handle, uint64_t raw, const void *allocator) {
+    (void)handle; (void)allocator; free((void *)(uintptr_t)raw);
+}
+int vkCreatePipelineLayout(void *handle, const void *info, const void *allocator, uint64_t *out) {
+    (void)handle; (void)info; (void)allocator;
+    void *layout = malloc(1);
+    if (!layout) return -1;
+    *out = (uint64_t)(uintptr_t)layout;
+    return 0;
+}
+void vkDestroyPipelineLayout(void *handle, uint64_t raw, const void *allocator) {
+    (void)handle; (void)allocator; free((void *)(uintptr_t)raw);
+}
+int vkCreateComputePipelines(void *handle, uint64_t cache, uint32_t count,
+                             const compute_info *info, const void *allocator, uint64_t *out) {
+    (void)handle; (void)allocator;
+    if (cache || count != 1 || !info || strcmp(info->stage.name, "main") != 0 || !info->layout) return -8;
+    const header *chain = info->next;
+    if (!chain) return -8;
+    if (chain->type == 1000470005) {
+        if (!info->stage.module) return -8;
+    } else if (chain->type == 1000483002) {
+        const binary_info *binary = (const binary_info *)chain;
+        if (info->stage.module || binary->count != 1 || !binary->binaries || !binary->binaries[0]) return -8;
+    } else return -8;
+    void *pipeline = malloc(1);
+    if (!pipeline) return -1;
+    *out = (uint64_t)(uintptr_t)pipeline;
+    return 0;
+}
+void vkDestroyPipeline(void *handle, uint64_t raw, const void *allocator) {
+    (void)handle; (void)allocator; free((void *)(uintptr_t)raw);
+}
+int vkGetPipelineKeyKHR(void *handle, const void *info, binary_key *out) {
+    (void)handle;
+    if (info) return -8;
+    set_key(out, 0xA5);
+    return 0;
+}
+int vkCreatePipelineBinariesKHR(void *handle, const binary_create *info,
+                                const void *allocator, binary_handles *out) {
+    (void)handle; (void)allocator;
+    if (info->pipeline) {
+        if (info->input || info->pipeline_info) return -8;
+    } else {
+        const keys_and_data *input = info->input;
+        if (!input || input->count != 1 || input->keys[0].size != 1 || input->keys[0].key[0] != 0xB6 ||
+            input->data[0].size != sizeof(simulated_binary) ||
+            memcmp(input->data[0].data, simulated_binary, sizeof(simulated_binary)) != 0) return -8;
+    }
+    if (!out->binaries) { out->count = 1; return 0; }
+    if (out->count != 1) return -8;
+    void *binary = malloc(1);
+    if (!binary) return -1;
+    out->binaries[0] = (uint64_t)(uintptr_t)binary;
+    return 0;
+}
+void vkDestroyPipelineBinaryKHR(void *handle, uint64_t raw, const void *allocator) {
+    (void)handle; (void)allocator; free((void *)(uintptr_t)raw);
+}
+int vkGetPipelineBinaryDataKHR(void *handle, const binary_data_info *info,
+                               binary_key *key, size_t *size, void *out) {
+    (void)handle;
+    if (!info->binary) return -8;
+    set_key(key, 0xB6);
+    if (out) {
+        if (*size < sizeof(simulated_binary)) return -8;
+        memcpy(out, simulated_binary, sizeof(simulated_binary));
+    }
+    *size = sizeof(simulated_binary);
+    return 0;
+}
+int vkReleaseCapturedPipelineDataKHR(void *handle, const void *info, const void *allocator) {
+    (void)handle; (void)info; (void)allocator; return 0;
+}
