@@ -9,7 +9,7 @@ use tir::backend::binary::{
 use tir::backend::{RegAssignment, RegClassType};
 use tir::{Context, NewOp, OpHandle, Operation};
 
-use super::fixtures::{machine_op, r, RD_RS_PORTS};
+use super::fixtures::{machine_op, r, reg_class, RD_RS_PORTS};
 
 fn phys(index: u16) -> AttributeValue {
     AttributeValue::Register(RegisterAttr::Physical { class: r(), index })
@@ -481,4 +481,45 @@ fn decode_matches_a_two_byte_shape_in_the_fetch_window() {
     assert_eq!(op.name().as_str(), "cmv");
     assert_eq!(op.attr("rd"), Some(phys(5)));
     assert_eq!(op.attr("rs"), Some(phys(2)));
+}
+
+/// Registers 8..15 of file `R`, reached through a three-bit field like RVC's
+/// `GPRC`.
+static RC_CLASS: tir::backend::regalloc::RegClassInfo =
+    reg_class("RC", "R", &[8, 9, 10, 11, 12, 13, 14, 15], 1, 0, false);
+
+const CSW_DECODE: DecodeSpec = DecodeSpec {
+    op: ("test", "csw"),
+    attrs: &["rs1", "rs2"],
+    shapes: &[DecodeShape {
+        fixed_mask: 0xe003,
+        const_word: 0xc000,
+        fields: &[
+            decoded(
+                "rs1",
+                DecodeFieldKind::Register(tir::backend::regalloc::RegClassId::new(&RC_CLASS)),
+                &[run(0, 7, 3)],
+            ),
+            decoded(
+                "rs2",
+                DecodeFieldKind::Register(tir::backend::regalloc::RegClassId::new(&RC_CLASS)),
+                &[run(0, 2, 3)],
+            ),
+        ],
+    }],
+};
+
+#[test]
+fn decode_maps_a_narrow_register_field_onto_its_class() {
+    let context = Context::with_default_dialects();
+    let id = decode_with(&context, 0xc000 | (1 << 7) | (2 << 2), &CSW_DECODE).expect("decodes");
+    let op = context.get_op(id);
+    let reg = |index| {
+        AttributeValue::Register(RegisterAttr::Physical {
+            class: tir::backend::regalloc::RegClassId::new(&RC_CLASS),
+            index,
+        })
+    };
+    assert_eq!(op.attr("rs1"), Some(reg(9)));
+    assert_eq!(op.attr("rs2"), Some(reg(10)));
 }
