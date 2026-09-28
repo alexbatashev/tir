@@ -1,4 +1,4 @@
-//! Bounded, little-endian encoding for Vulkan pipeline-binary packages.
+//! Bounded, little-endian encoding for native executable packages.
 
 use crate::{
     CooperativeMatrixTuple, FEATURE_BFLOAT16_DOT, FEATURE_BFLOAT16_MATRIX, FEATURE_BFLOAT16_TYPE,
@@ -9,7 +9,9 @@ const MAGIC: &[u8; 8] = b"NISYROS\0";
 const PACKAGE_VERSION: u32 = 1;
 const OPTIONAL_FEATURE_PACKAGE_VERSION: u32 = 2;
 const EXECUTABLE_ABI_VERSION: u32 = 1;
-const VULKAN_PIPELINE_BINARY_FORMAT: u32 = 1;
+pub const VULKAN_PIPELINE_BINARY_FORMAT: u32 = 1;
+pub const ROCM_CODE_OBJECT_FORMAT: u32 = 2;
+pub const XDNA_XCLBIN_FORMAT: u32 = 3;
 const HEADER_SIZE: usize = 40;
 const MAX_PACKAGE_SIZE: usize = 128 * 1024 * 1024;
 const MAX_BINARY_SIZE: usize = 64 * 1024 * 1024;
@@ -43,6 +45,7 @@ pub struct PipelineBinary {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Package {
+    pub format: u32,
     pub global_key: BinaryKey,
     pub vendor_id: u32,
     pub device_id: u32,
@@ -79,11 +82,16 @@ impl Package {
             return Err(PackageError::Invalid);
         }
         let package_version = reader.u32()?;
+        let executable_abi = reader.u32()?;
+        let format = reader.u32()?;
         if !matches!(
             package_version,
             PACKAGE_VERSION | OPTIONAL_FEATURE_PACKAGE_VERSION
-        ) || reader.u32()? != EXECUTABLE_ABI_VERSION
-            || reader.u32()? != VULKAN_PIPELINE_BINARY_FORMAT
+        ) || executable_abi != EXECUTABLE_ABI_VERSION
+            || !matches!(
+                format,
+                VULKAN_PIPELINE_BINARY_FORMAT | ROCM_CODE_OBJECT_FORMAT | XDNA_XCLBIN_FORMAT
+            )
         {
             return Err(PackageError::Unsupported);
         }
@@ -166,6 +174,7 @@ impl Package {
             return Err(PackageError::Invalid);
         }
         let package = Self {
+            format,
             global_key,
             vendor_id,
             device_id,
@@ -195,7 +204,7 @@ impl Package {
         output.extend_from_slice(MAGIC);
         write_u32(&mut output, package_version);
         write_u32(&mut output, EXECUTABLE_ABI_VERSION);
-        write_u32(&mut output, VULKAN_PIPELINE_BINARY_FORMAT);
+        write_u32(&mut output, self.format);
         write_u32(&mut output, 0);
         write_u64(&mut output, 0);
         write_u64(&mut output, 0);
@@ -253,7 +262,10 @@ impl Package {
     }
 
     fn validate(&self) -> Result<(), PackageError> {
-        if self.global_key.size == 0
+        if !matches!(
+            self.format,
+            VULKAN_PIPELINE_BINARY_FORMAT | ROCM_CODE_OBJECT_FORMAT | XDNA_XCLBIN_FORMAT
+        ) || self.global_key.size == 0
             || self.global_key.size > 32
             || self.entry.is_empty()
             || self.entry.len() > MAX_ENTRY_LEN
@@ -406,6 +418,7 @@ mod tests {
 
     fn sample() -> Package {
         Package {
+            format: VULKAN_PIPELINE_BINARY_FORMAT,
             global_key: BinaryKey {
                 size: 3,
                 bytes: [1; 32],
@@ -467,6 +480,19 @@ mod tests {
         let mut package = sample();
         package.argument_fields[1].offset = 4;
         assert_eq!(package.encode(), Err(PackageError::Invalid));
+    }
+
+    #[test]
+    fn rocm_code_object_round_trip() {
+        let mut package = sample();
+        package.format = ROCM_CODE_OBJECT_FORMAT;
+        package.global_key.bytes[3..].fill(0);
+        package.binaries[0].key.bytes[2..].fill(0);
+        package.device_id = 0;
+        package.api_version = 0;
+        package.binaries[0].data = b"\x7fELF".to_vec();
+        let bytes = package.encode().unwrap();
+        assert_eq!(Package::parse(&bytes).unwrap(), package);
     }
 
     #[test]

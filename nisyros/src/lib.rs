@@ -1,4 +1,4 @@
-//! Nisyros C ABI. The only backend implemented by this crate is Vulkan.
+//! Nisyros C ABI with ROCm, Vulkan, and direct DRM XDNA backends.
 
 mod communication;
 mod diagnostic;
@@ -16,6 +16,9 @@ pub fn capture_vulkan_package(
     words: &[u32],
     mut template: package::Package,
 ) -> Result<package::Package, String> {
+    if template.format != package::VULKAN_PIPELINE_BINARY_FORMAT {
+        return Err("Vulkan capture requires a Vulkan package format".into());
+    }
     let instance = vulkan::Instance::open().map_err(|()| "Vulkan loader unavailable")?;
     let devices = instance
         .devices()
@@ -74,6 +77,8 @@ const INCOMPATIBLE_BINARY: i32 = -9;
 const PEER_LOST: i32 = -10;
 const ABI_VERSION: u32 = 1;
 const BACKEND_VULKAN: u32 = 1;
+const BACKEND_ROCM: u32 = 2;
+const BACKEND_XDNA: u32 = 3;
 const EXT_ALLOC_HEAP: u32 = 1;
 const EXT_ALLOC_SHARING: u32 = 2;
 pub const FEATURE_COOPERATIVE_MATRIX: u64 = 1;
@@ -336,6 +341,13 @@ pub struct PeerInfo {
     host_staging: u32,
 }
 
+#[repr(C)]
+struct PeerInfoExtended {
+    prefix: PeerInfo,
+    shared_allocation_backend: u32,
+    reserved: u32,
+}
+
 pub struct Cluster {
     instance: plugin::Instance,
     devices: Vec<plugin::DeviceRecord>,
@@ -376,6 +388,7 @@ pub struct Device {
     vendor_id: u32,
     device_id: u32,
     api_version: u32,
+    backend_id: u32,
     device_uuid: [u8; 16],
     driver_uuid: [u8; 16],
     inventory_index: u32,
@@ -667,7 +680,7 @@ fn announce_device(record: &plugin::DeviceRecord) -> transport::DeviceAnnounceme
     }
 }
 
-/// Opens the local Vulkan inventory.
+/// Opens the local inventory using ROCm first, then Vulkan.
 ///
 /// # Safety
 /// `out` must point to writable storage for one cluster handle.
@@ -856,7 +869,7 @@ pub unsafe extern "C" fn nisyros_cluster_devices(
     }
 }
 
-/// Returns the Vulkan device identity and strict-profile availability.
+/// Returns the device identity and strict-profile availability.
 ///
 /// # Safety
 /// `cluster` must be live and `out` must point to a complete `DeviceInfo`
@@ -988,8 +1001,8 @@ pub unsafe extern "C" fn nisyros_cluster_cooperative_matrices(
     }
 }
 
-/// Queries a Vulkan queue family. Physical engine identity and enforceable
-/// affinity are reported as unknown because Vulkan does not expose them.
+/// Queries a queue family. Physical engine identity and enforceable affinity
+/// are reported as unknown by the built-in backends.
 ///
 /// # Safety
 /// `cluster` must be live and `out` must be writable.
@@ -1260,7 +1273,7 @@ pub unsafe extern "C" fn nisyros_group_epoch(group: *mut Group, epoch: *mut u64)
     SUCCESS
 }
 
-/// Opens a strict-profile Vulkan session with exactly the requested queues.
+/// Opens a strict-profile session with exactly the requested queues.
 ///
 /// # Safety
 /// `cluster` and `id` must be live, `desc` must point to a complete descriptor,
@@ -1377,6 +1390,7 @@ pub unsafe extern "C" fn nisyros_device_open(
         vendor_id: record.vendor_id,
         device_id: record.device_id,
         api_version: record.api_version,
+        backend_id: record.backend,
         device_uuid: record.device_uuid,
         driver_uuid: record.driver_uuid,
         inventory_index: id.index,
@@ -1781,7 +1795,7 @@ pub unsafe extern "C" fn nisyros_invalidate(device: *mut Device, address: u64, b
     visibility(device, address, bytes, false)
 }
 
-/// Allocates coherent host memory backed by a device-addressable Vulkan range.
+/// Allocates coherent host memory backed by a device-addressable range.
 /// Its returned value is an ordinary host pointer.
 ///
 /// # Safety
@@ -1907,7 +1921,7 @@ pub unsafe extern "C" fn nisyros_host_registration_alignment(
     SUCCESS
 }
 
-/// Registers an aligned caller-owned host range with the local Vulkan device.
+/// Registers an aligned caller-owned host range with the local device.
 /// The caller retains ownership and keeps it alive until unregister succeeds.
 ///
 /// # Safety
@@ -1990,18 +2004,67 @@ pub unsafe extern "C" fn nisyros_host_unregister(device: *mut Device, host: *mut
 
 fn peer_pair(device: &Device, peer: &Device) -> (bool, bool, bool) {
     let same_physical = device.device_uuid != [0; 16] && device.device_uuid == peer.device_uuid;
-    let compatible = same_physical
-        && ptr::eq(device.cluster, peer.cluster)
-        && device.driver_uuid != [0; 16]
-        && device.driver_uuid == peer.driver_uuid;
+    let same_driver = same_physical
+        && ((device.backend_id == BACKEND_ROCM && peer.backend_id == BACKEND_ROCM)
+            || (device.driver_uuid != [0; 16] && device.driver_uuid == peer.driver_uuid));
+    let gpu_to_xdna = (device.backend_id, peer.backend_id) == (BACKEND_XDNA, BACKEND_ROCM)
+        && (device.vendor_id, peer.vendor_id) == (0x1022, 0x1002);
+    let vulkan_xdna = matches!(
+        (device.backend_id, peer.backend_id),
+        (BACKEND_VULKAN, BACKEND_XDNA) | (BACKEND_XDNA, BACKEND_VULKAN)
+    ) && ((device.vendor_id, peer.vendor_id) == (0x1002, 0x1022)
+        || (device.vendor_id, peer.vendor_id) == (0x1022, 0x1002));
+    let same_cluster = ptr::eq(device.cluster, peer.cluster);
     (
         same_physical,
-        compatible && device.backend.peer_memory_fd && peer.backend.peer_memory_fd,
-        compatible && device.backend.peer_timeline_fd && peer.backend.peer_timeline_fd,
+        same_cluster
+            && (same_driver || gpu_to_xdna || vulkan_xdna)
+            && device.backend.peer_memory_fd
+            && peer.backend.peer_memory_fd,
+        same_cluster
+            && same_driver
+            && device.backend.peer_timeline_fd
+            && peer.backend.peer_timeline_fd,
     )
 }
 
-/// Queries direct peer routes between two opened local Vulkan sessions.
+fn probe_peer_memory(target: &Device, source: &Device) -> bool {
+    let mut families: Vec<u32> = source.queues.iter().map(|queue| queue.family).collect();
+    families.sort_unstable();
+    families.dedup();
+    let request = plugin::AllocRequest {
+        bytes: 4096,
+        alignment: 4096,
+        required_properties: 2,
+        preferred_properties: 1,
+        queue_families: &families,
+        required_heap: None,
+        preferred_heap: None,
+        exclusive: false,
+    };
+    let Ok(allocation) = source.backend.allocate(&request) else {
+        return false;
+    };
+    let imported =
+        source
+            .backend
+            .export_allocation_fd(&allocation)
+            .and_then(|(fd, backing_offset)| {
+                target
+                    .backend
+                    .import_peer_fd(&allocation, backing_offset, 4096, fd, false)
+            });
+    if let Ok(imported) = imported {
+        target.backend.free_allocation(imported);
+        source.backend.free_allocation(allocation);
+        true
+    } else {
+        source.backend.free_allocation(allocation);
+        false
+    }
+}
+
+/// Queries direct peer routes between two opened local sessions.
 ///
 /// # Safety
 /// Both devices must be live and `out` must be a complete initialized struct.
@@ -2014,16 +2077,42 @@ pub unsafe extern "C" fn nisyros_peer_capabilities(
     if device.is_null() || peer.is_null() || out.is_null() {
         return INVALID_ARGUMENT;
     }
-    let out = unsafe { &mut *out };
-    let status = validate_header(&out.header, std::mem::size_of::<PeerInfo>());
+    let out_ref = unsafe { &mut *out };
+    let status = validate_header(&out_ref.header, std::mem::size_of::<PeerInfo>());
     if status != SUCCESS {
         return status;
     }
-    let (same, memory, event) = peer_pair(unsafe { &*device }, unsafe { &*peer });
-    out.same_physical_device = u32::from(same);
-    out.direct_mapping = u32::from(memory);
-    out.event_import = u32::from(event);
-    out.host_staging = 0;
+    let target = unsafe { &*device };
+    let source = unsafe { &*peer };
+    let (same, mut memory, event) = peer_pair(target, source);
+    if memory && target.backend_id != source.backend_id {
+        memory = probe_peer_memory(target, source);
+    }
+    let shared_allocation_backend = if !ptr::eq(target.cluster, source.cluster) {
+        0
+    } else {
+        match (target.backend_id, source.backend_id) {
+            (BACKEND_XDNA, BACKEND_ROCM) if memory => BACKEND_ROCM,
+            (BACKEND_ROCM, BACKEND_XDNA) if probe_peer_memory(source, target) => BACKEND_ROCM,
+            (BACKEND_VULKAN, BACKEND_XDNA) if memory => BACKEND_XDNA,
+            (BACKEND_XDNA, BACKEND_VULKAN) if probe_peer_memory(source, target) => BACKEND_XDNA,
+            (BACKEND_XDNA, BACKEND_VULKAN) if memory => BACKEND_VULKAN,
+            (BACKEND_VULKAN, BACKEND_XDNA) if probe_peer_memory(source, target) => BACKEND_VULKAN,
+            _ if memory && same => target.backend_id,
+            _ => 0,
+        }
+    };
+    out_ref.same_physical_device = u32::from(same);
+    out_ref.direct_mapping = u32::from(memory);
+    out_ref.event_import = u32::from(event);
+    out_ref.host_staging = 0;
+    if out_ref.header.struct_size as usize >= std::mem::size_of::<PeerInfoExtended>() {
+        let extended = out.cast::<PeerInfoExtended>();
+        unsafe {
+            (*extended).shared_allocation_backend = shared_allocation_backend;
+            (*extended).reserved = 0;
+        }
+    }
     SUCCESS
 }
 
@@ -2073,21 +2162,26 @@ pub unsafe extern "C" fn nisyros_peer_map(
         return INVALID_ARGUMENT;
     }
     let offset = source.address - source_base;
-    let fd = match origin
+    let (fd, backing_offset) = match origin
         .backend
         .export_allocation_fd(&source_allocation.backend)
     {
         Ok(fd) => fd,
         Err(error) => return allocation_status(error),
     };
-    let imported =
-        match target
-            .backend
-            .import_peer_fd(&source_allocation.backend, offset, bytes, fd)
-        {
-            Ok(imported) => imported,
-            Err(error) => return allocation_status(error),
-        };
+    let Some(backing_offset) = backing_offset.checked_add(offset) else {
+        return INVALID_ARGUMENT;
+    };
+    let imported = match target.backend.import_peer_fd(
+        &source_allocation.backend,
+        backing_offset,
+        bytes,
+        fd,
+        target.backend_id == origin.backend_id,
+    ) {
+        Ok(imported) => imported,
+        Err(error) => return allocation_status(error),
+    };
     let base = imported.base;
     let Ok(mut target_allocations) = target.allocations.lock() else {
         target.backend.free_allocation(imported);
@@ -2163,7 +2257,7 @@ pub unsafe extern "C" fn nisyros_peer_unmap(device: *mut Device, base: u64) -> i
     SUCCESS
 }
 
-/// Loads a complete native Vulkan pipeline-binary package without shader compilation.
+/// Loads a native package for the selected backend without shader compilation.
 ///
 /// # Safety
 /// `device` must be live, `image` complete with readable bytes, and `out`
@@ -2184,7 +2278,7 @@ pub unsafe extern "C" fn nisyros_executable_load(
     if status != SUCCESS {
         return status;
     }
-    if image.format != 1
+    if !matches!(image.format, 1..=3)
         || image.reserved != 0
         || image.bytes.is_null()
         || image.byte_size == 0
@@ -2201,8 +2295,10 @@ pub unsafe extern "C" fn nisyros_executable_load(
         Err(package::PackageError::UnsupportedFeature) => return UNSUPPORTED,
         Err(_) => return INCOMPATIBLE_BINARY,
     };
-    if package.vendor_id != device_ref.vendor_id
-        || package.device_id != device_ref.device_id
+    if package.format != image.format
+        || package.format != device_ref.backend_id
+        || package.vendor_id != device_ref.vendor_id
+        || (package.device_id != 0 && package.device_id != device_ref.device_id)
         || package.api_version > device_ref.api_version
     {
         return INCOMPATIBLE_BINARY;
@@ -2315,7 +2411,7 @@ fn refresh_command(state: &mut CommandState) -> i32 {
     }
 }
 
-/// Creates a recording for one provisioned Vulkan queue family.
+/// Creates a recording for one provisioned queue family.
 ///
 /// # Safety
 /// `device` must be live and `out` must be writable.
@@ -3407,7 +3503,7 @@ pub unsafe extern "C" fn nisyros_cmd_signal_slot(cmd: *mut Command, slot: u32) -
     record_slot(cmd, slot, true)
 }
 
-/// Seals a recording and prepares native Vulkan command segments.
+/// Seals a recording and prepares native command segments.
 ///
 /// # Safety
 /// `cmd` must be a live command handle.

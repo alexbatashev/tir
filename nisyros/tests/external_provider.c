@@ -112,8 +112,9 @@ static nisyros_status allocation_register_host(void *device, void *host, uint64_
     (void)device; (void)host; (void)bytes; (void)out; (void)info;
     return NISYROS_UNSUPPORTED;
 }
-static nisyros_status allocation_export_fd(void *device, void *handle, int32_t *out_fd) {
-    (void)device; (void)handle; (void)out_fd;
+static nisyros_status allocation_export_fd(void *device, void *handle, int32_t *out_fd,
+                                           uint64_t *out_backing_offset) {
+    (void)device; (void)handle; (void)out_fd; (void)out_backing_offset;
     return NISYROS_UNSUPPORTED;
 }
 static nisyros_status allocation_import_fd(void *device, void *source, uint64_t offset,

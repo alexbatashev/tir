@@ -1,4 +1,4 @@
-//! Transactional submission of sealed local Vulkan recordings.
+//! Transactional submission of sealed local recordings.
 
 use super::*;
 
