@@ -1477,7 +1477,7 @@ pub unsafe extern "C" fn nisyros_device_close(device: *mut Device) -> i32 {
     SUCCESS
 }
 
-/// Marks a lost logical device quiescent so retained children can be released.
+/// Marks a lost or failed logical device quiescent so retained children can be released.
 /// This does not recover the device or preserve its allocation contents.
 ///
 /// # Safety
@@ -1494,7 +1494,12 @@ pub unsafe extern "C" fn nisyros_device_abort(device: *mut Device) -> i32 {
     if device.quiescent.load(Ordering::Acquire) {
         return SUCCESS;
     }
-    if !device.lost.load(Ordering::Acquire) {
+    if !device.lost.load(Ordering::Acquire)
+        && !device
+            .queues
+            .iter()
+            .any(|queue| queue.state.lock().is_ok_and(|state| state.poisoned))
+    {
         return INVALID_ARGUMENT;
     }
     match device.backend.wait_idle() {
@@ -2148,9 +2153,24 @@ pub unsafe extern "C" fn nisyros_peer_map(
     if !peer_pair(target, origin).1 {
         return UNSUPPORTED;
     }
-    let Ok(mut source_allocations) = origin.allocations.lock() else {
+    // Reciprocal peer maps must acquire both allocation tables in the same order.
+    let (first, second) = if (device as usize) < (source.device as usize) {
+        (&target.allocations, &origin.allocations)
+    } else {
+        (&origin.allocations, &target.allocations)
+    };
+    let Ok(first) = first.lock() else {
         return DEVICE_LOST;
     };
+    let Ok(second) = second.lock() else {
+        return DEVICE_LOST;
+    };
+    let (mut target_allocations, mut source_allocations) =
+        if (device as usize) < (source.device as usize) {
+            (first, second)
+        } else {
+            (second, first)
+        };
     let Some((&source_base, source_allocation)) =
         source_allocations.range(..=source.address).next_back()
     else {
@@ -2183,10 +2203,6 @@ pub unsafe extern "C" fn nisyros_peer_map(
         Err(error) => return allocation_status(error),
     };
     let base = imported.base;
-    let Ok(mut target_allocations) = target.allocations.lock() else {
-        target.backend.free_allocation(imported);
-        return DEVICE_LOST;
-    };
     if overlaps_allocation(&target_allocations, base, imported.bytes) {
         target.backend.free_allocation(imported);
         return DEVICE_LOST;
@@ -2753,7 +2769,9 @@ pub unsafe extern "C" fn nisyros_cmd_dispatch_args(
     }
     let cmd_ref = unsafe { &*cmd };
     let executable = unsafe { &*(*kernel).executable };
-    if executable.owner != cmd_ref.device {
+    if executable.owner != cmd_ref.device
+        || !arguments.is_multiple_of(u64::from(executable.package.argument_alignment))
+    {
         return invalid_recording_argument(cmd);
     }
     let grid = unsafe { *grid };
@@ -2809,7 +2827,9 @@ pub unsafe extern "C" fn nisyros_cmd_dispatch_indirect_args(
     }
     let cmd_ref = unsafe { &*cmd };
     let executable = unsafe { &*(*kernel).executable };
-    if executable.owner != cmd_ref.device {
+    if executable.owner != cmd_ref.device
+        || !arguments.is_multiple_of(u64::from(executable.package.argument_alignment))
+    {
         return invalid_recording_argument(cmd);
     }
     let operation = plugin::CommandOp::DispatchIndirect {
@@ -3503,6 +3523,18 @@ pub unsafe extern "C" fn nisyros_cmd_signal_slot(cmd: *mut Command, slot: u32) -
     record_slot(cmd, slot, true)
 }
 
+fn command_error(device: &Device, error: plugin::BackendError) -> i32 {
+    if error.status == DEVICE_LOST {
+        device.lost.store(true, Ordering::Release);
+    }
+    set_backend_diagnostic(
+        error.status,
+        error.code,
+        "Execution provider command preparation failed",
+    );
+    error.status
+}
+
 /// Seals a recording and prepares native command segments.
 ///
 /// # Safety
@@ -3544,13 +3576,16 @@ pub unsafe extern "C" fn nisyros_cmd_end(cmd: *mut Command) -> i32 {
     plans.push(current);
     let mut native_segments = Vec::with_capacity(plans.len());
     for plan in &plans {
-        let Ok(native) = device.backend.create_command(cmd.family) else {
-            inner.state = RecordingState::Invalid;
-            return DEVICE_LOST;
+        let native = match device.backend.create_command(cmd.family) {
+            Ok(native) => native,
+            Err(error) => {
+                inner.state = RecordingState::Invalid;
+                return command_error(device, error);
+            }
         };
-        if native.record(&plan.operations).is_err() {
+        if let Err(error) = native.record(&plan.operations) {
             inner.state = RecordingState::Invalid;
-            return DEVICE_LOST;
+            return command_error(device, error);
         }
         native_segments.push(native);
     }

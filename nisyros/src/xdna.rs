@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -615,6 +616,7 @@ struct XdnaDevice {
     file: File,
     sender: mpsc::Sender<XdnaWork>,
     worker: Option<JoinHandle<()>>,
+    cancelled: Arc<AtomicBool>,
     heap: Mutex<Option<XdnaAllocation>>,
     allocations: Arc<Mutex<BTreeMap<u64, AllocationSpan>>>,
     imported: Mutex<BTreeMap<u32, Weak<ImportedBacking>>>,
@@ -776,6 +778,26 @@ fn allocation_view(
             (span.host + (address - base) as usize) as *mut u8,
         )
     })
+}
+
+fn register_span(
+    allocations: &mut BTreeMap<u64, AllocationSpan>,
+    address: u64,
+    span: AllocationSpan,
+) -> Result<(), i32> {
+    let end = address.checked_add(span.bytes).ok_or(INVALID_ARGUMENT)?;
+    if allocations
+        .range(..end)
+        .next_back()
+        .is_some_and(|(&base, existing)| {
+            base.checked_add(existing.bytes)
+                .is_none_or(|last| last > address)
+        })
+    {
+        return Err(INVALID_ARGUMENT);
+    }
+    allocations.insert(address, span);
+    Ok(())
 }
 
 unsafe fn dispatch(
@@ -942,6 +964,7 @@ fn queue_worker(
     receiver: mpsc::Receiver<XdnaWork>,
     file: File,
     allocations: Arc<Mutex<BTreeMap<u64, AllocationSpan>>>,
+    cancelled: Arc<AtomicBool>,
 ) {
     while let Ok(work) = receiver.recv() {
         match work {
@@ -958,8 +981,21 @@ fn queue_worker(
                 let mut status = SUCCESS;
                 for segment in segments {
                     for (timeline, value) in segment.waits {
-                        if let Err(error) = wait_value(&timeline, value, u64::MAX) {
-                            status = error;
+                        loop {
+                            if cancelled.load(Ordering::Acquire) {
+                                status = DEVICE_LOST;
+                                break;
+                            }
+                            match wait_value(&timeline, value, 1_000_000) {
+                                Ok(true) => break,
+                                Ok(false) => continue,
+                                Err(error) => {
+                                    status = error;
+                                    break;
+                                }
+                            }
+                        }
+                        if status != SUCCESS {
                             break;
                         }
                     }
@@ -1224,13 +1260,17 @@ unsafe extern "C" fn device_open(
     let allocations = Arc::new(Mutex::new(BTreeMap::new()));
     let worker_allocations = Arc::clone(&allocations);
     let (sender, receiver) = mpsc::channel();
-    let worker =
-        std::thread::spawn(move || queue_worker(receiver, worker_file, worker_allocations));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker_cancelled = Arc::clone(&cancelled);
+    let worker = std::thread::spawn(move || {
+        queue_worker(receiver, worker_file, worker_allocations, worker_cancelled)
+    });
     unsafe {
         *out = Box::into_raw(Box::new(XdnaDevice {
             file,
             sender,
             worker: Some(worker),
+            cancelled,
             heap: Mutex::new(None),
             allocations,
             imported: Mutex::new(BTreeMap::new()),
@@ -1245,6 +1285,7 @@ unsafe extern "C" fn device_close(device: *mut c_void) {
         return;
     }
     let mut device = unsafe { Box::from_raw(device.cast::<XdnaDevice>()) };
+    device.cancelled.store(true, Ordering::Release);
     let _ = device.sender.send(XdnaWork::Shutdown);
     if let Some(worker) = device.worker.take() {
         let _ = worker.join();
@@ -1338,6 +1379,24 @@ unsafe extern "C" fn allocation_create(
             }
         }
     };
+    let mut allocations = device.allocations.lock().unwrap_or_else(|e| e.into_inner());
+    if let Err(status) = register_span(
+        &mut allocations,
+        allocation.address,
+        AllocationSpan {
+            bytes: allocation.bytes,
+            handle: allocation.handle,
+            host: allocation.map as usize + allocation.view_offset,
+        },
+    ) {
+        unsafe {
+            if allocation.owns_map {
+                munmap(allocation.map, allocation.map_bytes);
+            }
+            close_bo(fd, allocation.handle);
+        }
+        return status;
+    }
     unsafe {
         *info = PluginAllocationInfo {
             base: allocation.address,
@@ -1351,16 +1410,6 @@ unsafe extern "C" fn allocation_create(
         };
         *out = Box::into_raw(Box::new(allocation)).cast();
     }
-    let mut allocations = device.allocations.lock().unwrap_or_else(|e| e.into_inner());
-    let allocation = unsafe { &*(*out).cast::<XdnaAllocation>() };
-    allocations.insert(
-        allocation.address,
-        AllocationSpan {
-            bytes: allocation.bytes,
-            handle: allocation.handle,
-            host: allocation.map as usize + allocation.view_offset,
-        },
-    );
     SUCCESS
 }
 
@@ -1563,6 +1612,18 @@ unsafe extern "C" fn allocation_import_fd(
         owns_map: false,
         imported: Some(backing),
     };
+    let mut allocations = device.allocations.lock().unwrap_or_else(|e| e.into_inner());
+    if let Err(status) = register_span(
+        &mut allocations,
+        allocation.address,
+        AllocationSpan {
+            bytes: allocation.bytes,
+            handle: allocation.handle,
+            host: allocation.map as usize + allocation.view_offset,
+        },
+    ) {
+        return status;
+    }
     unsafe {
         *info = PluginAllocationInfo {
             base: allocation.address,
@@ -1576,16 +1637,6 @@ unsafe extern "C" fn allocation_import_fd(
         };
         *out = Box::into_raw(Box::new(allocation)).cast();
     }
-    let mut allocations = device.allocations.lock().unwrap_or_else(|e| e.into_inner());
-    let allocation = unsafe { &*(*out).cast::<XdnaAllocation>() };
-    allocations.insert(
-        allocation.address,
-        AllocationSpan {
-            bytes: allocation.bytes,
-            handle: allocation.handle,
-            host: allocation.map as usize + allocation.view_offset,
-        },
-    );
     SUCCESS
 }
 unsafe extern "C" fn device_wait_idle(device: *mut c_void, _: *mut i32) -> i32 {
@@ -2036,4 +2087,100 @@ unsafe extern "C" fn device_native_handles(
     _: *mut *mut c_void,
 ) -> i32 {
     UNSUPPORTED
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_close_cancels_an_unsatisfied_queue_wait() {
+        let file = File::open("/dev/null").unwrap();
+        let worker_file = file.try_clone().unwrap();
+        let allocations = Arc::new(Mutex::new(BTreeMap::new()));
+        let worker_allocations = Arc::clone(&allocations);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let (sender, receiver) = mpsc::channel();
+        let shared = Arc::new((
+            Mutex::new(TimelineState {
+                value: 0,
+                failure: 0,
+            }),
+            Condvar::new(),
+        ));
+        sender
+            .send(XdnaWork::Submit(vec![XdnaSegment {
+                waits: vec![(Arc::clone(&shared), 1)],
+                operations: Vec::new(),
+                signals: vec![(Arc::clone(&shared), 2)],
+            }]))
+            .unwrap();
+        let worker = std::thread::spawn(move || {
+            queue_worker(receiver, worker_file, worker_allocations, worker_cancelled)
+        });
+        let device = Box::into_raw(Box::new(XdnaDevice {
+            file,
+            sender,
+            worker: Some(worker),
+            cancelled,
+            heap: Mutex::new(None),
+            allocations,
+            imported: Mutex::new(BTreeMap::new()),
+        })) as usize;
+        let (done, finished) = mpsc::channel();
+        let closer = std::thread::spawn(move || {
+            unsafe { device_close(device as *mut c_void) };
+            done.send(()).unwrap();
+        });
+        finished.recv_timeout(Duration::from_secs(1)).unwrap();
+        closer.join().unwrap();
+        assert_eq!(wait_value(&shared, 2, 0), Err(DEVICE_LOST));
+    }
+
+    #[test]
+    fn overlapping_import_does_not_replace_a_live_mapping() {
+        let mut allocations = BTreeMap::new();
+        let mut storage = [0u8; 32];
+        register_span(
+            &mut allocations,
+            0x1000,
+            AllocationSpan {
+                bytes: 32,
+                handle: 7,
+                host: storage.as_mut_ptr() as usize,
+            },
+        )
+        .unwrap();
+        for address in [0x1000, 0x1008, 0xff8] {
+            assert_eq!(
+                register_span(
+                    &mut allocations,
+                    address,
+                    AllocationSpan {
+                        bytes: 16,
+                        handle: 9,
+                        host: 0,
+                    }
+                ),
+                Err(INVALID_ARGUMENT)
+            );
+            let (handle, pointer) = allocation_view(&allocations, 0x1008, 16).unwrap();
+            assert_eq!(handle, 7);
+            unsafe { ptr::write_bytes(pointer, 42, 16) };
+            assert_eq!(&storage[8..24], &[42; 16]);
+        }
+        assert!(
+            register_span(
+                &mut allocations,
+                0x1020,
+                AllocationSpan {
+                    bytes: 16,
+                    handle: 9,
+                    host: 0,
+                }
+            )
+            .is_ok()
+        );
+    }
 }

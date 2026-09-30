@@ -188,6 +188,7 @@ static nisyros_status command_record(void *handle, uint32_t count,
                                      const nisyros_plugin_command_op *ops, int32_t *code) {
     (void)code;
     if (!handle || (count && !ops)) return NISYROS_INVALID_ARGUMENT;
+    if (getenv("NISYROS_TEST_RECORD_OOM")) return NISYROS_OUT_OF_MEMORY;
     command *c = handle;
     nisyros_plugin_command_op *copy = count ? malloc(count * sizeof(*copy)) : NULL;
     if (count && !copy) return NISYROS_OUT_OF_MEMORY;

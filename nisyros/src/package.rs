@@ -30,6 +30,15 @@ pub struct BinaryKey {
     pub bytes: [u8; 32],
 }
 
+impl BinaryKey {
+    fn valid(self) -> bool {
+        (1..=32).contains(&self.size)
+            && self.bytes[self.size as usize..]
+                .iter()
+                .all(|&byte| byte == 0)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ArgumentField {
     pub offset: u32,
@@ -265,8 +274,7 @@ impl Package {
         if !matches!(
             self.format,
             VULKAN_PIPELINE_BINARY_FORMAT | ROCM_CODE_OBJECT_FORMAT | XDNA_XCLBIN_FORMAT
-        ) || self.global_key.size == 0
-            || self.global_key.size > 32
+        ) || !self.global_key.valid()
             || self.entry.is_empty()
             || self.entry.len() > MAX_ENTRY_LEN
             || self.entry.as_bytes().contains(&0)
@@ -299,10 +307,7 @@ impl Package {
             previous_end = end;
         }
         for binary in &self.binaries {
-            if binary.key.size == 0
-                || binary.key.size > 32
-                || binary.data.is_empty()
-                || binary.data.len() > MAX_BINARY_SIZE
+            if !binary.key.valid() || binary.data.is_empty() || binary.data.len() > MAX_BINARY_SIZE
             {
                 return Err(PackageError::Invalid);
             }
@@ -382,10 +387,11 @@ impl<'a> Reader<'a> {
     fn key(&mut self) -> Result<BinaryKey, PackageError> {
         let size = self.u32()?;
         let bytes: [u8; 32] = self.take(32)?.try_into().expect("fixed width");
-        if size == 0 || size > 32 || bytes[size as usize..].iter().any(|&byte| byte != 0) {
+        let key = BinaryKey { size, bytes };
+        if !key.valid() {
             return Err(PackageError::Invalid);
         }
-        Ok(BinaryKey { size, bytes })
+        Ok(key)
     }
 
     fn remaining(&self) -> usize {
@@ -421,7 +427,7 @@ mod tests {
             format: VULKAN_PIPELINE_BINARY_FORMAT,
             global_key: BinaryKey {
                 size: 3,
-                bytes: [1; 32],
+                bytes: std::array::from_fn(|index| u8::from(index < 3)),
             },
             vendor_id: 0x1002,
             device_id: 0x1586,
@@ -453,7 +459,7 @@ mod tests {
             binaries: vec![PipelineBinary {
                 key: BinaryKey {
                     size: 2,
-                    bytes: [2; 32],
+                    bytes: std::array::from_fn(|index| if index < 2 { 2 } else { 0 }),
                 },
                 data: vec![3, 4, 5],
             }],
@@ -462,9 +468,7 @@ mod tests {
 
     #[test]
     fn round_trip_and_reject_corruption() {
-        let mut original = sample();
-        original.global_key.bytes[3..].fill(0);
-        original.binaries[0].key.bytes[2..].fill(0);
+        let original = sample();
         let bytes = original.encode().unwrap();
         assert_eq!(Package::parse(&bytes).unwrap(), original);
         for end in 0..bytes.len() {
@@ -483,11 +487,19 @@ mod tests {
     }
 
     #[test]
+    fn rejects_nonzero_unused_key_bytes() {
+        let mut package = sample();
+        package.global_key.bytes[3] = 1;
+        assert_eq!(package.encode(), Err(PackageError::Invalid));
+        let mut package = sample();
+        package.binaries[0].key.bytes[2] = 1;
+        assert_eq!(package.encode(), Err(PackageError::Invalid));
+    }
+
+    #[test]
     fn rocm_code_object_round_trip() {
         let mut package = sample();
         package.format = ROCM_CODE_OBJECT_FORMAT;
-        package.global_key.bytes[3..].fill(0);
-        package.binaries[0].key.bytes[2..].fill(0);
         package.device_id = 0;
         package.api_version = 0;
         package.binaries[0].data = b"\x7fELF".to_vec();
@@ -498,8 +510,6 @@ mod tests {
     #[test]
     fn matrix_manifest_uses_version_two_and_checks_exact_tuple() {
         let mut package = sample();
-        package.global_key.bytes[3..].fill(0);
-        package.binaries[0].key.bytes[2..].fill(0);
         package.required_features = FEATURE_COOPERATIVE_MATRIX | FEATURE_SHADER_FLOAT16;
         package.required_matrices.push(CooperativeMatrixTuple {
             m: 16,

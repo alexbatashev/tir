@@ -306,7 +306,7 @@ struct RocmCommand {
 
 struct RocmTimeline {
     fns: HipFns,
-    state: *mut u64,
+    state: *mut AtomicU64,
     device_state: *mut c_void,
     backing: TimelineBacking,
     lock: Mutex<()>,
@@ -366,6 +366,14 @@ unsafe fn register_shared_timeline(
     initialize: bool,
     backend: *mut i32,
 ) -> Result<RocmTimeline, i32> {
+    let file = std::fs::File::from(fd);
+    if file
+        .metadata()
+        .map_or(true, |metadata| metadata.len() < TIMELINE_PAGE_BYTES as u64)
+    {
+        return Err(INVALID_ARGUMENT);
+    }
+    let fd = OwnedFd::from(file);
     let mapping = unsafe {
         mmap(
             ptr::null_mut(),
@@ -400,7 +408,7 @@ unsafe fn register_shared_timeline(
     }
     if initialize {
         unsafe {
-            ptr::write_volatile(mapping.cast::<u64>(), 0);
+            ptr::write(mapping.cast::<AtomicU64>(), AtomicU64::new(0));
             ptr::write(mapping.byte_add(8).cast(), AtomicI32::new(HIP_SUCCESS));
         }
     }
@@ -443,7 +451,7 @@ unsafe fn probe_shared_timeline(fns: HipFns) -> bool {
         write
     };
     unsafe { (fns.stream_destroy)(stream) };
-    sync == HIP_SUCCESS && unsafe { ptr::read_volatile(target.state) } == 1
+    sync == HIP_SUCCESS && unsafe { (*target.state).load(Ordering::Acquire) } == 1
 }
 
 unsafe extern "C" fn collect_hsa_gpu(agent: HsaAgent, data: *mut c_void) -> i32 {
@@ -1374,7 +1382,7 @@ unsafe extern "C" fn timeline_create(
         return hip_status(status, backend);
     }
     unsafe {
-        ptr::write_volatile(state.cast::<u64>(), 0);
+        ptr::write(state.cast::<AtomicU64>(), AtomicU64::new(0));
     }
     let failure = Box::new(AtomicI32::new(HIP_SUCCESS));
     let failure_pointer = (&raw const *failure).cast_mut();
@@ -1440,7 +1448,7 @@ unsafe extern "C" fn timeline_query(
         return SUBMISSION_FAILED;
     }
     unsafe {
-        *out = ptr::read_volatile(timeline.state);
+        *out = (*timeline.state).load(Ordering::Acquire);
     }
     SUCCESS
 }
@@ -1463,7 +1471,7 @@ unsafe extern "C" fn timeline_wait(
             unsafe { *backend = failure };
             return SUBMISSION_FAILED;
         }
-        if unsafe { ptr::read_volatile(timeline.state) } >= value {
+        if unsafe { (*timeline.state).load(Ordering::Acquire) } >= value {
             unsafe {
                 *completed = 1;
             }
@@ -1492,11 +1500,11 @@ unsafe extern "C" fn timeline_signal(timeline: *mut c_void, value: u64, _: *mut 
     }
     let timeline = unsafe { &*timeline.cast::<RocmTimeline>() };
     let _guard = timeline.lock.lock().unwrap_or_else(|e| e.into_inner());
-    if value <= unsafe { ptr::read_volatile(timeline.state) } {
+    if value <= unsafe { (*timeline.state).load(Ordering::Acquire) } {
         return INVALID_ARGUMENT;
     }
     unsafe {
-        ptr::write_volatile(timeline.state, value);
+        (*timeline.state).store(value, Ordering::Release);
     }
     timeline.changed.notify_all();
     SUCCESS
@@ -1919,7 +1927,7 @@ fn rocm_queue_worker(
                                 failure_status = dependency_failure;
                                 break;
                             }
-                            if unsafe { ptr::read_volatile(timeline.state) } >= value {
+                            if unsafe { (*timeline.state).load(Ordering::Acquire) } >= value {
                                 break;
                             }
                             let guard = timeline.lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -2086,4 +2094,25 @@ unsafe extern "C" fn device_native_handles(
             .map_or(ptr::null_mut(), |queue| queue.stream);
     }
     SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_timeline_rejects_a_truncated_descriptor() {
+        let handle = unsafe { dlopen(c"libamdhip64.so".as_ptr(), 2) };
+        if handle.is_null() {
+            return;
+        }
+        let _library = DynamicLibrary(handle);
+        let Some(fns) = (unsafe { HipFns::load(handle) }) else {
+            return;
+        };
+        let fd = create_timeline_memfd().unwrap();
+        assert_eq!(unsafe { ftruncate(fd.as_raw_fd(), 8) }, 0);
+        let result = unsafe { register_shared_timeline(fns, fd, false, ptr::null_mut()) };
+        assert!(matches!(result, Err(INVALID_ARGUMENT)));
+    }
 }
