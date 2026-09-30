@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use tir_adt::IndexMap;
 
 use crate::attributes::{AttributeValue, RegisterAttr};
 use crate::block::BlockId;
@@ -11,7 +12,7 @@ pub(crate) struct RegionParseState {
     /// Every label seen so far, whether defined by `^name:` or only referenced
     /// as a successor. A referenced-only label owns a block that joins the
     /// region once its definition appears.
-    pub labels: HashMap<String, BlockId>,
+    pub labels: IndexMap<String, BlockId>,
     /// The labels whose defining `^name:` has been parsed. The entry block is
     /// defined under the name `bb0` as soon as it exists.
     pub defined: HashSet<String>,
@@ -35,8 +36,9 @@ pub struct Parser<'src> {
     /// Placeholder values standing in for names not yet defined when they were
     /// first used. Module-level λ and δ values are usable before their
     /// definition appears, so a reference creates a placeholder and the parse
-    /// rewrites it once the whole operation is in.
-    forward: HashMap<String, ValueId>,
+    /// rewrites it once the whole operation is in. Keep first-reference order
+    /// so unresolved-name diagnostics are stable.
+    forward: IndexMap<String, ValueId>,
     /// Whether a name this parse has not bound yet may still be defined later.
     /// A detached single-op parse says no: there, an unbound numeric name is a
     /// value the caller already owns.
@@ -53,7 +55,7 @@ impl<'src> Parser<'src> {
             position: 0,
             region_parse: None,
             value_names: HashMap::new(),
-            forward: HashMap::new(),
+            forward: IndexMap::new(),
             forward_references: true,
             aliases: HashMap::new(),
         }
