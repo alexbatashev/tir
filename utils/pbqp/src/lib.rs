@@ -367,7 +367,12 @@ pub struct PbqpSolution {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PbqpSolveError {
-    Infeasible { node: PbqpNodeId },
+    Infeasible {
+        node: PbqpNodeId,
+    },
+    /// A bounded solve backed out of its allowed number of heuristic choices.
+    /// The problem may still have a solution.
+    Exhausted,
     InvalidProblem(String),
 }
 
@@ -426,6 +431,18 @@ pub fn solve(problem: &PbqpProblem) -> Result<PbqpSolution, PbqpSolveError> {
     Solver::new(problem).solve()
 }
 
+/// [`solve`], giving up with [`PbqpSolveError::Exhausted`] once `backtracks`
+/// heuristic choices proved infeasible. The search behind those choices is
+/// exponential in the worst case; exact reductions are never bounded.
+pub fn solve_within(
+    problem: &PbqpProblem,
+    backtracks: u64,
+) -> Result<PbqpSolution, PbqpSolveError> {
+    let mut solver = Solver::new(problem);
+    solver.backtracks = Some(backtracks);
+    solver.solve()
+}
+
 /// A solve mutates node costs and edges, so it works on copies of those; the
 /// interned matrices are read straight out of the problem and the ones a
 /// reduction mints land in `scratch`, whose ids continue the problem's.
@@ -442,6 +459,8 @@ struct Solver<'a> {
     infeasible: BTreeSet<usize>,
     recording_undo: bool,
     undo: Vec<Undo>,
+    /// The infeasible heuristic choices a bounded solve may still back out of.
+    backtracks: Option<u64>,
 }
 
 impl<'a> Solver<'a> {
@@ -474,6 +493,7 @@ impl<'a> Solver<'a> {
             infeasible,
             recording_undo: false,
             undo: Vec::new(),
+            backtracks: None,
         }
     }
 
@@ -852,13 +872,16 @@ impl<'a> Solver<'a> {
         let checkpoint = self.checkpoint();
         for alternative in alternatives {
             self.rollback(checkpoint);
-            if let Err(PbqpSolveError::Infeasible { .. }) = self.reduce_rn(node, alternative) {
-                continue;
-            }
-            match self.solve_prepared() {
-                Ok(solution) => return Ok(solution),
-                Err(PbqpSolveError::Infeasible { .. }) => {}
-                Err(error) => return Err(error),
+            let infeasible = match self.reduce_rn(node, alternative) {
+                Err(PbqpSolveError::Infeasible { .. }) => true,
+                _ => match self.solve_prepared() {
+                    Ok(solution) => return Ok(solution),
+                    Err(PbqpSolveError::Infeasible { .. }) => true,
+                    Err(error) => return Err(error),
+                },
+            };
+            if infeasible && let Some(left) = &mut self.backtracks {
+                *left = left.checked_sub(1).ok_or(PbqpSolveError::Exhausted)?;
             }
         }
         self.rollback(checkpoint);
@@ -1113,7 +1136,6 @@ impl<'a> Solver<'a> {
                     old_matrix,
                 } => {
                     let edge = self
-                        .problem
                         .edges
                         .find(lhs, rhs)
                         .expect("a changed PBQP edge must exist during rollback");
@@ -1492,6 +1514,46 @@ mod tests {
         assert_eq!(solution.choices[center.index()], 1);
         assert_eq!(solution.choices[a.index()], 2);
         assert_eq!(solution.total_cost, 2);
+    }
+
+    #[test]
+    fn rollback_restores_a_changed_fill_in_absent_from_the_input() {
+        let mut problem = PbqpProblem::new();
+        let center = problem.add_node(vec![0, 1]);
+        let left = problem.add_node(vec![0, 0]);
+        let right = problem.add_node(vec![0, 0]);
+        let a = problem.add_node(vec![0, 0]);
+        let b = problem.add_node(vec![0, 0, 0]);
+        let c = problem.add_node(vec![0, 0]);
+        let agree = PbqpMatrix::new(2, 2, vec![0, 1, 1, 0]);
+        let same = PbqpMatrix::new(2, 2, vec![0, INF_COST, INF_COST, 0]);
+
+        for middle in [a, c] {
+            problem.add_edge(center, middle, agree.clone());
+            problem.add_edge(left, middle, same.clone());
+            problem.add_edge(right, middle, same.clone());
+        }
+        problem.add_edge(
+            center,
+            b,
+            PbqpMatrix::new(2, 3, vec![0, 0, INF_COST, INF_COST, INF_COST, 0]),
+        );
+        problem.add_edge(
+            left,
+            b,
+            PbqpMatrix::new(2, 3, vec![0, INF_COST, 0, INF_COST, 0, 0]),
+        );
+        problem.add_edge(
+            right,
+            b,
+            PbqpMatrix::new(2, 3, vec![INF_COST, 0, 0, 0, INF_COST, 0]),
+        );
+
+        // center=0 makes left=right through a but left!=right through b.
+        // center=1 permits b=2; both agreement edges then prefer a=c=1.
+        let solution = solve(&problem).expect("the second Rn alternative is solvable");
+        assert_eq!(solution.choices, vec![1, 1, 1, 1, 2, 1]);
+        assert_eq!(solution.total_cost, 1);
     }
 
     /// Interference matrices repeat: every pair of vregs in one register class
