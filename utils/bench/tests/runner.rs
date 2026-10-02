@@ -4,13 +4,13 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use serde_json::{Value, json};
-use tir_bench::{Options, ProcessCase, Suite, process::Command};
+use tir_bench::{BatchSize, Criterion, Options, ProcessCase, Variant, process::Command};
 
 const NAMESPACE: &str = "tir-bench/runner-test";
 
 fn options(output: &Path) -> Options {
     let mut options =
-        Options::try_parse_from(["runner", "--samples", "2", "--warmups", "0"]).unwrap();
+        Options::try_parse_from(["runner", "--sample-size", "2", "--warmups", "0"]).unwrap();
     options.output = Some(output.to_owned());
     options
 }
@@ -26,6 +26,12 @@ fn process_case(script: &str, metadata: Value) -> ProcessCase {
         })),
         metadata,
         gate: true,
+        variant: Some(Variant {
+            benchmark: "process".into(),
+            group: "Run".into(),
+            variant: "candidate".into(),
+            subject: true,
+        }),
     }
 }
 
@@ -35,14 +41,12 @@ fn run_suite(
     metadata: Value,
     include_case: bool,
 ) -> (PathBuf, tir_bench::Result<()>) {
-    let mut suite = Suite::new(NAMESPACE, options).unwrap();
-    let path = suite.artifacts().to_owned();
+    let mut criterion = Criterion::new(NAMESPACE, options).unwrap();
+    let path = criterion.artifacts().unwrap();
     if include_case {
-        suite
-            .process_group(vec![process_case(script, metadata)])
-            .unwrap();
+        criterion.bench_processes(vec![process_case(script, metadata)]);
     }
-    (path, suite.finish())
+    (path, criterion.finish())
 }
 
 fn result(path: &Path) -> Value {
@@ -87,14 +91,35 @@ fn native_suite_records_validates_and_compares() {
     latencies.sort_by(f64::total_cmp);
     let median = (latencies[0] + latencies[1]) / 2.0;
     assert_eq!(process["summary"]["latency"].as_f64().unwrap(), median);
-    let bmf: Value =
-        serde_json::from_slice(&std::fs::read(baseline_path.join("summary.bmf.json")).unwrap())
+    // Benchboard reads this file, so its shape is a contract with another repository.
+    let summary: Value =
+        serde_json::from_slice(&std::fs::read(baseline_path.join("summary.json")).unwrap())
             .unwrap();
+    let deviation = (latencies[1] - latencies[0]) / 2.0;
     assert_eq!(
-        bmf[format!("{NAMESPACE}/process")]["latency"]["value"],
-        json!(median)
+        summary["results"][format!("{NAMESPACE}/process")]["latency"],
+        json!({"value": median, "lower_value": median - deviation, "upper_value": median + deviation})
     );
-    assert!(bmf[format!("{NAMESPACE}/process")]["peak_process_rss_bytes"]["value"].is_number());
+    // CPU times and the deviation are sampled, and only defined metrics are exported.
+    let exported: Vec<_> = summary["metrics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|metric| {
+            (
+                metric["key"].as_str().unwrap(),
+                metric["unit"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        exported,
+        [("latency", "ns"), ("peak_process_rss_bytes", "bytes")]
+    );
+    assert_eq!(
+        summary["variants"][format!("{NAMESPACE}/process")],
+        json!({"benchmark": "process", "group": "Run", "variant": "candidate", "subject": true})
+    );
 
     let mut compatible = options(temp.path());
     compatible.baseline = Some(baseline_path.clone());
@@ -146,25 +171,66 @@ fn native_suite_records_validates_and_compares() {
     );
     assert_eq!(result(&path)["status"], "incomplete");
 
-    let mut invalid = Suite::new(NAMESPACE, options(temp.path())).unwrap();
-    let invalid_path = invalid.artifacts().to_owned();
-    let error = invalid
-        .process_group(vec![process_case(
-            "printf 'wrong\\n'",
-            json!({"workload": "invalid"}),
-        )])
-        .unwrap_err();
-    assert!(error.to_string().contains("validator"));
+    let (invalid_path, status) = run_suite(
+        options(temp.path()),
+        "printf 'wrong\\n'",
+        json!({"workload": "invalid"}),
+        true,
+    );
+    assert!(status.unwrap_err().to_string().contains("validator"));
     let invalid_result = result(&invalid_path);
     assert_eq!(invalid_result["status"], "incomplete");
     assert!(invalid_result["cases"].as_array().unwrap().is_empty());
+
+    // A failed group stops the benchmarks after it. The host lock allows one
+    // active harness, so this shares the test above.
+    let marker = temp.path().join("ran");
+    let mut criterion = Criterion::new(NAMESPACE, options(temp.path())).unwrap();
+    criterion.bench_processes(vec![process_case("printf 'wrong\\n'", json!({}))]);
+    criterion.bench_processes(vec![ProcessCase {
+        id: format!("{NAMESPACE}/later"),
+        command: Command::new("/bin/sh").args(["-c", &format!("touch {}", marker.display())]),
+        verify: None,
+        metadata: json!({}),
+        gate: true,
+        variant: None,
+    }]);
+    assert!(criterion.finish().is_err());
+    assert!(!marker.exists());
 }
 
+/// The Cachegrind parent starts this binary once per function with
+/// `--count-function`. The child must run that routine's counted region once.
 #[test]
-fn relative_filters_survive_qualified_dispatch() {
-    let options = Options::try_parse_from(["runner", "--list", "--filter", "parse"]).unwrap();
-    let suite = Suite::new("fixture/parser", options).unwrap();
-    assert!(suite.matches("parse"));
-    assert!(suite.matches("fixture/parser/parse"));
-    assert!(!suite.matches("fixture/parser/other"));
+fn a_counting_child_runs_only_the_requested_function_once() {
+    let child = |function: &str| {
+        Criterion::new(
+            NAMESPACE,
+            Options::try_parse_from(["runner", "--count-function", function]).unwrap(),
+        )
+        .unwrap()
+    };
+    let calls = std::cell::RefCell::new(Vec::new());
+    let call = |name| calls.borrow_mut().push(name);
+    let mut criterion = child("group/batched");
+    let mut group = criterion.benchmark_group("group");
+    group.bench_function("plain", |b| b.iter(|| call("plain")));
+    group.bench_function("batched", |b| {
+        b.iter_batched(
+            || call("setup"),
+            |()| call("routine"),
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_with_input("input", &7, |b, _| b.iter(|| call("input")));
+    group.finish();
+    criterion.finish().unwrap();
+    assert_eq!(*calls.borrow(), ["setup", "routine"]);
+
+    let mut criterion = child("group/missing");
+    criterion
+        .benchmark_group("group")
+        .bench_function("plain", |b| b.iter(|| ()));
+    let error = criterion.finish().unwrap_err().to_string();
+    assert!(error.contains("group/missing is not registered"), "{error}");
 }
