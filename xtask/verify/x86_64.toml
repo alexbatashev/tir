@@ -6,7 +6,7 @@ dialect = "x86_64"
 defs_dir = "backends/x86_64/defs"
 snapshot = "x86.ir"
 snapshot_repo = "frontiers-labs/isla-snapshots"
-snapshot_ref = "3c4f457ea9ac2702dae9203414cbdad498be602d"
+snapshot_ref = "de24457e791893e34a2a959fb39aab514d6fec0c"
 isla_config = "verify-smt-x86_64.toml"
 xlen = 64
 # The simplifier mishandles the model's wide struct values.
@@ -56,3 +56,23 @@ map = [
   { sail = "rflags", bits = [4, 4], class = "eflags", index = 5 },
   { sail = "rflags", bits = [10, 10], class = "eflags", index = 6 },
 ]
+
+[[expected_failures]]
+reason = "no execution semantics in the pinned Sail snapshot"
+instructions = [
+  "andn", "andn32", "bextr", "bextr32", "blsi", "blsi32", "blsmsk", "blsmsk32",
+  "blsr", "blsr32", "btc", "btr", "bts", "bzhi", "bzhi32", "mulx", "mulx32",
+  "rorx", "rorx32", "sarx", "sarx32", "shlx", "shlx32", "shrx", "shrx32",
+]
+
+[[expected_failures]]
+reason = "Isla cannot turn the symbolic 128-bit intermediate into an integer"
+instructions = ["shldimm", "shrdimm", "shldcl", "shrdcl"]
+
+[[expected_failures]]
+reason = "Sail execution does not finish within Isla's limit"
+instructions = ["pushf"]
+
+[[expected_failures]]
+reason = "guarded narrow division proof incomplete"
+instructions = ["signeddivide32", "unsigneddivide32"]

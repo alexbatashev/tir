@@ -804,7 +804,7 @@ shift_imm!("16", "16", RegShift16,
         let res = dst << c;
         let carry = extract(dst << (c - zext(0b1, 5)), 15, 15);
         let zero = if res == zext(0b0, 16) { zext(0b1, 1) } else { zext(0b0, 1) };
-        EFLAGS::cf = if c == zext(0b0, 5) { EFLAGS::cf } else { carry };
+        EFLAGS::cf = if c == zext(0b0, 5) { EFLAGS::cf } else if c ~< zext(0b10000, 5) { carry } else { undefined(1) };
         EFLAGS::zf = if c == zext(0b0, 5) { EFLAGS::zf } else { zero };
         EFLAGS::sf = if c == zext(0b0, 5) { EFLAGS::sf } else { extract(res, 15, 15) };
         EFLAGS::pf = if c == zext(0b0, 5) { EFLAGS::pf } else { parity_flag(res) };
@@ -815,7 +815,7 @@ shift_imm!("16", "16", RegShift16,
         let c = extract(imm, 4, 0);
         let res = dst >> c;
         let zero = if res == zext(0b0, 16) { zext(0b1, 1) } else { zext(0b0, 1) };
-        EFLAGS::cf = if c == zext(0b0, 5) { EFLAGS::cf } else { extract(dst >> (c - zext(0b1, 5)), 0, 0) };
+        EFLAGS::cf = if c == zext(0b0, 5) { EFLAGS::cf } else if c ~< zext(0b10000, 5) { extract(dst >> (c - zext(0b1, 5)), 0, 0) } else { undefined(1) };
         EFLAGS::zf = if c == zext(0b0, 5) { EFLAGS::zf } else { zero };
         EFLAGS::sf = if c == zext(0b0, 5) { EFLAGS::sf } else { extract(res, 15, 15) };
         EFLAGS::pf = if c == zext(0b0, 5) { EFLAGS::pf } else { parity_flag(res) };
@@ -867,7 +867,7 @@ shift_imm!("8", "8", RegShift8,
         let res = dst << c;
         let carry = extract(dst << (c - zext(0b1, 5)), 7, 7);
         let zero = if res == zext(0b0, 8) { zext(0b1, 1) } else { zext(0b0, 1) };
-        EFLAGS::cf = if c == zext(0b0, 5) { EFLAGS::cf } else { carry };
+        EFLAGS::cf = if c == zext(0b0, 5) { EFLAGS::cf } else if c ~< zext(0b1000, 5) { carry } else { undefined(1) };
         EFLAGS::zf = if c == zext(0b0, 5) { EFLAGS::zf } else { zero };
         EFLAGS::sf = if c == zext(0b0, 5) { EFLAGS::sf } else { extract(res, 7, 7) };
         EFLAGS::pf = if c == zext(0b0, 5) { EFLAGS::pf } else { parity_flag(res) };
@@ -878,7 +878,7 @@ shift_imm!("8", "8", RegShift8,
         let c = extract(imm, 4, 0);
         let res = dst >> c;
         let zero = if res == zext(0b0, 8) { zext(0b1, 1) } else { zext(0b0, 1) };
-        EFLAGS::cf = if c == zext(0b0, 5) { EFLAGS::cf } else { extract(dst >> (c - zext(0b1, 5)), 0, 0) };
+        EFLAGS::cf = if c == zext(0b0, 5) { EFLAGS::cf } else if c ~< zext(0b1000, 5) { extract(dst >> (c - zext(0b1, 5)), 0, 0) } else { undefined(1) };
         EFLAGS::zf = if c == zext(0b0, 5) { EFLAGS::zf } else { zero };
         EFLAGS::sf = if c == zext(0b0, 5) { EFLAGS::sf } else { extract(res, 7, 7) };
         EFLAGS::pf = if c == zext(0b0, 5) { EFLAGS::pf } else { parity_flag(res) };
@@ -921,7 +921,7 @@ reg_ext!(RegShiftCl16, WriteIShift,
         let res = dst << c;
         let carry = extract(dst << (c - zext(0b1, 5)), 15, 15);
         let zero = if res == zext(0b0, 16) { zext(0b1, 1) } else { zext(0b0, 1) };
-        EFLAGS::cf = if c == zext(0b0, 5) { EFLAGS::cf } else { carry };
+        EFLAGS::cf = if c == zext(0b0, 5) { EFLAGS::cf } else if c ~< zext(0b10000, 5) { carry } else { undefined(1) };
         EFLAGS::zf = if c == zext(0b0, 5) { EFLAGS::zf } else { zero };
         EFLAGS::sf = if c == zext(0b0, 5) { EFLAGS::sf } else { extract(res, 15, 15) };
         EFLAGS::pf = if c == zext(0b0, 5) { EFLAGS::pf } else { parity_flag(res) };
@@ -934,7 +934,7 @@ reg_ext!(RegShiftCl16, WriteIShift,
         let c = extract(GPR::rcx, 4, 0);
         let res = dst >> c;
         let zero = if res == zext(0b0, 16) { zext(0b1, 1) } else { zext(0b0, 1) };
-        EFLAGS::cf = if c == zext(0b0, 5) { EFLAGS::cf } else { extract(dst >> (c - zext(0b1, 5)), 0, 0) };
+        EFLAGS::cf = if c == zext(0b0, 5) { EFLAGS::cf } else if c ~< zext(0b10000, 5) { extract(dst >> (c - zext(0b1, 5)), 0, 0) } else { undefined(1) };
         EFLAGS::zf = if c == zext(0b0, 5) { EFLAGS::zf } else { zero };
         EFLAGS::sf = if c == zext(0b0, 5) { EFLAGS::sf } else { extract(res, 15, 15) };
         EFLAGS::pf = if c == zext(0b0, 5) { EFLAGS::pf } else { parity_flag(res) };
@@ -962,7 +962,7 @@ reg_ext!(RegShiftCl8, WriteIShift,
         let res = dst << c;
         let carry = extract(dst << (c - zext(0b1, 5)), 7, 7);
         let zero = if res == zext(0b0, 8) { zext(0b1, 1) } else { zext(0b0, 1) };
-        EFLAGS::cf = if c == zext(0b0, 5) { EFLAGS::cf } else { carry };
+        EFLAGS::cf = if c == zext(0b0, 5) { EFLAGS::cf } else if c ~< zext(0b1000, 5) { carry } else { undefined(1) };
         EFLAGS::zf = if c == zext(0b0, 5) { EFLAGS::zf } else { zero };
         EFLAGS::sf = if c == zext(0b0, 5) { EFLAGS::sf } else { extract(res, 7, 7) };
         EFLAGS::pf = if c == zext(0b0, 5) { EFLAGS::pf } else { parity_flag(res) };
@@ -975,7 +975,7 @@ reg_ext!(RegShiftCl8, WriteIShift,
         let c = extract(GPR::rcx, 4, 0);
         let res = dst >> c;
         let zero = if res == zext(0b0, 8) { zext(0b1, 1) } else { zext(0b0, 1) };
-        EFLAGS::cf = if c == zext(0b0, 5) { EFLAGS::cf } else { extract(dst >> (c - zext(0b1, 5)), 0, 0) };
+        EFLAGS::cf = if c == zext(0b0, 5) { EFLAGS::cf } else if c ~< zext(0b1000, 5) { extract(dst >> (c - zext(0b1, 5)), 0, 0) } else { undefined(1) };
         EFLAGS::zf = if c == zext(0b0, 5) { EFLAGS::zf } else { zero };
         EFLAGS::sf = if c == zext(0b0, 5) { EFLAGS::sf } else { extract(res, 7, 7) };
         EFLAGS::pf = if c == zext(0b0, 5) { EFLAGS::pf } else { parity_flag(res) };
@@ -1014,7 +1014,7 @@ shift_imm!(X86, "8H", "8h", RegShift8H,
         let res = dst << c;
         let carry = extract(dst << (c - zext(0b1, 5)), 7, 7);
         let zero = if res == zext(0b0, 8) { zext(0b1, 1) } else { zext(0b0, 1) };
-        EFLAGS::cf = if c == zext(0b0, 5) { EFLAGS::cf } else { carry };
+        EFLAGS::cf = if c == zext(0b0, 5) { EFLAGS::cf } else if c ~< zext(0b1000, 5) { carry } else { undefined(1) };
         EFLAGS::zf = if c == zext(0b0, 5) { EFLAGS::zf } else { zero };
         EFLAGS::sf = if c == zext(0b0, 5) { EFLAGS::sf } else { extract(res, 7, 7) };
         EFLAGS::pf = if c == zext(0b0, 5) { EFLAGS::pf } else { parity_flag(res) };
@@ -1025,7 +1025,7 @@ shift_imm!(X86, "8H", "8h", RegShift8H,
         let c = extract(imm, 4, 0);
         let res = dst >> c;
         let zero = if res == zext(0b0, 8) { zext(0b1, 1) } else { zext(0b0, 1) };
-        EFLAGS::cf = if c == zext(0b0, 5) { EFLAGS::cf } else { extract(dst >> (c - zext(0b1, 5)), 0, 0) };
+        EFLAGS::cf = if c == zext(0b0, 5) { EFLAGS::cf } else if c ~< zext(0b1000, 5) { extract(dst >> (c - zext(0b1, 5)), 0, 0) } else { undefined(1) };
         EFLAGS::zf = if c == zext(0b0, 5) { EFLAGS::zf } else { zero };
         EFLAGS::sf = if c == zext(0b0, 5) { EFLAGS::sf } else { extract(res, 7, 7) };
         EFLAGS::pf = if c == zext(0b0, 5) { EFLAGS::pf } else { parity_flag(res) };

@@ -847,6 +847,8 @@ fn eval_ready<V, M: Memory, A>(
         | SymKind::StoreConditional
         | SymKind::AtomicRmw
         | SymKind::Fence) => eval_atomic(kind, &c, memory)?,
+        // Any value is allowed; this evaluator picks zero.
+        SymKind::Undef => Value::Int(APInt::new(as_int!(c(0), "undef").to_u64() as u32, 0)),
         _ => unreachable!("operator has no concrete evaluator"),
     };
 

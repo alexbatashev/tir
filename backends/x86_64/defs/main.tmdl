@@ -883,16 +883,15 @@ macro neg_flags {
 
 // Status flags an instruction leaves undefined on hardware. Written all the
 // same, so the dependence graph orders the instruction against the compare/jcc
-// pairs around it; the value is not architectural and nothing selects on it,
-// since branches pair only with definers that write flags alone.
+// pairs around it.
 macro undefined_flags {
     () => {
-        EFLAGS::cf = zext(0b0, 1);
-        EFLAGS::zf = zext(0b0, 1);
-        EFLAGS::sf = zext(0b0, 1);
-        EFLAGS::of = zext(0b0, 1);
-        EFLAGS::af = zext(0b0, 1);
-        EFLAGS::pf = zext(0b0, 1);
+        EFLAGS::cf = undefined(1);
+        EFLAGS::zf = undefined(1);
+        EFLAGS::sf = undefined(1);
+        EFLAGS::of = undefined(1);
+        EFLAGS::af = undefined(1);
+        EFLAGS::pf = undefined(1);
     };
 }
 

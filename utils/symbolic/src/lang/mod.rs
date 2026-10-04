@@ -196,6 +196,10 @@ pub enum SymKind {
     FPToSIRound,
     FPToUIRound,
     FPFlags,
+    /// `[width, id]`: a value of `width` bits the architecture leaves
+    /// undefined. `id` tells occurrences apart, so two undefined values are
+    /// never the same term; nothing may be concluded from one.
+    Undef,
 }
 
 impl SymKind {

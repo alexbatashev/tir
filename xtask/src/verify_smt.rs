@@ -14,9 +14,9 @@
 //!      GPRs or PC. `unsat` proves agreement for ALL
 //!      2^XLEN values of every register; `sat` yields a counterexample.
 //!
-//! Undefined Sail values are internal choices. The query searches for an
-//! architectural input whose TMDL result no choice can reproduce. Register
-//! and memory inputs remain outside that quantifier.
+//! Values either model leaves undefined are internal choices. The query
+//! searches for an architectural input on which no choice makes the two final
+//! states equal. Register and memory inputs remain outside that quantifier.
 //!
 //! Modeling assumptions, reported with the results:
 //!   - machine mode, no traps: paths that touch unmapped architectural state
@@ -44,7 +44,8 @@
 //! The x86 snapshot is translated from the ACL2-derived
 //! `sail-x86-from-acl2` model (see that repo's `model/Makefile` `x86.ir`
 //! target, spliced with `test-generation-patches/isla_footprint.sail`) and is
-//! downloaded from the published isla-snapshots mirror. Additional x86 assumptions
+//! downloaded from the published isla-snapshots mirror, whose README lists the
+//! model errors fixed there. Additional x86 assumptions
 //! beyond machine-mode/no-trap:
 //!   - the PC (`rip`) is pinned to a concrete canonical address by the config,
 //!     and the fetch/decode is served from a concrete instruction-byte register
@@ -126,6 +127,17 @@ pub struct IsaSpec {
     requires_pc_write: bool,
     #[serde(deserialize_with = "expand_map")]
     map: Vec<MapRow>,
+    /// Instructions known not to verify. They run all the same, and one that
+    /// verifies fails the run, so an entry cannot outlive its reason.
+    #[serde(default)]
+    expected_failures: Vec<ExpectedFailures>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExpectedFailures {
+    reason: String,
+    instructions: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -292,102 +304,11 @@ impl MapRow {
     }
 }
 
-// These AdvSIMD operations have been checked across every lane arrangement.
-// Keep other vector operations out of the nightly proof set until their Sail
-// paths have the same coverage, since many fork once per lane.
-const ARM_VECTOR_PROOFS: &[&str] = &[
-    "addvector8b",
-    "addvector16b",
-    "addvector4h",
-    "addvector8h",
-    "addvector2s",
-    "addvector4s",
-    "addvector2d",
-    "subvector8b",
-    "subvector16b",
-    "subvector4h",
-    "subvector8h",
-    "subvector2s",
-    "subvector4s",
-    "subvector2d",
-    "andvector8b",
-    "andvector16b",
-    "orrvector8b",
-    "orrvector16b",
-    "eorvector8b",
-    "eorvector16b",
-];
-
-// The pinned ACL2-derived snapshot has no execution semantics for these
-// instructions: every Sail path stops before writing RIP.
-const X86_SAIL_UNIMPLEMENTED: &[&str] = &[
-    "andn", "andn32", "bextr", "bextr32", "blsi", "blsi32", "blsmsk", "blsmsk32", "blsr", "blsr32",
-    "btc", "btr", "bts", "bzhi", "bzhi32", "mulx", "mulx32", "rorx", "rorx32", "sarx", "sarx32",
-    "shlx", "shlx32", "shrx", "shrx32",
-];
-
-// The pinned Isla evaluator panics when Sail's 64-bit SHLD/SHRD forms convert
-// their symbolic 128-bit intermediate to an integer.
-const X86_ISLA_128BIT_SHIFTS: &[&str] = &["shldimm", "shrdimm", "shldcl", "shrdcl"];
-
-// These pinned Sail forms do not complete a trace within Isla's execution
-// limit, so there is no path on which to compare architectural state.
-const X86_ISLA_UNEXECUTABLE: &[&str] = &["pushf", "signeddivide32"];
-
-fn x86_unsupported_reason(name: &str) -> Option<&'static str> {
-    if X86_SAIL_UNIMPLEMENTED.contains(&name) {
-        Some("not implemented by pinned Sail snapshot")
-    } else if X86_ISLA_128BIT_SHIFTS.contains(&name) {
-        Some("pinned Isla evaluator cannot execute symbolic 128-bit shift")
-    } else if X86_ISLA_UNEXECUTABLE.contains(&name) {
-        Some("pinned Isla evaluator cannot complete Sail execution")
-    } else if name == "unsigneddivide32" {
-        Some("guarded narrow division proof incomplete")
-    } else {
-        None
-    }
-}
-
-fn uses_arm_vector(model: &FlatModel, instr: &Instruction) -> bool {
-    let is_vector = |class: &str| {
-        model
-            .classes
-            .get(class)
-            .is_some_and(|info| info.storage == "vpr")
-    };
-    instr
-        .operands
-        .iter()
-        .any(|(_, kind)| matches!(kind, OperandKind::Reg { class, .. } if is_vector(class)))
-        || instr.write_classes.iter().any(|class| is_vector(class))
-}
-
 /// Why `instr` cannot be verified against the model, as the report names it,
 /// or `None` when it can.
 fn unsupported_reason(spec: &IsaSpec, model: &FlatModel, instr: &Instruction) -> Option<String> {
-    let riscv = spec.name.starts_with("riscv");
-    if riscv && instr.name == "vsetvli" {
-        return Some("vsetvli (RVV disabled in Sail configuration)".to_string());
-    }
-    if riscv && instr.width_bits == 16 {
-        return Some(format!(
-            "{} (compressed extension disabled in Sail configuration)",
-            instr.name
-        ));
-    }
-    if riscv && matches!(instr.name.as_str(), "envcall" | "envbreak" | "cenvbreak") {
-        return Some(format!(
-            "{} (terminating Sail trace omits architectural trap state)",
-            instr.name
-        ));
-    }
     if !instr.supported {
         return Some(instr.name.clone());
-    }
-    if spec.name == "x86_64" {
-        if let Some(reason) = x86_unsupported_reason(&instr.name) {
-            return Some(format!("{} ({reason})", instr.name));
-        }
     }
     // Atomics (A extension) reference the reservation state, whose mapping onto
     // Sail's reservation register is follow-up work (see module docs).
@@ -399,15 +320,6 @@ fn unsupported_reason(spec: &IsaSpec, model: &FlatModel, instr: &Instruction) ->
     }
     if instr.flat_execute.is_none() {
         return Some(format!("{} (no flat SMT behavior)", instr.name));
-    }
-    if spec.name == "armv8"
-        && uses_arm_vector(model, instr)
-        && !ARM_VECTOR_PROOFS.contains(&instr.name.as_str())
-    {
-        return Some(format!(
-            "{} (ARM vector equivalence not yet checked)",
-            instr.name
-        ));
     }
     // Operands in register classes that have no correspondence to Sail state
     // (e.g. the TMDL `pc` operand class).
@@ -475,17 +387,43 @@ pub fn verify_smt(sh: &Shell, isa: &str, args: impl Iterator<Item = String>) -> 
         selected.push(instr);
     }
 
-    for instr in &selected {
-        let (instruction_report, timing, line) =
-            verify_instruction(&tools, spec, &out_dir, &inventory.flat, instr)?;
+    let mut proved = Vec::new();
+    for instr in selected {
+        let expected = spec
+            .expected_failures
+            .iter()
+            .find(|group| group.instructions.contains(&instr.name));
+        // One divergence settles that an expected failure does not verify.
+        let (instruction_report, timing, line) = verify_instruction(
+            &tools,
+            spec,
+            &out_dir,
+            &inventory.flat,
+            instr,
+            expected.is_some(),
+        )?;
         println!("{line}");
-        report.merge(instruction_report);
-        report.instructions.push(timing);
+        let Some(expected) = expected else {
+            report.merge(instruction_report);
+            report.instructions.push(timing);
+            proved.push(instr);
+            continue;
+        };
+        // What keeps the run green for an instruction outside the table.
+        let verifies = instruction_report.verified > 0
+            && instruction_report.failed == 0
+            && instruction_report.behavior_independent.is_empty()
+            && timing.shape_cases.iter().all(|(_, cases)| *cases > 0);
+        let entry = format!("{} ({})", instr.name, expected.reason);
+        match verifies {
+            true => report.unexpected_passes.push(entry),
+            false => report.expected_failures.push(entry),
+        }
     }
 
     // What an encoding owes its decoder, whichever shape it took: the word the
     // instruction encodes to reads back as that instruction.
-    for instr in &selected {
+    for instr in &proved {
         match prove_roundtrip(&tools, spec, &out_dir, &smt_path, instr)? {
             true => report.roundtrip_proved.push(instr.name.clone()),
             false => report.roundtrip_open.push(instr.name.clone()),
@@ -497,6 +435,14 @@ pub fn verify_smt(sh: &Shell, isa: &str, args: impl Iterator<Item = String>) -> 
     let report_path = out_dir.join("report.json");
     std::fs::write(&report_path, serde_json::to_vec_pretty(&report)?)?;
     println!("JSON report:      {}", report_path.display());
+    if !report.unexpected_passes.is_empty() {
+        anyhow::bail!(
+            "{} expected failure(s) verify; remove them from xtask/verify/{}.toml: {}",
+            report.unexpected_passes.len(),
+            spec.name,
+            report.unexpected_passes.join(", ")
+        );
+    }
     if report.failed > 0 {
         anyhow::bail!(
             "SMT equivalence check found {} divergence(s)",
@@ -680,7 +626,6 @@ struct Instruction {
     width_bits: u32,
     operands: Vec<(String, OperandKind)>,
     supported: bool,
-    write_classes: Vec<String>,
     uses_reservation: bool,
     pc_source_operands: Vec<usize>,
     memory_accesses: Vec<MemoryAccess>,
@@ -688,6 +633,9 @@ struct Instruction {
     /// the operands that selects it. Every ISA but x86 has exactly one.
     shapes: Vec<Shape>,
     flat_execute: Option<BTreeMap<String, Term>>,
+    /// Free variables of `flat_execute` standing for values the ISA leaves
+    /// undefined, with their widths.
+    undefined: BTreeMap<String, u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -837,7 +785,6 @@ fn parse_inventory(json: &str) -> anyhow::Result<Inventory> {
                 width_bits: u32::from(raw.width_bits),
                 operands,
                 supported: raw.supported,
-                write_classes: raw.write_classes,
                 uses_reservation: raw.uses_reservation,
                 pc_source_operands: raw.pc_source_operands,
                 memory_accesses: raw
@@ -861,6 +808,7 @@ fn parse_inventory(json: &str) -> anyhow::Result<Inventory> {
                             .collect::<anyhow::Result<_>>()
                     })
                     .transpose()?,
+                undefined: raw.undefined,
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -1728,58 +1676,6 @@ fn analyze_trace(spec: &IsaSpec, events: &[tir_verify::TraceEvent]) -> TraceInfo
     info
 }
 
-/// The pinned x86 snapshot subtracts CMPS operands in the opposite order.
-/// Build its status flags from its own RSI and RDI bytes in ISA order.
-fn normalize_x86_cmps_flags(trace: &mut TraceInfo, bytes: u32) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        trace.mem_reads.len() == 2 * bytes as usize
-            && trace.mem_reads.iter().all(|read| read.bytes == 1)
-            && trace.mem_writes.is_empty(),
-        "Sail CMPS memory trace changed"
-    );
-    let operand = |start: usize| {
-        trace.mem_reads[start..start + bytes as usize]
-            .iter()
-            .rev()
-            .map(|read| read.value.clone())
-            .reduce(|high, low| Term::app("concat", vec![high, low]))
-            .expect("CMPS has at least one byte")
-    };
-    let lhs = operand(0);
-    let rhs = operand(bytes as usize);
-    let high = bytes * 8 - 1;
-    let xor = |a: &Term, b: &Term| Term::app("bvxor", vec![a.clone(), b.clone()]);
-    let flag = |condition| Term::app("ite", vec![condition, bv(1, 1), bv(0, 1)]);
-    let diff = Term::app("bvsub", vec![lhs.clone(), rhs.clone()]);
-    let parity = (0..8)
-        .map(|bit| extract(bit, bit, diff.clone()))
-        .reduce(|a, b| xor(&a, &b))
-        .context("CMPS has at least one parity bit")?;
-    let flags = [
-        (0, flag(Term::app("bvult", vec![lhs.clone(), rhs.clone()]))),
-        (1, Term::app("bvnot", vec![parity])),
-        (2, flag(eq(lhs.clone(), rhs.clone()))),
-        (3, extract(high, high, diff.clone())),
-        (
-            4,
-            extract(
-                high,
-                high,
-                Term::app("bvand", vec![xor(&lhs, &rhs), xor(&lhs, &diff)]),
-            ),
-        ),
-        (5, extract(4, 4, xor(&xor(&lhs, &rhs), &diff))),
-    ];
-    trace.writes.extend(flags.map(|(index, value)| {
-        let flag = State::Slot {
-            class: "eflags".to_string(),
-            index,
-        };
-        (flag, value)
-    }));
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Equivalence query construction
 // ---------------------------------------------------------------------------
@@ -1913,19 +1809,43 @@ fn emit_state_transition(
         .collect();
     commands.push(assert(not(Term::ident("st0_resv"))));
     commands.push(assert(not(Term::ident("st0_pc_written"))));
+    for (name, width) in &instr.undefined {
+        commands.push(SmtCommand::DeclareConst(
+            Symbol(name.clone()),
+            Sort::bitvec(*width),
+        ));
+    }
+    let state = final_state(spec, model, instr, case);
+    for (binding, (_, sort)) in state.into_iter().zip(&model.fields) {
+        commands.push(SmtCommand::DefineFun(FunctionDef {
+            name: binding.var,
+            params: vec![],
+            return_sort: sort.clone(),
+            body: binding.term,
+        }));
+    }
+    commands
+}
+
+/// TMDL's state after the instruction: `st1_<field>` for every flat field.
+fn final_state(
+    spec: &IsaSpec,
+    model: &FlatModel,
+    instr: &Instruction,
+    case: &[u64],
+) -> Vec<VarBinding> {
     let execute = instr
         .flat_execute
         .as_ref()
         .expect("supported instruction has flat execute metadata");
-    for (name, sort) in &model.fields {
-        commands.push(SmtCommand::DefineFun(FunctionDef {
-            name: Symbol(format!("st1_{name}")),
-            params: vec![],
-            return_sort: sort.clone(),
-            body: with_operands(spec, instr, case, execute[name].clone()),
-        }));
-    }
-    commands
+    model
+        .fields
+        .iter()
+        .map(|(name, _)| VarBinding {
+            var: Symbol(format!("st1_{name}")),
+            term: with_operands(spec, instr, case, execute[name].clone()),
+        })
+        .collect()
 }
 
 /// Assumptions on the addresses this instance may form: PC alignment on a
@@ -2019,84 +1939,6 @@ fn emit_trace_read_constraints(
         commands.push(assert(eq(value.clone(), initial)));
     }
     commands
-}
-
-/// The reference x86 model gives a concrete CF for oversized narrow shifts.
-/// Intel leaves SHL/SHR CF undefined there; SAR's CF remains the old sign bit.
-fn x86_narrow_shift_count(
-    model: &FlatModel,
-    instr: &Instruction,
-    case: &[u64],
-) -> Option<(u32, Term)> {
-    let name = instr.name.as_str();
-    if !["shl", "shr", "sal", "sar"]
-        .iter()
-        .any(|op| name.starts_with(op))
-    {
-        return None;
-    }
-    let OperandKind::Reg { class, .. } = &instr.operands.first()?.1 else {
-        return None;
-    };
-    let width = model.classes[class].value_width;
-    if !matches!(width, 8 | 16) {
-        return None;
-    }
-    let count = if name.contains("imm") {
-        bv(case.get(1)? & 31, 64)
-    } else if name.contains("cl") {
-        Term::app(
-            "bvand",
-            vec![
-                flat_read_register(model, "gpr", "st0", bv(1, 4)),
-                bv(31, 64),
-            ],
-        )
-    } else {
-        return None;
-    };
-    Some((u32::from(width), count))
-}
-
-fn x86_carry_equality(
-    model: &FlatModel,
-    instr: &Instruction,
-    case: &[u64],
-    trace: &TraceInfo,
-    tmdl: &Term,
-    sail: &Term,
-) -> Option<Term> {
-    if let Some((width, count)) = x86_narrow_shift_count(model, instr, case) {
-        let defined = Term::app("bvult", vec![count, bv(u64::from(width), 64)]);
-        if instr.name.starts_with("sar") {
-            let OperandKind::Reg { class, idx_width } = &instr.operands[0].1 else {
-                unreachable!()
-            };
-            let old = flat_read_register(model, class, "st0", bv(case[0], *idx_width));
-            let sign = extract(width - 1, width - 1, old);
-            return Some(eq(
-                tmdl.clone(),
-                Term::app("ite", vec![defined, sail.clone(), sign]),
-            ));
-        }
-        return Some(or(vec![not(defined), eq(tmdl.clone(), sail.clone())]));
-    }
-
-    // The pinned model uses the result's low bit for ROR carry.
-    let (width, mask) = match instr.name.as_str() {
-        "rorimm" => (64, 63),
-        "rorimm32" => (32, 31),
-        _ => return None,
-    };
-    if *case.get(1)? & mask == 0 {
-        return None;
-    }
-    let result = trace.writes.get(&State::Slot {
-        class: "gpr".to_string(),
-        index: *case.first()?,
-    })?;
-    let high = width - 1;
-    Some(eq(tmdl.clone(), extract(high, high, result.clone())))
 }
 
 fn query_prelude(
@@ -2231,11 +2073,7 @@ fn build_query(
             .get(&row.state)
             .cloned()
             .unwrap_or_else(|| read_slot(model, class, *index, "st0"));
-        let tmdl = read_slot(model, class, *index, "st1");
-        let carry = (class == "eflags" && *index == 0)
-            .then(|| x86_carry_equality(model, instr, case, trace, &tmdl, &sail))
-            .flatten();
-        final_eq.push(carry.unwrap_or_else(|| eq(tmdl, sail)));
+        final_eq.push(eq(read_slot(model, class, *index, "st1"), sail));
     }
     // Models with a delayed PC (RISC-V `nextPC`) announce taken branches
     // there; the ARM model writes the PC register directly.
@@ -2336,20 +2174,35 @@ fn build_query(
         SmtCommand::Pop(1),
     ]);
     let (_, used) = with_trace_defines(trace, and(final_eq.clone()));
-    let choices: Vec<SortedVar> = trace
+    // Values either model leaves undefined: the models agree when some
+    // choice of them makes the states equal.
+    let sail_choices = trace
         .declares
         .iter()
         .filter(|(name, _)| used.contains(name) && !trace.inputs.contains(name))
+        .map(|(name, sort)| (name.clone(), sort.clone()));
+    let tmdl_choices = instr
+        .undefined
+        .iter()
+        .map(|(name, width)| (name.clone(), Sort::bitvec(*width)));
+    let choices: Vec<SortedVar> = sail_choices
+        .chain(tmdl_choices)
         .map(|(name, sort)| SortedVar {
-            var: Symbol(name.clone()),
-            sort: sort.clone(),
+            var: Symbol(name),
+            sort,
         })
         .collect();
     let (logic, body) = if choices.is_empty() {
         let body = and([path, vec![not(and(final_eq))]].concat());
         ("QF_AUFBV", with_defines(body))
     } else {
-        let agrees = with_defines(and([path, final_eq].concat()));
+        let mut agrees = with_defines(and([path, final_eq].concat()));
+        if !instr.undefined.is_empty() {
+            // The `st1_*` definitions read the declared undefined values, so
+            // the final state is bound again where the quantifier binds them.
+            let state = final_state(spec, model, instr, case);
+            agrees = Term::Let(state, Box::new(agrees));
+        }
         let disagrees = not(Term::Exists(choices, Box::new(agrees)));
         ("AUFBV", and(vec![reachable, disagrees]))
     };
@@ -2386,6 +2239,10 @@ struct Report {
     excluded_paths: usize,
     excluded_reasons: HashMap<String, usize>,
     unsupported: Vec<String>,
+    /// Instructions listed in the ISA file's `expected_failures` that did not
+    /// verify, and those that did.
+    expected_failures: Vec<String>,
+    unexpected_passes: Vec<String>,
     /// Instructions whose encoding is proved to decode back to itself, and
     /// those where the solver could not show it. Two instructions with the same
     /// bytes land in the second list: the word cannot say which one it was.
@@ -2479,6 +2336,9 @@ impl Report {
                 self.unsupported.join(", ")
             );
         }
+        if !self.expected_failures.is_empty() {
+            println!("expected failures: {}", self.expected_failures.join(", "));
+        }
         for failure in &self.failures {
             println!("\n{}", failure);
         }
@@ -2506,6 +2366,7 @@ fn verify_instruction(
     out_dir: &Path,
     model: &FlatModel,
     instr: &Instruction,
+    stop_at_divergence: bool,
 ) -> anyhow::Result<(Report, InstructionTiming, String)> {
     let total_started = Instant::now();
     let mut report = Report::default();
@@ -2588,6 +2449,9 @@ fn verify_instruction(
     timing.isla_ms = isla_started.elapsed().as_millis();
 
     for (index, (case, word)) in cases.iter().zip(&words).enumerate() {
+        if stop_at_divergence && report.failed > 0 {
+            break;
+        }
         let Some(traces) = traces_by_word.get(word).and_then(Option::as_ref) else {
             report.excluded_paths += 1;
             *report
@@ -2611,6 +2475,9 @@ fn verify_instruction(
         }
 
         for (path_idx, events) in traces.iter().enumerate() {
+            if stop_at_divergence && report.failed > 0 {
+                break;
+            }
             timing.paths += 1;
             let mut info = analyze_trace(spec, events);
             if let Some(reason) = &info.excluded {
@@ -2621,18 +2488,6 @@ fn verify_instruction(
                     .or_default() += 1;
                 line.push('-');
                 continue;
-            }
-            if spec.name == "x86_64" {
-                let bytes = match instr.name.as_str() {
-                    "cmpsb" => Some(1),
-                    "cmpsw" => Some(2),
-                    "cmpsdstring" => Some(4),
-                    "cmpsq" => Some(8),
-                    _ => None,
-                };
-                if let Some(bytes) = bytes {
-                    normalize_x86_cmps_flags(&mut info, bytes)?;
-                }
             }
             let query_path = out_dir
                 .join("queries")
@@ -2914,7 +2769,7 @@ mod tests {
           "instructions": [{
             "name": "load", "writes_pc": false, "width_bits": 32,
             "operands": [OPERANDS],
-            "supported": true, "write_classes": ["gpr"],
+            "supported": true,
             "uses_reservation": false, "pc_source_operands": [],
             "memory_accesses": [{"kind": "load", "bytes": 4, "address": "(read_gpr st rd)", "flat_address": "(select st0_gpr rd)"}],
             "trap_kinds": ["misaligned_load"],
@@ -2925,7 +2780,8 @@ mod tests {
                 {"word_low": 0, "word_high": 6, "operand": null, "operand_low": 0, "value": "3"}
               ]
             }],
-            "flat_execute": {"gpr": "st0_gpr", "mem": "st0_mem", "resv": "st0_resv", "resa": "st0_resa", "pc": "st0_pc"}
+            "flat_execute": {"gpr": "st0_gpr", "mem": "st0_mem", "resv": "st0_resv", "resa": "st0_resa", "pc": "st0_pc"},
+            "undefined": {}
           }]
         }"#;
 
@@ -2940,7 +2796,6 @@ mod tests {
         assert_eq!(instruction.name, "load");
         assert_eq!(inventory.isa, "TestIsa");
         assert_eq!(inventory.dialect, "test");
-        assert_eq!(instruction.write_classes, ["gpr"]);
         assert_eq!(
             instruction.memory_accesses[0].address.to_string(),
             "(select st0_gpr rd)"
@@ -3007,12 +2862,12 @@ mod tests {
             width_bits: 8,
             operands: vec![],
             supported: true,
-            write_classes: vec!["eflags".into()],
             uses_reservation: false,
             pc_source_operands: vec![],
             memory_accesses: vec![],
             shapes: vec![],
             flat_execute: Some(BTreeMap::new()),
+            undefined: BTreeMap::new(),
         };
         let trace = analyze_trace(
             spec,

@@ -278,6 +278,11 @@ instruction Add for [RV32I, RV64I] : RType {
   `extract`, `width`, `clamp`, `log2Ceil`, `load`/`store` (memory), and `trap(cause)` —
   raise a synchronous exception with a constant cause code (e.g. RISC-V
   `ecall`/`ebreak`); the simulator routes it to its exception callback.
+- `undefined(width)` is a value the architecture leaves undefined, such as the
+  x86 carry flag after a shift by more than the operand width. Each occurrence
+  is its own value. Nothing may be concluded from one: equivalence checking
+  accepts any value the reference model produces there, and instruction
+  selection has no pattern that matches it.
 - Floating-point builtins accept an optional final rounding-mode argument:
   `fadd(a, b, rm)`, `fsub(a, b, rm)`, `fmul(a, b, rm)`, `fdiv(a, b, rm)`,
   `fma(a, b, c, rm)`, `sqrt(a, rm)`, `fcvt(a, exponent, mantissa, rm)`,

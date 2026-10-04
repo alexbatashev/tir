@@ -885,6 +885,7 @@ fn format_builtin(builtin: &BuiltinFunction) -> &'static str {
         BuiltinFunction::UIToFP => "uitofp",
         BuiltinFunction::FPToSI => "fptosi",
         BuiltinFunction::FPToUI => "fptoui",
+        BuiltinFunction::Undefined => "undefined",
         BuiltinFunction::Todo => "todo",
     }
 }

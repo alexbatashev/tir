@@ -1288,7 +1288,9 @@ fn latency_condition_error(expr: &ast::Expr) -> Option<&'static str> {
                 let count = call.arguments.len();
                 let valid_arity = match call.callee.as_ref() {
                     ast::Expr::BuiltinFunction(Clamp | Extract) => count == 3,
-                    ast::Expr::BuiltinFunction(Bitcast | Log2Ceil | Regnum | Width) => count == 1,
+                    ast::Expr::BuiltinFunction(Bitcast | Log2Ceil | Regnum | Width | Undefined) => {
+                        count == 1
+                    }
                     ast::Expr::BuiltinFunction(SExt | ZExt) => count == 2,
                     ast::Expr::BuiltinFunction(
                         Load | Store | LoadReserved | StoreConditional | AtomicRmw | Fence | FenceI

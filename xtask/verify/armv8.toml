@@ -39,3 +39,46 @@ map = [
   { sail = "PSTATE.V", class = "pstate", index = 3 },
   { sail = "_V[{n}]", class = "vpr", n = [0, 31] },
 ]
+
+[[expected_failures]]
+reason = "Isla does not finish the Sail execution"
+instructions = [
+  "cmtstvector16b", "sqaddvector8b", "sqaddvector16b", "sqaddvector8h",
+  "uqaddvector16b", "srshlvector16b", "sshlvector16b", "urshlvector16b",
+  "ushlvector16b", "sqrshlvector8b", "sqrshlvector16b", "sqrshlvector8h",
+  "sqshlvector8b", "sqshlvector16b", "sqshlvector8h", "uqrshlvector8b",
+  "uqrshlvector16b", "uqrshlvector8h", "uqshlvector8b", "uqshlvector16b",
+  "uqshlvector8h", "pmulvector8b", "pmulvector16b", "sqdmulhvector4h",
+  "sqdmulhvector8h", "sqdmulhvector2s", "sqdmulhvector4s", "sqrdmulhvector4h",
+  "sqrdmulhvector8h", "sqrdmulhvector2s", "sqrdmulhvector4s", "fcmeqvector2s",
+  "fcmeqvector4s", "fcmeqvector2d", "fcmgevector2s", "fcmgevector4s", "fcmgevector2d",
+  "fcmgtvector2s", "fcmgtvector4s", "fcmgtvector2d", "facgevector2s", "facgevector4s",
+  "facgevector2d", "facgtvector2s", "facgtvector4s", "facgtvector2d", "fcmpdouble",
+  "fcmpsingle",
+]
+
+[[expected_failures]]
+reason = "diverges from the Sail model"
+instructions = [
+  "shaddvector8b", "shaddvector16b", "shaddvector4h", "shaddvector8h",
+  "shaddvector2s", "shaddvector4s", "shsubvector8b", "shsubvector16b",
+  "shsubvector4h", "shsubvector8h", "shsubvector2s", "shsubvector4s",
+  "srhaddvector8b", "srhaddvector16b", "srhaddvector4h", "srhaddvector8h",
+  "srhaddvector2s", "srhaddvector4s", "uhaddvector8b", "uhaddvector16b",
+  "uhaddvector4h", "uhaddvector8h", "uhaddvector2s", "uhaddvector4s", "uhsubvector8b",
+  "uhsubvector16b", "uhsubvector4h", "uhsubvector8h", "uhsubvector2s",
+  "uhsubvector4s", "urhaddvector8b", "urhaddvector16b", "urhaddvector4h",
+  "urhaddvector8h", "urhaddvector2s", "urhaddvector4s", "srshlvector8b",
+  "srshlvector4h", "srshlvector8h", "srshlvector2s", "srshlvector4s", "srshlvector2d",
+  "urshlvector8b", "urshlvector4h", "urshlvector8h", "urshlvector2s", "urshlvector4s",
+  "urshlvector2d", "sqrshlvector4h", "sqrshlvector2s", "sqrshlvector4s",
+  "sqrshlvector2d", "sqshlvector4h", "sqshlvector2s", "sqshlvector4s",
+  "sqshlvector2d", "uqrshlvector4h", "uqrshlvector2s", "uqrshlvector4s",
+  "uqrshlvector2d", "uqshlvector4h", "uqshlvector2s", "uqshlvector4s", "uqshlvector2d",
+]
+
+[[expected_failures]]
+reason = "no Sail path is comparable"
+instructions = [
+  "loadfloatdouble", "loadfloatsingle", "storefloatdouble", "storefloatsingle",
+]

@@ -32,13 +32,15 @@ pub struct InstructionMetadata {
     pub width_bits: u16,
     pub operands: Vec<OperandMetadata>,
     pub supported: bool,
-    pub write_classes: Vec<String>,
     pub uses_reservation: bool,
     pub pc_source_operands: Vec<usize>,
     pub memory_accesses: Vec<MemoryAccessMetadata>,
     pub trap_kinds: Vec<String>,
     pub shapes: Vec<EncodingShapeMetadata>,
     pub flat_execute: Option<BTreeMap<String, String>>,
+    /// The values `flat_execute` leaves undefined: free variables by name,
+    /// with their widths. Any value of them is a behavior the ISA allows.
+    pub undefined: BTreeMap<String, u32>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -619,6 +621,8 @@ fn build_instructions<'a>(
     let mut encode_arms = vec![];
     let mut execute_arms = vec![];
     let mut metadata = vec![];
+    // Undefined-value variables already declared: instructions share them.
+    let mut undefined = BTreeSet::new();
 
     // `(class, register-name) -> encoding index` so register paths without a
     // numeric index (e.g. `PC::pc`) lower to a stable slot.
@@ -734,9 +738,6 @@ fn build_instructions<'a>(
             width_bits: enc_width,
             operands: operand_metadata,
             supported,
-            write_classes: behavior
-                .as_ref()
-                .map_or_else(Vec::new, |behavior| behavior.write_classes.clone()),
             uses_reservation: behavior
                 .as_ref()
                 .is_some_and(|behavior| behavior.uses_reservation),
@@ -751,7 +752,15 @@ fn build_instructions<'a>(
             flat_execute: behavior
                 .as_ref()
                 .and_then(|behavior| behavior.flat_execute.clone()),
+            undefined: behavior
+                .as_ref()
+                .map_or_else(BTreeMap::new, |behavior| behavior.undefined.clone()),
         });
+        for (variable, width) in behavior.iter().flat_map(|behavior| &behavior.undefined) {
+            if undefined.insert(variable.clone()) {
+                writeln!(output, "\n(declare-const {variable} (_ BitVec {width}))")?;
+            }
+        }
 
         let operand_names = operands
             .iter()
@@ -1637,6 +1646,8 @@ struct SmtSymbolResolver<'a> {
     locals: &'a HashMap<String, SmtVal>,
     state: SmtStateRef<'a>,
     ctx: &'a SmtCtx<'a>,
+    /// Undefined values emitted so far, by variable name, with their widths.
+    undefined: &'a std::cell::RefCell<BTreeMap<String, u32>>,
 }
 
 impl SmtSymbolResolver<'_> {
@@ -2047,6 +2058,15 @@ impl crate::semgen::TermBackend for SmtTerm<'_, '_> {
                     signed,
                 ))
             }
+            // A free variable per occurrence: the caller decides what "any
+            // value" means for its query.
+            SymKind::Undef => {
+                let width = const_child(0)? as u32;
+                let name = format!("undef_{}_{width}", const_child(1)?);
+                let mut undefined = self.resolver.undefined.borrow_mut();
+                undefined.insert(name.clone(), width);
+                Some(SmtVal::bv(name, width, false))
+            }
             SymKind::LoadMemory | SymKind::LoadReserved => read_mem(self, 0, 1),
             // The atomic RMW's value facet is the OLD word; the reservation is a
             // state effect the behavior emitter sets.
@@ -2195,8 +2215,8 @@ struct BehaviorEmitter<'a, S> {
     in_handler: std::cell::Cell<bool>,
     failed: std::cell::Cell<bool>,
     writes_pc: std::cell::Cell<bool>,
-    write_classes: std::cell::RefCell<BTreeSet<String>>,
     pc_value_roots: std::cell::RefCell<Vec<NodeId>>,
+    undefined: std::cell::RefCell<BTreeMap<String, u32>>,
 }
 
 impl<S: SmtState> BehaviorEmitter<'_, S> {
@@ -2231,6 +2251,7 @@ impl<S: SmtState> BehaviorEmitter<'_, S> {
             // preserving distinct operands that alias one physical register.
             state,
             ctx: self.ctx,
+            undefined: &self.undefined,
         };
         let (values, root) = self.behavior.value_graph(root)?;
         emit_sem_expr(&values, root, &resolver).or_else(|| {
@@ -2358,7 +2379,6 @@ impl<S: SmtState> sem_expr_state::BehaviorEmitter for BehaviorEmitter<'_, S> {
                 }
                 Some(Type::Struct(rc)) => {
                     let class = rc.to_lowercase();
-                    self.write_classes.borrow_mut().insert(class.clone());
                     return commit(state.write_register(
                         ctx,
                         &class,
@@ -2373,7 +2393,6 @@ impl<S: SmtState> sem_expr_state::BehaviorEmitter for BehaviorEmitter<'_, S> {
         // `PSTATE::n`).
         if let sem_expr_state::Destination::FixedRegister { class, index, .. } = destination {
             let class = class.to_lowercase();
-            self.write_classes.borrow_mut().insert(class.clone());
             return commit(state.write_register(
                 ctx,
                 &class,
@@ -2557,12 +2576,12 @@ impl<S: SmtState> sem_expr_state::BehaviorEmitter for BehaviorEmitter<'_, S> {
 struct BehaviorMetadata {
     body: String,
     writes_pc: bool,
-    write_classes: Vec<String>,
     pc_source_names: BTreeSet<String>,
     memory_accesses: Vec<MemoryAccessMetadata>,
     uses_reservation: bool,
     trap_kinds: Vec<String>,
     flat_execute: Option<BTreeMap<String, String>>,
+    undefined: BTreeMap<String, u32>,
 }
 
 struct GraphMemOp {
@@ -2698,8 +2717,8 @@ fn build_smt_behavior<'a>(
         in_handler: Default::default(),
         failed: Default::default(),
         writes_pc: Default::default(),
-        write_classes: Default::default(),
         pc_value_roots: Default::default(),
+        undefined: Default::default(),
     };
     let body = sem_expr_state::fold_behavior(&behavior_graph, &emitter.entry.clone(), &emitter);
     let mem_ops = graph_memory_operations(&behavior_graph)?;
@@ -2715,8 +2734,8 @@ fn build_smt_behavior<'a>(
         in_handler: Default::default(),
         failed: Default::default(),
         writes_pc: Default::default(),
-        write_classes: Default::default(),
         pc_value_roots: Default::default(),
+        undefined: Default::default(),
     };
     let flat_state =
         sem_expr_state::fold_behavior(&behavior_graph, &flat_emitter.entry.clone(), &flat_emitter);
@@ -2744,7 +2763,6 @@ fn build_smt_behavior<'a>(
         Some(BehaviorMetadata {
             body,
             writes_pc: emitter.writes_pc.get(),
-            write_classes: emitter.write_classes.into_inner().into_iter().collect(),
             pc_source_names: behavior_graph
                 .variable_symbols
                 .iter()
@@ -2764,6 +2782,7 @@ fn build_smt_behavior<'a>(
             uses_reservation,
             trap_kinds: trap_kinds.into_iter().collect(),
             flat_execute,
+            undefined: emitter.undefined.into_inner(),
         })
     }
 }

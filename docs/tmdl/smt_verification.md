@@ -72,11 +72,27 @@ Reported with the results, and deliberate:
   writes it requires TMDL's next PC (the written PC, or the fall-through
   address) to equal the written value.
 - Every mapped status flag is compared, whether or not the TMDL behavior
-  writes it. A value Sail leaves undefined accepts any TMDL result, and the
-  verifier corrects known flag errors in the pinned reference model from its
-  execution trace.
-- Instructions without SMT behavior or executable reference traces are
-  reported as unsupported.
+  writes it. A value either model leaves undefined is a choice: the models
+  agree when some choice of them makes the final states equal. TMDL spells
+  such a value `undefined(width)`.
+- The reference model is taken as it is pinned. An error in it is fixed in
+  the snapshot (see the README of the snapshot repository), not worked around
+  here.
+- Instructions without SMT behavior are reported as unsupported.
+
+## Expected failures
+
+Instructions known not to verify are listed in the ISA file with the reason:
+
+```toml
+[[expected_failures]]
+reason = "no execution semantics in the pinned Sail snapshot"
+instructions = ["andn", "bextr"]
+```
+
+They run like any other instruction, stop at their first divergence, and are
+reported separately. One that verifies fails the run until its entry is
+removed, so the table cannot outlive its reasons.
 
 ## Setup
 
@@ -116,7 +132,8 @@ used, so stubs are sufficient.
 `<name>.metadata.json`. The versioned sidecar describes each instruction's
 operands and the `#[align]`/`#[nonzero]` constraints they declare (the concrete
 boundary cases stay inside them), encoding width, support status, flattened state expressions, PC and register-file writes,
-reservation use, memory address terms, and trap kinds. The verifier reads this
+reservation use, memory address terms, trap kinds, and the free variables
+that stand for undefined values. The verifier reads this
 sidecar directly; it does not recover behavior facts by scanning SMT function
 bodies or substituting text in emitted expressions.
 
