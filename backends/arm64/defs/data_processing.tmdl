@@ -1202,15 +1202,13 @@ instruction AndImmediate for [ARMv8A64] {
         imms: bits<6>,
     }
 
+    // An element with every bit set is reserved.
     encoding {
-        0b1,
-        0b00,
-        0b100100,
-        0b1,
-        immr,
-        imms,
-        rn,
-        rd[4..0],
+        if imms == 0b111111 {
+            ()
+        } else {
+            (0b1, 0b00, 0b100100, 0b1, immr, imms, rn, rd[4..0])
+        },
     }
 
     asm {
@@ -1229,6 +1227,13 @@ instruction AndImmediate for [ARMv8A64] {
     }
 }
 
+// The `imms` patterns that are reserved with N = 0: the highest clear bit picks
+// the element size, and an element with every bit set is no bitmask.
+fn reserved_bitmask(imms) {
+    (imms == 0b011111) | (imms == 0b101111) | (imms == 0b110111)
+        | (imms == 0b111011) | (imms == 0b111101) | (imms[5..1] == 0b11111)
+}
+
 // 32-bit AND (immediate): sf = 0, N = 0, so the element size is 32 or a
 // replicated 16/8/4/2-bit pattern; the result zero-extends to 64.
 instruction AndImmediate32 for [ARMv8A64] {
@@ -1244,14 +1249,11 @@ instruction AndImmediate32 for [ARMv8A64] {
     }
 
     encoding {
-        0b0,
-        0b00,
-        0b100100,
-        0b0,
-        immr,
-        imms,
-        rn,
-        rd[4..0],
+        if reserved_bitmask(imms) {
+            ()
+        } else {
+            (0b0, 0b00, 0b100100, 0b0, immr, imms, rn, rd[4..0])
+        },
     }
 
     asm {

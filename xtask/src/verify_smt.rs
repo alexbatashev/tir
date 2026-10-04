@@ -952,13 +952,10 @@ fn operand_cases(spec: &IsaSpec, instr: &Instruction) -> Vec<Vec<u64>> {
     cases
 }
 
-fn operand_case_is_valid(
-    spec: &IsaSpec,
-    model: &FlatModel,
-    instr: &Instruction,
-    case: &[u64],
-) -> bool {
-    if !instr
+/// Whether `case` names registers their classes hold and operands some shape
+/// encodes: a tuple no guard admits is one the instruction does not have.
+fn operand_case_is_valid(model: &FlatModel, instr: &Instruction, case: &[u64]) -> bool {
+    let registers = instr
         .operands
         .iter()
         .zip(case)
@@ -968,48 +965,10 @@ fn operand_case_is_valid(
                 .iter()
                 .any(|index| u64::from(*index) == *value),
             _ => true,
-        })
-    {
-        return false;
-    }
-    let value = |index: usize| case[index];
-    match (spec.name.as_str(), instr.name.as_str()) {
-        ("armv8", "loaddoublewordpreindex" | "loaddoublewordpostindex") => value(0) != value(1),
-        ("armv8", "storedoublewordpreindex") => value(0) != value(1),
-        ("armv8", "loadpair") => value(0) != value(1),
-        ("armv8", "loadpairpreindex" | "loadpairpostindex") => {
-            value(0) != value(1) && value(0) != value(2) && value(1) != value(2)
-        }
-        ("armv8", "storepairpreindex") => value(0) != value(2) && value(1) != value(2),
-        ("armv8", "andimmediate") => !reserved_bitmask(true, value(3)),
-        ("armv8", "andimmediate32") => !reserved_bitmask(false, value(3)),
-        (name, "cmove" | "cadd") if name.starts_with("riscv") => value(0) != 0 && value(1) != 0,
-        (name, "cjumpreg" | "cjumpandlinkreg") if name.starts_with("riscv") => value(0) != 0,
-        (name, "caddimm" | "cloadimm") if name.starts_with("riscv") => value(0) != 0,
-        (name, "cloadupperimm") if name.starts_with("riscv") => {
-            value(0) != 0 && value(0) != 2 && value(1) != 0
-        }
-        (name, "caddimm16sp") if name.starts_with("riscv") => value(0) != 0,
-        ("riscv32", "cshiftleftlogicalimm") => value(0) != 0 && value(1) < 32,
-        (name, "cshiftleftlogicalimm") if name.starts_with("riscv") => value(0) != 0,
-        (name, "cloadwordsp" | "cloaddoublesp") if name.starts_with("riscv") => value(0) != 0,
-        _ => true,
-    }
-}
-
-/// Whether a logical-immediate `N:imms` is the reserved all-ones element
-/// (`DecodeBitMasks` is UNDEFINED there).
-fn reserved_bitmask(n: bool, imms: u64) -> bool {
-    let len = if n {
-        6
-    } else {
-        match (!imms & 0x3f).checked_ilog2() {
-            Some(len) => len,
-            None => return true,
-        }
-    };
-    let levels = (1 << len) - 1;
-    imms & levels == levels
+        });
+    let read = reader(instr, case);
+    registers
+        && (instr.shapes.is_empty() || instr.shapes.iter().any(|shape| shape.guard.holds(&read)))
 }
 
 /// `body` with the instruction's operands bound to one case's values.
@@ -1326,6 +1285,14 @@ fn satisfy(
                 true => bit_mask(u32::from(bits.checked_sub(1)?)) as u64,
                 // One bit past it, which the field cannot hold either way.
                 false => 1u64.checked_shl(u32::from(*bits))?,
+            };
+            Some(())
+        }
+        Predicate::Same { a, b, .. } => {
+            let other = case[index(b)?];
+            case[index(a)?] = match want {
+                true => other,
+                false => other ^ 1,
             };
             Some(())
         }
@@ -2376,7 +2343,7 @@ fn verify_instruction(
     };
     let cases = operand_cases(spec, instr)
         .into_iter()
-        .filter(|case| operand_case_is_valid(spec, model, instr, case))
+        .filter(|case| operand_case_is_valid(model, instr, case))
         .collect::<Vec<_>>();
     // A shape the sampled cases never reach is a shape nothing verifies, so
     // each one that comes up empty gets a case built to satisfy its guard.
@@ -2394,7 +2361,7 @@ fn verify_instruction(
         let Some(case) = case_reaching(instr, shape, base) else {
             continue;
         };
-        if operand_case_is_valid(spec, model, instr, &case) {
+        if operand_case_is_valid(model, instr, &case) {
             cases.push(case);
         }
     }

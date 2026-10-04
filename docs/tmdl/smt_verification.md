@@ -13,6 +13,9 @@ set (x0 corner cases, register aliasing, immediate extremes):
 1. The instruction word is computed and decoded directly from TMDL's
    structured encoding fields, so encoding bugs surface as Sail decoding the
    word differently without a solver round-trip.
+   An operand tuple no encoding shape admits is skipped: TMDL says the
+   instruction does not have it (a reserved bitmask, an unpredictable register
+   pair).
 2. The pinned [`isla-lib`](https://github.com/rems-project/isla) dependency
    loads the snapshot once and symbolically executes a batch of words over a
    fully symbolic register state.

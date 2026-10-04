@@ -418,9 +418,12 @@ instruction CNop for [C] {
 }
 
 // CI-format register-immediate ALU: rd is both source and destination.
+// Register 0 as the destination is a hint or reserved in every form. c.lui
+// also gives up register 2, which is c.addi16sp, and a zero immediate.
 template CIALUOp for [C] {
     param MNEMONIC: String;
     param FUNCT3: bits<3>;
+    param LUI: bits<1> = 0b0;
 
     operands {
         rd: GPR,
@@ -428,11 +431,11 @@ template CIALUOp for [C] {
     }
 
     encoding {
-        FUNCT3,
-        imm[5],
-        rd,
-        imm[4..0],
-        0b01,
+        if (rd == 0b00000) | (LUI & ((rd == 0b00010) | (imm == 0))) {
+            ()
+        } else {
+            (FUNCT3, imm[5], rd, imm[4..0], 0b01)
+        },
     }
 
     asm {
@@ -474,6 +477,7 @@ instruction CLoadImm for [C] : CIALUOp {
 instruction CLoadUpperImm for [C] : CIALUOp {
     param MNEMONIC: String = "c.lui";
     param FUNCT3: bits<3> = 0b011;
+    param LUI: bits<1> = 0b1;
 
     behavior {
         rd = sext(imm, self.XLEN) << 12;
@@ -490,14 +494,11 @@ instruction CAddImm16Sp for [C] {
     }
 
     encoding {
-        0b011,
-        imm[9],
-        0b00010,
-        imm[4],
-        imm[6],
-        imm[8..7],
-        imm[5],
-        0b01,
+        if imm == 0 {
+            ()
+        } else {
+            (0b011, imm[9], 0b00010, imm[4], imm[6], imm[8..7], imm[5], 0b01)
+        },
     }
 
     asm {
@@ -761,15 +762,16 @@ instruction CShiftLeftLogicalImm for [C] {
 
     operands {
         rd: GPR,
-        imm: bits<6>,
+        // 5-bit shamt on RV32, 6-bit on RV64; shamt[5] = 1 is reserved on RV32.
+        imm: bits<log2Ceil(self.XLEN)>,
     }
 
     encoding {
-        0b000,
-        imm[5],
-        rd,
-        imm[4..0],
-        0b10,
+        if rd == 0b00000 {
+            ()
+        } else {
+            (0b000, imm[5], rd, imm[4..0], 0b10)
+        },
     }
 
     asm {
@@ -792,12 +794,11 @@ instruction CLoadWordSp for [C] {
     }
 
     encoding {
-        0b010,
-        imm[5],
-        rd,
-        imm[4..2],
-        imm[7..6],
-        0b10,
+        if rd == 0b00000 {
+            ()
+        } else {
+            (0b010, imm[5], rd, imm[4..2], imm[7..6], 0b10)
+        },
     }
 
     asm {
@@ -824,12 +825,11 @@ instruction CLoadDoubleSp for [C64] {
     }
 
     encoding {
-        0b011,
-        imm[5],
-        rd,
-        imm[4..3],
-        imm[8..6],
-        0b10,
+        if rd == 0b00000 {
+            ()
+        } else {
+            (0b011, imm[5], rd, imm[4..3], imm[8..6], 0b10)
+        },
     }
 
     asm {
@@ -911,11 +911,11 @@ instruction CJumpReg for [C] {
     }
 
     encoding {
-        0b100,
-        0b0,
-        rs1,
-        0b00000,
-        0b10,
+        if rs1 == 0b00000 {
+            ()
+        } else {
+            (0b100, 0b0, rs1, 0b00000, 0b10)
+        },
     }
 
     asm {
@@ -938,11 +938,11 @@ instruction CMove for [C] {
     }
 
     encoding {
-        0b100,
-        0b0,
-        rd,
-        rs2,
-        0b10,
+        if (rd == 0b00000) | (rs2 == 0b00000) {
+            ()
+        } else {
+            (0b100, 0b0, rd, rs2, 0b10)
+        },
     }
 
     asm {
@@ -987,11 +987,11 @@ instruction CJumpAndLinkReg for [C] {
     }
 
     encoding {
-        0b100,
-        0b1,
-        rs1,
-        0b00000,
-        0b10,
+        if rs1 == 0b00000 {
+            ()
+        } else {
+            (0b100, 0b1, rs1, 0b00000, 0b10)
+        },
     }
 
     asm {
@@ -1015,11 +1015,11 @@ instruction CAdd for [C] {
     }
 
     encoding {
-        0b100,
-        0b1,
-        rd,
-        rs2,
-        0b10,
+        if (rd == 0b00000) | (rs2 == 0b00000) {
+            ()
+        } else {
+            (0b100, 0b1, rd, rs2, 0b10)
+        },
     }
 
     asm {

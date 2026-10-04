@@ -119,6 +119,12 @@ pub enum Guard {
         cmp: CmpOp,
         value: i128,
     },
+    /// Two operands spell the same `width`-bit pattern.
+    Same {
+        a: &'static str,
+        b: &'static str,
+        width: u16,
+    },
 }
 
 /// What a guard evaluates to. Undecided when it reads an operand that has no
@@ -304,6 +310,12 @@ impl Guard {
                 }
                 None => Truth::Undecided,
             },
+            Guard::Same { a, b, width } => {
+                match (operands.pattern(a, *width), operands.pattern(b, *width)) {
+                    (Some(a), Some(b)) => Truth::of(a == b),
+                    _ => Truth::Undecided,
+                }
+            }
         }
     }
 }

@@ -89,3 +89,21 @@ instruction MovByte for [ByteIsa] : RegReg {
 // CHECK-NEXT: cmp: tir::backend::binary::CmpOp::UGe,
 // CHECK-NEXT: value: 4,
 // CHECK: width_bytes: (2, 3),
+
+// A pair that names one register twice has no encoding here, so the guard
+// compares the two operands.
+instruction Swap for [ByteIsa] {
+    param MNEMONIC: String = "swap";
+    operands { dst: GPR, src: GPR }
+    asm { "{self.MNEMONIC} {dst}, {src}" }
+    encoding { if dst == src { () } else { (0x90, dst, src) } }
+    behavior { dst = src; }
+}
+
+// CHECK: static ENCODE_SWAP: tir::backend::binary::EncodeSpec
+// CHECK: guard: tir::backend::binary::Guard::Not(
+// CHECK-NEXT: &tir::backend::binary::Guard::Same {
+// CHECK-NEXT: a: "dst",
+// CHECK-NEXT: b: "src",
+// CHECK-NEXT: width: 4,
+// CHECK: width_bytes: 2,

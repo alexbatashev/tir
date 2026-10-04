@@ -1103,6 +1103,9 @@ fn render_predicate(
                 kept - 1
             )
         }
+        Predicate::Same { a, b, width } => {
+            format!("(= {} {})", bits(a, *width)?, bits(b, *width)?)
+        }
     })
 }
 

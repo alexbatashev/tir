@@ -99,6 +99,13 @@ pub enum Predicate {
         bits: u16,
         signed: bool,
     },
+    /// Two operands spell the same `width`-bit pattern: one register named
+    /// twice, which some encodings do not have.
+    Same {
+        a: String,
+        b: String,
+        width: u16,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -174,6 +181,7 @@ impl Predicate {
                 };
                 extended == held
             }
+            Predicate::Same { a, b, width } => read(a, *width) == read(b, *width),
         }
     }
 }
@@ -264,6 +272,21 @@ fn lower_cond(cond: &ast::Expr, ctx: &Context) -> Result<Predicate, String> {
                     lower_cond(lhs, ctx)?,
                     lower_cond(rhs, ctx)?,
                 ])),
+                op @ (ast::BinOp::Equal | ast::BinOp::NotEqual)
+                    if let (ast::Expr::Ident(a), ast::Expr::Ident(b)) = (lhs, rhs)
+                        && let Some(width) = ctx.operand_width(&a.name)
+                        && ctx.operand_width(&b.name) == Some(width) =>
+                {
+                    let test = Predicate::Same {
+                        a: a.name.clone(),
+                        b: b.name.clone(),
+                        width,
+                    };
+                    Ok(match op {
+                        ast::BinOp::NotEqual => Predicate::Not(Box::new(test)),
+                        _ => test,
+                    })
+                }
                 op => {
                     let (literal, operand, flipped) = match (int_literal(lhs), int_literal(rhs)) {
                         (Some(literal), None) => (literal, rhs, true),
@@ -777,7 +800,9 @@ fn expr_key(expr: &ast::Expr) -> String {
 
 /// Flatten `expr` under one truth assignment into the fields it spells,
 /// returning their total width. A nested concatenation is a group the ISA's
-/// manual draws as whole encoding units, so it must fill them.
+/// manual draws as whole encoding units, so it must fill them. A group that
+/// is the whole encoding is not nested: it is the field list itself, written
+/// under the condition that the encoding exists.
 fn flatten(
     expr: &ast::Expr,
     assignment: &Assignment<'_>,
@@ -788,10 +813,14 @@ fn flatten(
 ) -> u16 {
     match expr {
         ast::Expr::Tuple(tuple) => {
+            let inner = match (depth, tuple.elements.len()) {
+                (0, 1) => 0,
+                _ => depth + 1,
+            };
             let width: u16 = tuple
                 .elements
                 .iter()
-                .map(|e| flatten(e, assignment, ctx, depth + 1, fields, errors))
+                .map(|e| flatten(e, assignment, ctx, inner, fields, errors))
                 .sum();
             if let Some(unit) = ctx.unit
                 && depth > 0

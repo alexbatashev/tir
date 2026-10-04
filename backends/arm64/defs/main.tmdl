@@ -1234,6 +1234,13 @@ tmpl_loadstore_reg_offset!(LoadStoreRegOffsetWord, GPR32)
 // 64-bit, no writeback). The operand is the byte offset; the field stores it
 // scaled down by 8, so only multiples of 8 in [-512, 504] are representable,
 // as in hardware.
+// Whether a writeback updates a base register the instruction also transfers,
+// which the architecture leaves unpredictable. Number 31 is the stack pointer
+// as a base and the zero register as a transfer register, so it never clashes.
+fn writes_back_over(rt, rn) {
+    (rt == rn) & (rn != 0b11111)
+}
+
 template LoadStorePair for [ARMv8A64] {
     schedule { units = [WriteLoad]; }
     param MNEMONIC: String;
@@ -1248,15 +1255,11 @@ template LoadStorePair for [ARMv8A64] {
     }
 
     encoding {
-        0b10,
-        0b101,
-        V,
-        0b010,
-        L,
-        imm[9..3],
-        rt2,
-        rn[4..0],
-        rt,
+        if L & (rt == rt2) {
+            ()
+        } else {
+            (0b10, 0b101, V, 0b010, L, imm[9..3], rt2, rn[4..0], rt)
+        },
     }
 
     asm {
@@ -1281,16 +1284,11 @@ template LoadStorePostIndex for [ARMv8A64] {
     }
 
     encoding {
-        SIZE,
-        0b111,
-        V,
-        0b00,
-        OPC,
-        0b0,
-        imm,
-        0b01,
-        rn[4..0],
-        rt,
+        if (OPC != 0b00) & writes_back_over(rt, rn) {
+            ()
+        } else {
+            (SIZE, 0b111, V, 0b00, OPC, 0b0, imm, 0b01, rn[4..0], rt)
+        },
     }
 
     asm {
@@ -1313,16 +1311,11 @@ template LoadStorePreIndex for [ARMv8A64] {
     }
 
     encoding {
-        SIZE,
-        0b111,
-        V,
-        0b00,
-        OPC,
-        0b0,
-        imm,
-        0b11,
-        rn[4..0],
-        rt,
+        if writes_back_over(rt, rn) {
+            ()
+        } else {
+            (SIZE, 0b111, V, 0b00, OPC, 0b0, imm, 0b11, rn[4..0], rt)
+        },
     }
 
     asm {
@@ -1349,15 +1342,11 @@ template LoadStorePairWriteback for [ARMv8A64] {
     }
 
     encoding {
-        0b10,
-        0b101,
-        V,
-        INDEX,
-        L,
-        imm[9..3],
-        rt2,
-        rn[4..0],
-        rt,
+        if (L & (rt == rt2)) | ((L | INDEX[1]) & (writes_back_over(rt, rn) | writes_back_over(rt2, rn))) {
+            ()
+        } else {
+            (0b10, 0b101, V, INDEX, L, imm[9..3], rt2, rn[4..0], rt)
+        },
     }
 
     asm {

@@ -222,6 +222,12 @@ fn emit_predicate(predicate: &crate::shapes::Predicate) -> proc_macro2::TokenStr
                 tir::backend::binary::Guard::#variant { op: #op, width: #width, bits: #bits }
             }
         }
+        Predicate::Same { a, b, width } => {
+            let a = proc_macro2::Literal::string(a);
+            let b = proc_macro2::Literal::string(b);
+            let width = proc_macro2::Literal::u16_unsuffixed(*width);
+            quote! { tir::backend::binary::Guard::Same { a: #a, b: #b, width: #width } }
+        }
     }
 }
 
