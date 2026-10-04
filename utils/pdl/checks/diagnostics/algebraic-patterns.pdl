@@ -1,0 +1,18 @@
+// Unsupported laws and residual constraints must be diagnosed, not ignored.
+// RUN: not tir-pdl %s --emit ast 2>&1 | filecheck %s
+
+rule unsupported: #sub(x: int<W>, y) : int<W> => x match associative;
+rule ambiguous: #add(x: int<W>, y) : int<W> => x match associative;
+rule mixed: #add(x: int<32>, 0) : int<64> => x match associative;
+rule floating: #fadd(x: float<32>, y) => x match associative;
+rule guarded: #add(x: int<W>, 0) : int<W> => x where x == 0 match associative;
+rule attributes: builtin.addi<mode = 1>(x: int<W>, 0) => x match associative;
+rule reverse: #add(x: int<W>, 0) : int<W> <=> x match associative;
+
+// CHECK: match options require an integer add, mul, and, or, or xor pattern
+// CHECK: associative pattern has more than one opaque remainder binder
+// CHECK: algebraic operand widths must agree
+// CHECK: algebraic matching supports homogeneous integer operations only
+// CHECK: associative remainder `x` must be opaque and used only in the replacement
+// CHECK: algebraic operation patterns require two operands and no attributes or dependencies
+// CHECK: algebraic matching requires a forward equality rule

@@ -1,0 +1,26 @@
+// All match clauses parse after proof and before phase. Repeated binders are
+// selected occurrences; only a unique unconstrained binder is a remainder.
+// RUN: tir-pdl %s --emit ast | filecheck %s
+
+rule collect: builtin.addi(builtin.addi(x: int<W>, a: const), b: const)
+    => builtin.addi(x, const<W>(a + b))
+    proof trusted match associative, commutative phase post-saturation;
+rule commute: #add(x: int<W>, y: int<W>) : int<W> => #add(y, x)
+    match commutative;
+rule cancel: #xor(#xor(x: int<W>, y: int<W>), y) : int<W> => x
+    match associative;
+rule under-sub: #sub(#add(x: int<W>, 0), c: int<W>) : int<W> => #sub(x, c)
+    match associative;
+
+// CHECK: name: "collect"
+// CHECK: post_saturation: true
+// CHECK: match_options: MatchOptions {
+// CHECK-NEXT: associative: true
+// CHECK-NEXT: commutative: true
+// CHECK: name: "commute"
+// CHECK: associative: false
+// CHECK-NEXT: commutative: true
+// CHECK: name: "cancel"
+// CHECK: associative: true
+// CHECK-NEXT: commutative: false
+// CHECK: name: "under-sub"

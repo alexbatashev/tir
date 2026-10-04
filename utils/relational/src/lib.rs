@@ -10,10 +10,12 @@
 //! side is a join. Rewrites are conjunctive queries; saturation is the least
 //! fixpoint of the rule set.
 
+mod algebraic;
 mod column;
 mod csr;
 mod engine;
 mod extract;
+mod identity;
 mod label;
 mod query;
 mod rule;
@@ -25,6 +27,7 @@ mod unionfind;
 #[cfg(test)]
 mod testing;
 
+pub use algebraic::{AlgebraicOptions, Residual, lower_algebraic};
 pub use column::Fact;
 pub use csr::Csr;
 pub use engine::{ClassRef, Engine, Rows, Stats};

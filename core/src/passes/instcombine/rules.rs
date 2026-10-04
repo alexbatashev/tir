@@ -169,9 +169,8 @@ impl Ruleset {
     }
 }
 
-pub fn builtin_ruleset(context: &Context, seeded: &Seeded) -> Ruleset {
+pub fn complete_ruleset(context: &Context, seeded: &Seeded, ruleset: &mut Ruleset) {
     let eg = &seeded.eg;
-    let mut ruleset = generated_ruleset(context);
     for template in fold_templates(eg) {
         ruleset.push_query(const_fold(&template), None);
     }
@@ -183,7 +182,6 @@ pub fn builtin_ruleset(context: &Context, seeded: &Seeded) -> Ruleset {
     }
     ruleset.push_query(state::pointer_derivation(), None);
     ruleset.push_query(state::forward_load(), None);
-    ruleset
 }
 
 fn emit_sub() -> EmitFn {

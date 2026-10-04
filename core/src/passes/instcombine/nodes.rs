@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 /// operands allow, which may be well outside the reader's own region.
 type Memo = HashMap<Id, ValueId>;
 
-use tir_relational::{ClassId as Id, Extraction};
+use tir_relational::{ClassId as Id, Extraction, Label};
 
 use super::{Driver, Node, Prov, SymKind, cost, state};
 use crate::analysis::AnalysisManager;
@@ -63,9 +63,12 @@ impl Pass for InstCombineNodesPass {
         _analyses: &AnalysisManager,
     ) -> Result<(), PassError> {
         let root = op.op().id;
-        let mut seeded = super::seed::seed(context, root);
+        let mut ruleset = super::rules::generated_ruleset(context);
+        let mut eg = tir_relational::Engine::new();
+        eg.register_algebraic_rules(&ruleset.rewrites);
+        let mut seeded = super::seed::seed(context, root, eg);
         let loop_ports = std::mem::take(&mut seeded.loop_ports);
-        let ruleset = super::builtin_ruleset(context, &seeded);
+        super::rules::complete_ruleset(context, &seeded, &mut ruleset);
         let mut driver = Driver {
             context,
             eg: seeded.eg,
@@ -460,12 +463,38 @@ impl Driver<'_> {
                 value
             }
             Prov::None => {
-                let literal = node.int()?;
-                let op =
-                    crate::builtin::ops::constant(self.context, super::spell(literal), expected_ty)
-                        .build();
-                self.context.add(region, crate::Operation::id(&op));
-                op.result()
+                if let Some(ir) = node.kind.ir() {
+                    // A regrouped integer expression owns its new operands,
+                    // so it cannot reuse the source operation's SSA result.
+                    if !node.associative() {
+                        return None;
+                    }
+                    let ty = node.ty?;
+                    let types = vec![ty; node.children.len()];
+                    let operands =
+                        self.materialize_children(extraction, node, &types, region, memo)?;
+                    let result = self.context.create_value(ty, None).id();
+                    let op = self.context.add_operation(NewOp::new_dynamic(
+                        (ir.dialect, ir.name),
+                        self.context.clone(),
+                        operands,
+                        vec![result],
+                        vec![],
+                        ir.attrs.clone(),
+                    ));
+                    self.context.add_auto(op.id);
+                    result
+                } else {
+                    let literal = node.int()?;
+                    let op = crate::builtin::ops::constant(
+                        self.context,
+                        super::spell(literal),
+                        expected_ty,
+                    )
+                    .build();
+                    self.context.add(region, crate::Operation::id(&op));
+                    op.result()
+                }
             }
         };
         memo.insert(class, value);

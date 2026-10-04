@@ -274,8 +274,8 @@ pub struct Axiom {
     /// The RHS references the matched root itself (excludes var references).
     uses_root: bool,
     obligation: ProofObligation,
-    /// The source rule uses floating-point semantics and must always prove its
-    /// equality before the e-graph can apply it.
+    proof: tir_pdl::Proof,
+    /// The source rule uses floating-point semantics.
     floating_point: bool,
     /// Declared `(phase post-saturation)`: applied once after the iterative
     /// fixpoint instead of participating in it.
@@ -284,6 +284,8 @@ pub struct Axiom {
     /// every constant class, and its RHS structure is unioned *with* the folded
     /// constant instead of collapsing to it (keeps the shift/add tiling live).
     materialize: bool,
+    match_options: tir_pdl::MatchOptions,
+    algebraic_patterns: Vec<tir_pdl::AlgebraicPattern>,
 }
 
 fn contains_kind(node: &AxNode, expected: SymKind) -> bool {
@@ -335,7 +337,8 @@ fn holes_of(node: &AxNode, out: &mut Vec<(String, Option<usize>)>) {
 
 impl Axiom {
     fn requires_mandatory_proof(&self) -> bool {
-        self.floating_point || self.symbol_types.iter().any(Option::is_some)
+        self.proof != tir_pdl::Proof::Trusted
+            && (self.floating_point || self.symbol_types.iter().any(Option::is_some))
     }
 
     pub(crate) fn counterexample(
@@ -367,9 +370,9 @@ impl Axiom {
     }
 
     /// Compile into a rule: the left-hand side as atoms, the declared widths and
-    /// value predicates as guards, the right-hand side as a head. Debug builds
-    /// prove each width instantiation before asserting the invariant, through
-    /// the [`call::VERIFY`] guard.
+    /// value predicates as guards, the right-hand side as a head. Mandatory
+    /// proofs and optional `TIR_VERIFY_AXIOMS` checks use the [`call::VERIFY`]
+    /// guard before applying the head.
     pub(crate) fn compile(
         &self,
         index: usize,
@@ -378,6 +381,12 @@ impl Axiom {
     ) -> Option<(tir_relational::Rule<SemNode>, bool)> {
         let mut low = Lowering::new(self, folds, assume);
         low.left(self);
+        low.algebraic(self).unwrap_or_else(|message| {
+            panic!(
+                "invalid algebraic pattern in axiom `{}`: {message}",
+                self.name
+            )
+        });
         low.widths(self);
         low.constant_matches();
         low.predicates(self, index);
@@ -939,6 +948,8 @@ struct Lowering<'a> {
     guards: Vec<Guard>,
     /// Class variable per capture name, so a name written twice is one variable.
     holes: HashMap<String, u32>,
+    nodes: HashMap<Vec<usize>, u32>,
+    remainder_types: HashMap<u32, u32>,
     /// Class variable per declared var, in declaration order.
     declared: Vec<u32>,
     /// Scalars holding each declared const var's value and width.
@@ -986,6 +997,8 @@ impl<'a> Lowering<'a> {
             atoms: Vec::new(),
             guards: Vec::new(),
             holes: HashMap::new(),
+            nodes: HashMap::new(),
+            remainder_types: HashMap::new(),
             declared: vec![u32::MAX; axiom.vars.len()],
             const_values: HashMap::new(),
             constant_matches: Vec::new(),
@@ -1012,14 +1025,15 @@ impl<'a> Lowering<'a> {
                     self.declared[*index] = 0;
                 }
             }
-            node => self.node(node, 0),
+            node => self.node(node, 0, &mut Vec::new()),
         }
     }
 
-    fn node(&mut self, node: &AxNode, class: u32) {
+    fn node(&mut self, node: &AxNode, class: u32, path: &mut Vec<usize>) {
         let AxNode::Node(kind, children) = node else {
             unreachable!("only a template node is matched")
         };
+        self.nodes.insert(path.clone(), class);
         let args: Vec<u32> = children.iter().map(|child| self.child(child)).collect();
         let mut template = template_node(*kind, None, None);
         template.children = args.iter().map(|&var| Id::from_raw(var)).collect();
@@ -1029,13 +1043,44 @@ impl<'a> Lowering<'a> {
             class,
             row: None,
         });
-        for (child, &var) in children.iter().zip(&args) {
+        for (index, (child, &var)) in children.iter().zip(&args).enumerate() {
             match child {
-                AxNode::Node(..) => self.node(child, var),
+                AxNode::Node(..) => {
+                    path.push(index);
+                    self.node(child, var, path);
+                    path.pop();
+                }
                 AxNode::ConstMatch(expr) => self.const_match(var, expr),
                 _ => {}
             }
         }
+    }
+
+    fn algebraic(&mut self, axiom: &Axiom) -> Result<(), String> {
+        for pattern in &axiom.algebraic_patterns {
+            if let Some((a, b)) = &pattern.selector_order {
+                self.guards
+                    .push(Guard::ClassLe(self.holes[a], self.holes[b]));
+            }
+            let root = self.nodes[&pattern.path];
+            let remainder = pattern.remainder.as_ref().map(|name| self.holes[name]);
+            let remainder_type = remainder.map(|var| {
+                let scalar = self.slots.scalar();
+                self.remainder_types.insert(var, scalar);
+                scalar
+            });
+            tir_relational::lower_algebraic(
+                &mut self.atoms,
+                root,
+                remainder,
+                tir_relational::AlgebraicOptions {
+                    associative: axiom.match_options.associative,
+                    commutative: axiom.match_options.commutative,
+                },
+                remainder_type,
+            )?;
+        }
+        Ok(())
     }
 
     /// The variable a child binds, reusing the one a capture name already has.
@@ -1131,6 +1176,9 @@ impl<'a> Lowering<'a> {
     }
 
     fn type_of(&mut self, class: u32) -> u32 {
+        if let Some(&ty) = self.remainder_types.get(&class) {
+            return ty;
+        }
         let ty = self.slots.scalar();
         self.atoms.push(Atom::Fact {
             column: ColumnId::Type,
@@ -1309,8 +1357,8 @@ impl<'a> Lowering<'a> {
                 Built {
                     var: class,
                     value: var.and_then(|index| self.const_values.get(&index).copied()),
-                    assumable: true,
-                    ty: None,
+                    assumable: !self.remainder_types.contains_key(&class),
+                    ty: self.remainder_types.get(&class).copied(),
                 }
             }
             AxNode::Const(expr, width) => {

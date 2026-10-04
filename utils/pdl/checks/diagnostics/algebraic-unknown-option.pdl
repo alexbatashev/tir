@@ -1,0 +1,3 @@
+// RUN: not tir-pdl %s --emit ast 2>&1 | filecheck %s
+rule unknown: #add(x, 0) => x match distributing;
+// CHECK: match option is `associative` or `commutative`

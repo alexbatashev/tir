@@ -47,6 +47,13 @@ pub fn analyze(file: &File) -> Vec<Diagnostic> {
                 rule.span,
             ));
         }
+        if let Err(message) = rule.algebraic_patterns() {
+            diagnostics.push(Diagnostic::new(
+                message,
+                "this match declaration is unsupported",
+                rule.span,
+            ));
+        }
         let mut binders = HashSet::new();
         let mut widths = HashSet::new();
         collect_lhs_bindings(&rule.lhs, &mut binders, &mut widths, &mut diagnostics);
@@ -72,11 +79,43 @@ pub fn analyze(file: &File) -> Vec<Diagnostic> {
             ));
         }
         for guard in &rule.guards {
+            if guard.is_nonconstant_root_guard() {
+                if rule.proof() != Proof::Trusted
+                    || contains_semantic_operator(&rule.lhs)
+                    || contains_semantic_operator(&rule.rhs)
+                {
+                    diagnostics.push(Diagnostic::new(
+                        "root_has_constant is an admission-only generated-rule guard",
+                        "it cannot be a proof assumption or guard a semantic axiom",
+                        guard.span,
+                    ));
+                }
+                continue;
+            }
             validate_expr(guard, &binders, &widths, &mut diagnostics);
         }
     }
 
     diagnostics
+}
+
+fn contains_semantic_operator(term: &Term) -> bool {
+    match &term.kind {
+        TermKind::Operation {
+            operator,
+            operands,
+            dependencies,
+            ..
+        } => {
+            matches!(operator, Operator::Semantic(_))
+                || operands
+                    .iter()
+                    .chain(dependencies)
+                    .any(contains_semantic_operator)
+        }
+        TermKind::Keep(inner) => contains_semantic_operator(inner),
+        _ => false,
+    }
 }
 
 fn collect_lhs_bindings<'a>(
@@ -399,7 +438,14 @@ fn validate_expr(
         {
             diagnostics.push(unbound(name, expr.span));
         }
-        ExprKind::Call { args, .. } => {
+        ExprKind::Call { name, args } => {
+            if name == "root_has_constant" {
+                diagnostics.push(Diagnostic::new(
+                    "root_has_constant requires the standalone guard !root_has_constant()",
+                    "this admission-only generated-rule guard takes no arguments and is not a scalar",
+                    expr.span,
+                ));
+            }
             for arg in args {
                 validate_expr(arg, binders, widths, diagnostics);
             }

@@ -39,7 +39,7 @@ use crate::{
 
 use crate::sem::node::cost;
 use crate::sem::{Prov, SemNode as Node, SymKind};
-use rules::{Ruleset, builtin_ruleset};
+use rules::Ruleset;
 
 const ITER_LIMIT: usize = 30;
 const NODE_LIMIT: usize = 100_000;

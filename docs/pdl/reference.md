@@ -30,7 +30,7 @@ hyphens. A binder named `_` is an ordinary name; the special width wildcard is
 the `_` in `int<_>`.
 
 The reserved words are `group`, `rule`, `refinement`, `where`, `requires`,
-`proof`, `phase`, `root`, `keep`, `const`, `int`, `float`, and `shaped_float`.
+`proof`, `match`, `phase`, `root`, `keep`, `const`, `int`, `float`, and `shaped_float`.
 
 Integer literals use decimal, hexadecimal with `0x`, or binary with `0b`.
 `0X` and `0B` prefixes are also accepted. Digits cannot contain separators.
@@ -51,10 +51,11 @@ The general form is:
 rule NAME: LEFT => RIGHT
     where CONDITION, CONDITION
     proof MODE
+    match associative, commutative
     phase post-saturation;
 ```
 
-The `where`, `proof`, and `phase` clauses are optional. When present, they occur
+The `where`, `proof`, `match`, and `phase` clauses are optional. When present, they occur
 in that order. A `where` clause contains one or more comma-separated conditions,
 all of which must hold.
 
@@ -76,6 +77,60 @@ available merely because a rule parses with `<=>`.
 
 Rule names must be unique within a compiled input. Names identify diagnostics
 and rules; declaration order does not specify a sequence of destructive edits.
+
+### Algebraic matching
+
+An ordinary forward equality may select `match associative`, `match commutative`,
+or both. These options select engine matching laws; users do not write equations
+that define associativity. Existing metadata-driven binary commutativity remains
+the default.
+
+When both laws are requested, PDL may order two selected constant classes by
+canonical class ID. It does so only for two distinct, identically constrained
+binders that each occur once in one maximal pattern, when exchanging them
+preserves every guard and the replacement. The proof can commute built-in
+scalar addition, multiplication, bitwise operations, and equality comparisons.
+It does not commute graph operations or assume symmetry of external calls.
+Asymmetric guards and replacements keep both orders. Public relational queries
+without an explicit ordering guard still return all ordered bindings.
+
+The supported operation families are integer addition, multiplication, bitwise
+and, or, and xor: `builtin.addi`, `builtin.muli`, `builtin.andi`, `builtin.ori`,
+`builtin.xori`, and their `#add`, `#mul`, `#and`, `#or`, `#xor` semantic forms.
+The options apply to maximal compatible patterns anywhere in the left-hand side,
+including an addition below a subtraction. Attributes, dependencies, mixed
+explicit widths, floating-point operations, and bidirectional rules cannot
+request these laws. A declaration with no supported operation is an error.
+
+```pdl
+rule collect-add-constants:
+    builtin.addi(builtin.addi(x: int<W>, a: const), b: const)
+    => builtin.addi(x, const<W>(a + b))
+    where !root_has_constant()
+    match associative phase post-saturation;
+```
+
+This rule can collect `3` and `5` from `(x + 3) + (y + 5)`. The unique
+nonconstant binder `x` captures the remaining expression, which may contain
+several operands. The engine rebuilds that expression only after the guards pass
+and the replacement uses it. Its type comes from the matched homogeneous
+operation. `match associative` also uses these operations' existing
+commutativity metadata. Constant collection uses `phase post-saturation` so a
+new constant cannot repeatedly feed a cyclic class within the same saturation
+call. The admission guard skips roots already known to be constant, preventing
+constant collection from generating more factors or summands inside their cyclic
+classes across nested scopes. Finite matching witnesses bound each search; they
+do not prevent that feedback across rewrite rounds on their own.
+
+Constant binders, literals, other operation patterns, and repeated nonconstant
+binders select individual operand occurrences. Repeated binders still require
+the same equivalence class and preserve multiplicity. A compatible associative
+pattern may have at most one unique nonconstant binder; more than one is an
+ambiguous remainder and is rejected. A remainder must stay opaque: guards cannot
+inspect it, and it cannot also constrain another left-hand pattern. With no
+remainder the selected occurrences must account for the whole expression.
+Matching does not provide an empty remainder or enumerate arbitrary partitions
+among multiple remainders.
 
 ## Terms and operation patterns
 
@@ -339,6 +394,7 @@ functions in a PDL file. A consumer determines which functions it supports.
 | `popcount(c)` | Number of set bits in constant `c`. | Instcombine Rust generation. |
 | `ctz(c)` | Number of trailing zero bits. For zero, the constant's width. | Instcombine Rust generation. |
 | `clz(c)` | Number of leading zero bits within the constant's width. For zero, that width. | Instcombine Rust generation. |
+| `!root_has_constant()` | Admit a rewrite only when the matched root has no readable constant fact in the current scope. | Trusted generated instcombine rules only. |
 | `ones(W)` | A mask with `W` low bits set. | Semantic axioms and their width expressions. |
 | `fits(c, N)` | Whether the constant fits in a signed `N`-bit field. | Semantic axiom guards. |
 | `ufits(c, N)` | Whether the constant fits in an unsigned `N`-bit field. | Semantic axiom guards. |
@@ -349,6 +405,14 @@ as `popcount(c + 1)` do not preserve a binder width and are rejected by the
 Rust generator. `fits` and `ufits` take a bound constant and a literal field
 width from 1 through 64. Their negations, such as `!fits(c, 12)`, are supported.
 `materializable` takes a bound constant and may also be negated.
+
+`!root_has_constant()` must be an entire comma-separated guard and takes no
+arguments. It cannot appear in arithmetic, another Boolean expression, or a
+semantic or checked-proof rule. This is a rule admission policy, never a proof
+assumption. It tests knowledge in the current e-graph scope, not whether the
+program's value can be constant. Conflicting constant facts count as unknown.
+Popping a scope restores the enclosing scope's facts. Generic algebraic matching
+still retains every valid binding, including bindings through constant classes.
 
 Semantic axiom guards support width comparisons with `<` and `==`, and the
 `fits` family. They do not support the whole generated-rule expression
@@ -408,6 +472,13 @@ The Rust generator does not prove rules. In particular, it rejects
 floating-point equalities that require SMT proof because it has no checked
 proof binding. An explicit trusted declaration is an assertion of correctness,
 not a substitute for establishing that correctness.
+
+The semantic e-graph requires a solver proof before applying floating-point
+equalities or equalities with typed floating-point binders unless the rule uses
+`proof trusted`. Those SMT rules cannot apply without a successful proof.
+`TIR_VERIFY_AXIOMS` also checks trusted rules when they match and reports a
+failed proof as an invalid semantic invariant. Integer SMT rules otherwise
+retain their optional checks through `TIR_VERIFY_AXIOMS`.
 
 The proof tool distinguishes proven, admitted, disproven, and unsupported
 obligations. A proof at one integer width is not a proof for every width.

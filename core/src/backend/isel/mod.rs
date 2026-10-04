@@ -1863,6 +1863,7 @@ impl InstructionSelectPass {
         let pointer_width = layout.as_ref().and_then(crate::DataLayout::pointer_size);
 
         let mut egraph = SemEGraph::new();
+        egraph.register_algebraic_rules(&self.theory.rules);
         let mut lowering = self.lower_regions(
             context,
             op,

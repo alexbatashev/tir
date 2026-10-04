@@ -52,10 +52,10 @@ pub struct Port {
 }
 
 /// Build the e-graph for the regions of `root`.
-pub fn seed(context: &Context, root: OpId) -> Seeded {
+pub fn seed(context: &Context, root: OpId, eg: Engine<Node>) -> Seeded {
     let mut seeder = Seeder {
         context,
-        eg: Engine::new(),
+        eg,
         value_class: HashMap::new(),
         seeded: HashSet::new(),
         pointer_width: crate::DataLayout::for_op(context, root)

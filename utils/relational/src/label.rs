@@ -58,6 +58,21 @@ pub trait Label: Debug + Clone {
         false
     }
 
+    /// Whether this concrete binary operator permits reassociation. Languages
+    /// must include type and attribute restrictions in this decision.
+    fn associative(&self) -> bool {
+        false
+    }
+
+    /// Spell a residual binary node with new operands. The concrete operator,
+    /// type, and attributes must remain equal. Languages can clear source-value
+    /// provenance when changed operands require materializing a new value.
+    fn reassociate(&self, children: &[ClassId]) -> Self {
+        let mut node = self.clone();
+        node.children_mut().copy_from_slice(children);
+        node
+    }
+
     /// This node's constant, spelled the one way the language spells that value
     /// — `None` for a node that is not a ground constant. The *value*, not the
     /// spelling, is what a class is known to be, so a typed and an untyped

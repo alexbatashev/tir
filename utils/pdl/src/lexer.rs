@@ -20,6 +20,8 @@ pub enum Token {
     Requires,
     #[token("proof")]
     Proof,
+    #[token("match")]
+    Match,
     #[token("phase")]
     Phase,
     #[token("root")]

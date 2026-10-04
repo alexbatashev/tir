@@ -1,0 +1,3 @@
+// RUN: not tir-pdl %s --emit ast 2>&1 | filecheck %s
+rule duplicate: #add(x, 0) => x match associative, associative;
+// CHECK: duplicate match option `associative`

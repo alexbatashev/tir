@@ -242,7 +242,9 @@ fn validate_codegen_rule(rule: &Rule, diagnostics: &mut Vec<Diagnostic>) {
     validate_lhs(&rule.lhs, diagnostics);
     validate_rhs(&rule.rhs, true, &binders, diagnostics);
     for guard in &rule.guards {
-        validate_codegen_expr(guard, &binders, diagnostics);
+        if !guard.is_nonconstant_root_guard() {
+            validate_codegen_expr(guard, &binders, diagnostics);
+        }
     }
     if contains_nested_rhs_operation(&rule.rhs, true) {
         diagnostics.push(Diagnostic::new(
@@ -554,6 +556,7 @@ fn generate_rule(rule: &Rule, function: Ident, base: u32) -> Option<TokenStream>
     let rule_name = &rule.name;
     let mut pattern = PatternGenerator::default();
     let root = pattern.term(&rule.lhs)?;
+    let algebraic_patterns = rule.algebraic_patterns().ok()?;
 
     let mut build = RuleBuilder {
         vars: pattern.vars,
@@ -561,6 +564,7 @@ fn generate_rule(rule: &Rule, function: Ident, base: u32) -> Option<TokenStream>
         base,
         ..RuleBuilder::default()
     };
+    let algebraic = pattern.algebraic_setup(&algebraic_patterns, rule.match_options, &mut build);
     // An operand written as a number is that number, at whatever width the class
     // spells it — the reading `class_is_literal` took.
     for literal in &pattern.literals {
@@ -580,10 +584,7 @@ fn generate_rule(rule: &Rule, function: Ident, base: u32) -> Option<TokenStream>
     for constraint in &pattern.constraints {
         generate_constraint(constraint, &mut build)?;
     }
-    for guard in &rule.guards {
-        let body = bool_expr(guard, &pattern.binders, &mut build)?;
-        build.call(quote! { #body }, None);
-    }
+    let nots = generate_guards(&rule.guards, root, &pattern.binders, &mut build)?;
     let replacement = generate_rhs(&rule.rhs, root, &pattern.binders, &mut build)?;
     build
         .head
@@ -599,18 +600,21 @@ fn generate_rule(rule: &Rule, function: Ident, base: u32) -> Option<TokenStream>
         quote! { #id => #body, }
     });
     let table = format_ident!("{function}_extern");
+    let mutability = (!algebraic.is_empty()).then_some(quote! { mut });
     Some(quote! {
         fn #function(context: &Context, index: usize) -> tir_relational::Rule<Node> {
             let _ = (context, index);
+            let #mutability atoms = vec![#(#atoms),*];
+            #(#algebraic)*
             tir_relational::Rule {
                 name: #rule_name.to_string(),
                 plan: Plan::compile(Query {
                     vars: #vars,
                     scalars: #scalars,
                     root: #root,
-                    atoms: vec![#(#atoms),*],
+                    atoms,
                     guards: vec![#(#guards),*],
-                    nots: Vec::new(),
+                    nots: vec![#(#nots),*],
                 }),
                 head: vec![#(#head),*],
                 head_vars: #head_vars,
@@ -628,6 +632,30 @@ fn generate_rule(rule: &Rule, function: Ident, base: u32) -> Option<TokenStream>
     })
 }
 
+fn generate_guards(
+    guards: &[Expr],
+    root: u32,
+    binders: &BTreeMap<String, u32>,
+    build: &mut RuleBuilder,
+) -> Option<Vec<TokenStream>> {
+    let mut nots = Vec::new();
+    for guard in guards {
+        if guard.is_nonconstant_root_guard() {
+            let value = build.scalar();
+            nots.push(quote! {
+                tir_relational::Nested {
+                    atoms: vec![Atom::Fact { column: ColumnId::Const, key: #root, value: #value }],
+                    guards: Vec::new(),
+                }
+            });
+        } else {
+            let body = bool_expr(guard, binders, build)?;
+            build.call(quote! { #body }, None);
+        }
+    }
+    Some(nots)
+}
+
 /// Lowers a rule's left-hand side into query atoms: one class variable per
 /// pattern node, one atom per operation, and a note of what each binder must
 /// turn out to be.
@@ -635,6 +663,8 @@ fn generate_rule(rule: &Rule, function: Ident, base: u32) -> Option<TokenStream>
 struct PatternGenerator {
     /// Binder name -> the class variable it binds.
     binders: BTreeMap<String, u32>,
+    nodes: BTreeMap<Vec<usize>, u32>,
+    path: Vec<usize>,
     constraints: Vec<Constraint>,
     literals: Vec<Literal>,
     atoms: Vec<TokenStream>,
@@ -652,6 +682,47 @@ struct Literal {
 }
 
 impl PatternGenerator {
+    /// Lower the algebraic regions using this pattern's class-variable bindings.
+    fn algebraic_setup(
+        &self,
+        patterns: &[AlgebraicPattern],
+        options: MatchOptions,
+        build: &mut RuleBuilder,
+    ) -> Vec<TokenStream> {
+        let associative = options.associative;
+        let commutative = options.commutative;
+        let mut algebraic = Vec::new();
+        for selected in patterns {
+            if let Some((a, b)) = &selected.selector_order {
+                let (a, b) = (self.binders[a], self.binders[b]);
+                build.guards.push(quote! { Guard::ClassLe(#a, #b) });
+            }
+            let class = self.nodes[&selected.path];
+            let remainder = selected.remainder.as_ref().map(|name| self.binders[name]);
+            let remainder_type = remainder.map(|binder| {
+                let scalar = build.scalar();
+                build.types.insert(binder, scalar);
+                scalar
+            });
+            let remainder = match remainder {
+                Some(var) => quote! { Some(#var) },
+                None => quote! { None },
+            };
+            let remainder_type = match remainder_type {
+                Some(scalar) => quote! { Some(#scalar) },
+                None => quote! { None },
+            };
+            algebraic.push(quote! {
+                tir_relational::lower_algebraic(
+                    &mut atoms, #class, #remainder,
+                    tir_relational::AlgebraicOptions { associative: #associative, commutative: #commutative },
+                    #remainder_type,
+                ).expect("validated PDL algebraic pattern");
+            });
+        }
+        algebraic
+    }
+
     fn var(&mut self) -> u32 {
         self.vars += 1;
         self.vars - 1
@@ -690,9 +761,16 @@ impl PatternGenerator {
                 let operands: Vec<u32> = operands
                     .iter()
                     .chain(dependencies)
-                    .map(|operand| self.term(operand))
+                    .enumerate()
+                    .map(|(index, operand)| {
+                        self.path.push(index);
+                        let var = self.term(operand);
+                        self.path.pop();
+                        var
+                    })
                     .collect::<Option<_>>()?;
                 let class = self.var();
+                self.nodes.insert(self.path.clone(), class);
                 let children = operands.iter().map(|&var| quote! { Id::from_raw(#var) });
                 let constructor = match operator {
                     Operator::Dialect { .. } => {
@@ -740,6 +818,7 @@ struct RuleBuilder {
     values: BTreeMap<u32, (u32, u32)>,
     /// Scalars holding each named width.
     widths: BTreeMap<String, u32>,
+    types: BTreeMap<u32, u32>,
     /// The scalars an extern body reads, as `args`, in order.
     inputs: Vec<u32>,
     /// Where this rule's host-function ids start.
@@ -774,6 +853,18 @@ impl RuleBuilder {
         });
         self.values.insert(binder, (value, width));
         (value, width)
+    }
+
+    fn type_of(&mut self, binder: u32) -> u32 {
+        if let Some(&scalar) = self.types.get(&binder) {
+            return scalar;
+        }
+        let ty = self.scalar();
+        self.atoms.push(quote! {
+            Atom::Fact { column: ColumnId::Type, key: #binder, value: #ty }
+        });
+        self.types.insert(binder, ty);
+        ty
     }
 
     /// Bind a width name to `actual`, or require the two to agree.
@@ -850,11 +941,8 @@ fn generate_constraint(constraint: &Constraint, build: &mut RuleBuilder) -> Opti
             Some(())
         }
         BindingType::Type(Type::Integer(Width::Named(name))) => {
-            let ty = build.scalar();
+            let ty = build.type_of(binder);
             let width = build.scalar();
-            build.atoms.push(quote! {
-                Atom::Fact { column: ColumnId::Type, key: #binder, value: #ty }
-            });
             build.guards.push(quote! {
                 Guard::Extern {
                     call: call::INT_WIDTH_OF,
@@ -867,15 +955,12 @@ fn generate_constraint(constraint: &Constraint, build: &mut RuleBuilder) -> Opti
             Some(())
         }
         BindingType::Type(Type::Float(format)) => {
-            let ty = build.scalar();
+            let ty = build.type_of(binder);
             let width = build.scalar();
             let expected = match format {
                 FloatFormat::Binary32 => 32i64,
                 FloatFormat::Binary64 => 64i64,
             };
-            build.atoms.push(quote! {
-                Atom::Fact { column: ColumnId::Type, key: #binder, value: #ty }
-            });
             build.guards.push(quote! {
                 Guard::Extern {
                     call: call::FLOAT_WIDTH_OF,
@@ -890,16 +975,13 @@ fn generate_constraint(constraint: &Constraint, build: &mut RuleBuilder) -> Opti
             Some(())
         }
         BindingType::Type(Type::State(resource)) => {
-            let ty = build.scalar();
+            let ty = build.type_of(binder);
             let value = build.scalar();
             let expected = match resource {
                 Resource::Memory => 0i64,
                 Resource::FpEnv => 1i64,
                 Resource::Named(_) => return None,
             };
-            build.atoms.push(quote! {
-                Atom::Fact { column: ColumnId::Type, key: #binder, value: #ty }
-            });
             build.guards.push(quote! {
                 Guard::Extern {
                     call: call::STATE_RESOURCE_OF,

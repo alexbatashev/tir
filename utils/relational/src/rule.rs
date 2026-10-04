@@ -1,15 +1,13 @@
 //! A rule as data: a query, and a head that only writes.
 //!
-//! Nothing in a head reads the graph and nothing outside an atom reads it
-//! either, so a match exists in round `t` and not `t-1` exactly when one of its
-//! rows or facts is from round `t-1`'s delta. That is what a hand-asserted
-//! "this applier reads no deeper than its pattern" used to promise and nothing
-//! checked.
+//! Structural atoms support exact row and fact deltas. Algebraic atoms read
+//! transitive same-label rows, so their plans search every root each round.
+//! Heads materialize accepted residuals and add rows or equivalences.
 
 use smallvec::SmallVec;
 
 use crate::query::{Expr, Field, Match, Plan, Scalar, Var};
-use crate::{ClassId, Engine, Label, LabelId};
+use crate::{ClassId, Engine, Label, LabelId, Residual};
 
 /// A node a head builds: a template with scalars written into named fields.
 #[derive(Clone, Debug)]
@@ -73,18 +71,27 @@ impl<L: Label> Engine<L> {
     /// which is sound because a head only ever adds.
     pub fn apply_head(&mut self, head: &[HeadOp<L>], head_vars: u32, matched: &Match) {
         let (bindings, scalars) = (&matched.bindings, &matched.scalars);
-        self.apply_head_cached(head, head_vars, bindings, scalars, &mut Vec::new());
+        self.apply_head_cached(
+            head,
+            head_vars,
+            bindings,
+            scalars,
+            &matched.residuals,
+            &mut Vec::new(),
+        );
     }
 
     /// [`Self::apply_head`] for a head run many times: `labels` keeps the label
     /// of each insert whose node is the template as written, so a node the
     /// graph already holds costs a key lookup and no term is built for it.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply_head_cached(
         &mut self,
         head: &[HeadOp<L>],
         head_vars: u32,
         bindings: &[Option<ClassId>],
         scalars: &[u64],
+        residuals: &[Residual],
         labels: &mut Vec<Option<LabelId>>,
     ) {
         if labels.len() < head.len() {
@@ -96,6 +103,29 @@ impl<L: Label> Engine<L> {
         bound.clear();
         bound.extend_from_slice(bindings);
         bound.resize(bound.len() + head_vars as usize, None);
+        for residual in residuals {
+            let needed = head.iter().any(|op| match op {
+                HeadOp::Insert { args, .. } => args.contains(&residual.var),
+                HeadOp::Union(a, b) => *a == residual.var || *b == residual.var,
+                HeadOp::RaiseObject { key, base, .. } => {
+                    *key == residual.var || *base == residual.var
+                }
+                HeadOp::UnionIndexed {
+                    class,
+                    offset,
+                    index,
+                } => {
+                    *class == residual.var
+                        || *offset as usize + scalars[*index as usize] as usize
+                            == residual.var as usize
+                }
+            });
+            if !needed {
+                continue;
+            }
+            let class = residual.materialize(self);
+            bound[residual.var as usize] = Some(self.find(class));
+        }
         self.run_head(head, scalars, &mut bound, labels);
         self.head_bound = bound;
     }
@@ -168,7 +198,7 @@ impl<L: Label> Engine<L> {
                         let Some(class) = bound[arg as usize] else {
                             return;
                         };
-                        *slot = class;
+                        *slot = self.find(class);
                     }
                     if node.commutative() {
                         node.children_mut().sort_by_key(|class| class.index());

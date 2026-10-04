@@ -26,7 +26,9 @@ struct Object {
 /// the node belongs to, so hash-consing is a key lookup and congruence is the
 /// table's functional dependency: a rebuild rewrites every table through the
 /// union-find and merges the classes of the rows that come to share a key. A
-/// rule's atoms are joins over those tables.
+/// rule's atoms are joins over those tables. Registered algebraic laws add a
+/// finite normalized identity index beside them; physical binary rows remain
+/// available as extraction and row-capture alternatives.
 ///
 /// What the tables do not hold is the term itself. A row is tagged with the
 /// e-node it was interned as, and `node` keeps that term verbatim, provenance
@@ -38,7 +40,7 @@ struct Object {
 /// older one does not.
 pub struct Engine<L: Label> {
     labels: Labels<L>,
-    graph: Graph,
+    graph: Graph<L>,
 
     /// The term each e-node was interned as, and its label.
     node: Vec<L>,
@@ -73,7 +75,7 @@ pub struct Engine<L: Label> {
     pub(crate) head_bound: Vec<Option<ClassId>>,
     stats: Stats,
 
-    scopes: Vec<Scope>,
+    scopes: Vec<Scope<L>>,
     /// The constant a class is known to be: seeded by every literal row, raised
     /// by a scope's assumption, joined by a union.
     consts: Column<LabelId>,
@@ -92,7 +94,8 @@ pub struct Engine<L: Label> {
 /// The part of the engine a scope undoes: copied when one opens, put back when
 /// it closes.
 #[derive(Clone)]
-struct Graph {
+struct Graph<L> {
+    identity: crate::identity::Identity<L>,
     uf: UnionFind,
     /// `(label, children) -> class`, tagged with the e-node: one table per
     /// arity, and beside it one for the labels of that arity that never
@@ -128,9 +131,9 @@ struct Graph {
 }
 
 /// An open assumption scope.
-struct Scope {
+struct Scope<L> {
     /// The graph as the scope found it.
-    saved: Graph,
+    saved: Graph<L>,
     /// E-nodes interned before the scope opened; the rest go with it.
     nodes: usize,
     /// The classes the scope found distinct, grouped under the class it merged
@@ -204,6 +207,7 @@ impl<L: Label> Engine<L> {
         Self {
             labels: Labels::default(),
             graph: Graph {
+                identity: Default::default(),
                 uf: UnionFind::new(),
                 tables: Vec::new(),
                 node_next: Vec::new(),
@@ -609,6 +613,7 @@ impl<L: Label> Engine<L> {
         let mut key: SmallVec<[u32; 8]> = SmallVec::from_slice(&[label.0]);
         key.extend(node.children().iter().map(|&child| self.find(child).0));
         self.memo_find(label, &key)
+            .or_else(|| self.identity_lookup(label, &key))
     }
 
     /// The class of the row with `key`, which is `label` and then the canonical
@@ -620,6 +625,203 @@ impl<L: Label> Engine<L> {
     }
 
     // ---- writing ----------------------------------------------------------
+
+    /// Register universally valid algebraic laws requested by compiled rules.
+    /// Existing rows are reindexed before returning. Registrations and their
+    /// equalities belong to the current assumption scope.
+    pub fn register_algebraic_rules(&mut self, rules: &[crate::Rule<L>]) {
+        let mut requests = Vec::new();
+        for rule in rules {
+            rule.plan.algebraic_requests(&mut requests);
+        }
+        for (template, laws) in requests {
+            if self.graph.identity.requests.iter().any(|(known, options)| {
+                known.matches(&template)
+                    && template.matches(known)
+                    && options.associative == laws.associative
+                    && options.commutative == laws.commutative
+            }) {
+                continue;
+            }
+            self.graph.identity.requests.push((template, laws));
+            self.graph.identity.resolved = 0;
+        }
+        self.resolve_algebraic_labels();
+        if self.graph.dirty {
+            self.rebuild();
+        }
+    }
+
+    fn resolve_algebraic_labels(&mut self) {
+        if self.graph.identity.requests.is_empty() {
+            return;
+        }
+        for index in self.graph.identity.resolved..self.labels.len() {
+            let label = LabelId(index as u32);
+            let node = self.labels.node(label);
+            if node.children().len() != 2 || node.is_unique() {
+                continue;
+            }
+            let mut laws = self
+                .graph
+                .identity
+                .policies
+                .get(&label)
+                .copied()
+                .unwrap_or_default();
+            for (template, requested) in &self.graph.identity.requests {
+                if template.matches_template(node)
+                    && (!requested.associative || node.associative())
+                    && (!requested.commutative || node.commutative())
+                {
+                    laws.associative |= requested.associative;
+                    laws.commutative |= requested.commutative;
+                }
+            }
+            if !laws.associative && !laws.commutative {
+                continue;
+            }
+            let changed = self
+                .graph
+                .identity
+                .policies
+                .get(&label)
+                .is_none_or(|known| {
+                    known.associative != laws.associative || known.commutative != laws.commutative
+                });
+            if changed {
+                let populated = self
+                    .table(label)
+                    .is_some_and(|table| table.column(0).contains(&label.0));
+                self.graph.identity.policies.insert(label, laws);
+                self.graph.dirty |= populated;
+                if populated {
+                    self.graph.identity.dirty.insert(label);
+                    let occurrences: Vec<_> = self
+                        .table(label)
+                        .into_iter()
+                        .flat_map(|table| {
+                            table
+                                .column(0)
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(offset, &found)| {
+                                    if found != label.0 {
+                                        return None;
+                                    }
+                                    let class =
+                                        self.find(ClassId(table.column(table.arity())[offset]));
+                                    let children = self.children(RowId(table.tags()[offset]));
+                                    Some([class, children[0], children[1]])
+                                })
+                        })
+                        .collect();
+                    for classes in occurrences {
+                        self.graph.identity.watch(label, classes);
+                    }
+                }
+            }
+        }
+        self.graph.identity.resolved = self.labels.len();
+    }
+
+    fn identity_lookup(&self, label: LabelId, key: &[u32]) -> Option<ClassId> {
+        let laws = *self.graph.identity.policies.get(&label)?;
+        let ground =
+            crate::identity::production_key(self, label, laws, [ClassId(key[1]), ClassId(key[2])])?;
+        self.ground_owner(label, &ground)
+    }
+
+    fn ground_owner(&self, label: LabelId, ground: &crate::identity::GroundKey) -> Option<ClassId> {
+        if !self.graph.identity.dirty.contains(&label) {
+            return self
+                .graph
+                .identity
+                .proofs
+                .get(&(label, ground.clone()))
+                .map(|&class| self.find(class));
+        }
+        self.graph
+            .identity
+            .proofs
+            .iter()
+            .find_map(|((other, known), &class)| {
+                (*other == label && known.transport(self).as_ref() == Some(ground))
+                    .then(|| self.find(class))
+            })
+    }
+
+    fn repair_algebraic_identity(&mut self) {
+        let dirty = std::mem::take(&mut self.graph.identity.dirty);
+        if dirty.is_empty() {
+            return;
+        }
+        let mut old_proofs = Vec::new();
+        self.graph.identity.proofs.retain(|(label, key), class| {
+            if dirty.contains(label) {
+                old_proofs.push((*label, key.clone(), *class));
+                false
+            } else {
+                true
+            }
+        });
+        self.graph
+            .identity
+            .certified
+            .retain(|(label, _), _| !dirty.contains(label));
+        let mut proofs = std::collections::BTreeMap::new();
+        let mut collisions = Vec::new();
+        let mut retain = |label, key, class| {
+            if let Some(other) = proofs.insert((label, key), class)
+                && other != class
+            {
+                collisions.push((other, class));
+            }
+        };
+        for (label, key, class) in old_proofs {
+            if let Some(key) = key.transport(self) {
+                retain(label, key, self.find(class));
+            }
+        }
+        let mut certified = std::collections::BTreeMap::new();
+        for label in dirty {
+            let laws = self.graph.identity.policies[&label];
+            let certificates = crate::identity::certificates(self, label, laws);
+            for (&class, productions) in &certificates.productions {
+                if let Some(Some(key)) = certificates.keys.get(&class) {
+                    certified.insert((label, class), key.clone());
+                }
+                for &(_, children) in productions {
+                    let key = if laws.associative {
+                        let [left, right] = [children[0], children[1]].map(|child| {
+                            certificates
+                                .keys
+                                .get(&child)
+                                .and_then(Clone::clone)
+                                .unwrap_or_else(|| crate::identity::GroundKey::atom(child, laws))
+                        });
+                        crate::identity::GroundKey::combine(left, right, laws)
+                    } else {
+                        let mut children = [children[0], children[1]];
+                        children.sort_unstable();
+                        Some(crate::identity::GroundKey::Pair(children))
+                    };
+                    if let Some(key) = key {
+                        retain(label, key, class);
+                    }
+                }
+            }
+        }
+        self.graph.identity.proofs.extend(proofs);
+        self.graph.identity.certified.extend(certified);
+        for (left, right) in collisions {
+            self.union(left, right);
+        }
+    }
+
+    pub(crate) fn algebraic_identity(&self) -> &crate::identity::Identity<L> {
+        &self.graph.identity
+    }
 
     /// Intern `node`, returning its class. A non-unique node equal to an
     /// existing one shares its class; otherwise a fresh class.
@@ -657,6 +859,7 @@ impl<L: Label> Engine<L> {
                 .or_default()
                 .push(LabelId(index as u32));
         }
+        self.resolve_algebraic_labels();
         label
     }
 
@@ -671,7 +874,55 @@ impl<L: Label> Engine<L> {
     ) -> ClassId {
         match self.memo_find(label, key) {
             Some(class) => class,
-            None => self.make_class(node(), label, key),
+            None => {
+                let laws = self.graph.identity.policies.get(&label).copied();
+                let ground = laws.and_then(|laws| {
+                    crate::identity::production_key(
+                        self,
+                        label,
+                        laws,
+                        [ClassId(key[1]), ClassId(key[2])],
+                    )
+                });
+                let owner = ground
+                    .as_ref()
+                    .and_then(|ground| self.ground_owner(label, ground));
+                let can_certify = !self.graph.identity.dirty.contains(&label)
+                    && laws.is_some_and(|laws| {
+                        !laws.associative
+                            || key[1..].iter().all(|&child| {
+                                let child = self.find(ClassId(child));
+                                self.graph.identity.certified.contains_key(&(label, child))
+                                    || !self.rows(child).any(|row| self.label(row) == label)
+                            })
+                    });
+                let class = match owner {
+                    Some(class) => {
+                        self.add_row_to_class(class, node(), label, key, false);
+                        class
+                    }
+                    None => self.make_class(node(), label, key),
+                };
+                if let Some(ground) = ground {
+                    let certified = can_certify
+                        && (owner.is_none()
+                            || self.graph.identity.certified.get(&(label, class)) == Some(&ground));
+                    self.graph
+                        .identity
+                        .proofs
+                        .insert((label, ground.clone()), class);
+                    if certified {
+                        self.graph.identity.certified.insert((label, class), ground);
+                    } else {
+                        self.graph.identity.dirty.insert(label);
+                        self.graph.dirty = true;
+                    }
+                } else if laws.is_some() {
+                    self.graph.identity.dirty.insert(label);
+                    self.graph.dirty = true;
+                }
+                class
+            }
         }
     }
 
@@ -724,6 +975,7 @@ impl<L: Label> Engine<L> {
         }
         self.graph.num_classes -= 1;
         self.graph.dirty = true;
+        self.graph.identity.merge(survivor, absorbed);
         self.log_change(survivor);
         survivor
     }
@@ -754,6 +1006,7 @@ impl<L: Label> Engine<L> {
                 self.union(ClassId(collision.kept), ClassId(collision.removed));
             }
             self.repair = report;
+            self.repair_algebraic_identity();
         }
         self.graph.uf.flatten();
         if let Some(scope) = self.scopes.last_mut() {
@@ -783,17 +1036,45 @@ impl<L: Label> Engine<L> {
     }
 
     fn make_class(&mut self, node: L, label: LabelId, key: &[u32]) -> ClassId {
+        let class = self.graph.uf.push();
+        self.graph.class_head.push(NONE);
+        self.graph.class_tail.push(NONE);
+        self.graph.class_len.push(0);
+        self.graph.num_classes += 1;
+        self.add_row_to_class(class, node, label, key, true);
+        class
+    }
+
+    fn add_row_to_class(
+        &mut self,
+        class: ClassId,
+        node: L,
+        label: LabelId,
+        key: &[u32],
+        minted: bool,
+    ) {
         let constant = node.constant();
         let type_key = node.type_key();
         let row = RowId(self.node.len() as u32);
-        let class = self.graph.uf.push();
         let epoch = self.graph.epoch;
         self.table_mut(label).insert(key, class.0, row.0, epoch);
+        if self.graph.identity.policies.contains_key(&label) {
+            // Keep watches even when cycles or overflow prevent a finite key.
+            self.graph.identity.watch(
+                label,
+                std::iter::once(class).chain(key[1..].iter().map(|&child| ClassId(child))),
+            );
+        }
         self.version += 1;
         self.graph.node_next.push(NONE);
-        self.graph.class_head.push(row.0);
-        self.graph.class_tail.push(row.0);
-        self.graph.class_len.push(1);
+        let tail = self.graph.class_tail[class.index()];
+        if tail == NONE {
+            self.graph.class_head[class.index()] = row.0;
+        } else {
+            self.graph.node_next[tail as usize] = row.0;
+        }
+        self.graph.class_tail[class.index()] = row.0;
+        self.graph.class_len[class.index()] += 1;
         if let Some(scope) = self.scopes.last_mut() {
             scope.dirt.push(class);
         }
@@ -806,18 +1087,19 @@ impl<L: Label> Engine<L> {
             let label = self.intern(&constant);
             if self.consts.raise(class, label, epoch) {
                 self.stats.raises += 1;
-                self.graph.rising[1].push((column_bit(ColumnId::Const) as u8, class));
+                self.graph.rising[usize::from(minted)]
+                    .push((column_bit(ColumnId::Const) as u8, class));
             }
         }
-        if let Some(key) = type_key {
-            self.types.raise(class, key, epoch);
-            self.graph.rising[1].push((column_bit(ColumnId::Type) as u8, class));
+        if let Some(key) = type_key
+            && self.types.raise(class, key, epoch)
+        {
+            self.stats.raises += 1;
+            self.graph.rising[usize::from(minted)].push((column_bit(ColumnId::Type) as u8, class));
         }
         self.graph.total_nodes += 1;
-        self.graph.num_classes += 1;
         self.stats.adds += 1;
         self.log_change(class);
-        class
     }
 
     /// Move the absorbed class's e-nodes onto the end of the survivor's list.

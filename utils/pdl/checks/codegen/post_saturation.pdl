@@ -2,6 +2,11 @@
 
 rule terminal-add:
   builtin.addi(builtin.addi(x: int<W>, a: const), b: const) => builtin.addi(x, const<W>(a + b))
+  where !root_has_constant()
   phase post-saturation;
 
+// CHECK: root: [[ROOT:[0-9]+]]u32,
+// CHECK: nots: vec![
+// CHECK-NEXT: tir_relational::Nested { atoms : vec![Atom::Fact { column :
+// CHECK-NEXT: ColumnId::Const, key : [[ROOT]]u32, value : [[ADMISSION:[0-9]+]]u32 }], guards : Vec::new(), }
 // CHECK: post_saturation: true

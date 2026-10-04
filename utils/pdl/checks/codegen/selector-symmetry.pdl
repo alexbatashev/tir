@@ -1,0 +1,22 @@
+// The emitted application queries constrain class IDs only after PDL proves
+// that the full rule remains valid with its two constant binders exchanged.
+// RUN: tir-pdl %s --emit rust | filecheck %s
+
+rule symmetric: builtin.addi(builtin.addi(x: int<W>, a: const), b: const)
+    => builtin.addi(x, const<W>(a + b))
+    where a + b != 0
+    proof trusted match associative, commutative;
+rule asymmetric-guard: builtin.addi(builtin.addi(x: int<W>, a: const), b: const)
+    => builtin.addi(x, const<W>(a + b))
+    where a < b
+    proof trusted match associative, commutative;
+rule asymmetric-rhs: builtin.addi(builtin.addi(x: int<W>, a: const), b: const)
+    => builtin.addi(x, const<W>(a - b))
+    proof trusted match associative, commutative;
+
+// CHECK-LABEL: fn pdl_rule_0(
+// CHECK: Guard::ClassLe(
+// CHECK-LABEL: fn pdl_rule_1(
+// CHECK-NOT: Guard::ClassLe
+// CHECK-LABEL: fn pdl_rule_2(
+// CHECK-NOT: Guard::ClassLe

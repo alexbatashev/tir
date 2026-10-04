@@ -457,6 +457,27 @@ impl ENode for SemNode {
         }
     }
 
+    fn associative(&self) -> bool {
+        if self.payload.is_some() || self.children.len() != 2 {
+            return false;
+        }
+        match &self.kind {
+            Kind::Sym(kind) => kind.is_associative(),
+            Kind::Ir(op) => {
+                op.attrs.is_empty()
+                    && op.dialect == "builtin"
+                    && matches!(op.name, "addi" | "muli" | "andi" | "ori" | "xori")
+            }
+        }
+    }
+
+    fn reassociate(&self, children: &[Id]) -> Self {
+        let mut node = self.clone();
+        node.children = children.to_vec();
+        node.prov = Prov::None;
+        node
+    }
+
     /// An integer literal, spelled untyped: the value is what the class is known
     /// to be, and the same number carried at a type and without one is one fact.
     fn constant(&self) -> Option<Self> {

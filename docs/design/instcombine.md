@@ -125,6 +125,26 @@ The first rule equates an addition with its first operand. That operand can
 be any integer value, including zero. The second checks a constant
 and introduces a shift. Neither rule traverses the function or edits users.
 
+PDL rules can opt into algebraic matching with `match associative` or
+`match associative, commutative`. Generated instcombine rules and semantic
+axioms lower compatible integer add, multiply, and, or, and xor patterns through
+the same relational helper. The query selects operand occurrences across binary
+groupings and preserves the unmatched expression in one opaque remainder.
+For example, a rule combining two addition constants can turn
+`(x + 3) + (y + 5)` into `(x + y) + 8` without generating reassociation rules.
+Repeated selected binders retain class equality and occurrence multiplicity.
+The remainder receives the operation's type and is rebuilt by the head only
+after the guards pass. Semantic proof width bindings use that derived type;
+floating-point reassociation is excluded.
+
+PDL records a proven constant-binder transposition in the shared algebraic
+pattern metadata. Both generated instcombine rules and semantic axiom lowering
+turn it into a relational `ClassLe` guard over canonical selected class IDs.
+The engine filters witnesses as soon as both classes are bound. PDL proves
+application validity under the exchange; it does not prove identical extraction
+alternatives when mirrored assignments choose different residual witnesses.
+
+
 Host rules connect matching to behavior that an operation already provides.
 Constant folding, for example, asks an operation to compute its result from
 constant inputs. Other rules handle known branch decisions and memory state.
@@ -141,10 +161,70 @@ For an expression such as `(x + y) - y`, the query joins a subtraction node
 to an addition node and requires both appearances of `y` to name the same
 class. A successful match can merge the subtraction's class with `x`.
 
+Compiled algebraic rules register their requested laws with the relational
+engine. Each concrete label authorizes those laws independently, so types and
+attributes remain part of identity. Registered insertion and rebuild merge
+finite normalized sequences or multisets while retaining genuine binary nodes
+for extraction and row captures. Registration works before or after seeding,
+and its state rolls back with an assumption scope.
+
+Multiset keys store sorted class/count pairs. Combining keys merges those sorted
+pairs directly. Union transport sorts the new representatives before combining
+equal entries, because representative changes need not preserve class order.
+Both operations check multiplicity overflow.
+
+Instcombine registers its generated rules before seeding, then adds folding
+templates and gate rules from the seeded graph. Semantic selection registers
+its theory before lowering regions. Already-seeded semantic callers register
+before dumping the saturation workload.
+
+Flattening requires an acyclic certificate that all alternatives in a class
+have the same normalized key. Previously proved finite keys remain valid when
+another alternative invalidates that certificate. Rebuild transports their
+atomic class references through unions without recursively expanding cyclic
+proofs. Certified AC queries enumerate occurrence partitions once per root
+identity, including a single nonempty remainder and existing classes with proved
+subbag keys as selectors. Candidate bags are indexed by their first atom, and
+only bags contained in the root enter its selector partitions. Certificates and
+proof repair enumerate exact family rows. Scoped occurrence lists watch each
+production owner and its children, including unresolved productions. Unions merge
+these lists and invalidate only the exact labels they name. Rebuild repairs those
+families and retains other proofs and certificates unchanged. Watches remain
+when a certificate is revoked, because flattened proof atoms originate in watched
+productions. Late registration indexes existing rows before repair. Classes without family productions
+have implicit atomic keys. They preserve operand multiplicity and repeated-variable
+equality. The direct index remains usable when unrelated classes have unresolved
+alternatives. A query also searches finite witnesses whenever any unresolved
+family class passes a selector, because an incomplete index cannot prove absence.
+Count overflow likewise retains finite-witness coverage.
+
+Unregistered, weaker-law, row-capturing, and uncertified queries retain the
+finite-witness matcher. Its shared states use compact class slots and retain
+the least-cost witness for each selector binding and remainder presence. Equal
+cost keeps the first witness in deterministic search order. Residual proofs use
+hash-consed joins in a flat arena shared by escaping matches. Direct remainders
+encode repeated atoms with binary powering. Only a head that uses the remainder
+materializes it, with an explicit stack and memoized joins. This preserves
+shared operand occurrences without expanding them into leaf vectors.
+Changed states propagate to dependent parents, and indexed joins pair disjoint
+selector subsets. Conservative occurrence bounds retain possible finite cyclic
+witnesses. Selector assignments can still be combinatorial. The current API
+supports class-valued selectors and at most one opaque remainder; it does not
+claim complete enumeration of arbitrary fragment substitutions. Identity
+normalization keeps associative-only sequences ordered. The existing witness
+matcher still requires concrete commutativity when reassociating, so genuinely
+noncommutative associative query support remains outside this stage. Ground keys
+currently store flat vectors, so retaining every prefix of a chain of distinct
+operands can require quadratic total key storage. This first stage establishes
+identity and query behavior, not a final scaling or compile-time result.
+
 A saturation round searches the current graph, collects matches, applies
 their actions, and rebuilds congruence. Later rounds use recorded changes to
 restrict searches where a rule's dependencies permit that restriction.
-This avoids treating every rule as a fresh whole-function traversal.
+Algebraic plans search all candidate roots each round because their dependencies
+extend through arbitrary compatible groupings; a fixed pattern height cannot
+bound the affected roots. The shared matching state lasts only for the frozen
+search and is rebuilt for the next graph state.
 
 The rounds stop when no further progress is found or when a resource limit
 is reached. Bounds on work and graph size keep compilation finite even when
@@ -155,6 +235,14 @@ Some rules run in a terminal post-saturation phase. Constant reassociation is
 one use: a new constant should not repeatedly feed a cyclic class and generate
 more constants in the same saturation call. These rules have the same equality
 obligation as ordinary rules; only their scheduling differs.
+
+The add and multiply constant-collection rules also use
+`where !root_has_constant()`. A root already known to be constant needs no more
+constant collection. Skipping it prevents generated factors and summands from
+feeding its cyclic class in later nested assumption scopes. This explicit
+instcombine admission policy reads the current scope's constant fact before
+algebraic enumeration. It does not change the shared matcher's algebraic laws
+or its complete set of bindings.
 
 ## Facts that hold only inside a region
 

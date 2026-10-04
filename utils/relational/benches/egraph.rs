@@ -60,6 +60,91 @@ impl ENode for Sym {
     fn matches(&self, other: &Self) -> bool {
         self.op == other.op && self.children.len() == other.children.len()
     }
+    fn associative(&self) -> bool {
+        self.op == u32::MAX
+    }
+    fn commutative(&self) -> bool {
+        self.associative()
+    }
+}
+
+fn algebraic_chain(count: u32) -> (Engine<Sym>, Plan<Sym>) {
+    let mut eg = Engine::new();
+    let leaves: Vec<_> = (0..count)
+        .map(|op| {
+            eg.add(Sym {
+                op,
+                children: SmallVec::new(),
+            })
+        })
+        .collect();
+    let mut root = leaves[0];
+    for &leaf in &leaves[1..] {
+        root = eg.add(Sym {
+            op: u32::MAX,
+            children: SmallVec::from_slice(&[root, leaf]),
+        });
+    }
+    eg.rebuild();
+    let plan = Plan::compile(Query::tree(
+        3,
+        0,
+        vec![Atom::Algebraic {
+            template: Sym {
+                op: u32::MAX,
+                children: SmallVec::from_slice(&[Id(0), Id(0)]),
+            },
+            selectors: SmallVec::from_slice(&[1, 1]),
+            remainder: Some(2),
+            class: 0,
+            row: None,
+            associative: true,
+            commutative: true,
+            remainder_type: None,
+        }],
+    ));
+    (eg, plan)
+}
+
+fn algebraic_cycle(count: u32) -> (Engine<Sym>, Plan<Sym>, Id) {
+    let mut eg = Engine::new();
+    let root = eg.add(Sym {
+        op: 0,
+        children: SmallVec::new(),
+    });
+    // Compilation can produce cycles such as 0 = 0 * 4. These opaque symbols
+    // exercise that graph shape without assigning numeric constant semantics.
+    for op in 1..=count {
+        let factor = eg.add(Sym {
+            op,
+            children: SmallVec::new(),
+        });
+        let product = eg.add(Sym {
+            op: u32::MAX,
+            children: SmallVec::from_slice(&[root, factor]),
+        });
+        eg.union(root, product);
+    }
+    eg.rebuild();
+    let root = eg.find(root);
+    let plan = Plan::compile(Query::tree(
+        4,
+        0,
+        vec![Atom::Algebraic {
+            template: Sym {
+                op: u32::MAX,
+                children: SmallVec::from_slice(&[Id(0), Id(0)]),
+            },
+            selectors: SmallVec::from_slice(&[1, 2]),
+            remainder: Some(3),
+            class: 0,
+            row: None,
+            associative: true,
+            commutative: true,
+            remainder_type: None,
+        }],
+    ));
+    (eg, plan, root)
 }
 
 /// One rule's variables, atoms and head as it is built out of the patterns.
@@ -211,6 +296,24 @@ fn print_stats(workloads: &[Workload]) {
 }
 
 fn benches(c: &mut Criterion) {
+    let mut algebraic = c.benchmark_group("tir/algebraic-distinct-chain");
+    for count in [32, 64, 128, 256] {
+        let (eg, plan) = algebraic_chain(count);
+        algebraic.bench_function(BenchmarkId::from_parameter(count), |b| {
+            b.iter(|| {
+                black_box(plan.search(&eg, plan.roots(&eg), &|_, _| true, false, &NoExterns))
+            });
+        });
+    }
+    algebraic.finish();
+    let mut algebraic = c.benchmark_group("tir/algebraic-cyclic-distinct-selectors");
+    for count in [8, 16, 32, 64] {
+        let (eg, plan, root) = algebraic_cycle(count);
+        algebraic.bench_function(BenchmarkId::from_parameter(count), |b| {
+            b.iter(|| black_box(plan.search(&eg, [root], &|_, _| true, false, &NoExterns)));
+        });
+    }
+    algebraic.finish();
     let workloads = shared::workloads();
     print_stats(&workloads);
     let mut group = c.benchmark_group("tir/seed");

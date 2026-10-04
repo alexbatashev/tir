@@ -1,3 +1,4 @@
+mod algebraic;
 mod ast;
 mod codegen;
 mod diagnostic;

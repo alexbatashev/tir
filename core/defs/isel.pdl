@@ -35,6 +35,7 @@ rule or-zero: #or(x: int<W>, 0) : int<W>
 rule add-const-reassociate:
   #add(#add(x: int<W>, a: const<W>), b: const<W>) : int<W>
   => #add(x, #add(a, b))
+  match associative, commutative
   phase post-saturation;
 
 rule sub-const-reassociate:

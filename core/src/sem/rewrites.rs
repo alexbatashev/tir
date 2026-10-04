@@ -184,6 +184,7 @@ impl Default for SaturationLimits {
 /// assumption would find the assertion already gone.
 pub fn saturate(ctx: &Context, eg: &mut SemEGraph, theory: &Theory, limits: SaturationLimits) {
     let externs = theory.interpretation(ctx);
+    eg.register_algebraic_rules(&theory.rules);
     crate::sem::workload::dump("isel", eg, &theory.rules);
     eg.saturate_rules(
         &theory.rules,

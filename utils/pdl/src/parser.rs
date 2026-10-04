@@ -101,6 +101,38 @@ where
             )),
         }))
         .or_not();
+    let match_options = just(Token::Match)
+        .ignore_then(
+            identifier()
+                .separated_by(just(Token::Comma))
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .try_map(|names, span| {
+            let mut options = MatchOptions::default();
+            for name in names {
+                let selected = match name.as_str() {
+                    "associative" => &mut options.associative,
+                    "commutative" => &mut options.commutative,
+                    _ => {
+                        return Err(Rich::custom(
+                            span,
+                            "match option is `associative` or `commutative`",
+                        ));
+                    }
+                };
+                if *selected {
+                    return Err(Rich::custom(
+                        span,
+                        format!("duplicate match option `{name}`"),
+                    ));
+                }
+                *selected = true;
+            }
+            Ok(options)
+        })
+        .or_not()
+        .map(Option::unwrap_or_default);
     let phase = just(Token::Phase)
         .ignore_then(
             identifier()
@@ -122,10 +154,15 @@ where
         .then(term())
         .then(guards)
         .then(proof)
+        .then(match_options)
         .then(phase)
         .then_ignore(just(Token::Semicolon))
         .map_with(
-            |((((((name, lhs), direction), rhs), guards), proof), post_saturation), extra| Rule {
+            |(
+                ((((((name, lhs), direction), rhs), guards), proof), match_options),
+                post_saturation,
+            ),
+             extra| Rule {
                 name,
                 kind: RuleKind::Equality(direction),
                 lhs,
@@ -134,6 +171,7 @@ where
                 requirements: Vec::new(),
                 proof,
                 post_saturation,
+                match_options,
                 span: extra.span(),
             },
         )
@@ -247,6 +285,7 @@ where
             requirements,
             proof,
             post_saturation: false,
+            match_options: MatchOptions::default(),
             span: extra.span(),
         })
         .labelled("refinement rule")

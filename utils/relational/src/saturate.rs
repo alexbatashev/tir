@@ -258,8 +258,8 @@ impl<L: Label> Engine<L> {
     ) {
         let timer = Timer::start();
         register_rules(rules);
-        // The first round searches before anything else rebuilds.
-        self.rebuild();
+        // Registration repairs seeded rows and pending unions before the first search.
+        self.register_algebraic_rules(rules);
         let mut log = self.take_changed();
         let mut touched = log.clone();
         let mut delta = log.take().map(Delta::new);
@@ -359,6 +359,7 @@ impl<L: Label> Engine<L> {
                                 rule.head_vars,
                                 bindings,
                                 scalars,
+                                matches.residuals(at),
                                 heads,
                             )
                         })

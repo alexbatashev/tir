@@ -27,6 +27,14 @@ module {
     %result = addi %inner, %four : !i64
     func.return %result
   }
+  %fn_split_constants = func.func @split_constants(%0: !i64, %1: !i64) -> !i64 {
+    %three = constant {value = 3} : !i64
+    %five = constant {value = 5} : !i64
+    %left = addi %0, %three : !i64
+    %right = addi %1, %five : !i64
+    %result = addi %left, %right : !i64
+    func.return %result
+  }
   module_end
 }
 
@@ -42,3 +50,8 @@ module {
 // CHECK-NOT: imm = 3
 // CHECK-NOT: imm = 4
 // CHECK: riscv.addi {rd = %{{[0-9]+}}:GPR, rs1 = %{{[0-9]+}}:GPR, imm = 7}
+
+// CHECK-LABEL: asm.symbol {name = "split_constants", arg_regs = [%[[SPLIT_X:[0-9]+]]:GPR, %[[SPLIT_Y:[0-9]+]]:GPR]
+// CHECK-NEXT: riscv.add {rd = %[[SUM:[0-9]+]]:GPR, rs1 = %[[SPLIT_X]]:GPR, rs2 = %[[SPLIT_Y]]:GPR}
+// CHECK-NEXT: riscv.addi {rd = %[[RESULT:[0-9]+]]:GPR, rs1 = %[[SUM]]:GPR, imm = 8}
+// CHECK-NEXT: asm.vret %[[RESULT]]

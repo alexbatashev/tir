@@ -12,7 +12,7 @@ rule mul-one: #mul(x: int<W>, 1) : int<W> => x;
 rule mul-zero: #mul(x: int<W>, 0) : int<W> => const<W>(0);
 rule add-const-reassociate:
   #add(#add(x: int<W>, a: const<W>), b: const<W>) : int<W>
-  => #add(x, #add(a, b));
+  => #add(x, #add(a, b)) match associative, commutative;
 rule sub-const-reassociate:
   #sub(#sub(x: int<W>, a: const<W>), b: const<W>) : int<W>
   => #sub(x, #add(a, b));

@@ -31,7 +31,26 @@ pub struct Rule {
     /// [`Proof::Trusted`] for other dialect rules.
     pub proof: Option<Proof>,
     pub post_saturation: bool,
+    /// Built-in matching laws selected for compatible integer operation patterns.
+    pub match_options: MatchOptions,
     pub span: Span,
+}
+
+/// Built-in algebraic laws selected by an ordinary rule.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MatchOptions {
+    pub associative: bool,
+    pub commutative: bool,
+}
+
+/// A maximal compatible operation pattern and its optional opaque remainder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlgebraicPattern {
+    /// Operand indices from the left-hand side root to this operation.
+    pub path: Vec<usize>,
+    pub remainder: Option<String>,
+    /// A proven binder transposition, ordered by canonical selected class ID.
+    pub selector_order: Option<(String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -355,6 +374,15 @@ pub enum Width {
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
+}
+
+impl Expr {
+    pub(crate) fn is_nonconstant_root_guard(&self) -> bool {
+        matches!(&self.kind,
+            ExprKind::Unary { op: UnaryOp::Not, value }
+            if matches!(&value.kind, ExprKind::Call { name, args }
+                if name == "root_has_constant" && args.is_empty()))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

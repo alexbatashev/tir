@@ -1,0 +1,22 @@
+// RUN: not tir-pdl %s --emit ast 2>&1 | filecheck %s
+
+rule arguments: builtin.addi(x: int<W>, 0) => x
+  where !root_has_constant(x);
+// CHECK: root_has_constant requires the standalone guard !root_has_constant()
+
+rule nested: builtin.addi(x: int<W>, 0) => x
+  where !root_has_constant() || 1 == 1;
+// CHECK: root_has_constant requires the standalone guard !root_has_constant()
+
+rule scalar: builtin.addi(x: int<W>, 0) => const<W>(root_has_constant());
+// CHECK: root_has_constant requires the standalone guard !root_has_constant()
+
+rule semantic: #add(x: int<W>, 0) => x
+  where !root_has_constant() proof trusted;
+// CHECK: root_has_constant is an admission-only generated-rule guard
+// CHECK: it cannot be a proof assumption or guard a semantic axiom
+
+rule checked: builtin.addi(x: int<W>, 0) => x
+  where !root_has_constant() proof smt;
+// CHECK: root_has_constant is an admission-only generated-rule guard
+// CHECK: it cannot be a proof assumption or guard a semantic axiom

@@ -86,6 +86,10 @@ impl Label for Term {
         }
     }
 
+    fn associative(&self) -> bool {
+        self.commutative && self.op == "add"
+    }
+
     fn commutative(&self) -> bool {
         self.commutative
     }

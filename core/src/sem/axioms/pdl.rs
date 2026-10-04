@@ -256,9 +256,12 @@ pub(crate) fn axiom_from_rule(rule: &tir_pdl::Rule) -> Result<Axiom, String> {
         rhs,
         uses_root,
         obligation,
+        proof: rule.proof(),
         floating_point: rule.is_floating_point(),
         post_saturation: rule.post_saturation,
         materialize: rule.materializes(),
+        match_options: rule.match_options,
+        algebraic_patterns: rule.algebraic_patterns()?,
     })
 }
 
@@ -484,5 +487,155 @@ fn push_guard(
             "guards are `a < b`, `a == b`, `[u]fits(v, n)`, `materializable(v)` or their negation"
                 .into(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::axioms_from_pdl;
+    use crate::Context;
+    use crate::builtin::FloatType;
+    use crate::sem::rewrites::saturate;
+    use crate::sem::{SaturationLimits, SemEGraph, SemNode, SymKind, Theory, template_node};
+
+    #[test]
+    fn selector_symmetry_preserves_asymmetric_guard_bindings() {
+        use crate::builtin::IntegerType;
+        use crate::sem::SymPayload;
+        use crate::sem::axioms::{Folding, Interpretation};
+        use tir_adt::APInt;
+        use tir_relational::Guard;
+
+        let source = r#"
+            rule symmetric: #add(#add(x: int<W>, a: const<W>), b: const<W>): int<W>
+                => #add(x, #add(a, b))
+                proof trusted match associative, commutative;
+            rule asymmetric: #add(#add(x: int<W>, a: const<W>), b: const<W>): int<W>
+                => #add(x, #add(a, b)) where fits(a, 3)
+                proof trusted match associative, commutative;
+        "#;
+        let axioms = axioms_from_pdl(source).unwrap();
+        let mut folds = Vec::new();
+        let rules: Vec<_> = axioms
+            .iter()
+            .enumerate()
+            .map(|(index, axiom)| axiom.compile(index, &mut folds, Folding::Never).unwrap().0)
+            .collect();
+        let (a_var, b_var) = rules[0]
+            .plan
+            .query()
+            .guards
+            .iter()
+            .find_map(|guard| match guard {
+                Guard::ClassLe(a, b) => Some((*a as usize, *b as usize)),
+                _ => None,
+            })
+            .expect("the symmetric query must select canonical class order");
+        let context = Context::with_default_dialects();
+        let ty = IntegerType::new(&context, 32);
+        let value = context.create_value(ty, None).id();
+        let mut graph = SemEGraph::new();
+        graph.register_algebraic_rules(&rules);
+        let x = graph.add(SemNode::input(value).typed(ty));
+        // Class order puts 10 first, but only 3 fits the signed guard.
+        let high = graph.add(template_node(
+            SymKind::Constant,
+            Some(SymPayload::Int(APInt::new(32, 10))),
+            Some(ty),
+        ));
+        let low = graph.add(template_node(
+            SymKind::Constant,
+            Some(SymPayload::Int(APInt::new(32, 3))),
+            Some(ty),
+        ));
+        let mut add = template_node(SymKind::Add, None, Some(ty));
+        add.children = vec![x, high];
+        let inner = graph.add(add.clone());
+        add.children = vec![inner, low];
+        let root = graph.add(add);
+        graph.rebuild();
+        assert!(graph.find(high) < graph.find(low));
+        let externs = Interpretation::new(&context, &axioms, &folds, None);
+        let matches: Vec<_> = rules
+            .iter()
+            .map(|rule| {
+                rule.plan
+                    .search(&graph, [root], &|_, _| true, false, &externs)
+            })
+            .collect();
+        assert_eq!(matches[0].len(), 1);
+        assert_eq!(matches[1].len(), 1);
+        assert_eq!(matches[0][0].bindings[a_var], Some(graph.find(high)));
+        assert_eq!(matches[0][0].bindings[b_var], Some(graph.find(low)));
+        assert_eq!(matches[1][0].bindings[a_var], Some(graph.find(low)));
+        assert_eq!(matches[1][0].bindings[b_var], Some(graph.find(high)));
+    }
+
+    #[test]
+    fn floating_axiom_proof_modes() {
+        const MODE: &str = "TIR_TEST_AXIOM_PROOF_MODE";
+        let Ok(mode) = std::env::var(MODE) else {
+            // Each process caches TIR_VERIFY_AXIOMS on its first read.
+            for mode in ["default", "smt", "trusted"] {
+                for verify in [false, true] {
+                    let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+                    child
+                        .args([
+                            "--exact",
+                            "sem::axioms::pdl::tests::floating_axiom_proof_modes",
+                            "--nocapture",
+                        ])
+                        .env(MODE, mode)
+                        .env_remove("TIR_VERIFY_AXIOMS");
+                    if verify {
+                        child.env("TIR_VERIFY_AXIOMS", "1");
+                    }
+                    let output = child.output().unwrap();
+                    assert!(
+                        output.status.success(),
+                        "mode={mode}, verify={verify}:\n{}\n{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    );
+                }
+            }
+            return;
+        };
+        let proof = match mode.as_str() {
+            "default" => "",
+            "smt" => "proof smt",
+            "trusted" => "proof trusted",
+            _ => panic!("unknown test proof mode"),
+        };
+        let source =
+            format!("rule invalid-float: #fsub(x: float<32>, x) : float<32> => x {proof};");
+        let mut theory = Theory::default();
+        for axiom in axioms_from_pdl(&source).unwrap() {
+            theory.push(axiom);
+        }
+        let context = Context::with_default_dialects();
+        let ty = FloatType::f32(&context);
+        let value = context.create_value(ty, None).id();
+        let mut graph = SemEGraph::new();
+        let x = graph.add(SemNode::input(value).typed(ty));
+        let mut node = template_node(SymKind::FSub, None, Some(ty));
+        node.children = vec![x, x];
+        let root = graph.add(node);
+        graph.rebuild();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            saturate(&context, &mut graph, &theory, SaturationLimits::default());
+        }));
+        if mode == "trusted" && std::env::var_os("TIR_VERIFY_AXIOMS").is_some() {
+            let error = result.expect_err("optional verification must check trusted axioms");
+            let message = error
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| error.downcast_ref::<&str>().copied())
+                .unwrap_or_default();
+            assert!(message.contains("invalid semantic invariant `invalid-float`"));
+        } else {
+            result.unwrap();
+            assert_eq!(graph.find(root) == graph.find(x), mode == "trusted");
+        }
     }
 }

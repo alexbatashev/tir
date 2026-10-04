@@ -216,6 +216,14 @@ impl SymKind {
         )
     }
 
+    /// Integer operations whose binary grouping preserves modular bit-vector semantics.
+    pub fn is_associative(&self) -> bool {
+        matches!(
+            self,
+            Self::Add | Self::Mul | Self::And | Self::Or | Self::Xor
+        )
+    }
+
     /// Structural arity: number of operand children.
     pub fn arity(&self) -> usize {
         if let Some(op) = scalar_op(*self) {

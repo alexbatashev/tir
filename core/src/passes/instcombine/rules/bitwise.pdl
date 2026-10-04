@@ -10,7 +10,8 @@ rule xor-self: builtin.xori(x: int<W>, x) => const<W>(0);
 rule and-absorption: builtin.andi(builtin.ori(x: int<W>, y), x) => x;
 rule xor-xor-and: builtin.xori(builtin.xori(x: int<W>, y), builtin.andi(x, y)) => builtin.ori(x, y);
 rule or-absorption: builtin.ori(builtin.andi(x: int<W>, y), x) => x;
-rule xor-cancel: builtin.xori(builtin.xori(x: int<W>, y), y) => x;
+rule xor-cancel: builtin.xori(builtin.xori(x: int<W>, y), y) => x
+  match associative, commutative;
 rule and-complement: builtin.andi(x: int<W>, builtin.xori(x, c: const)) => const<W>(0) where popcount(c) == W;
 rule or-complement: builtin.ori(x: int<W>, builtin.xori(x, c: const)) => const<W>(-1) where popcount(c) == W;
 rule shl-zero: builtin.shli(x: int<W>, 0) => x;

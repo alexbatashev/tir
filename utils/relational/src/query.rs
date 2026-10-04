@@ -11,7 +11,7 @@ use smallvec::SmallVec;
 
 use crate::engine::{Candidates, Groups};
 use crate::store::Table;
-use crate::{ClassId, Engine, Label, LabelId};
+use crate::{ClassId, Engine, Label, LabelId, Residual};
 
 /// A class variable of a [`Query`], numbered from zero.
 pub type Var = u32;
@@ -140,6 +140,8 @@ pub enum Guard {
     /// The pairs are not all bound to the same class. One pair is plain
     /// disequality; several say "these two terms are not the same term".
     Distinct(SmallVec<[(Var, Var); 4]>),
+    /// The canonical class bound to `a` is no greater than that bound to `b`.
+    ClassLe(Var, Var),
     /// Read `field` off the label a fact column bound, so a constant's value and
     /// width reach the guards as words. The engine owns the label table; this is
     /// a decode, not a look at the graph.
@@ -167,7 +169,7 @@ impl Guard {
                 b.reads(&mut out);
             }
             Guard::Let { value, .. } => value.reads(&mut out),
-            Guard::Distinct(..) => {}
+            Guard::Distinct(..) | Guard::ClassLe(..) => {}
             Guard::Read { term, .. } => out.push(term.slot()),
             Guard::Extern { terms, args, .. } => {
                 out.extend(terms.iter().map(|term| term.slot()));
@@ -179,18 +181,18 @@ impl Guard {
         out
     }
 
-    /// The class variables the guard reads. Only a disequality has any: the
-    /// rest work on words.
+    /// The class variables the guard reads.
     fn vars(&self) -> SmallVec<[Var; 8]> {
         match self {
             Guard::Distinct(pairs) => pairs.iter().flat_map(|&(a, b)| [a, b]).collect(),
+            Guard::ClassLe(a, b) => SmallVec::from_slice(&[*a, *b]),
             _ => SmallVec::new(),
         }
     }
 
     fn writes(&self) -> SmallVec<[Scalar; 2]> {
         match self {
-            Guard::Cmp(..) | Guard::Distinct(..) => SmallVec::new(),
+            Guard::Cmp(..) | Guard::Distinct(..) | Guard::ClassLe(..) => SmallVec::new(),
             Guard::Let { out, .. } | Guard::Read { out, .. } => SmallVec::from_slice(&[*out]),
             Guard::Extern { out, .. } => out.clone(),
         }
@@ -207,6 +209,18 @@ pub enum Atom<L> {
         args: SmallVec<[Var; 4]>,
         class: Var,
         row: Option<Scalar>,
+    },
+    /// A binary operator matched using its concrete algebraic laws. Selectors
+    /// bind existing classes; the optional remainder exists only in the head.
+    Algebraic {
+        template: L,
+        selectors: SmallVec<[Var; 4]>,
+        remainder: Option<Var>,
+        class: Var,
+        row: Option<Scalar>,
+        associative: bool,
+        commutative: bool,
+        remainder_type: Option<Scalar>,
     },
     /// `class` holds `value` as a childless row, or is assumed to evaluate to it.
     Literal { value: L, class: Var },
@@ -253,7 +267,9 @@ impl<L> Atom<L> {
     /// is stepped.
     pub fn class(&self) -> Var {
         match self {
-            Atom::Node { class, .. } | Atom::Literal { class, .. } => *class,
+            Atom::Node { class, .. }
+            | Atom::Algebraic { class, .. }
+            | Atom::Literal { class, .. } => *class,
             Atom::Fact { key, .. }
             | Atom::Object { key, .. }
             | Atom::Unplaceable { key }
@@ -262,10 +278,24 @@ impl<L> Atom<L> {
         }
     }
 
+    fn has_operand(&self, var: Var) -> bool {
+        match self {
+            Atom::Node { args, .. } => args.contains(&var),
+            Atom::Algebraic { selectors, .. } => selectors.contains(&var),
+            Atom::Object { base, .. } => *base == var,
+            _ => false,
+        }
+    }
+
     /// The scalars this atom binds.
     fn writes(&self) -> SmallVec<[Scalar; 2]> {
         match self {
             Atom::Node { row, .. } => row.iter().copied().collect(),
+            Atom::Algebraic {
+                row,
+                remainder_type,
+                ..
+            } => row.iter().chain(remainder_type).copied().collect(),
             Atom::Literal { .. } => SmallVec::new(),
             Atom::Fact { value, .. } => SmallVec::from_slice(&[*value]),
             Atom::Object { offset, .. } => SmallVec::from_slice(&[*offset]),
@@ -304,12 +334,14 @@ impl<L> Query<L> {
 }
 
 /// One match: the class the root variable bound to, and the class every
-/// variable bound to. `None` for a variable no atom reached.
+/// variable bound to. `None` for an unreached variable or a deferred remainder.
+/// Deferred expressions are carried separately in [`Self::residuals`].
 #[derive(Clone, Debug)]
 pub struct Match {
     pub root: ClassId,
     pub bindings: SmallVec<[Option<ClassId>; 8]>,
     pub scalars: SmallVec<[u64; 8]>,
+    pub residuals: Vec<Residual>,
 }
 
 /// An evaluation order: the steps, the template levels below the root, and
@@ -324,6 +356,7 @@ pub(crate) struct Matches {
     /// `roots.len()` rows of bindings back to back, and the same of scalars.
     bindings: Vec<Option<ClassId>>,
     scalars: Vec<u64>,
+    residuals: Option<Vec<Vec<Residual>>>,
 }
 
 impl Matches {
@@ -331,8 +364,20 @@ impl Matches {
         self.roots.len()
     }
 
-    fn push(&mut self, root: ClassId, bindings: &[Option<ClassId>], scalars: &[u64]) {
+    fn push(
+        &mut self,
+        root: ClassId,
+        bindings: &[Option<ClassId>],
+        scalars: &[u64],
+        residuals: &[Residual],
+    ) {
         self.roots.push(root);
+        if !residuals.is_empty() && self.residuals.is_none() {
+            self.residuals = Some(vec![Vec::new(); self.roots.len() - 1]);
+        }
+        if let Some(rows) = &mut self.residuals {
+            rows.push(residuals.to_vec());
+        }
         self.bindings.extend_from_slice(bindings);
         self.scalars.extend_from_slice(scalars);
     }
@@ -348,8 +393,24 @@ impl Matches {
         )
     }
 
+    pub(crate) fn residuals(&self, index: usize) -> &[Residual] {
+        self.residuals
+            .as_ref()
+            .map_or(&[], |rows| rows[index].as_slice())
+    }
+
     /// Append the matches of another search of the same plan.
     pub(crate) fn extend(&mut self, other: Matches) {
+        if other.residuals.is_some() && self.residuals.is_none() {
+            self.residuals = Some(vec![Vec::new(); self.roots.len()]);
+        }
+        if let Some(rows) = &mut self.residuals {
+            rows.extend(
+                other
+                    .residuals
+                    .unwrap_or_else(|| vec![Vec::new(); other.roots.len()]),
+            );
+        }
         self.roots.extend(other.roots);
         self.bindings.extend(other.bindings);
         self.scalars.extend(other.scalars);
@@ -363,6 +424,7 @@ impl Matches {
                     root,
                     bindings: SmallVec::from_slice(bindings),
                     scalars: SmallVec::from_slice(scalars),
+                    residuals: self.residuals(index).to_vec(),
                 }
             })
             .collect()
@@ -394,6 +456,9 @@ pub struct Plan<L> {
     /// Per atom, the operator bucket of the rows it reads, hashed once here
     /// rather than once per search. Zero for an atom that reads no row.
     ops: Vec<u64>,
+    /// Per atom, class-order guards whose operands each have one selector slot.
+    /// Empty when the query has no class-order guards.
+    selector_orders: Vec<Vec<(usize, usize)>>,
 }
 
 /// An evaluation order that starts at one row atom. Its first step is that
@@ -479,6 +544,28 @@ pub enum Step {
 }
 
 impl<L: Label> Plan<L> {
+    pub(crate) fn algebraic_requests(&self, out: &mut Vec<(L, crate::AlgebraicOptions)>) {
+        for atom in &self.query.atoms {
+            if let Atom::Algebraic {
+                template,
+                associative,
+                commutative,
+                ..
+            } = atom
+            {
+                out.push((
+                    template.clone(),
+                    crate::AlgebraicOptions {
+                        associative: *associative,
+                        commutative: *commutative,
+                    },
+                ));
+            }
+        }
+        for plan in &self.nots {
+            plan.algebraic_requests(out);
+        }
+    }
     /// Order `query`'s atoms — the root's atom first, then whatever its operands
     /// bound, in the order the query was written — with each guard placed at the
     /// first point its inputs are all bound.
@@ -486,6 +573,46 @@ impl<L: Label> Plan<L> {
     /// Panics if an atom's class variable is unreachable from the root, or a
     /// guard reads a scalar nothing binds.
     pub fn compile(query: Query<L>) -> Self {
+        for atom in &query.atoms {
+            if let Atom::Algebraic {
+                associative,
+                commutative,
+                ..
+            } = atom
+            {
+                assert!(
+                    *associative || *commutative,
+                    "an algebraic atom must request a law"
+                );
+            }
+            if let Atom::Algebraic {
+                remainder: Some(var),
+                ..
+            } = atom
+            {
+                assert!(
+                    !query.atoms.iter().any(|other| other.class() == *var),
+                    "a deferred remainder must not be queried as a class"
+                );
+                assert!(
+                    !query.atoms.iter().any(|other| other.has_operand(*var)),
+                    "a deferred remainder cannot constrain another atom's operands"
+                );
+                assert!(
+                    !query.guards.iter().any(|guard| guard.vars().contains(var)),
+                    "a deferred remainder must not be compared as a class"
+                );
+                assert!(
+                    !query.nots.iter().any(|nested| {
+                        nested.atoms.iter().any(|other| {
+                            other.class() == *var || other.has_operand(*var)
+                                || matches!(other, Atom::Algebraic { remainder: Some(remainder), .. } if remainder == var)
+                        }) || nested.guards.iter().any(|guard| guard.vars().contains(var))
+                    }),
+                    "a negated query cannot reference a deferred remainder"
+                );
+            }
+        }
         let mut bound = vec![false; query.vars as usize];
         bound[query.root as usize] = true;
         let known = vec![false; query.scalars as usize];
@@ -525,7 +652,7 @@ impl<L: Label> Plan<L> {
             .atoms
             .iter()
             .any(|atom| matches!(atom, Atom::Holds { .. }));
-        if !rooted || holds || !self.nots.is_empty() {
+        if self.algebraic() || !rooted || holds || !self.nots.is_empty() {
             return Vec::new();
         }
         let mut anchors = Vec::new();
@@ -557,11 +684,12 @@ impl<L: Label> Plan<L> {
 
     /// Whether the plan reads no row at all: every atom is a fact.
     pub(crate) fn rowless(&self) -> bool {
-        !self
-            .query
-            .atoms
-            .iter()
-            .any(|atom| matches!(atom, Atom::Node { .. } | Atom::Holds { .. }))
+        !self.query.atoms.iter().any(|atom| {
+            matches!(
+                atom,
+                Atom::Node { .. } | Atom::Algebraic { .. } | Atom::Holds { .. }
+            )
+        })
     }
 
     /// Whether a round can search this plan from the facts the round before
@@ -578,7 +706,7 @@ impl<L: Label> Plan<L> {
     /// reads no fact, or some atom of which cannot be reached from one.
     fn fact_anchor(&self) -> Vec<FactAnchor> {
         let query = &self.query;
-        if !self.nots.is_empty() {
+        if self.algebraic() || !self.nots.is_empty() {
             return Vec::new();
         }
         // Facts are tried in order of how rarely their column rises: a
@@ -691,7 +819,7 @@ impl<L: Label> Plan<L> {
             .atoms
             .iter()
             .zip(&self.ops)
-            .filter(|(atom, _)| matches!(atom, Atom::Node { .. }))
+            .filter(|(atom, _)| matches!(atom, Atom::Node { .. } | Atom::Algebraic { .. }))
             .map(|(_, &op)| op)
     }
 
@@ -719,11 +847,46 @@ impl<L: Label> Plan<L> {
     ) -> Option<Self> {
         let (steps, height, nots) = Self::order(&query, bound, known, skip)?;
         Some(Self {
+            selector_orders: if query
+                .guards
+                .iter()
+                .any(|guard| matches!(guard, Guard::ClassLe(..)))
+            {
+                query
+                    .atoms
+                    .iter()
+                    .map(|atom| {
+                        let Atom::Algebraic { selectors, .. } = atom else {
+                            return Vec::new();
+                        };
+                        let unique_slot = |var| {
+                            let mut slots =
+                                selectors.iter().enumerate().filter(|(_, v)| **v == var);
+                            let slot = slots.next()?.0;
+                            slots.next().is_none().then_some(slot)
+                        };
+                        query
+                            .guards
+                            .iter()
+                            .filter_map(|guard| {
+                                let Guard::ClassLe(a, b) = guard else {
+                                    return None;
+                                };
+                                Some((unique_slot(*a)?, unique_slot(*b)?))
+                            })
+                            .collect()
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
             ops: query
                 .atoms
                 .iter()
                 .map(|atom| match atom {
-                    Atom::Node { template, .. } => template.op_key(),
+                    Atom::Node { template, .. } | Atom::Algebraic { template, .. } => {
+                        template.op_key()
+                    }
                     Atom::Holds { op, .. } => *op,
                     _ => 0,
                 })
@@ -845,6 +1008,13 @@ impl<L: Label> Plan<L> {
                         }
                     }
                 }
+                Atom::Algebraic { selectors, .. } => {
+                    height = height.max(below);
+                    for &arg in selectors {
+                        bound[arg as usize] = true;
+                        depth[arg as usize] = below;
+                    }
+                }
                 Atom::Object { base, .. } => bound[*base as usize] = true,
                 _ => {}
             }
@@ -873,19 +1043,23 @@ impl<L: Label> Plan<L> {
         self.height
     }
 
-    /// Whether the match depends on rows the root's downward cone does not
-    /// contain, so neither narrowing a round's roots to the change frontier nor
-    /// skipping a match with no new row of its own is licensed.
-    ///
-    /// Two shapes do this. A sideways atom sits in a sibling class sharing a
-    /// child, which no upward closure of the change log reaches from the root.
-    /// And a negated conjunction is read against the whole relation: what
-    /// satisfies it can change — a class placed nowhere in one round is placed
-    /// in the next — without anything in the match moving at all.
-    pub fn unbounded(&self) -> bool {
-        self.steps
+    /// Whether the plan reads a transitive algebraic region.
+    pub fn algebraic(&self) -> bool {
+        self.query
+            .atoms
             .iter()
-            .any(|step| matches!(step, Step::Parents { .. } | Step::Not(_)))
+            .any(|atom| matches!(atom, Atom::Algebraic { .. }))
+    }
+
+    /// Whether finite-height row deltas cannot cover every dependency.
+    /// Algebraic atoms read transitive regions; sideways atoms and negated
+    /// conjunctions can depend on rows outside the root's downward cone.
+    pub fn unbounded(&self) -> bool {
+        self.algebraic()
+            || self
+                .steps
+                .iter()
+                .any(|step| matches!(step, Step::Parents { .. } | Step::Not(_)))
             || self.nots.iter().any(Plan::unbounded)
     }
 
@@ -906,7 +1080,9 @@ impl<L: Label> Plan<L> {
             .iter()
             .find(|atom| atom.class() == self.query.root)
         {
-            Some(Atom::Node { template, .. }) => Some(template.op_key()),
+            Some(Atom::Node { template, .. } | Atom::Algebraic { template, .. }) => {
+                Some(template.op_key())
+            }
             _ => None,
         }
     }
@@ -915,6 +1091,7 @@ impl<L: Label> Plan<L> {
     ///
     /// `allowed(var, class)` prunes a binding the caller rejects — the hook for
     /// operand constraints instruction selection carries outside the query.
+    /// It receives only existing class bindings, never deferred remainders.
     /// When `only_new` is set, a match nothing of whose rows or facts the
     /// previous round touched is dropped: it existed a round earlier at a root
     /// that was searched then, so its head ran then.
@@ -969,6 +1146,7 @@ impl<L: Label> Plan<L> {
         eval.scan = scan;
         eval.old_below = fresh.1;
         eval.only_new = fresh.0
+            && !self.unbounded()
             && self
                 .query
                 .atoms
@@ -1131,6 +1309,8 @@ impl<L: Label> Plan<L> {
             pool: scratch.pool,
             fresh: 0,
             out: Matches::default(),
+            residuals: Vec::new(),
+            algebraic: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1197,6 +1377,9 @@ impl<L: Label> Plan<L> {
                     Atom::Node { template, args, .. } => {
                         eg.labels_matching(op, Some((template, args.len())), since, reads);
                     }
+                    Atom::Algebraic { template, .. } => {
+                        eg.labels_matching(op, Some((template, 2)), since, reads)
+                    }
                     Atom::Holds { .. } => eg.labels_matching(op, None, since, reads),
                     _ => {}
                 }
@@ -1208,7 +1391,10 @@ impl<L: Label> Plan<L> {
             .iter()
             .zip(&cache.tables[0])
             .any(|(atom, reads)| {
-                matches!(atom, Atom::Node { .. } | Atom::Holds { .. }) && reads.is_empty()
+                matches!(
+                    atom,
+                    Atom::Node { .. } | Atom::Algebraic { .. } | Atom::Holds { .. }
+                ) && reads.is_empty()
             });
     }
 
@@ -1252,7 +1438,8 @@ impl<L: Label> Plan<L> {
             }
             if !eval.only_new || eval.fresh > 0 {
                 let root = eval.bound[self.query.root as usize].unwrap_or(root);
-                eval.out.push(root, &eval.bound, &eval.scalars);
+                eval.out
+                    .push(root, &eval.bound, &eval.scalars, &eval.residuals);
             }
             return;
         };
@@ -1333,6 +1520,9 @@ impl<L: Label> Plan<L> {
             }
         }
         match atom {
+            Atom::Algebraic { .. } => {
+                self.algebraic_step(eval, root, index, index_of_atom, atom, class)
+            }
             Atom::Literal { value, .. } => self.literal(eval, root, index, value, class),
             Atom::Fact { column, value, .. } => {
                 self.fact(eval, root, index, *column, *value, class)
@@ -1375,6 +1565,110 @@ impl<L: Label> Plan<L> {
             Atom::Node { args, row, .. } => {
                 self.node(eval, root, index, index_of_atom, args, *row, class)
             }
+        }
+    }
+
+    fn algebraic_step(
+        &self,
+        eval: &mut Eval<'_, L>,
+        root: ClassId,
+        index: usize,
+        atom_index: usize,
+        atom: &Atom<L>,
+        class: ClassId,
+    ) {
+        let Atom::Algebraic {
+            template,
+            selectors,
+            remainder,
+            row,
+            associative,
+            commutative,
+            remainder_type,
+            ..
+        } = atom
+        else {
+            unreachable!()
+        };
+        let eg = eval.eg;
+        let allowed = eval.allowed;
+        let accepts = |var, class| {
+            if allowed.is_some_and(|allowed| !allowed(var, class)) {
+                return false;
+            }
+            self.query
+                .atoms
+                .iter()
+                .filter(|atom| atom.class() == var)
+                .all(|atom| match atom {
+                    Atom::Literal { value, .. } => {
+                        eg.const_of(class).is_some_and(|known| value.matches(known))
+                    }
+                    Atom::Fact { column, .. } => eg.fact(*column, class).is_some(),
+                    Atom::Node { template, args, .. } => eg.nodes(class).any(|node| {
+                        node.children().len() == args.len() && template.matches_template(node)
+                    }),
+                    _ => true,
+                })
+        };
+        let orders = self
+            .selector_orders
+            .get(atom_index)
+            .map_or(&[][..], Vec::as_slice);
+        let mut found = crate::algebraic::witnesses(
+            eval.eg,
+            class,
+            template,
+            selectors,
+            remainder.is_some(),
+            *associative,
+            *commutative,
+            row.is_some(),
+            &accepts,
+            orders,
+            eval.algebraic.entry((eval.plan, atom_index)).or_default(),
+        );
+        if row.is_none() {
+            found.sort_by_key(|found| (found.2.cost, found.0));
+            let mut seen = std::collections::BTreeSet::new();
+            found.retain(|(_, label, witness)| seen.insert((*label, witness.bindings.clone())));
+        }
+        for (found_row, label, witness) in found {
+            let mark = eval.trail.len();
+            let residual_mark = eval.residuals.len();
+            if selectors
+                .iter()
+                .zip(&witness.bindings)
+                .all(|(&var, class)| eval.bind_one(var, class.unwrap()))
+            {
+                if let Some(slot) = row {
+                    eval.scalars[*slot as usize] = found_row.0 as u64;
+                }
+                let typed = if let Some(slot) = remainder_type {
+                    if let Some(key) = eval.eg.node(found_row).type_key() {
+                        eval.scalars[*slot as usize] = key;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    true
+                };
+                if let Some(var) = remainder {
+                    eval.residuals.push(Residual {
+                        var: *var,
+                        label,
+                        expr: witness
+                            .residual
+                            .expect("a remainder query has a residual proof"),
+                    });
+                }
+                if typed {
+                    self.step(eval, root, index + 1);
+                }
+            }
+            eval.residuals.truncate(residual_mark);
+            eval.unbind(mark);
         }
     }
 
@@ -1608,6 +1902,8 @@ struct Eval<'a, L: Label> {
     /// How many rows and facts of the partial match the previous round touched.
     fresh: usize,
     out: Matches,
+    residuals: Vec<Residual>,
+    algebraic: std::collections::BTreeMap<(usize, usize), crate::algebraic::AlgebraicCache>,
 }
 
 impl<'a, L: Label> Eval<'a, L> {
@@ -1689,6 +1985,7 @@ impl<'a, L: Label> Eval<'a, L> {
                     Cmp::Ne => a != b,
                 }
             }
+            Guard::ClassLe(a, b) => self.bound[*a as usize] <= self.bound[*b as usize],
             Guard::Distinct(pairs) => !pairs
                 .iter()
                 .all(|&(a, b)| self.bound[a as usize] == self.bound[b as usize]),
@@ -1745,6 +2042,8 @@ impl<'a, L: Label> Eval<'a, L> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use crate::query::Nested;
     use crate::testing::Term;
@@ -1834,6 +2133,7 @@ mod tests {
             Atom::Unplaceable { .. } => eg.object_of(class).is_none(),
             Atom::Holds { op, .. } => eg.rows(class).any(|row| eg.node(row).op_key() == *op),
             Atom::Unknown { column, .. } => eg.fact(*column, class).is_none(),
+            Atom::Algebraic { .. } => panic!("brute matcher covers structural queries"),
             Atom::Node { template, args, .. } => eg.rows(class).any(|row| {
                 let children: Vec<ClassId> = eg.children(row).iter().map(|&c| eg.find(c)).collect();
                 if children.len() != args.len() || !template.matches_template(eg.node(row)) {
@@ -1876,6 +2176,28 @@ mod tests {
         let found = plan.search(&eg, [blocked, free], &|_, _| true, false, &NoExterns);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].root, free);
+    }
+
+    #[test]
+    fn class_order_guard_reads_bound_classes_without_algebraic_pushdown() {
+        let mut eg = Engine::new();
+        let a = eg.add(Term::leaf("a"));
+        let b = eg.add(Term::leaf("b"));
+        let ab = eg.add(Term::op("f", &[a, b]));
+        let ba = eg.add(Term::op("f", &[b, a]));
+        let aa = eg.add(Term::op("f", &[a, a]));
+        eg.rebuild();
+        let mut query = Query::tree(
+            3,
+            0,
+            vec![node(Term::op("f", &[ClassId(0), ClassId(0)]), &[1, 2], 0)],
+        );
+        query.guards.push(Guard::ClassLe(1, 2));
+        let found = Plan::compile(query).search(&eg, [ab, ba, aa], &|_, _| true, false, &NoExterns);
+        assert_eq!(
+            found.iter().map(|m| m.root).collect::<BTreeSet<_>>(),
+            BTreeSet::from([ab, aa])
+        );
     }
 
     /// A second root reached from an operand the first bound.

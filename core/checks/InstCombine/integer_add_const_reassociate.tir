@@ -1,4 +1,6 @@
 // RUN: tir opt --pass restructure-nodes,instcombine-nodes --verify %s | filecheck %s
+// RUN: tir interp %s -f add_split_constants --args=7,11 | filecheck %s --check-prefix=VALUE
+// RUN: tir opt --pass restructure-nodes,instcombine-nodes --verify %s | tir interp -f add_split_constants --args=7,11 | filecheck %s --check-prefix=VALUE
 
 module {
   %f8 = func.func @add_const_reassociate_8(%x: !i8, %y: !i8, %z: !i8) -> !i8 {
@@ -22,6 +24,22 @@ module {
     %r = addi %t, %b : !i64
     func.return %r
   }
+  %split = func.func @add_split_constants(%x: !i32, %y: !i32) -> !i32 {
+    %a = constant {value = 3} : !i32
+    %b = constant {value = 5} : !i32
+    %l = addi %x, %a : !i32
+    %r = addi %y, %b : !i32
+    %result = addi %l, %r : !i32
+    func.return %result
+  }
+  %permuted = func.func @add_permuted_constants(%x: !i8, %y: !i8) -> !i8 {
+    %a = constant {value = 3} : !i8
+    %b = constant {value = 5} : !i8
+    %l = addi %a, %x : !i8
+    %r = addi %b, %y : !i8
+    %result = addi %r, %l : !i8
+    func.return %result
+  }
   module_end
 }
 
@@ -37,3 +55,15 @@ module {
 // CHECK-NEXT: %[[C64_1:[0-9]+]] = constant {value = 8} : !i64
 // CHECK-NEXT: %[[R64:[0-9]+]] = addi %[[X64]], %[[C64_1]] : !i64
 // CHECK-NEXT: -> %[[R64]]
+
+// CHECK-LABEL: func.func @add_split_constants(%[[SPLIT_X:[0-9]+]]: !i32, %[[SPLIT_Y:[0-9]+]]: !i32)
+// CHECK-NEXT: %[[SPLIT_SUM:[0-9]+]] = addi %[[SPLIT_X]], %[[SPLIT_Y]] : !i32
+// CHECK-NEXT: %[[SPLIT_C:[0-9]+]] = constant {value = 8} : !i32
+// CHECK-NEXT: %[[SPLIT_R:[0-9]+]] = addi %[[SPLIT_SUM]], %[[SPLIT_C]] : !i32
+// CHECK-NEXT: -> %[[SPLIT_R]]
+// CHECK-LABEL: func.func @add_permuted_constants(%[[PERM_X:[0-9]+]]: !i8, %[[PERM_Y:[0-9]+]]: !i8)
+// CHECK-NEXT: %[[PERM_SUM:[0-9]+]] = addi %[[PERM_X]], %[[PERM_Y]] : !i8
+// CHECK-NEXT: %[[PERM_C:[0-9]+]] = constant {value = 8} : !i8
+// CHECK-NEXT: %[[PERM_R:[0-9]+]] = addi %[[PERM_SUM]], %[[PERM_C]] : !i8
+// CHECK-NEXT: -> %[[PERM_R]]
+// VALUE: !i32 26

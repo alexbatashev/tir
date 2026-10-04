@@ -1,4 +1,6 @@
 // RUN: tir opt --pass restructure-nodes,instcombine-nodes --verify %s | filecheck %s
+// RUN: tir interp %s -f mul_split_constants --args=7,11 | filecheck %s --check-prefix=VALUE
+// RUN: tir opt --pass restructure-nodes,instcombine-nodes --verify %s | tir interp -f mul_split_constants --args=7,11 | filecheck %s --check-prefix=VALUE
 
 module {
   %f8 = func.func @mul_const_reassociate_8(%x: !i8, %y: !i8, %z: !i8) -> !i8 {
@@ -22,6 +24,14 @@ module {
     %r = muli %t, %b : !i64
     func.return %r
   }
+  %split = func.func @mul_split_constants(%x: !i32, %y: !i32) -> !i32 {
+    %a = constant {value = 3} : !i32
+    %b = constant {value = 5} : !i32
+    %l = muli %x, %a : !i32
+    %r = muli %y, %b : !i32
+    %result = muli %l, %r : !i32
+    func.return %result
+  }
   module_end
 }
 
@@ -37,3 +47,10 @@ module {
 // CHECK-NEXT: %[[C64_1:[0-9]+]] = constant {value = 15} : !i64
 // CHECK-NEXT: %[[R64:[0-9]+]] = muli %[[X64]], %[[C64_1]] : !i64
 // CHECK-NEXT: -> %[[R64]]
+
+// CHECK-LABEL: func.func @mul_split_constants(%[[SPLIT_X:[0-9]+]]: !i32, %[[SPLIT_Y:[0-9]+]]: !i32)
+// CHECK-NEXT: %[[SPLIT_PRODUCT:[0-9]+]] = muli %[[SPLIT_X]], %[[SPLIT_Y]] : !i32
+// CHECK-NEXT: %[[SPLIT_C:[0-9]+]] = constant {value = 15} : !i32
+// CHECK-NEXT: %[[SPLIT_R:[0-9]+]] = muli %[[SPLIT_PRODUCT]], %[[SPLIT_C]] : !i32
+// CHECK-NEXT: -> %[[SPLIT_R]]
+// VALUE: !i32 1155
