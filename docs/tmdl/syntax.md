@@ -278,6 +278,11 @@ instruction Add for [RV32I, RV64I] : RType {
   `extract`, `width`, `clamp`, `log2Ceil`, `load`/`store` (memory), and `trap(cause)` —
   raise a synchronous exception with a constant cause code (e.g. RISC-V
   `ecall`/`ebreak`); the simulator routes it to its exception callback.
+- `undefined(width)` is a value the architecture leaves undefined, such as the
+  x86 carry flag after a shift by more than the operand width. Each occurrence
+  is its own value. Nothing may be concluded from one: equivalence checking
+  accepts any value the reference model produces there, and instruction
+  selection has no pattern that matches it.
 - Floating-point builtins accept an optional final rounding-mode argument:
   `fadd(a, b, rm)`, `fsub(a, b, rm)`, `fmul(a, b, rm)`, `fdiv(a, b, rm)`,
   `fma(a, b, c, rm)`, `sqrt(a, rm)`, `fcvt(a, exponent, mantissa, rm)`,
@@ -391,6 +396,8 @@ encoding {
 that produces bits can stand where a field does: a nested concatenation, a call
 to a `fn` helper, or an `if` whose arms differ in width. A nested concatenation
 is a group the manual draws as whole encoding units, so it must fill them.
+A group that is the whole encoding, as in `encoding { if c { () } else { (a, b) } }`,
+is the field list itself and takes any width the list could.
 
 ```
 fn rex(w: bits<1>, reg: bits<4>, rm: bits<4>) {
@@ -416,10 +423,12 @@ The rules a set of shapes must satisfy:
 
 - A condition is `bits<1>` and is decided from the instruction's own operands
   and parameters; nothing else is in hand when the encoder runs.
+  It tests an operand, or a slice of one, against a constant, or two operands
+  of one width against each other (`rt == rt2`).
 - At least one nonempty shape is reachable. A branch that produces no bits
   gives those operand values no encoding. This can exclude operand pairs that
   the ISA cannot encode, such as x86 high-byte registers paired with registers
-  that require REX. An operand its `#[align]`/`#[nonzero]` constraints leave no
+  that require REX, or an ARM load pair that names one register twice. An operand its `#[align]`/`#[nonzero]` constraints leave no
   value for makes all shapes unreachable.
 - Shapes are decode-distinguishable: any two differ in width or in some bit
   both of them fix, so decoding stays a function of the instruction word.

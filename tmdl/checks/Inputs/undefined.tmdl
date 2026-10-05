@@ -1,0 +1,38 @@
+// `undefined(width)` in an instruction behavior. Consumed by
+// SmtLib/undefined.tmdl (emit-smtlib).
+
+isa UIsa {
+    param XLEN: Integer = 64;
+}
+
+register_class PC for [UIsa] {
+    param ENCODING_LEN: Integer = 0;
+    param WIDTH: Integer = self.XLEN;
+
+    registers {
+        pc => { traits = [program_counter] },
+    }
+}
+
+register_class GPR for [UIsa] {
+    param ENCODING_LEN: Integer = 5;
+    param WIDTH: Integer = self.XLEN;
+
+    registers {
+        x0("zero") => { traits = [hardwired_zero] },
+        x1..x31("r{}") => {                         },
+    }
+}
+
+instruction Scan for [UIsa] {
+    param MNEMONIC: String = "scan";
+    param OPCODE: bits<7> = 0b0110011;
+
+    operands { rd: GPR, rs1: GPR, rs2: GPR, }
+    encoding { rs2, rs1, 0b000, rd, OPCODE }
+    asm { "{self.MNEMONIC} {rd}, {rs1}, {rs2}" }
+
+    behavior {
+        rd = if rs1 == zext(0b0, self.XLEN) { undefined(self.XLEN) } else { rs1 + rs2 };
+    }
+}

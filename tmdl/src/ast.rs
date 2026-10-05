@@ -885,6 +885,9 @@ pub enum BuiltinFunction {
     FPToUI,
     /// `fp_flags(expr)`: the five IEEE exception flags of an explicitly rounded operation.
     FPFlags,
+    /// `undefined(width)`: a value the architecture leaves undefined. Every
+    /// occurrence is its own value; a consumer may rely on none of them.
+    Undefined,
     /// `todo()`: the instruction's semantics are not modeled. It suppresses
     /// instruction-selection rule generation (the op still exists, prints, and
     /// parses) and its `execute()` traps. For behaviors the TMDL expression
@@ -1929,6 +1932,13 @@ impl Call {
             | BuiltinFunction::FPToSI
             | BuiltinFunction::FPFlags
             | BuiltinFunction::FPToUI => self.lower_float_builtin(builtin, ctx),
+            BuiltinFunction::Undefined => {
+                assert!(self.arguments.len() == 1, "undefined requires 1 argument");
+                let width = self.arguments[0].lower_with_ctx(ctx);
+                let id = u64::try_from(ctx.graph.len()).expect("node count fits u64");
+                let id = ctx.add_int_const(tir_adt::APInt::new(64, id));
+                ctx.add_node(tir_symbolic::lang::SymKind::Undef, &[width, id])
+            }
             // `todo()` marks unmodeled semantics; rustgen suppresses selection-rule
             // and `execute()` lowering for such behaviors, so this is never reached.
             BuiltinFunction::Todo => {

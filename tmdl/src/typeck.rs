@@ -528,6 +528,7 @@ fn infer_call<'a>(
         }
         ast::Expr::BuiltinFunction(ast::BuiltinFunction::SExt)
         | ast::Expr::BuiltinFunction(ast::BuiltinFunction::ZExt)
+        | ast::Expr::BuiltinFunction(ast::BuiltinFunction::Undefined)
         | ast::Expr::BuiltinFunction(ast::BuiltinFunction::Load)
         | ast::Expr::BuiltinFunction(ast::BuiltinFunction::LoadReserved) => {
             for arg in &call.arguments {

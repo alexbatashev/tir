@@ -2209,6 +2209,7 @@ where
                 "uitofp" => Some(BuiltinFunction::UIToFP),
                 "fptosi" => Some(BuiltinFunction::FPToSI),
                 "fptoui" => Some(BuiltinFunction::FPToUI),
+                "undefined" => Some(BuiltinFunction::Undefined),
                 "todo" => Some(BuiltinFunction::Todo),
                 _ => None,
             }

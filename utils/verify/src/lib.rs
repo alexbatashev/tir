@@ -372,14 +372,22 @@ impl Verifier {
             tasks.push(task);
         }
         let queue: Arc<BatchQueue> = Arc::new(Mutex::new(Vec::new()));
-        executor::start_multi(
-            self.threads,
-            Some(self.timeout_seconds),
-            tasks,
-            shared,
-            queue.clone(),
-            &batch_collector,
-        );
+        // The evaluator panics on some models (a symbolic 128-bit value used
+        // as an integer). The words it took down have no trace, which the
+        // caller reports like any other failed execution.
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            executor::start_multi(
+                self.threads,
+                Some(self.timeout_seconds),
+                tasks,
+                shared,
+                queue.clone(),
+                &batch_collector,
+            )
+        }));
+        if run.is_err() {
+            return Ok(HashMap::new());
+        }
         let mut traces: HashMap<u128, Vec<Vec<TraceEvent>>> = HashMap::new();
         let mut failed = HashSet::new();
         for result in std::mem::take(&mut *queue.lock().unwrap()) {

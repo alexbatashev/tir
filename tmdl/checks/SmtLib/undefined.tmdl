@@ -1,0 +1,9 @@
+// SMT-LIB lowering of `undefined(width)`: a declared constant, free in the
+// instruction's body, so a query decides what "any value" means. Do not
+// regenerate with update_checks.py.
+
+// RUN: tmdlc --action=emit-smtlib --dialect=uisa --isa=UIsa --output=- %S/../Inputs/undefined.tmdl | filecheck %s
+
+// CHECK: (declare-const [[UNDEF:undef_[0-9]+_64]] (_ BitVec 64))
+// CHECK: (define-fun execute_scan
+// CHECK-NEXT: (write_gpr st rd (ite (= (read_gpr st rs1) ((_ zero_extend 63) (_ bv0 1))) [[UNDEF]] (bvadd (read_gpr st rs1) (read_gpr st rs2)))))

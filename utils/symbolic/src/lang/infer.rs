@@ -206,6 +206,9 @@ pub fn infer_types<V, A>(
                 }
             }
             SymKind::Clamp | SymKind::Log2Ceil | SymKind::Sqrt => child(0),
+            SymKind::Undef => const_u64(graph, children[0])
+                .map(|width| SemType::bits(width as u32))
+                .unwrap_or_else(|| inference.fresh_bits()),
             SymKind::SqrtRound => {
                 let ty = inference.fresh_float();
                 inference.unify(&child(0), &ty)?;

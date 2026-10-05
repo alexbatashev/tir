@@ -12,19 +12,20 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def check(isa, instructions, unsupported=()):
+def check(isa, instructions, expected_failures=()):
     result = subprocess.run(
         ["cargo", "xtask", "verify", isa],
         cwd=ROOT,
-        env={**os.environ, "TIR_VERIFY_SMT_FILTER": ",".join([*instructions, *unsupported])},
+        env={**os.environ, "TIR_VERIFY_SMT_FILTER": ",".join([*instructions, *expected_failures])},
         check=False,
     )
     assert result.returncode == 0, f"{isa} verification failed"
     report = json.loads((ROOT / f"target/verify/smt/{isa}/report.json").read_text())
     checked = {entry["instruction"] for entry in report["instructions"]}
     assert checked == set(instructions), f"unchecked instructions: {set(instructions) - checked}"
-    skipped = {entry.split()[0] for entry in report["unsupported"]}
-    assert skipped == set(unsupported), f"unexpected unsupported instructions: {skipped}"
+    assert not report["unsupported"], f"unsupported instructions: {report['unsupported']}"
+    failing = {entry.split()[0] for entry in report["expected_failures"]}
+    assert failing == set(expected_failures), f"unexpected expected failures: {failing}"
     assert report["verified"] > 0
     assert report["failed"] == 0
     assert report["unknown"] == 0
@@ -70,7 +71,7 @@ if __name__ == "__main__":
             "movsw", "cmpsq", "shlimm8", "sarcl16", "rorimm",
             "imul16memorysourcedisp", "imul32memorysourcedisp", "imulmemorysourcedisp",
         ],
-        unsupported=[
+        expected_failures=[
             "andn", "btr", "rorx", "unsigneddivide32",
             "blsr", "blsr32", "blsmsk32", "bzhi", "mulx32", "shrx32",
             "pushf", "signeddivide32",

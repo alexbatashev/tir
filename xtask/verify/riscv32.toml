@@ -34,3 +34,21 @@ map = [
   { sail = "fcsr", bits = [7, 5], class = "frm", index = 2 },
   { sail = "fcsr", bits = [31, 8] },
 ]
+
+[[expected_failures]]
+reason = "compressed extension disabled in the Sail configuration"
+instructions = [
+  "caddimm4spn", "cloadword", "cfloaddouble", "cfloadword", "cstoreword",
+  "cfstoredouble", "cfstoreword", "caddimm", "cloadimm", "cloadupperimm",
+  "caddimm16sp", "cshiftrightlogicalimm", "cshiftrightarithmeticimm", "candimm",
+  "csub", "cxor", "cor", "cand", "cjumpandlink", "cjump", "cbrancheqzero",
+  "cbranchnoteqzero", "cshiftleftlogicalimm", "cloadwordsp", "cfloaddoublesp",
+  "cfloadwordsp", "cjumpreg", "cmove", "cjumpandlinkreg", "cadd", "cstorewordsp",
+  "cfstoredoublesp", "cfstorewordsp",
+]
+
+[[expected_failures]]
+reason = "terminating Sail trace omits architectural trap state"
+instructions = [
+  "envcall", "envbreak", "cenvbreak",
+]
