@@ -38,8 +38,9 @@ use std::sync::{LazyLock, Mutex, OnceLock};
 
 use smallvec::{SmallVec, smallvec};
 use tir_adt::APInt;
-use tir_relational::ClassId as Id;
-use tir_relational::{Atom, Cmp, ColumnId, Expr, Guard, HeadOp, LabelFill, Plan, Query, Source};
+use tir_egraph::ClassId as Id;
+use tir_egraph::{Atom, ColumnId, Guard, HeadOp, LabelFill, Plan, Query, Source};
+use tir_relational::{Cmp, Expr};
 
 pub(crate) mod pdl;
 
@@ -375,7 +376,7 @@ impl Axiom {
         index: usize,
         folds: &mut Vec<SymKind>,
         assume: Folding,
-    ) -> Option<(tir_relational::Rule<SemNode>, bool)> {
+    ) -> Option<(tir_egraph::Rule<SemNode>, bool)> {
         let mut low = Lowering::new(self, folds, assume);
         low.left(self);
         low.widths(self);
@@ -386,7 +387,7 @@ impl Axiom {
         let head = low.right(self)?;
         let assumed = low.assumed;
         Some((
-            tir_relational::Rule {
+            tir_egraph::Rule {
                 name: format!("axiom-{}", self.name),
                 plan: Plan::compile(Query {
                     vars: match_vars,
@@ -806,7 +807,7 @@ impl<'a> Interpretation<'a> {
     }
 }
 
-impl tir_relational::Externs<SemNode> for Interpretation<'_> {
+impl tir_egraph::Externs<SemNode> for Interpretation<'_> {
     fn call(&self, id: u32, _terms: &[&SemNode], args: &[u64], out: &mut [u64]) -> bool {
         match id {
             call::WIDTH_OF => match type_width(self.context, TypeId::from_number(args[0] as u32)) {

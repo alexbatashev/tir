@@ -2,8 +2,8 @@
 
 use tir_adt::{APFloat, APInt};
 
-use tir_relational::{Atom, HeadOp, LabelFill, NoExterns, Plan, Query, Rule};
-use tir_relational::{ClassId as Id, Engine, Label as ENode};
+use tir_egraph::{Atom, HeadOp, LabelFill, NoExterns, Plan, Query, Rule};
+use tir_egraph::{ClassId as Id, Engine, Label as ENode};
 
 #[derive(Debug, Clone)]
 pub(crate) enum Math {

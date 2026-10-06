@@ -4,8 +4,8 @@
 use std::collections::{HashMap, HashSet};
 
 use tir::sem::SymKind;
+use tir_egraph::ClassId as Id;
 use tir_pbqp::{self as pbqp, INF_COST, PbqpMatrix, PbqpProblem};
-use tir_relational::ClassId as Id;
 
 use super::problem::{Policy, RegionProblem};
 

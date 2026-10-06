@@ -8,11 +8,12 @@
 
 use smallvec::SmallVec;
 
-use super::engine::{CLASSES, Lists, OBJECTS};
-use super::query::{Externs, Field, Match, NoExterns, Plan};
-use crate::db::Database;
-use crate::query::{Expr, Scalar, Var};
-use crate::rule::{self as rel, Client, Head, Key, KeyOrder, Value};
+use tir_relational::Database;
+use tir_relational::query::{Expr, Scalar, Var};
+use tir_relational::rule::{self as rel, Client, Head, Key, KeyOrder, Value};
+
+use crate::engine::{CLASSES, Lists, OBJECTS};
+use crate::query::{Externs, Field, Match, NoExterns, Plan};
 use crate::{ClassId, Engine, Label, LabelId};
 
 /// A node a head builds: a template with scalars written into named fields.
@@ -255,7 +256,7 @@ impl<L: Label> Client<Lists, 1> for Run<'_, L> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::egraph::testing::Term;
+    use crate::testing::Term;
     use crate::{Atom, NoExterns, Query};
 
     /// `f(?1, ?2)` proves `f(?1, ?2) = g(?1)`.
@@ -322,10 +323,7 @@ mod tests {
             head: vec![HeadOp::RaiseObject {
                 key: 0,
                 base: 3,
-                offset: crate::Expr::Add(
-                    Box::new(crate::Expr::Scalar(1)),
-                    Box::new(crate::Expr::Scalar(2)),
-                ),
+                offset: Expr::Add(Box::new(Expr::Scalar(1)), Box::new(Expr::Scalar(2))),
             }],
             head_vars: 0,
             post_saturation: false,

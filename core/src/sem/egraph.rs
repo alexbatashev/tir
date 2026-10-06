@@ -8,7 +8,7 @@
 //! a semantic type is spelled as. What a *backend* makes of a class — a
 //! register's type, a low-bit view of one — stays with the backend.
 
-use tir_relational::{ClassId as Id, Engine};
+use tir_egraph::{ClassId as Id, Engine};
 
 use crate::builtin::{FloatType, IntegerType};
 use crate::sem::{FloatFormat, SemNode, SemPayload, SemType, SymKind, SymPayload};

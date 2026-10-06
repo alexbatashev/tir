@@ -1,4 +1,4 @@
-//! Equality saturation on `tir-relational`, over the workloads `fcc` produces
+//! Equality saturation on `tir-egraph`, over the workloads `fcc` produces
 //! while compiling real programs (see [`shared`]). The `egg` and `egglog`
 //! benchmarks run the same workloads on those engines.
 
@@ -8,8 +8,8 @@ use std::hint::black_box;
 use smallvec::SmallVec;
 use tir_adt::FxHasher;
 use tir_bench::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use tir_relational::{Atom, HeadOp, LabelFill, NoExterns, Plan, Query, Rule};
-use tir_relational::{ClassId as Id, Engine, Label as ENode};
+use tir_egraph::{Atom, HeadOp, LabelFill, NoExterns, Plan, Query, Rule};
+use tir_egraph::{ClassId as Id, Engine, Label as ENode};
 
 #[path = "workload.rs"]
 mod shared;

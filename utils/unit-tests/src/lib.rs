@@ -51,9 +51,9 @@ mod symbolic {
 }
 
 #[cfg(test)]
-mod relational {
-    mod egraph;
+mod egraph {
     mod egraph_pattern;
+    mod engine;
     mod rewrite_runner_extract;
     mod test_lang;
 }

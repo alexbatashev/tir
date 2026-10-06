@@ -12,8 +12,9 @@ use tir::{
         infer_types, template_node,
     },
 };
-use tir_relational::ClassId as Id;
-use tir_relational::{Atom, Cmp, ColumnId, Expr, Guard, Match, NoExterns, Plan, Query, Source};
+use tir_egraph::ClassId as Id;
+use tir_egraph::{Atom, ColumnId, Guard, Match, NoExterns, Plan, Query, Source};
+use tir_relational::{Cmp, Expr};
 
 use super::node::{class_register_type, is_memory_kind};
 use super::{ImmRange, OperandConstraint, RegisterRequirement};

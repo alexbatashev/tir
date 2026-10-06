@@ -1,5 +1,5 @@
 //! Dump a saturation's input as an engine-neutral workload, which the e-graph
-//! benchmarks under `utils/relational/benches` replay on every engine they
+//! benchmarks under `utils/egraph/benches` replay on every engine they
 //! compare. Off unless `TIR_SAT_DUMP` names a directory.
 //!
 //! The format keeps what any e-graph library can express and erases the rest. A
@@ -25,9 +25,8 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tir_relational::{
-    Atom, Cmp, ColumnId, Expr, Guard, HeadOp, Label as _, Rule, Scalar, Source, Step, Var,
-};
+use tir_egraph::{Atom, ColumnId, Guard, HeadOp, Label as _, Rule, Source};
+use tir_relational::{Cmp, Expr, Scalar, Step, Var};
 
 use crate::sem::node::field;
 use crate::sem::{Kind, SemEGraph, SemNode, SemPayload, SymPayload};

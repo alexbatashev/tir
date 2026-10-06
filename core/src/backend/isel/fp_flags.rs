@@ -53,7 +53,7 @@ pub(super) fn accepts(
                 && let Some(bound) = tir::sem::egraph::class_semantic_type(
                     context,
                     &fs.egraph,
-                    tir_relational::ClassId::from_raw(*class),
+                    tir_egraph::ClassId::from_raw(*class),
                 )
             {
                 tir::sem::TypeUnifier::default()
@@ -70,7 +70,7 @@ pub(super) fn accepts(
                     Some(SymPayload::SymbolId(class)) => tir::sem::egraph::class_semantic_type(
                         context,
                         &fs.egraph,
-                        tir_relational::ClassId::from_raw(*class),
+                        tir_egraph::ClassId::from_raw(*class),
                     ),
                     _ => None,
                 })

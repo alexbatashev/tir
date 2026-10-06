@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 /// operands allow, which may be well outside the reader's own region.
 type Memo = HashMap<Id, ValueId>;
 
-use tir_relational::{ClassId as Id, Extraction};
+use tir_egraph::{ClassId as Id, Extraction};
 
 use super::{Driver, Node, Prov, SymKind, cost, state};
 use crate::analysis::AnalysisManager;

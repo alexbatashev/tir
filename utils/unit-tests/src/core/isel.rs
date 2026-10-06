@@ -1015,7 +1015,7 @@ module_end
 fn merged_value_classes_resolve_to_earliest_def() {
     use smallvec::smallvec;
     use tir::backend::isel::Theory;
-    use tir_relational::{Atom, ClassId as Id, HeadOp, Plan, Query};
+    use tir_egraph::{Atom, ClassId as Id, HeadOp, Plan, Query};
 
     let (context, module, region) = function(
         r#"module {
@@ -1042,7 +1042,7 @@ module_end
             row: None,
         }
     };
-    let union_mul_add = tir_relational::Rule {
+    let union_mul_add = tir_egraph::Rule {
         name: "mul-equals-add".to_string(),
         plan: Plan::compile(Query::tree(
             4,
@@ -1111,7 +1111,7 @@ module_end
 fn instances_reading_each_other_in_a_cycle_are_not_selected() {
     use smallvec::smallvec;
     use tir::backend::isel::Theory;
-    use tir_relational::{Atom, ClassId as Id, HeadOp, Plan, Query};
+    use tir_egraph::{Atom, ClassId as Id, HeadOp, Plan, Query};
 
     let (context, module, region) = function(
         r#"module {
@@ -1136,7 +1136,7 @@ module_end
             row: None,
         }
     };
-    let cancel = tir_relational::Rule {
+    let cancel = tir_egraph::Rule {
         name: "add-then-sub-cancels".to_string(),
         plan: Plan::compile(Query::tree(
             4,
@@ -1187,7 +1187,7 @@ module_end
 fn a_region_with_a_valid_cover_keeps_it_when_another_needs_the_search() {
     use smallvec::smallvec;
     use tir::backend::isel::Theory;
-    use tir_relational::{Atom, ClassId as Id, HeadOp, Plan, Query};
+    use tir_egraph::{Atom, ClassId as Id, HeadOp, Plan, Query};
 
     let (context, module, region) = function(
         r#"module {
@@ -1219,7 +1219,7 @@ module_end
             row: None,
         }
     };
-    let cancel = tir_relational::Rule {
+    let cancel = tir_egraph::Rule {
         name: "add-then-sub-cancels".to_string(),
         plan: Plan::compile(Query::tree(
             4,

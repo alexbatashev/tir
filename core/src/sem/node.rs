@@ -13,7 +13,7 @@
 use std::hash::{Hash, Hasher};
 
 use tir_adt::{APInt, FxHasher};
-use tir_relational::{ClassId as Id, Label as ENode};
+use tir_egraph::{ClassId as Id, Label as ENode};
 
 use crate::attributes::{AttributeValue, NamedAttribute};
 use crate::sem::{SymKind, SymPayload};

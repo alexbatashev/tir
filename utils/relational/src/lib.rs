@@ -19,13 +19,11 @@
 //! least-cost fold a client reads a solution off with. They name tables,
 //! columns and cells, and ask their client for whatever means more than that.
 //!
-//! The e-graph is one such client: [`Engine`], its rule front end ([`Query`],
-//! [`Rule`]) and [`Extraction`].
+//! The e-graph is one such client and lives in its own crate, `tir-egraph`.
 
 mod column;
 mod csr;
 mod db;
-mod egraph;
 pub mod extract;
 pub mod query;
 pub mod rule;
@@ -37,7 +35,6 @@ mod unionfind;
 pub use column::{Column, Fact, Join};
 pub use csr::Csr;
 pub use db::{Database, Groups, LatticeId, Marks, SpaceId, Stats};
-pub use egraph::*;
 pub use query::{Cmp, Expr, Scalar, Step, Var};
 pub use telemetry::{RoundStats, Timer, report_saturation};
 

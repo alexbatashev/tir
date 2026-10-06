@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use tir_relational::{ClassId as Id, Engine};
+use tir_egraph::{ClassId as Id, Engine};
 
 use crate::analysis::effects::{observed_state, produced_state};
 use crate::sem::egraph::{minimal_unsigned_apint, type_width};

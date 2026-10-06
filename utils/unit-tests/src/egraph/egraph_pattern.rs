@@ -3,8 +3,8 @@
 //! caller prunes with.
 
 use tir_adt::APInt;
-use tir_relational::{Atom, ClassId, NoExterns, Plan, Query};
-use tir_relational::{ClassId as Id, Engine, Label as ENode};
+use tir_egraph::{Atom, ClassId, NoExterns, Plan, Query};
+use tir_egraph::{ClassId as Id, Engine, Label as ENode};
 
 use super::test_lang::*;
 

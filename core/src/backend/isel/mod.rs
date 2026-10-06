@@ -5,7 +5,7 @@
 //! rewrites the vocabulary owns ([`tir::sem::rewrites`]), and matched *per
 //! region* while traversing the entry-fact scopes the region nesting spells —
 //! by the target's instruction patterns ([`pattern`]), e-matched by the shared
-//! [`tir_relational`] engine. What each region offers is frozen into the
+//! [`tir_egraph`] engine. What each region offers is frozen into the
 //! function's selection problem ([`problem`]) before its scope closes. A PBQP
 //! cover over e-classes ([`cover`]) is the incumbent assignment; a bounded
 //! search ([`search`]) may replace it with a cheaper one or construct one where
@@ -40,7 +40,7 @@ use tir::{
     },
 };
 use tir_adt::APInt;
-use tir_relational::{ClassId as Id, Label as ENode};
+use tir_egraph::{ClassId as Id, Label as ENode};
 
 use crate::passes::destructure::{
     ControlId, ControlKind, DemandDomainId, RecoveryError, RecoveryPlan,
@@ -53,7 +53,7 @@ pub use rules::{
     ResultRegSpec, RuleSpec, build_rules,
 };
 pub use tir::sem::{SaturationLimits, SemEGraph, SemNode, SemPayload, Theory};
-pub use tir_relational::Match as IselMatch;
+pub use tir_egraph::Match as IselMatch;
 
 use builder::{ControlSlot, SemDagBuilder};
 use cover::{

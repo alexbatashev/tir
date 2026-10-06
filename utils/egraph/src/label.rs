@@ -172,8 +172,8 @@ impl<L: Label> Labels<L> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::testing::Term;
     use super::*;
+    use crate::testing::Term;
 
     #[test]
     fn equal_labels_share_an_id_whatever_their_children() {

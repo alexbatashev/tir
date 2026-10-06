@@ -1,8 +1,7 @@
 use smallvec::{SmallVec, smallvec};
-use tir_relational::{
-    Atom, Cmp, ColumnId, Expr, Externs, Guard, HeadOp, LabelFill, Plan, Query, Source,
-};
-use tir_relational::{ClassId as Id, Engine, Label as ENode};
+use tir_egraph::{Atom, ColumnId, Externs, Guard, HeadOp, LabelFill, Plan, Query, Source};
+use tir_egraph::{ClassId as Id, Engine, Label as ENode};
+use tir_relational::{Cmp, Expr};
 
 use super::seed::Seeded;
 use super::state;
@@ -146,7 +145,7 @@ pub type EmitFn =
     Box<dyn Fn(&Context, &[ValueId], TypeId) -> (Box<dyn crate::Operation>, ValueId) + Send + Sync>;
 
 pub struct Ruleset {
-    pub rewrites: Vec<tir_relational::Rule<Node>>,
+    pub rewrites: Vec<tir_egraph::Rule<Node>>,
     pub emits: Vec<Option<EmitFn>>,
     /// What the rules' guards ask the IR.
     pub interpretation: Interpretation,
@@ -163,7 +162,7 @@ impl Ruleset {
         }
     }
 
-    fn push_query(&mut self, rule: tir_relational::Rule<Node>, emit: Option<EmitFn>) {
+    fn push_query(&mut self, rule: tir_egraph::Rule<Node>, emit: Option<EmitFn>) {
         self.rewrites.push(rule);
         self.emits.push(emit);
     }
@@ -294,7 +293,7 @@ fn fold_templates(eg: &Engine<Node>) -> Vec<Node> {
 /// An op every operand of which is a known constant is that constant. What the
 /// value is comes from the op's own [`ConstantFold`]; what the rule reads is the
 /// matched row and its operands' constant facts, and nothing else.
-fn const_fold(template: &Node) -> tir_relational::Rule<Node> {
+fn const_fold(template: &Node) -> tir_egraph::Rule<Node> {
     let arity = template.children().len() as u32;
     // Variables: 0 the root, 1..=arity its operands, then the folded class.
     let operands: SmallVec<[u32; 4]> = (1..=arity).collect();
@@ -327,7 +326,7 @@ fn const_fold(template: &Node) -> tir_relational::Rule<Node> {
         args: SmallVec::new(),
         out: smallvec![Scalars::VALUE, Scalars::WIDTH, Scalars::TY],
     });
-    tir_relational::Rule {
+    tir_egraph::Rule {
         name: "const-fold".into(),
         plan: Plan::compile(Query {
             vars: arity + 2,
@@ -377,11 +376,11 @@ fn gamma_arities(eg: &Engine<Node>) -> Vec<usize> {
 /// when none does. Reading the decision as a boolean holds only for a two-armed
 /// `if`, whose case values are exactly `1` and the default; a switch names its own,
 /// and `case 0` is its first arm rather than the one no case matched.
-fn decided_gamma(arity: usize) -> tir_relational::Rule<Node> {
+fn decided_gamma(arity: usize) -> tir_egraph::Rule<Node> {
     let arity = arity as u32;
     // Variables: 0 the root, 1 the decision, 2.. the arms.
     let args: SmallVec<[u32; 4]> = (1..=arity).collect();
-    tir_relational::Rule {
+    tir_egraph::Rule {
         name: "gamma-decided".into(),
         plan: Plan::compile(Query {
             vars: arity + 1,
@@ -494,11 +493,11 @@ fn cmp_complement(
     context: &Context,
     predicate: Predicate,
     complement: Predicate,
-) -> tir_relational::Rule<Node> {
+) -> tir_egraph::Rule<Node> {
     // Variables: 0 the settled comparison, 1 and 2 its operands, 3 the
     // complement, 4 the constant the head mints.
     let operands = vec![Id::from_raw(1), Id::from_raw(2)];
-    tir_relational::Rule {
+    tir_egraph::Rule {
         name: "cmp-complement".into(),
         plan: Plan::compile(Query {
             vars: 5,

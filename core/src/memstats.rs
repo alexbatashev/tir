@@ -8,7 +8,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use tir_relational::{Engine, Label as ENode};
+use tir_egraph::{Engine, Label as ENode};
 
 static FORCED: AtomicBool = AtomicBool::new(false);
 static PASS_TOTALS: Mutex<Vec<(&'static str, i64)>> = Mutex::new(Vec::new());

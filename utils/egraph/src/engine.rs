@@ -3,12 +3,12 @@ use std::marker::PhantomData;
 
 use smallvec::SmallVec;
 
-use super::label::Labels;
-use crate::column::Join;
-use crate::db::{Database, LatticeId, SpaceId, Stats};
-use crate::query::Resolution;
-use crate::saturate::Caches;
-use crate::store::{Repair, Table};
+use tir_relational::query::Resolution;
+use tir_relational::saturate::Caches;
+use tir_relational::store::{Repair, Table};
+use tir_relational::{Database, Join, LatticeId, SpaceId, Stats};
+
+use crate::label::Labels;
 use crate::{ClassId, ColumnId, FxHashMap, Label, LabelId, RowId};
 
 /// Empty link in an intrusive list.
@@ -480,7 +480,7 @@ impl<L: Label> Engine<L> {
         lists.head.push(row);
         lists.tail.push(row);
         lists.size.push(1);
-        if crate::trace_enabled() {
+        if tir_relational::trace_enabled() {
             eprintln!("A {} {:?} {:?}", class, node, &key[1..]);
         }
         self.node.push(node);
@@ -640,7 +640,8 @@ impl<L: Label> Engine<L> {
     }
 
     /// Whether `class`'s value in `column` rose during the round the last
-    /// [`Self::take_changed`] closed — the fact-level [`Self::row_is_new`].
+    /// [`Self::take_changed`] closed: the fact-level counterpart of a row in
+    /// [`Groups::new_rows`](tir_relational::Groups::new_rows).
     pub fn fact_is_new(&self, column: ColumnId, class: ClassId) -> bool {
         self.db.is_new(lattice(column), class.0)
     }
@@ -804,8 +805,8 @@ impl<L: Label> Iterator for Rows<'_, L> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::testing::Term;
     use super::*;
+    use crate::testing::Term;
 
     #[test]
     fn commutative_operands_keep_the_order_they_were_written_in() {

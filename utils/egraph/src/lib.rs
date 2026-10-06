@@ -1,9 +1,15 @@
-//! The e-graph, a client of the [`Database`](crate::Database). Classes are one
-//! id space; each label is a table from child classes to the class the node
-//! belongs to, so hash-consing is a key lookup, congruence is the table's
-//! functional dependency, and a rewrite's left-hand side is a join. Rewrites
-//! are conjunctive queries compiled onto the database's query IR; saturation
-//! is the database's semi-naive fixpoint over them.
+//! The e-graph, a client of the [`tir_relational`] engine that uses only its
+//! public API. Classes are one id space of the [`Database`]; each label is a
+//! table from child classes to the class the node belongs to, so hash-consing is
+//! a key lookup, congruence is the table's functional dependency, and a
+//! rewrite's left-hand side is a join. Rewrites are conjunctive queries compiled
+//! onto the database's query IR; saturation is the database's semi-naive
+//! fixpoint over them, and extraction its least-cost fold.
+//!
+//! [`Engine`] is the e-graph, [`Query`] and [`Rule`] the rule front end, and
+//! [`Extraction`] the cheapest node per class.
+//!
+//! [`Database`]: tir_relational::Database
 
 mod engine;
 mod extract;
@@ -22,6 +28,8 @@ pub use query::{
     Atom, ColumnId, Externs, Field, Guard, Match, Nested, NoExterns, Plan, Query, Source,
 };
 pub use rule::{HeadOp, LabelFill, Rule};
+
+type FxHashMap<K, V> = std::collections::HashMap<K, V, tir_adt::FxBuildHasher>;
 
 /// An e-class. Only [`Engine::find`] turns one into its canonical form.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

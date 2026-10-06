@@ -1,12 +1,13 @@
 //! Saturation of the e-graph: the database's semi-naive driver, with the
 //! e-graph choosing where a rule is searched by the operator its root binds.
 
-use super::engine::{CLASSES, Lists};
-use super::query::{Externs, Lookup, Plan};
-use super::rule::{Rule, Run, compile};
-use crate::query::Host;
-use crate::rule as rel;
-use crate::saturate::{Delta, Saturate, saturate};
+use tir_relational::query::Host;
+use tir_relational::rule as rel;
+use tir_relational::saturate::{Delta, Saturate, saturate};
+
+use crate::engine::{CLASSES, Lists};
+use crate::query::{Externs, Lookup, Plan};
+use crate::rule::{Rule, Run, compile};
 use crate::{ClassId, Engine, FxHashMap, Label};
 
 /// Δ_h grouped by operator: for each, the classes holding it paired with the

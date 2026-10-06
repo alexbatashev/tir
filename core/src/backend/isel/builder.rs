@@ -14,7 +14,7 @@ use tir::{
     },
 };
 use tir_adt::APInt;
-use tir_relational::ClassId as Id;
+use tir_egraph::ClassId as Id;
 
 use super::node::class_is_pure;
 use crate::analysis::effects::{observed_state, produced_state};

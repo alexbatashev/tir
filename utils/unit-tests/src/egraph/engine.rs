@@ -1,5 +1,5 @@
 use proptest::prelude::*;
-use tir_relational::{ClassId as Id, Engine, Label as ENode};
+use tir_egraph::{ClassId as Id, Engine, Label as ENode};
 
 use super::test_lang::*;
 
@@ -329,7 +329,7 @@ fn pop_restores_the_base_graph() {
         let base_size = g.total_size();
 
         g.push_context();
-        g.saturate_rules(&[comm], &tir_relational::NoExterns, 10, 1000);
+        g.saturate_rules(&[comm], &tir_egraph::NoExterns, 10, 1000);
         assert!(g.total_size() > base_size);
         g.pop_context();
 

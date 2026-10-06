@@ -59,6 +59,7 @@ pub fn fold(
     outside: &dyn Fn(u32) -> Option<u64>,
     mut members: impl FnMut(u32, &mut Members<'_>),
 ) -> Vec<Option<(u32, u64)>> {
+    let started = crate::telemetry::enabled().then(std::time::Instant::now);
     // Id -> slot, as a dense array: ids run to the high-water mark, absorbed
     // ones included, but the array is a fraction of what a probe per child
     // costs.
@@ -98,6 +99,9 @@ pub fn fold(
         {
             chosen[member.slot] = Some((member.tag, settled));
         }
+    }
+    if let Some(started) = started {
+        crate::telemetry::count_extract(started.elapsed());
     }
     chosen
 }

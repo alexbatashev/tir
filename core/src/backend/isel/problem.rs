@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 
 use tir::{OpId, RegionId, sem::SymKind};
 use tir_adt::APInt;
-use tir_relational::ClassId as Id;
+use tir_egraph::ClassId as Id;
 
 use super::builder::ControlSlot;
 use super::cover::{ChildDemand, PbqpIselAlternative, PbqpIselMatch};

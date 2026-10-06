@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use tir::{Context, OpId, TypeId, ValueId};
-use tir_relational::ClassId as Id;
+use tir_egraph::ClassId as Id;
 
 use super::{
     FunctionSelection, RuleMatch,

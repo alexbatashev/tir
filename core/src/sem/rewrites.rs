@@ -5,7 +5,7 @@
 
 use std::sync::OnceLock;
 
-use tir_relational::Rule;
+use tir_egraph::Rule;
 
 use super::SymKind;
 use super::axioms::pdl::axioms_from_pdl;
@@ -54,7 +54,7 @@ impl Theory {
     ) -> Self {
         use super::{SymPayload, template_node};
         use smallvec::smallvec;
-        use tir_relational::{Atom, HeadOp, LabelFill, Plan, Query};
+        use tir_egraph::{Atom, HeadOp, LabelFill, Plan, Query};
 
         let constant = |width, value| {
             template_node(
@@ -172,7 +172,7 @@ impl Default for SaturationLimits {
 
 /// Saturate `eg` with `theory` under `limits`, then run the theory's
 /// post-saturation rules once over the fixpoint. See
-/// [`tir_relational::Engine::saturate_rules`] for the round loop and for what a
+/// [`tir_egraph::Engine::saturate_rules`] for the round loop and for what a
 /// stop on a limit leaves behind.
 ///
 /// Round 0 starts from the change log rather than from the whole graph, so an

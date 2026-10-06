@@ -12,8 +12,11 @@
 
 use smallvec::SmallVec;
 
-use super::engine::{CLASSES, OBJECTS, lattice};
-use crate::query::{self as rel, Cmp, Expr, ExternId, Host, Out, Param, Resolution, Scalar, Var};
+use tir_relational::query::{
+    self as rel, Cmp, Expr, ExternId, Host, Out, Param, Resolution, Scalar, Var,
+};
+
+use crate::engine::{CLASSES, OBJECTS, lattice};
 use crate::{ClassId, Engine, Label, LabelId, RowId};
 
 /// A field of a label the language lets a rule read or fill.
@@ -583,9 +586,9 @@ impl<L: Label> Host for Lookup<'_, L> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Step;
-    use crate::egraph::testing::Term;
+    use crate::testing::Term;
     use proptest::prelude::*;
+    use tir_relational::Step;
 
     fn node(template: Term, args: &[Var], class: Var) -> Atom<Term> {
         Atom::Node {

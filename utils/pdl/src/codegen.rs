@@ -600,9 +600,9 @@ fn generate_rule(rule: &Rule, function: Ident, base: u32) -> Option<TokenStream>
     });
     let table = format_ident!("{function}_extern");
     Some(quote! {
-        fn #function(context: &Context, index: usize) -> tir_relational::Rule<Node> {
+        fn #function(context: &Context, index: usize) -> tir_egraph::Rule<Node> {
             let _ = (context, index);
-            tir_relational::Rule {
+            tir_egraph::Rule {
                 name: #rule_name.to_string(),
                 plan: Plan::compile(Query {
                     vars: #vars,

@@ -8,8 +8,9 @@
 //! [`pointer_derivation`] answers.
 
 use smallvec::smallvec;
-use tir_relational::ClassId as Id;
-use tir_relational::{Atom, Cmp, ColumnId, Expr, Guard, HeadOp, Plan, Query, Source};
+use tir_egraph::ClassId as Id;
+use tir_egraph::{Atom, ColumnId, Guard, HeadOp, Plan, Query, Source};
+use tir_relational::{Cmp, Expr};
 
 use crate::sem::{SemNode as Node, SymKind, node::field};
 
@@ -28,10 +29,10 @@ pub(super) const BYTES: usize = 1;
 /// so a chain of any length is read back, and an address the terms derive two
 /// ways at once is placed nowhere — which makes a law refuse it rather than pick
 /// whichever spelling it met first.
-pub(crate) fn pointer_derivation() -> tir_relational::Rule<Node> {
+pub(crate) fn pointer_derivation() -> tir_egraph::Rule<Node> {
     // Variables: 0 the sum, 1 the address it starts from, 2 the step, 3 the
     // object that address is in.
-    tir_relational::Rule {
+    tir_egraph::Rule {
         name: "pointer-derivation".into(),
         plan: Plan::compile(Query {
             vars: 4,
@@ -90,10 +91,10 @@ impl Derivation {
 /// store is a node of the state class the load names, and the two extents are
 /// one object, one offset and one byte count — the object through the shared
 /// variable, the rest through the guards.
-pub(crate) fn forward_load() -> tir_relational::Rule<Node> {
+pub(crate) fn forward_load() -> tir_egraph::Rule<Node> {
     // Variables: 0 the load, 1..4 its operands, 5 the object both address, 6..10
     // the store's operands.
-    tir_relational::Rule {
+    tir_egraph::Rule {
         name: "store-to-load".into(),
         plan: Plan::compile(Query {
             vars: 11,

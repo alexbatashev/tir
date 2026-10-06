@@ -1,6 +1,6 @@
 //! InstCombine: an equality-saturation simplifier. It seeds the function's
 //! regions ([`seed`], which reads gates off the ops' own interfaces) into a
-//! [`tir_relational`] e-graph of real IR values, saturates, extracts the cheapest
+//! [`tir_egraph`] e-graph of real IR values, saturates, extracts the cheapest
 //! form per value by [`crate::OpCost`], and rewrites what improved.
 //!
 //! Flow-sensitive facts ride the e-graph's scoped assumptions, both ways round. A
@@ -28,7 +28,7 @@ use seed::{LoopPorts, Port};
 
 use std::collections::HashMap;
 
-use tir_relational::{ClassId as Id, Engine};
+use tir_egraph::{ClassId as Id, Engine};
 
 use crate::{
     Context, OpId, ValueId,

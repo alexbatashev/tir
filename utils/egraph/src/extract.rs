@@ -1,4 +1,5 @@
-use crate::extract::fold;
+use tir_relational::extract::fold;
+
 use crate::{ClassId as Id, Engine, FxHashMap, Label as ENode, RowId};
 
 /// Cheapest representative e-node per e-class, chosen by [`Engine::extract_best`].
@@ -34,10 +35,9 @@ impl<'a, L: ENode> Extraction<'a, L> {
     ///
     /// A class's answer depends on its own rows and its children's costs, so
     /// `dirty` must name every class changed since `self` was taken, closed
-    /// upward over parents:
-    /// [`tir_relational::Engine::scope_dirty`] where `self` is the base
-    /// extraction, [`tir_relational::Engine::innermost_dirty`] where it is the
-    /// one the enclosing scope refreshed. A class outside it has the rows and
+    /// upward over parents: [`Engine::scope_dirty`] where `self` is the base
+    /// extraction, [`Engine::innermost_dirty`] where it is the one the enclosing
+    /// scope refreshed. A class outside it has the rows and
     /// the child costs it had when `self` was taken, so it keeps its answer.
     /// Ascending order makes the sweep the same scan a full pass takes over those
     /// classes, which is what keeps the cost ties broken the same way.
@@ -47,13 +47,8 @@ impl<'a, L: ENode> Extraction<'a, L> {
         dirty: &[Id],
         cost_of: impl Fn(Id, &L) -> u64,
     ) -> Extraction<'b, L> {
-        let started = crate::telemetry::enabled().then(std::time::Instant::now);
         let dirty: Vec<u32> = dirty.iter().map(|id| id.0).collect();
-        let extraction = eg.extraction(&dirty, Some(self), cost_of);
-        if let Some(started) = started {
-            crate::telemetry::count_extract(started.elapsed());
-        }
-        extraction
+        eg.extraction(&dirty, Some(self), cost_of)
     }
 
     fn cost(&self, id: Id) -> Option<u64> {
@@ -79,13 +74,8 @@ impl<L: ENode> Engine<L> {
     /// through its non-cyclic input. Scope-aware via
     /// [`Engine::classes`]/[`Engine::find`].
     pub fn extract_best(&self, cost_of: impl Fn(Id, &L) -> u64) -> Extraction<'static, L> {
-        let started = crate::telemetry::enabled().then(std::time::Instant::now);
         let classes: Vec<u32> = self.class_ids().map(|id| id.0).collect();
-        let extraction = self.extraction(&classes, None, cost_of);
-        if let Some(started) = started {
-            crate::telemetry::count_extract(started.elapsed());
-        }
-        extraction
+        self.extraction(&classes, None, cost_of)
     }
 
     /// Fold `classes` over their e-nodes in class-list order, a child outside

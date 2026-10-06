@@ -6,8 +6,8 @@ use tir::sem::{
 };
 use tir::{attributes::NamedAttribute, Context, TypeId};
 use tir_adt::APInt;
-use tir_relational::{Atom, ClassId, NoExterns, Plan, Query};
-use tir_relational::{ClassId as Id, Engine};
+use tir_egraph::{Atom, ClassId, NoExterns, Plan, Query};
+use tir_egraph::{ClassId as Id, Engine};
 
 /// A one-level query over `template`, binding its two operands.
 fn addi_plan(template: SemNode) -> Plan<SemNode> {

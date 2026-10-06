@@ -21,7 +21,7 @@ use tir::{
     sem::{SymKind, SymPayload},
 };
 use tir_adt::{APInt, Dag};
-use tir_relational::ClassId as Id;
+use tir_egraph::ClassId as Id;
 use tir_symbolic::bitblast::blast;
 use tir_symbolic::sat::{Lit, SatResult};
 

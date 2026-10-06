@@ -1,5 +1,5 @@
-use tir_relational::{Atom, HeadOp, NoExterns, Rule};
-use tir_relational::{ClassId as Id, Engine, Label as ENode};
+use tir_egraph::{Atom, HeadOp, NoExterns, Rule};
+use tir_egraph::{ClassId as Id, Engine, Label as ENode};
 
 use super::test_lang::*;
 
@@ -344,7 +344,7 @@ fn build(g: &mut Engine<Math>, e: &Expr) -> Id {
 /// of equivalent spellings, so they break a cost tie differently.
 fn extracted_cost(
     g: &Engine<Math>,
-    e: &tir_relational::Extraction<'_, Math>,
+    e: &tir_egraph::Extraction<'_, Math>,
     id: Id,
     seen: &mut Vec<Id>,
 ) -> Option<u64> {
@@ -436,7 +436,7 @@ proptest::proptest! {
 #[test]
 fn a_sideways_rule_still_fires_on_a_row_a_later_round_minted() {
     use smallvec::smallvec;
-    use tir_relational::{LabelFill, Plan, Query};
+    use tir_egraph::{LabelFill, Plan, Query};
 
     let mut g: Engine<Math> = Engine::new();
     let a = sym(&mut g, 0);
@@ -495,7 +495,7 @@ fn a_sideways_rule_still_fires_on_a_row_a_later_round_minted() {
     };
     assert!(relate.plan.unbounded());
 
-    g.saturate_rules(&[mint, relate], &tir_relational::NoExterns, 10, 1000);
+    g.saturate_rules(&[mint, relate], &tir_egraph::NoExterns, 10, 1000);
 
     let negated = g.add(Math::Neg([a]));
     assert!(g.connected(sum, negated));
