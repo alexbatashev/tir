@@ -105,6 +105,11 @@ impl Table {
         self.arity
     }
 
+    /// How many leading key columns hold cells [`Self::repair`] leaves alone.
+    pub fn plain_columns(&self) -> usize {
+        self.plain
+    }
+
     pub fn len(&self) -> usize {
         self.stamp.len()
     }

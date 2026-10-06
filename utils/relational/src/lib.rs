@@ -1,17 +1,26 @@
-//! The relational engine behind TIR's e-graph, in two layers.
+//! The relational engine behind TIR's e-graph, in three layers.
 //!
-//! [`store`] is the generic one: tables of `u32` cells whose key columns
-//! determine a value column, with the whole-column loops done by
-//! [`tir_adt::simd`]. It holds any graph and knows nothing about classes.
+//! [`store`] holds tables of `u32` cells whose key columns determine a value
+//! column, with the whole-column loops done by [`tir_adt::simd`]. A table holds
+//! any relation and knows nothing about what its cells name.
 //!
-//! [`Engine`] is the e-graph on top of it. Each label is a table from child
-//! classes to the class the node belongs to, so hash-consing is a key lookup,
-//! congruence is the table's functional dependency, and a rewrite's left-hand
-//! side is a join. Rewrites are conjunctive queries; saturation is the least
-//! fixpoint of the rule set.
+//! [`Database`] puts tables together with what their cells name: id spaces,
+//! each partitioned by a union-find, whose equalities it pushes into the tables
+//! on [`Database::canonicalize`], reporting the rows that came to share a key.
+//! It also keeps lattice columns of what an id is known to be, the epoch
+//! stamps and change log a semi-naive fixpoint reads, the indexes (rows grouped
+//! by a column, ids to the rows naming them) built once per change, and
+//! assumption scopes that snapshot all of it along with the client's own state.
+//!
+//! [`Engine`] is the e-graph, a client of the database. Classes are one id
+//! space; each label is a table from child classes to the class the node
+//! belongs to, so hash-consing is a key lookup, congruence is the table's
+//! functional dependency, and a rewrite's left-hand side is a join. Rewrites
+//! are conjunctive queries; saturation is the least fixpoint of the rule set.
 
 mod column;
 mod csr;
+mod db;
 mod engine;
 mod extract;
 mod label;
@@ -25,8 +34,9 @@ mod unionfind;
 #[cfg(test)]
 mod testing;
 
-pub use column::Fact;
+pub use column::{Column, Fact, Join};
 pub use csr::Csr;
+pub use db::{Database, Groups, LatticeId, Marks, SpaceId};
 pub use engine::{ClassRef, Engine, Rows, Stats};
 pub use extract::Extraction;
 pub use label::Label;

@@ -1,6 +1,4 @@
-use crate::ClassId;
-
-/// One partition over the class ids.
+/// One partition over the ids of a space.
 ///
 /// The survivor of a merge is the smaller id, so a set's representative is the
 /// minimum of its members — a function of the set, not of the order the merges
@@ -17,47 +15,47 @@ impl UnionFind {
         Self::default()
     }
 
-    /// Mint a class in a set of its own.
-    pub fn push(&mut self) -> ClassId {
+    /// Mint an id in a set of its own.
+    pub fn push(&mut self) -> u32 {
         let id = self.parent.len() as u32;
         self.parent.push(id);
-        ClassId(id)
+        id
     }
 
     pub fn len(&self) -> usize {
         self.parent.len()
     }
 
-    /// Grow to `len` classes, each new one in a set of its own.
+    /// Grow to `len` ids, each new one in a set of its own.
     pub fn extend_to(&mut self, len: usize) {
         let from = self.parent.len() as u32;
         self.parent.extend(from..len as u32);
     }
 
-    pub fn find(&self, id: ClassId) -> ClassId {
-        let mut cur = id.0;
+    pub fn find(&self, id: u32) -> u32 {
+        let mut cur = id;
         while self.parent[cur as usize] != cur {
             cur = self.parent[cur as usize];
         }
-        ClassId(cur)
+        cur
     }
 
     /// Merge the sets of `a` and `b`, returning the representative.
-    pub fn union(&mut self, a: ClassId, b: ClassId) -> ClassId {
+    pub fn union(&mut self, a: u32, b: u32) -> u32 {
         let (a, b) = (self.find(a), self.find(b));
         let (survivor, absorbed) = if a < b { (a, b) } else { (b, a) };
-        self.parent[absorbed.index()] = survivor.0;
+        self.parent[absorbed as usize] = survivor;
         survivor
     }
 
-    /// Point every class straight at its representative.
+    /// Point every id straight at its representative.
     pub fn flatten(&mut self) {
         for i in 0..self.parent.len() {
             self.parent[i] = self.parent[self.parent[i] as usize];
         }
     }
 
-    /// Class -> parent. After [`Self::flatten`], class -> representative.
+    /// Id -> parent. After [`Self::flatten`], id -> representative.
     pub fn parents(&self) -> &[u32] {
         &self.parent
     }
@@ -79,11 +77,11 @@ mod tests {
     #[test]
     fn a_set_is_represented_by_its_smallest_member() {
         let mut uf = seeded(4);
-        assert_eq!(uf.union(ClassId(3), ClassId(1)), ClassId(1));
-        assert_eq!(uf.union(ClassId(2), ClassId(0)), ClassId(0));
-        assert_eq!(uf.union(ClassId(3), ClassId(2)), ClassId(0));
+        assert_eq!(uf.union(3, 1), 1);
+        assert_eq!(uf.union(2, 0), 0);
+        assert_eq!(uf.union(3, 2), 0);
         for i in 0..4 {
-            assert_eq!(uf.find(ClassId(i)), ClassId(0));
+            assert_eq!(uf.find(i), 0);
         }
     }
 
@@ -95,9 +93,9 @@ mod tests {
             .map(|order| {
                 let mut uf = seeded(4);
                 for &(a, b) in order {
-                    uf.union(ClassId(a), ClassId(b));
+                    uf.union(a, b);
                 }
-                (0..4).map(|i| uf.find(ClassId(i)).0).collect()
+                (0..4).map(|i| uf.find(i)).collect()
             })
             .collect();
         assert_eq!(roots[0], roots[1]);
@@ -108,9 +106,9 @@ mod tests {
         fn flatten_maps_every_class_to_its_representative(pairs in prop::collection::vec((0u32..16, 0u32..16), 0..64)) {
             let mut uf = seeded(16);
             for (a, b) in pairs {
-                uf.union(ClassId(a), ClassId(b));
+                uf.union(a, b);
             }
-            let before: Vec<u32> = (0..16).map(|i| uf.find(ClassId(i)).0).collect();
+            let before: Vec<u32> = (0..16).map(|i| uf.find(i)).collect();
             uf.flatten();
             prop_assert_eq!(uf.parents(), &before[..]);
         }

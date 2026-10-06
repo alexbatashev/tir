@@ -9,9 +9,9 @@
 
 use smallvec::SmallVec;
 
-use crate::engine::{Candidates, Groups};
+use crate::engine::Candidates;
 use crate::store::Table;
-use crate::{ClassId, Engine, Label, LabelId};
+use crate::{ClassId, Engine, Groups, Label, LabelId};
 
 /// A class variable of a [`Query`], numbered from zero.
 pub type Var = u32;
@@ -663,7 +663,7 @@ impl<L: Label> Plan<L> {
                 Self::group(eg, &cache.tables[0], &anchor.steps);
             }
         }
-        let groups = eg.groups();
+        let groups = eg.db.groups();
         let scratch = std::mem::take(&mut cache.scratch);
         let mut eval = self.eval(eg, &groups, &cache.tables, None, externs, scratch);
         eval.scan = scan;
@@ -956,14 +956,14 @@ impl<L: Label> Plan<L> {
         // Each root canonical and once, in the order first given.
         let mut roots: SmallVec<[ClassId; 16]> =
             roots.into_iter().map(|root| eg.find(root)).collect();
-        let mut marks = eg.marks();
+        let mut marks = eg.db.marks(crate::engine::CLASSES);
         roots.retain(|root| marks.insert(root.index()));
         drop(marks);
         let scan = roots.len() <= SCAN_LIMIT;
         if !scan {
             self.prepare(eg, cache);
         }
-        let groups = eg.groups();
+        let groups = eg.db.groups();
         let scratch = std::mem::take(&mut cache.scratch);
         let mut eval = self.eval(eg, &groups, &cache.tables, allowed, externs, scratch);
         eval.scan = scan;
@@ -1006,10 +1006,10 @@ impl<L: Label> Plan<L> {
             .expect("an anchorable plan has a row at its root");
         // The scan reads the root's rows by label; the rest are looked up.
         for (slot, _) in &cache.tables[0][self.anchors()[root].atom] {
-            eg.prepare_group(*slot, 0);
+            eg.db.prepare_group(*slot, 0);
         }
         Self::group(eg, &cache.tables[0], &self.anchors()[root].steps[1..]);
-        let groups = eg.groups();
+        let groups = eg.db.groups();
         let scratch = std::mem::take(&mut cache.scratch);
         let mut eval = self.eval(eg, &groups, &cache.tables, None, externs, scratch);
         self.scan(&mut eval, root, false);
@@ -1039,12 +1039,12 @@ impl<L: Label> Plan<L> {
         // before any grouping is built.
         for anchor in self.anchors() {
             for (slot, _) in &cache.tables[0][anchor.atom] {
-                eg.prepare_new_rows(*slot);
+                eg.db.prepare_new_rows(*slot);
             }
         }
         let mut starts = 0;
         let live: SmallVec<[usize; 4]> = {
-            let groups = eg.groups();
+            let groups = eg.db.groups();
             (0..self.anchors().len())
                 .filter(|&anchor| {
                     let rows: usize = cache.tables[0][self.anchors()[anchor].atom]
@@ -1052,7 +1052,7 @@ impl<L: Label> Plan<L> {
                         .flat_map(|(slot, wanted)| {
                             wanted
                                 .iter()
-                                .map(|&label| groups.new_rows(*slot, label).len())
+                                .map(|&label| groups.new_rows_with(*slot, label.0).len())
                         })
                         .sum();
                     starts += rows;
@@ -1069,7 +1069,7 @@ impl<L: Label> Plan<L> {
                 Self::group(eg, &cache.tables[0], &self.anchors()[anchor].steps[1..]);
             }
         }
-        let groups = eg.groups();
+        let groups = eg.db.groups();
         let scratch = std::mem::take(&mut cache.scratch);
         let mut eval = self.eval(eg, &groups, &cache.tables, None, externs, scratch);
         eval.scan = scan;
@@ -1104,7 +1104,10 @@ impl<L: Label> Plan<L> {
     ) -> Eval<'a, L> {
         // A probe looks a representative up in the cells, which name the
         // absorbed class until a rebuild.
-        debug_assert!(eg.rebuilt(), "search needs a rebuilt graph");
+        debug_assert!(
+            eg.db.is_canonical(crate::engine::CLASSES),
+            "search needs a rebuilt graph"
+        );
         scratch.bound.clear();
         scratch.bound.resize(self.query.vars as usize, None);
         scratch.scalars.clear();
@@ -1149,12 +1152,12 @@ impl<L: Label> Plan<L> {
         eval.old_below = if new { atom } else { 0 };
         let bind = (*row, Some(*class));
         for (slot, wanted) in &labels[0][atom] {
-            let Some(table) = eg.slot_table(*slot) else {
+            let Some(table) = eg.db.table(*slot) else {
                 continue;
             };
             for &label in wanted {
                 if new {
-                    for &(_, found) in groups.new_rows(*slot, label) {
+                    for &(_, found) in groups.new_rows_with(*slot, label.0) {
                         self.row(eval, ClassId(0), 0, atom, table, found, args, bind, 2);
                     }
                     continue;
@@ -1222,15 +1225,15 @@ impl<L: Label> Plan<L> {
                 _ => continue,
             };
             for (slot, _) in &labels[atom] {
-                let Some(table) = eg.slot_table(*slot) else {
+                let Some(table) = eg.db.table(*slot) else {
                     continue;
                 };
                 match operand {
-                    None => eg.prepare_group(*slot, table.arity()),
+                    None => eg.db.prepare_group(*slot, table.arity()),
                     Some(operand) => {
-                        eg.prepare_group(*slot, 1 + operand);
+                        eg.db.prepare_group(*slot, 1 + operand);
                         if table.arity() == 3 {
-                            eg.prepare_group(*slot, 2 - operand);
+                            eg.db.prepare_group(*slot, 2 - operand);
                         }
                     }
                 }
@@ -1356,12 +1359,12 @@ impl<L: Label> Plan<L> {
                 let (eg, groups, labels) = (eval.eg, eval.groups, eval.labels);
                 let mut held = None;
                 for (slot, wanted) in &labels[eval.plan][index_of_atom] {
-                    let Some(table) = eg.slot_table(*slot) else {
+                    let Some(table) = eg.db.table(*slot) else {
                         continue;
                     };
                     lookup!(eval, groups, *slot, table.arity(), table, class.0, |row| {
                         if held.is_none() && reads(wanted, table.column(0)[row as usize]) {
-                            held = Some(table.stamps()[row as usize] + 1 == eg.epoch());
+                            held = Some(table.stamps()[row as usize] + 1 == eg.db.epoch());
                         }
                     });
                 }
@@ -1392,7 +1395,7 @@ impl<L: Label> Plan<L> {
     ) {
         let (eg, groups, labels) = (eval.eg, eval.groups, eval.labels);
         for (slot, wanted) in &labels[eval.plan][atom] {
-            let Some(table) = eg.slot_table(*slot) else {
+            let Some(table) = eg.db.table(*slot) else {
                 continue;
             };
             lookup!(eval, groups, *slot, table.arity(), table, class.0, |row| {
@@ -1432,7 +1435,7 @@ impl<L: Label> Plan<L> {
         bind: (Option<Scalar>, Option<Var>),
         orders: usize,
     ) {
-        let fresh = usize::from(table.stamps()[row as usize] + 1 == eval.eg.epoch());
+        let fresh = usize::from(table.stamps()[row as usize] + 1 == eval.eg.db.epoch());
         if fresh == 1 && eval.plan == 0 && atom < eval.old_below {
             return;
         }
@@ -1477,7 +1480,7 @@ impl<L: Label> Plan<L> {
     ) {
         let (eg, groups, labels) = (eval.eg, eval.groups, eval.labels);
         for (table_slot, wanted) in &labels[eval.plan][atom] {
-            let Some(table) = eg.slot_table(*table_slot) else {
+            let Some(table) = eg.db.table(*table_slot) else {
                 continue;
             };
             // In the swapped order of a commutative operator the bound operand

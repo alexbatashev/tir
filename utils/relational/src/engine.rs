@@ -1,16 +1,35 @@
-use std::cell::{Ref, RefCell};
+use std::cell::RefCell;
+use std::marker::PhantomData;
 
 use smallvec::SmallVec;
 
-use crate::column::{Column, Fact, Join};
+use crate::column::{Fact, Join};
+use crate::db::{Database, LatticeId, SpaceId};
 use crate::label::{FxHashMap, Labels};
 use crate::saturate::{RuleCache, RuleIndex};
-use crate::store::{Group, Repair, Table};
-use crate::unionfind::UnionFind;
-use crate::{ClassId, ColumnId, Csr, Label, LabelId, RowId};
+use crate::store::{Repair, Table};
+use crate::{ClassId, ColumnId, Label, LabelId, RowId};
 
 /// Empty link in an intrusive list.
 const NONE: u32 = u32::MAX;
+
+/// The id space classes are minted in, the database's only one.
+pub(crate) const CLASSES: SpaceId = SpaceId::nth(0);
+
+/// The constant a class is known to be, as a label: seeded by every literal
+/// row, raised by a scope's assumption, joined by a union. The lattice columns
+/// are declared in [`column_bit`] order, so a column's bit is its id.
+const CONSTS: LatticeId = LatticeId::nth(0);
+/// The type a class's terms carry, seeded by every typed row. Congruence
+/// already forces a class's rows to agree on it, so the first row to say wins
+/// and a merge does not make the answer depend on merge order.
+const TYPES: LatticeId = LatticeId::nth(1);
+/// The class a class is derived from and the distance to it, as an index into
+/// [`Engine::derivations`]: pointer provenance, for the vocabulary that has
+/// any. A fact naming a class is canonicalized like a child, and two
+/// derivations that disagree conflict — which reads back as "derived from
+/// nothing known", the conservative answer.
+const OBJECTS: LatticeId = LatticeId::nth(2);
 
 /// A class read as a distance from another class.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -19,14 +38,13 @@ struct Object {
     offset: i64,
 }
 
-/// The e-graph: equivalence classes of terms, over the tables of
-/// [`crate::store`].
+/// The e-graph: equivalence classes of terms, as a client of a [`Database`].
 ///
-/// Each label has a table keyed on the child classes and valued by the class
-/// the node belongs to, so hash-consing is a key lookup and congruence is the
-/// table's functional dependency: a rebuild rewrites every table through the
-/// union-find and merges the classes of the rows that come to share a key. A
-/// rule's atoms are joins over those tables.
+/// Classes are the ids of one space of the database. Each label has a table
+/// keyed on the child classes and valued by the class the node belongs to, so
+/// hash-consing is a key lookup and congruence is the table's functional
+/// dependency: a rebuild canonicalizes the tables and merges the classes of the
+/// rows that come to share a key. A rule's atoms are joins over those tables.
 ///
 /// What the tables do not hold is the term itself. A row is tagged with the
 /// e-node it was interned as, and `node` keeps that term verbatim, provenance
@@ -37,8 +55,10 @@ struct Object {
 /// leaves its table but stays on that list, since it may carry provenance the
 /// older one does not.
 pub struct Engine<L: Label> {
+    /// The tables, the class partition, the class lists and the facts:
+    /// everything a scope undoes.
+    pub(crate) db: Database<Lists, 1>,
     labels: Labels<L>,
-    graph: Graph,
 
     /// The term each e-node was interned as, and its label.
     node: Vec<L>,
@@ -52,16 +72,16 @@ pub struct Engine<L: Label> {
     label_commutes: Vec<bool>,
     label_op: Vec<u64>,
 
-    /// Bumped whenever the graph changes, so a derived index knows it is stale.
-    version: u64,
-    groups: RefCell<Groups>,
-    /// Class -> the classes of the rows naming it as a child, and the version
-    /// it was built at.
-    parents: RefCell<(u64, Csr)>,
-    /// Reusable per-class "already seen" marks for the read-side sweeps, so a
-    /// query that visits a handful of classes does not first zero an array the
-    /// size of the graph.
-    marks: RefCell<Marks>,
+    /// Every derivation [`OBJECTS`] has held. A lattice value is one word, so the
+    /// column holds the index; only ever appended to, like the labels, so an
+    /// index a popped scope wrote never needs taking back.
+    derivations: Vec<Object>,
+    derivation_ids: FxHashMap<Object, u64>,
+    /// Per open scope, the classes it found distinct, grouped under the class
+    /// it merged them into; merged groups only. Starts as the enclosing
+    /// scope's, so a nested scope keeps naming base classes.
+    members: Vec<FxHashMap<ClassId, Vec<ClassId>>>,
+
     repair: Repair,
     /// Per plan, what its searches keep: the labels its atoms read and the
     /// labels its head builds. Labels only accumulate, so an entry stays
@@ -72,114 +92,22 @@ pub struct Engine<L: Label> {
     /// Scratch for the variables a rule head binds.
     pub(crate) head_bound: Vec<Option<ClassId>>,
     stats: Stats,
-
-    scopes: Vec<Scope>,
-    /// The constant a class is known to be: seeded by every literal row, raised
-    /// by a scope's assumption, joined by a union.
-    consts: Column<LabelId>,
-    /// The type a class's terms carry, seeded by every typed row. Congruence
-    /// already forces a class's rows to agree on it, so the first row to say
-    /// wins and a merge does not make the answer depend on merge order.
-    types: Column<u64>,
-    /// The class a class is derived from and the distance to it: pointer
-    /// provenance, for the vocabulary that has any. A fact naming a class is
-    /// canonicalized like a child, and two derivations that disagree conflict —
-    /// which reads back as "derived from nothing known", the conservative
-    /// answer.
-    objects: Column<Object>,
 }
 
-/// The part of the engine a scope undoes: copied when one opens, put back when
-/// it closes.
-#[derive(Clone)]
-struct Graph {
-    uf: UnionFind,
-    /// `(label, children) -> class`, tagged with the e-node: one table per
-    /// arity, and beside it one for the labels of that arity that never
-    /// hash-cons. A table past the end has no rows.
-    tables: Vec<Table>,
-    /// Next e-node of the same class, or [`NONE`].
-    node_next: Vec<u32>,
-    class_head: Vec<u32>,
-    class_tail: Vec<u32>,
-    class_len: Vec<u32>,
-    /// Whether a union happened since the last rebuild.
-    dirty: bool,
-    total_nodes: usize,
-    num_classes: usize,
-    /// The stamp a row written now gets. Bumped by every change-log drain, so
-    /// `stamp == epoch - 1` reads as "written during the round that just ended".
-    epoch: u32,
-    /// Classes changed since the last [`Engine::take_changed`], possibly
-    /// non-canonical — semi-naive saturation's frontier. A round touches the
-    /// same class many times, so entries are deduplicated as they are logged.
-    changed: Vec<ClassId>,
-    /// Per class, the `changed_epoch` it was last logged in.
-    changed_at: Vec<u32>,
-    changed_epoch: u32,
-    changed_all: bool,
-    /// The facts that rose since the last [`Engine::take_changed`], as column
-    /// and class: on a class that already existed, and on a class minted with
-    /// the fact. The two are kept apart because a class minted with a fact has
-    /// only new rows around it, which a round searches from anyway.
-    rising: [Vec<(u8, ClassId)>; 2],
-    /// The same for the round that drain closed, canonical and ascending.
-    risen: [Vec<(u8, ClassId)>; 2],
-}
-
-/// An open assumption scope.
-struct Scope {
-    /// The graph as the scope found it.
-    saved: Graph,
-    /// E-nodes interned before the scope opened; the rest go with it.
-    nodes: usize,
-    /// The classes the scope found distinct, grouped under the class it merged
-    /// them into; merged groups only. Starts as the enclosing scope's, so a
-    /// nested scope keeps naming base classes.
-    members: FxHashMap<ClassId, Vec<ClassId>>,
-    /// The classes the scope minted or merged: the seeds of
-    /// [`Engine::scope_dirty`].
-    dirt: Vec<ClassId>,
+/// The e-nodes of each class as an intrusive list, kept in the database so a
+/// scope undoes it.
+#[derive(Clone, Default)]
+pub(crate) struct Lists {
+    /// Per e-node, the next e-node of its class, or [`NONE`].
+    next: Vec<u32>,
+    /// Per class, its first and last e-node and how many it has.
+    head: Vec<u32>,
+    tail: Vec<u32>,
+    size: Vec<u32>,
 }
 
 /// The labels an atom reads, by the table they live in; ascending within one.
 pub(crate) type Candidates = SmallVec<[(u32, SmallVec<[LabelId; 4]>); 2]>;
-
-/// Per table and column, the rows grouped by that column and the table version
-/// the grouping was built at.
-#[derive(Default)]
-pub(crate) struct Groups {
-    built: Vec<Vec<(u64, Group)>>,
-    /// Per table, the rows the previous round wrote.
-    new_rows: Vec<NewRows>,
-    scratch: Vec<u32>,
-}
-
-/// The rows of one table the previous round wrote, as `(label, row)`,
-/// ascending.
-#[derive(Default)]
-struct NewRows {
-    /// The table version and epoch the list was made at.
-    made: (u64, u32),
-    rows: Vec<(u32, u32)>,
-}
-
-impl Groups {
-    pub(crate) fn get(&self, slot: u32, column: usize) -> &Group {
-        &self.built[slot as usize][column].1
-    }
-
-    /// The rows of `label`, in the table at `slot`, that the previous round
-    /// wrote, as `(label, row)`, ascending by row.
-    pub(crate) fn new_rows(&self, slot: u32, label: LabelId) -> &[(u32, u32)] {
-        let Some(NewRows { rows, .. }) = self.new_rows.get(slot as usize) else {
-            return &[];
-        };
-        let from = rows.partition_point(|&(other, _)| other < label.0);
-        let to = rows.partition_point(|&(other, _)| other <= label.0);
-        &rows[from..to]
-    }
-}
 
 /// Cumulative engine work, for the saturation counters.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -201,52 +129,37 @@ impl<L: Label> Default for Engine<L> {
 
 impl<L: Label> Engine<L> {
     pub fn new() -> Self {
+        let mut db = Database::new();
+        let facts = [
+            db.add_lattice(CLASSES, Join::Agree),
+            db.add_lattice(CLASSES, Join::First),
+            db.add_lattice(CLASSES, Join::Agree),
+        ];
+        debug_assert_eq!(facts, [CONSTS, TYPES, OBJECTS]);
         Self {
+            db,
             labels: Labels::default(),
-            graph: Graph {
-                uf: UnionFind::new(),
-                tables: Vec::new(),
-                node_next: Vec::new(),
-                class_head: Vec::new(),
-                class_tail: Vec::new(),
-                class_len: Vec::new(),
-                dirty: false,
-                total_nodes: 0,
-                num_classes: 0,
-                epoch: 1,
-                changed: Vec::new(),
-                changed_at: Vec::new(),
-                changed_epoch: 1,
-                changed_all: true,
-                rising: Default::default(),
-                risen: Default::default(),
-            },
             node: Vec::new(),
             node_label: Vec::new(),
             op_labels: FxHashMap::default(),
             label_slot: Vec::new(),
             label_commutes: Vec::new(),
             label_op: Vec::new(),
-            version: 1,
-            groups: RefCell::default(),
-            parents: RefCell::default(),
-            marks: RefCell::default(),
+            derivations: Vec::new(),
+            derivation_ids: FxHashMap::default(),
+            members: Vec::new(),
             repair: Repair::default(),
             caches: RefCell::default(),
             rule_index: None,
             head_bound: Vec::new(),
             stats: Stats::default(),
-            scopes: Vec::new(),
-            consts: Column::new(Join::Agree),
-            types: Column::new(Join::First),
-            objects: Column::new(Join::Agree),
         }
     }
 
     // ---- reading ----------------------------------------------------------
 
     pub fn find(&self, id: ClassId) -> ClassId {
-        self.graph.uf.find(id)
+        ClassId(self.db.find(CLASSES, id.0))
     }
 
     pub fn connected(&self, a: ClassId, b: ClassId) -> bool {
@@ -254,38 +167,38 @@ impl<L: Label> Engine<L> {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.graph.num_classes == 0
+        self.num_classes() == 0
     }
 
     /// Total e-nodes across all classes. An e-node found congruent to another
     /// still counts, so this only ever grows within a context — the fixpoint
     /// test both saturation drivers use reads it.
     pub fn total_size(&self) -> usize {
-        self.graph.total_nodes
+        self.node.len()
     }
 
     pub fn num_classes(&self) -> usize {
-        self.graph.num_classes
+        self.db.live(CLASSES)
     }
 
     /// One past the highest class id ever minted, live or not — the size a table
     /// indexed by class id needs.
     pub fn class_count(&self) -> usize {
-        self.graph.uf.len()
+        self.db.ids(CLASSES)
     }
 
     /// Bytes the e-nodes, the tables and the per-class arrays hold, without the
     /// tables' key indexes. An estimate for ranking, not an allocator total.
     pub fn approx_bytes(&self) -> usize {
         let cells: usize = self
-            .graph
-            .tables
+            .db
+            .tables()
             .iter()
             .map(|table| table.len() * (table.arity() + 3))
             .sum();
         self.node.len() * (size_of::<L>() + 2 * size_of::<u32>())
             + cells * size_of::<u32>()
-            + self.graph.uf.len() * 5 * size_of::<u32>()
+            + self.class_count() * 5 * size_of::<u32>()
             + self.labels.len() * size_of::<L>()
     }
 
@@ -297,7 +210,7 @@ impl<L: Label> Engine<L> {
     }
 
     fn in_scope(&self) -> bool {
-        !self.scopes.is_empty()
+        self.db.depth() != 0
     }
 
     /// Child classes of an e-node, canonical as of now.
@@ -321,9 +234,11 @@ impl<L: Label> Engine<L> {
     /// absorbed class's after the survivor's. Extraction breaks ties by this
     /// order, so it is part of the contract — a rebuild must not re-sort it.
     pub fn rows(&self, id: ClassId) -> Rows<'_, L> {
+        let lists = self.db.client();
         Rows {
-            engine: self,
-            cursor: self.graph.class_head[self.find(id).index()],
+            next: &lists.next,
+            cursor: lists.head[self.find(id).index()],
+            label: PhantomData,
         }
     }
 
@@ -334,7 +249,7 @@ impl<L: Label> Engine<L> {
     }
 
     fn class_len(&self, id: ClassId) -> usize {
-        self.graph.class_len[self.find(id).index()] as usize
+        self.db.client().size[self.find(id).index()] as usize
     }
 
     /// Every live class, ascending. A class is named by its lowest member, so
@@ -342,9 +257,10 @@ impl<L: Label> Engine<L> {
     /// Extraction and bare-variable-rooted patterns walk classes in this order
     /// and break ties by it, so it is part of the contract.
     pub fn class_ids(&self) -> impl Iterator<Item = ClassId> + '_ {
-        (0..self.graph.uf.len() as u32)
+        let size = &self.db.client().size;
+        (0..self.class_count() as u32)
             .map(ClassId)
-            .filter(|&id| self.find(id) == id && self.graph.class_len[id.index()] != 0)
+            .filter(move |&id| self.find(id) == id && size[id.index()] != 0)
     }
 
     /// [`Self::class_ids`] as readable classes.
@@ -359,17 +275,6 @@ impl<L: Label> Engine<L> {
         }
     }
 
-    /// The table `label`'s rows live in, or `None` while that table has never
-    /// had a row. Labels of one arity share a table, keyed on the label and
-    /// then the children.
-    pub(crate) fn table(&self, label: LabelId) -> Option<&Table> {
-        self.slot_table(*self.label_slot.get(label.index())?)
-    }
-
-    pub(crate) fn slot_table(&self, slot: u32) -> Option<&Table> {
-        self.graph.tables.get(slot as usize)
-    }
-
     /// Whether `label` is a commutative binary operator.
     pub(crate) fn commutes(&self, label: LabelId) -> bool {
         self.label_commutes[label.index()]
@@ -379,7 +284,6 @@ impl<L: Label> Engine<L> {
     pub(crate) fn labels_with_op(&self, op: u64) -> &[LabelId] {
         self.op_labels.get(&op).map_or(&[], Vec::as_slice)
     }
-
     /// Add to `reads` the labels in the `op` bucket that `template` matches at
     /// its arity, or every label in the bucket without one. With `since`, only
     /// the labels met from that count on are looked at, and `reads` already
@@ -434,94 +338,17 @@ impl<L: Label> Engine<L> {
     /// the round the last [`Self::take_changed`] closed: on a class that
     /// already existed, or with `minted` on a class minted with it.
     pub(crate) fn facts_rose(&self, minted: bool) -> u8 {
-        self.graph.risen[usize::from(minted)]
-            .iter()
-            .fold(0, |mask, &(column, _)| mask | 1 << column)
+        [ColumnId::Const, ColumnId::Type, ColumnId::Object]
+            .into_iter()
+            .filter(|&column| !self.db.risen(lattice(column), minted).is_empty())
+            .fold(0, |mask, column| mask | 1 << column_bit(column))
     }
 
     /// The classes whose fact in `column` rose during the round the last
     /// [`Self::take_changed`] closed; `minted` as for [`Self::facts_rose`].
     pub(crate) fn risen(&self, column: ColumnId, minted: bool) -> impl Iterator<Item = ClassId> {
-        let column = column_bit(column) as u8;
-        self.graph.risen[usize::from(minted)]
-            .iter()
-            .filter(move |&&(other, _)| other == column)
-            .map(|&(_, class)| class)
-    }
-
-    /// The stamp of the rows the round now running writes; a row stamped one
-    /// below it was written by the round before.
-    pub(crate) fn epoch(&self) -> u32 {
-        self.graph.epoch
-    }
-
-    /// Group the rows of the table at `slot` by `column`, unless that is
-    /// already done for the table as it is. A join looks rows up through
-    /// [`Self::groups`].
-    pub(crate) fn prepare_group(&self, slot: u32, column: usize) {
-        let Some(table) = self.slot_table(slot) else {
-            return;
-        };
-        let mut groups = self.groups.borrow_mut();
-        if groups.built.len() <= slot as usize {
-            groups.built.resize_with(slot as usize + 1, Vec::new);
-        }
-        let columns = &mut groups.built[slot as usize];
-        if columns.len() <= column {
-            columns.resize_with(column + 1, Default::default);
-        }
-        let version = table.version() + 1;
-        let (built, group) = &mut columns[column];
-        if *built != version {
-            *built = version;
-            // Column zero holds labels; every other one holds classes.
-            let cells = if column == 0 {
-                self.labels.len()
-            } else {
-                self.graph.uf.len()
-            };
-            group.build(table.column(column), cells);
-        }
-    }
-
-    /// List the rows of the table at `slot` the previous round wrote, by
-    /// label, unless that is already done for the table as it is; read through
-    /// [`Self::groups`].
-    pub(crate) fn prepare_new_rows(&self, slot: u32) {
-        let Some(table) = self.slot_table(slot) else {
-            return;
-        };
-        let mut groups = self.groups.borrow_mut();
-        let groups = &mut *groups;
-        if groups.new_rows.len() <= slot as usize {
-            groups
-                .new_rows
-                .resize_with(slot as usize + 1, Default::default);
-        }
-        let NewRows { made, rows } = &mut groups.new_rows[slot as usize];
-        let now = (table.version() + 1, self.graph.epoch);
-        if *made != now {
-            *made = now;
-            groups.scratch.clear();
-            tir_adt::simd::select_eq(table.stamps(), self.graph.epoch - 1, &mut groups.scratch);
-            rows.clear();
-            let labels = table.column(0);
-            rows.extend(
-                groups
-                    .scratch
-                    .iter()
-                    .map(|&row| (labels[row as usize], row)),
-            );
-            rows.sort_unstable();
-        }
-    }
-
-    /// A fresh set of per-class marks: `insert` reports whether a class was
-    /// unmarked.
-    pub(crate) fn marks(&self) -> std::cell::RefMut<'_, Marks> {
-        let mut marks = self.marks.borrow_mut();
-        marks.begin(self.graph.uf.len());
-        marks
+        let risen = self.db.risen(lattice(column), minted);
+        risen.iter().map(|&class| ClassId(class))
     }
 
     /// Take the cache of plan `id` out for a search; [`Self::put_cache`] puts
@@ -547,15 +374,16 @@ impl<L: Label> Engine<L> {
 
     /// The operator buckets of the rows the previous round wrote, each once.
     pub(crate) fn new_ops(&self) -> Vec<u64> {
-        for slot in 0..self.graph.tables.len() as u32 {
-            self.prepare_new_rows(slot);
+        let slots = self.db.tables().len() as u32;
+        for slot in 0..slots {
+            self.db.prepare_new_rows(slot);
         }
-        let groups = self.groups();
+        let groups = self.db.groups();
         let mut ops = Vec::new();
-        for NewRows { rows, .. } in &groups.new_rows {
+        for slot in 0..slots {
             let mut last = None;
             // The rows are sorted by label, so each label shows up as a run.
-            for &(label, _) in rows {
+            for &(label, _) in groups.new_rows(slot) {
                 if last.replace(label) != Some(label) {
                     ops.push(self.label_op[label as usize]);
                 }
@@ -566,33 +394,23 @@ impl<L: Label> Engine<L> {
         ops
     }
 
-    /// Whether every table names every class by its representative: no union
-    /// is waiting for a rebuild.
-    pub(crate) fn rebuilt(&self) -> bool {
-        !self.graph.dirty
-    }
-
-    pub(crate) fn groups(&self) -> Ref<'_, Groups> {
-        self.groups.borrow()
-    }
-
     /// Canonical classes holding a node in the `op` bucket, each once, in the
     /// order their labels were first seen. Over-approximates — callers confirm
     /// with the label.
     pub fn classes_with_op(&self, op: u64) -> Vec<ClassId> {
         let labels = self.labels_with_op(op);
         for &label in labels {
-            self.prepare_group(self.label_slot[label.index()], 0);
+            self.db.prepare_group(self.label_slot[label.index()], 0);
         }
-        let groups = self.groups();
-        let mut seen = self.marks.borrow_mut();
-        seen.begin(self.graph.uf.len());
+        let groups = self.db.groups();
+        let mut seen = self.db.marks(CLASSES);
         let mut out = Vec::new();
         for &label in labels {
-            let Some(table) = self.table(label) else {
+            let slot = self.label_slot[label.index()];
+            let Some(table) = self.db.table(slot) else {
                 continue;
             };
-            for &row in groups.get(self.label_slot[label.index()], 0).rows(label.0) {
+            for &row in groups.get(slot, 0).rows(label.0) {
                 let root = self.find(ClassId(table.values()[row as usize]));
                 if seen.insert(root.index()) {
                     out.push(root);
@@ -614,7 +432,7 @@ impl<L: Label> Engine<L> {
     /// The class of the row with `key`, which is `label` and then the canonical
     /// children.
     fn memo_find(&self, label: LabelId, key: &[u32]) -> Option<ClassId> {
-        let table = self.table(label)?;
+        let table = self.db.table(*self.label_slot.get(label.index())?)?;
         let row = table.get(key)?;
         Some(self.find(ClassId(table.values()[row as usize])))
     }
@@ -625,7 +443,7 @@ impl<L: Label> Engine<L> {
     /// existing one shares its class; otherwise a fresh class.
     pub fn add(&mut self, mut node: L) -> ClassId {
         for child in node.children_mut() {
-            *child = self.graph.uf.find(*child);
+            *child = self.find(*child);
         }
         let label = self.intern(&node);
         let mut key: SmallVec<[u32; 8]> = SmallVec::new();
@@ -633,7 +451,6 @@ impl<L: Label> Engine<L> {
         key.extend(node.children().iter().map(|child| child.0));
         self.add_labelled(label, &key, || node)
     }
-
     /// Whether `label` is `node`'s label.
     pub(crate) fn label_is(&self, label: LabelId, node: &L) -> bool {
         let known = self.labels.node(label);
@@ -683,81 +500,46 @@ impl<L: Label> Engine<L> {
     /// an applier that unions and then instantiates hash-conses against the
     /// result.
     pub fn union(&mut self, a: ClassId, b: ClassId) -> ClassId {
-        let ra = self.find(a);
-        let rb = self.find(b);
-        if ra == rb {
-            return ra;
-        }
+        let (survivor, absorbed) = match self.db.equate(CLASSES, a.0, b.0) {
+            (root, None) => return ClassId(root),
+            (survivor, Some(absorbed)) => (survivor, absorbed),
+        };
         self.stats.merges += 1;
-        self.version += 1;
-        let survivor = self.graph.uf.union(ra, rb);
-        if crate::trace_enabled() {
-            eprintln!("U {} {} -> {}", ra.0, rb.0, survivor.0);
+        self.db.merge(CONSTS, absorbed, survivor);
+        self.db.merge(TYPES, absorbed, survivor);
+        if !self.db.lattice(OBJECTS).is_empty() {
+            self.merge_object(ClassId(absorbed), ClassId(survivor));
         }
-        let absorbed = if survivor == ra { rb } else { ra };
-        let epoch = self.graph.epoch;
-        let moved = [
-            self.consts.merge(absorbed, survivor, epoch),
-            self.types.merge(absorbed, survivor, epoch),
-            !self.objects.is_empty() && self.merge_object(absorbed, survivor),
-        ];
-        for (column, moved) in moved.into_iter().enumerate() {
-            if moved {
-                self.graph.rising[0].push((column as u8, survivor));
-            }
-        }
-        if moved.contains(&true) {
-            self.log_change(survivor);
-        }
-        self.splice_class(survivor, absorbed);
-        if let Some(scope) = self.scopes.last_mut() {
-            let taken = scope
-                .members
-                .remove(&absorbed)
-                .unwrap_or_else(|| vec![absorbed]);
-            scope
-                .members
+        self.splice_class(survivor as usize, absorbed as usize);
+        let (survivor, absorbed) = (ClassId(survivor), ClassId(absorbed));
+        if let Some(members) = self.members.last_mut() {
+            let taken = members.remove(&absorbed).unwrap_or_else(|| vec![absorbed]);
+            members
                 .entry(survivor)
                 .or_insert_with(|| vec![survivor])
                 .extend(taken);
-            scope.dirt.push(survivor);
         }
-        self.graph.num_classes -= 1;
-        self.graph.dirty = true;
-        self.log_change(survivor);
         survivor
     }
 
     /// Restore congruence to a fixpoint after a batch of unions.
     ///
-    /// Each pass rewrites every table through the union-find and merges the
-    /// classes of the rows that came to share a key; those merges are what the
-    /// next pass rewrites. Nothing depends on the order the tables are visited
-    /// in or the rows within one: the class a merge leaves standing is the
-    /// smallest id in the set whichever way the merges are grouped.
+    /// Each pass canonicalizes every table and merges the classes of the rows
+    /// that came to share a key; those merges are what the next pass rewrites.
+    /// Nothing depends on the order the tables are visited in or the rows
+    /// within one: the class a merge leaves standing is the smallest id in the
+    /// set whichever way the merges are grouped.
     pub fn rebuild(&mut self) {
-        while std::mem::take(&mut self.graph.dirty) {
-            self.version += 1;
-            self.graph.uf.flatten();
-            let mut report = std::mem::take(&mut self.repair);
-            let epoch = self.graph.epoch;
-            for table in &mut self.graph.tables {
-                table.repair(self.graph.uf.parents(), epoch, &mut report);
-            }
+        let mut report = std::mem::take(&mut self.repair);
+        while self.db.canonicalize(CLASSES, &mut report) {
             self.stats.repairs += report.rekeyed.len();
-            // A row with a re-keyed child reads differently, and semi-naive has
-            // to see its class as changed.
-            for class in report.rekeyed.drain(..) {
-                self.log_change(ClassId(class));
-            }
             for collision in report.collisions.drain(..) {
                 self.union(ClassId(collision.kept), ClassId(collision.removed));
             }
-            self.repair = report;
         }
-        self.graph.uf.flatten();
-        if let Some(scope) = self.scopes.last_mut() {
-            for members in scope.members.values_mut() {
+        self.repair = report;
+        if let Some(members) = self.members.last_mut() {
+            for members in members.values_mut() {
                 members.sort_unstable();
                 members.dedup();
             }
@@ -766,135 +548,80 @@ impl<L: Label> Engine<L> {
 
     // ---- rows -------------------------------------------------------------
 
-    /// The table `label`'s rows live in, created with every table below it if
-    /// this is the first row it gets.
-    fn table_mut(&mut self, label: LabelId) -> &mut Table {
-        let slot = self.label_slot[label.index()] as usize;
-        while self.graph.tables.len() <= slot {
-            // The label is a key column the union-find has no say over.
-            let columns = 1 + self.graph.tables.len() / 2;
-            self.graph.tables.push(if self.graph.tables.len() % 2 == 1 {
-                Table::bag(columns).plain(1)
-            } else {
-                Table::new(columns).plain(1)
-            });
-        }
-        &mut self.graph.tables[slot]
-    }
-
     fn make_class(&mut self, node: L, label: LabelId, key: &[u32]) -> ClassId {
         let constant = node.constant();
         let type_key = node.type_key();
-        let row = RowId(self.node.len() as u32);
-        let class = self.graph.uf.push();
-        let epoch = self.graph.epoch;
-        self.table_mut(label).insert(key, class.0, row.0, epoch);
-        self.version += 1;
-        self.graph.node_next.push(NONE);
-        self.graph.class_head.push(row.0);
-        self.graph.class_tail.push(row.0);
-        self.graph.class_len.push(1);
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.dirt.push(class);
+        let row = self.node.len() as u32;
+        let class = self.db.mint(CLASSES);
+        let slot = self.label_slot[label.index()];
+        // The table a label's rows live in is made with every table below it
+        // when it gets its first row. Labels of one arity share a keyed table,
+        // and beside it a bag for the labels that never hash-cons.
+        while self.db.tables().len() <= slot as usize {
+            let at = self.db.tables().len();
+            let columns = 1 + at / 2;
+            let table = match at % 2 {
+                1 => Table::bag(columns),
+                _ => Table::new(columns),
+            };
+            // The label is a key column the union-find has no say over.
+            self.db.add_table(table.plain(1), CLASSES);
         }
+        self.db.insert(slot, key, class, row);
+        let lists = self.db.client_mut();
+        lists.next.push(NONE);
+        lists.head.push(row);
+        lists.tail.push(row);
+        lists.size.push(1);
         if crate::trace_enabled() {
-            eprintln!("A {} {:?} {:?}", class.0, node, &key[1..]);
+            eprintln!("A {} {:?} {:?}", class, node, &key[1..]);
         }
         self.node.push(node);
         self.node_label.push(label);
         if let Some(constant) = constant {
             let label = self.intern(&constant);
-            if self.consts.raise(class, label, epoch) {
+            if self.db.seed(CONSTS, class, u64::from(label.0)) {
                 self.stats.raises += 1;
-                self.graph.rising[1].push((column_bit(ColumnId::Const) as u8, class));
             }
         }
         if let Some(key) = type_key {
-            self.types.raise(class, key, epoch);
-            self.graph.rising[1].push((column_bit(ColumnId::Type) as u8, class));
+            self.db.seed(TYPES, class, key);
         }
-        self.graph.total_nodes += 1;
-        self.graph.num_classes += 1;
         self.stats.adds += 1;
-        self.log_change(class);
-        class
+        ClassId(class)
     }
 
     /// Move the absorbed class's e-nodes onto the end of the survivor's list.
-    fn splice_class(&mut self, survivor: ClassId, absorbed: ClassId) {
-        let graph = &mut self.graph;
-        let (head, tail, len) = (
-            graph.class_head[absorbed.index()],
-            graph.class_tail[absorbed.index()],
-            graph.class_len[absorbed.index()],
-        );
+    fn splice_class(&mut self, survivor: usize, absorbed: usize) {
+        let lists = self.db.client_mut();
+        let head = std::mem::replace(&mut lists.head[absorbed], NONE);
+        let tail = std::mem::replace(&mut lists.tail[absorbed], NONE);
+        let len = std::mem::take(&mut lists.size[absorbed]);
         if head != NONE {
-            let survivor_tail = graph.class_tail[survivor.index()];
-            if survivor_tail == NONE {
-                graph.class_head[survivor.index()] = head;
-            } else {
-                graph.node_next[survivor_tail as usize] = head;
+            match lists.tail[survivor] {
+                NONE => lists.head[survivor] = head,
+                survivor_tail => lists.next[survivor_tail as usize] = head,
             }
-            graph.class_tail[survivor.index()] = tail;
-            graph.class_len[survivor.index()] += len;
+            lists.tail[survivor] = tail;
+            lists.size[survivor] += len;
         }
-        graph.class_head[absorbed.index()] = NONE;
-        graph.class_tail[absorbed.index()] = NONE;
-        graph.class_len[absorbed.index()] = 0;
     }
 
     // ---- change log -------------------------------------------------------
 
-    fn log_change(&mut self, id: ClassId) {
-        let graph = &mut self.graph;
-        if graph.changed_at.len() <= id.index() {
-            // Classes are minted one at a time; growing by one each time would
-            // make every mint a resize.
-            let len = (id.index() + 1).max(graph.changed_at.len() * 2);
-            graph.changed_at.resize(len, 0);
-        }
-        if graph.changed_at[id.index()] != graph.changed_epoch {
-            graph.changed_at[id.index()] = graph.changed_epoch;
-            graph.changed.push(id);
-        }
-    }
-
     /// Drain the change log: the canonical classes changed since the previous
     /// call, ascending and deduplicated; `None` means "every class".
     pub fn take_changed(&mut self) -> Option<Vec<ClassId>> {
-        self.graph.epoch += 1;
-        let all = std::mem::replace(&mut self.graph.changed_all, false);
-        let mut changed = std::mem::take(&mut self.graph.changed);
-        for list in 0..2 {
-            let mut risen = std::mem::take(&mut self.graph.rising[list]);
-            for (_, class) in &mut risen {
-                *class = self.find(*class);
-            }
-            risen.sort_unstable();
-            risen.dedup();
-            // The drained list's allocation becomes the next round's.
-            std::mem::swap(&mut self.graph.risen[list], &mut risen);
-            risen.clear();
-            self.graph.rising[list] = risen;
-        }
-        // Every mark of the drained log goes stale at once.
-        self.graph.changed_epoch += 1;
-        if all {
-            return None;
-        }
-        for id in &mut changed {
-            *id = self.find(*id);
-        }
-        changed.sort_unstable();
-        changed.dedup();
-        Some(changed)
+        self.db.advance();
+        let changed = self.db.take_changed(CLASSES)?;
+        Some(changed.into_iter().map(ClassId).collect())
     }
 
     /// Report "everything" from the next [`Self::take_changed`]. A driver that
     /// stopped on a limit rather than at a fixpoint calls this: the matches it
     /// never reached are not named by the change log.
     pub fn mark_all_changed(&mut self) {
-        self.graph.changed_all = true;
+        self.db.mark_all_changed(CLASSES);
     }
 
     // ---- facts ------------------------------------------------------------
@@ -916,9 +643,10 @@ impl<L: Label> Engine<L> {
     /// open scope assumed of it. `None` when nothing is known and when two
     /// values were proven, which a refuted hypothesis reads as "unknown".
     pub fn const_of(&self, class: ClassId) -> Option<&L> {
-        self.consts
-            .get(self.find(class))
-            .map(|label| self.labels.node(label))
+        self.db
+            .lattice(CONSTS)
+            .get(self.find(class).0)
+            .map(|label| self.labels.node(LabelId(label as u32)))
     }
 
     /// The constant an *open scope* assumed of `class`, as opposed to the one
@@ -926,8 +654,9 @@ impl<L: Label> Engine<L> {
     /// than on the program asks this.
     pub fn assumed_const(&self, class: ClassId) -> Option<&L> {
         let class = self.find(class);
-        self.consts
-            .written_in_scope(class)
+        self.db
+            .lattice(CONSTS)
+            .written_in_scope(class.0)
             .then(|| self.const_of(class))
             .flatten()
     }
@@ -937,27 +666,31 @@ impl<L: Label> Engine<L> {
     /// *value*, and the row saying so may spell it at a type the caller has no
     /// way to name.
     pub fn const_class(&self, node: &L) -> Option<ClassId> {
+        let consts = self.db.lattice(CONSTS);
         self.classes_with_const(node)
-            .find(|&class| !self.consts.written_in_scope(class))
+            .find(|&class| !consts.written_in_scope(class.0))
     }
 
     /// The classes an open scope assumed to be `node`.
     pub fn classes_assumed_const<'a>(&'a self, node: &L) -> impl Iterator<Item = ClassId> + 'a {
+        let consts = self.db.lattice(CONSTS);
         self.classes_with_const(node)
-            .filter(|&class| self.consts.written_in_scope(class))
+            .filter(|&class| consts.written_in_scope(class.0))
     }
 
     /// Whether `class` was proven two different constants — a refuted scope.
     pub fn const_conflicted(&self, class: ClassId) -> bool {
-        self.consts.is_conflicted(self.find(class))
+        self.db.lattice(CONSTS).is_conflicted(self.find(class).0)
     }
 
     /// The classes known to be `node`.
     pub fn classes_with_const<'a>(&'a self, node: &L) -> impl Iterator<Item = ClassId> + 'a {
+        let consts = self.db.lattice(CONSTS);
         node.constant()
             .and_then(|constant| self.labels.get(&constant))
             .into_iter()
-            .flat_map(|label| self.consts.classes_with(label))
+            .flat_map(|label| consts.keys_with(u64::from(label.0)))
+            .map(ClassId)
     }
 
     /// The node interned under `label`.
@@ -990,13 +723,22 @@ impl<L: Label> Engine<L> {
         if stored == Some(joined) {
             return false;
         }
-        self.objects.put(class, joined, self.graph.epoch);
+        let joined = match joined {
+            Fact::Known(object) => Fact::Known(self.derivation_id(object)),
+            Fact::Conflict => Fact::Conflict,
+        };
+        self.db.put(OBJECTS, class.0, joined);
         self.stats.raises += 1;
-        self.rose(ColumnId::Object, class);
-        self.log_change(class);
         true
     }
 
+    /// The index `object` is stored under in the `objects` column.
+    fn derivation_id(&mut self, object: Object) -> u64 {
+        *self.derivation_ids.entry(object).or_insert_with(|| {
+            self.derivations.push(object);
+            self.derivations.len() as u64 - 1
+        })
+    }
     /// What `class` is derived from: the end of its derivation chain, or itself
     /// at offset zero when nothing derived it. `None` once two derivations have
     /// disagreed, and for a chain that does not end — a class derived from
@@ -1036,11 +778,14 @@ impl<L: Label> Engine<L> {
     /// when nothing derived the class. A class the entry names may have been
     /// absorbed since it was written.
     fn canonical_object(&self, class: ClassId) -> Option<Fact<Object>> {
-        Some(match self.objects.entry(class)? {
-            Fact::Known(object) => Fact::Known(Object {
-                base: self.find(object.base),
-                offset: object.offset,
-            }),
+        Some(match self.db.lattice(OBJECTS).entry(class.0)? {
+            Fact::Known(id) => {
+                let object = self.derivations[id as usize];
+                Fact::Known(Object {
+                    base: self.find(object.base),
+                    offset: object.offset,
+                })
+            }
             Fact::Conflict => Fact::Conflict,
         })
     }
@@ -1056,22 +801,25 @@ impl<L: Label> Engine<L> {
         })
     }
 
-    fn merge_object(&mut self, absorbed: ClassId, survivor: ClassId) -> bool {
-        let Some(fact) = self.objects.detach(absorbed) else {
-            return false;
-        };
-        match fact {
-            Fact::Known(object) => self.raise_object(survivor, object.base, object.offset),
-            Fact::Conflict => self.objects.put(survivor, Fact::Conflict, self.graph.epoch),
+    fn merge_object(&mut self, absorbed: ClassId, survivor: ClassId) {
+        match self.db.detach(OBJECTS, absorbed.0) {
+            Some(Fact::Known(id)) => {
+                let object = self.derivations[id as usize];
+                self.raise_object(survivor, object.base, object.offset);
+            }
+            Some(Fact::Conflict) => {
+                self.db.put(OBJECTS, survivor.0, Fact::Conflict);
+            }
+            None => {}
         }
     }
 
     /// `class`'s value in `column`, as one word.
     pub fn fact(&self, column: ColumnId, class: ClassId) -> Option<u64> {
-        let class = self.find(class);
         match column {
-            ColumnId::Const => self.consts.get(class).map(|label| label.0 as u64),
-            ColumnId::Type => self.types.get(class),
+            ColumnId::Const | ColumnId::Type => {
+                self.db.lattice(lattice(column)).get(self.find(class).0)
+            }
             // Not a word: a derivation is a class and a distance, which
             // [`crate::Atom::Object`] binds as a variable and a scalar.
             ColumnId::Object => None,
@@ -1082,34 +830,22 @@ impl<L: Label> Engine<L> {
     /// keeps outside the node.
     pub fn raise_type(&mut self, class: ClassId, key: u64) {
         let class = self.find(class);
-        if self.types.raise(class, key, self.graph.epoch) {
+        if self.db.raise(TYPES, class.0, key) {
             self.stats.raises += 1;
-            self.rose(ColumnId::Type, class);
-            self.log_change(class);
         }
     }
 
     /// Whether `class`'s value in `column` rose during the round the last
     /// [`Self::take_changed`] closed — the fact-level [`Self::row_is_new`].
     pub fn fact_is_new(&self, column: ColumnId, class: ClassId) -> bool {
-        let class = self.find(class);
-        match column {
-            ColumnId::Const => self.consts.is_new(class, self.graph.epoch),
-            ColumnId::Type => self.types.is_new(class, self.graph.epoch),
-            ColumnId::Object => self.objects.is_new(class, self.graph.epoch),
-        }
-    }
-
-    /// Note that `class`, which already existed, gained a fact in `column`.
-    fn rose(&mut self, column: ColumnId, class: ClassId) {
-        self.graph.rising[0].push((column_bit(column) as u8, class));
+        self.db
+            .lattice(lattice(column))
+            .is_new(self.find(class).0, self.db.epoch())
     }
 
     fn raise_const(&mut self, class: ClassId, label: LabelId) {
-        if self.consts.raise(class, label, self.graph.epoch) {
+        if self.db.raise(CONSTS, class.0, u64::from(label.0)) {
             self.stats.raises += 1;
-            self.rose(ColumnId::Const, class);
-            self.log_change(class);
         }
     }
 
@@ -1118,46 +854,27 @@ impl<L: Label> Engine<L> {
     /// Enter an assumption scope: everything until the matching
     /// [`Self::pop_context`] is undone by it.
     pub fn push_context(&mut self) {
-        let members = self
-            .scopes
-            .last()
-            .map(|scope| scope.members.clone())
-            .unwrap_or_default();
-        self.scopes.push(Scope {
-            saved: self.graph.clone(),
-            nodes: self.node.len(),
-            members,
-            dirt: Vec::new(),
-        });
-        self.consts.push_scope();
-        self.types.push_scope();
-        self.objects.push_scope();
+        let members = self.members.last().cloned().unwrap_or_default();
+        self.members.push(members);
+        self.db.push_scope();
     }
 
     /// Leave the scope, discarding its unions, its rows, and its assumptions;
     /// the enclosing scope (or the base graph) is restored without a rebuild.
     pub fn pop_context(&mut self) {
-        let scope = self.scopes.pop().expect("open scope");
-        self.consts.pop_scope();
-        self.types.pop_scope();
-        self.objects.pop_scope();
         // The classes the scope minted keep their ids, so a caller still holding
         // one finds it, but they lose every e-node the scope gave them and stop
         // being classes: `class_ids` skips a class with none.
-        let classes = self.graph.uf.len();
-        self.graph = scope.saved;
-        self.graph.uf.extend_to(classes);
-        self.graph.class_head.resize(classes, NONE);
-        self.graph.class_tail.resize(classes, NONE);
-        self.graph.class_len.resize(classes, 0);
-        self.node.truncate(scope.nodes);
-        self.node_label.truncate(scope.nodes);
-        self.version += 1;
-        // Table versions restart from the scope's copy, so a grouping built
-        // inside the scope could pass for one of a later table.
-        let groups = self.groups.get_mut();
-        groups.built.clear();
-        groups.new_rows.clear();
+        self.db.pop_scope();
+        self.members.pop();
+        let classes = self.class_count();
+        let lists = self.db.client_mut();
+        // The restored lists link exactly the e-nodes the scope found.
+        self.node.truncate(lists.next.len());
+        self.node_label.truncate(lists.next.len());
+        lists.head.resize(classes, NONE);
+        lists.tail.resize(classes, NONE);
+        lists.size.resize(classes, 0);
     }
 
     /// The classes the open scope found distinct and grouped under `id`, as of
@@ -1166,9 +883,9 @@ impl<L: Label> Engine<L> {
     /// scope opened on are keyed by those, so a query made under a scope
     /// aggregates over this.
     pub fn scope_members(&self, id: ClassId) -> &[ClassId] {
-        self.scopes
+        self.members
             .last()
-            .and_then(|scope| scope.members.get(&id))
+            .and_then(|members| members.get(&id))
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
@@ -1184,7 +901,7 @@ impl<L: Label> Engine<L> {
     /// scope enclosing it, so a caller that already answered for that one has
     /// only this to redo. Ascending id. Empty with no scope open.
     pub fn innermost_dirty(&self) -> Vec<ClassId> {
-        self.dirty_since(self.scopes.len().saturating_sub(1))
+        self.dirty_since(self.db.depth().saturating_sub(1))
     }
 
     /// Everything the scopes from `depth` outward-in changed, closed upward.
@@ -1192,13 +909,11 @@ impl<L: Label> Engine<L> {
         if !self.in_scope() {
             return Vec::new();
         }
-        let seeds: Vec<ClassId> = self.scopes[depth..]
-            .iter()
-            .flat_map(|scope| &scope.dirt)
-            .copied()
-            .chain(self.consts.scoped_keys_from(depth))
-            .collect();
-        self.close_upward(seeds, None)
+        let seeds = self
+            .db
+            .scope_touched(CLASSES, depth)
+            .chain(self.db.lattice(CONSTS).scoped_keys_from(depth));
+        class_ids(self.db.close_upward(CLASSES, seeds, None))
     }
 
     /// `changed` closed upward `height` times over parent edges, ascending: the
@@ -1206,63 +921,18 @@ impl<L: Label> Engine<L> {
     /// has an unchanged downward cone to that depth, so its matches are the
     /// previous round's and were applied then.
     pub fn delta(&self, changed: &[ClassId], height: usize) -> Vec<ClassId> {
-        self.close_upward(changed.to_vec(), Some(height))
+        let seeds = changed.iter().map(|id| id.0);
+        class_ids(self.db.close_upward(CLASSES, seeds, Some(height)))
     }
+}
 
-    /// Class -> the classes of the rows naming it as a child, grouped once for
-    /// the graph as it is. The tables are keyed the other way, so an upward walk
-    /// reads this instead.
-    fn parents(&self) -> Ref<'_, (u64, Csr)> {
-        if self.parents.borrow().0 != self.version {
-            // A rebuilt table already names representatives.
-            let rebuilt = self.rebuilt();
-            let class = |cell: u32| match rebuilt {
-                true => cell,
-                false => self.find(ClassId(cell)).0,
-            };
-            let csr = Csr::build_with(self.graph.uf.len(), |edge| {
-                for table in &self.graph.tables {
-                    for column in 1..table.arity() {
-                        for (&child, &parent) in table.column(column).iter().zip(table.values()) {
-                            edge(class(child), class(parent));
-                        }
-                    }
-                }
-            });
-            *self.parents.borrow_mut() = (self.version, csr);
-        }
-        self.parents.borrow()
-    }
+fn class_ids(ids: Vec<u32>) -> Vec<ClassId> {
+    ids.into_iter().map(ClassId).collect()
+}
 
-    /// `seeds` and everything reachable upward from them over parent edges in at
-    /// most `levels` steps (unbounded when `None`), ascending.
-    fn close_upward(&self, seeds: Vec<ClassId>, levels: Option<usize>) -> Vec<ClassId> {
-        let parents = self.parents();
-        let mut seen = self.marks.borrow_mut();
-        seen.begin(self.graph.uf.len());
-        let mut frontier: Vec<ClassId> = seeds
-            .into_iter()
-            .map(|id| self.find(id))
-            .filter(|&id| seen.insert(id.index()))
-            .collect();
-        let mut closure = frontier.clone();
-        let mut level = 0;
-        while !frontier.is_empty() && levels.is_none_or(|max| level < max) {
-            let mut next = Vec::new();
-            for id in frontier.drain(..) {
-                for &parent in parents.1.get(id.0) {
-                    if seen.insert(parent as usize) {
-                        closure.push(ClassId(parent));
-                        next.push(ClassId(parent));
-                    }
-                }
-            }
-            frontier = next;
-            level += 1;
-        }
-        closure.sort_unstable();
-        closure
-    }
+/// The lattice column of `column`.
+fn lattice(column: ColumnId) -> LatticeId {
+    LatticeId::nth(column_bit(column) as u32)
 }
 
 /// The position of `column` in a mask of columns.
@@ -1271,33 +941,6 @@ pub(crate) fn column_bit(column: ColumnId) -> usize {
         ColumnId::Const => 0,
         ColumnId::Type => 1,
         ColumnId::Object => 2,
-    }
-}
-
-/// Epoch-stamped membership marks over the class ids: `begin` costs nothing per
-/// class, so a sweep pays only for what it visits.
-#[derive(Default)]
-pub(crate) struct Marks {
-    stamp: Vec<u32>,
-    epoch: u32,
-}
-
-impl Marks {
-    fn begin(&mut self, classes: usize) {
-        self.epoch = self.epoch.wrapping_add(1);
-        if self.epoch == 0 {
-            self.stamp.fill(0);
-            self.epoch = 1;
-        }
-        if self.stamp.len() < classes {
-            self.stamp.resize(classes, 0);
-        }
-    }
-
-    /// Mark `id`, reporting whether this sweep had not seen it.
-    pub(crate) fn insert(&mut self, id: usize) -> bool {
-        let slot = &mut self.stamp[id];
-        std::mem::replace(slot, self.epoch) != self.epoch
     }
 }
 
@@ -1340,15 +983,17 @@ impl<'a, L: Label> ClassRef<'a, L> {
 
 /// Walks a class's e-nodes along its intrusive list.
 pub struct Rows<'a, L: Label> {
-    engine: &'a Engine<L>,
+    next: &'a [u32],
     cursor: u32,
+    label: PhantomData<&'a L>,
 }
 
 impl<L: Label> Clone for Rows<'_, L> {
     fn clone(&self) -> Self {
         Self {
-            engine: self.engine,
+            next: self.next,
             cursor: self.cursor,
+            label: PhantomData,
         }
     }
 }
@@ -1361,7 +1006,7 @@ impl<L: Label> Iterator for Rows<'_, L> {
             return None;
         }
         let row = RowId(self.cursor);
-        self.cursor = self.engine.graph.node_next[row.index()];
+        self.cursor = self.next[row.index()];
         Some(row)
     }
 }
