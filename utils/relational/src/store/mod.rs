@@ -377,6 +377,20 @@ impl Group {
             _ => &[],
         }
     }
+
+    /// How many cells the grouping has room for: one past the highest.
+    pub fn cells(&self) -> usize {
+        self.offsets.len().saturating_sub(2)
+    }
+
+    /// How many rows the cells have, all together.
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
 }
 
 #[cfg(test)]

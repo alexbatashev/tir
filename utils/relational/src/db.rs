@@ -16,6 +16,7 @@
 use std::cell::{Ref, RefCell, RefMut};
 
 use crate::column::{Column, Fact, Join};
+use crate::query::trie::Trie;
 use crate::store::{Group, Repair, Table};
 use crate::unionfind::UnionFind;
 use crate::{Csr, FxHashMap};
@@ -416,6 +417,33 @@ impl<C, const SPACES: usize> Database<C, SPACES> {
             let cells = table.column(column);
             rows.extend(groups.scratch.iter().map(|&row| (cells[row as usize], row)));
             rows.sort_unstable();
+        }
+    }
+
+    /// Index the rows of the table at `slot` as a trie over `columns`, unless
+    /// that is already done for the table as it is. Read through
+    /// [`Self::groups`].
+    pub fn prepare_trie(&self, slot: u32, columns: &[u8]) {
+        let Some(table) = self.table(slot) else {
+            return;
+        };
+        let mut groups = self.groups.borrow_mut();
+        if groups.tries.len() <= slot as usize {
+            groups.tries.resize_with(slot as usize + 1, Vec::new);
+        }
+        let tries = &mut groups.tries[slot as usize];
+        let at = match tries.iter().position(|(_, trie)| trie.columns() == columns) {
+            Some(at) => at,
+            None => {
+                tries.push((0, Trie::default()));
+                tries.len() - 1
+            }
+        };
+        let version = table.version() + 1;
+        let (built, trie) = &mut tries[at];
+        if *built != version {
+            *built = version;
+            trie.build(table, columns);
         }
     }
 
@@ -876,15 +904,18 @@ impl<C: Clone, const SPACES: usize> Database<C, SPACES> {
         let groups = self.groups.get_mut();
         groups.built.clear();
         groups.new_rows.clear();
+        groups.tries.clear();
     }
 }
 
 /// Per table and column, the rows grouped by that column and the table version
-/// the grouping was built at; and per table, the rows the epoch before wrote.
+/// the grouping was built at; per table, the rows the epoch before wrote; and
+/// per table and column order, the trie a join reads.
 #[derive(Default)]
 pub struct Groups {
     built: Vec<Vec<(u64, Group)>>,
     new_rows: Vec<Vec<NewRows>>,
+    tries: Vec<Vec<(u64, Trie)>>,
     scratch: Vec<u32>,
 }
 
@@ -911,6 +942,13 @@ impl Groups {
             .get(slot as usize)
             .and_then(|columns| columns.get(column))
             .map_or(&[], |new| new.rows.as_slice())
+    }
+
+    /// The trie [`Database::prepare_trie`] built over `columns`.
+    pub(crate) fn trie(&self, slot: u32, columns: &[u8]) -> &Trie {
+        let tries = &self.tries[slot as usize];
+        let found = tries.iter().find(|(_, trie)| trie.columns() == columns);
+        &found.expect("a prepared trie").1
     }
 
     /// The part of [`Self::new_rows`] whose cell is `cell`.

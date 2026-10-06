@@ -4,21 +4,38 @@
 use smallvec::SmallVec;
 
 use super::ir::{Atom, Cmp, Guard, Host, Lattice, Out, Resolution, Scalar, Var};
-use super::plan::{Arg, FactAnchor, Plan, RowShape, Shape, Step};
+use super::join::{JOIN_MIN_ROWS, JoinScratch};
+use super::plan::{Arg, FactAnchor, JoinPlan, Plan, RowShape, Shape, Step};
 use crate::db::{Database, Groups};
 use crate::store::Table;
 
 /// What a client keeps between searches for one plan: what its parameters
 /// resolved to, which only changes when the host's version moves.
-#[derive(Default)]
 pub struct PlanCache {
     version: Option<u64>,
     resolutions: Vec<Resolution>,
     /// Whether some row atom of the plan reads no table, so the plan has no
     /// match until a resolution grows.
     dead: bool,
+    /// [`JOIN_MIN_ROWS`] unless a test forces a join or the loop nest.
+    pub(crate) join_min_rows: usize,
     /// The evaluator's working arrays, kept so a search allocates nothing.
     scratch: Scratch,
+    /// A join's working arrays, made by the first join a search runs.
+    join: Option<Box<JoinScratch>>,
+}
+
+impl Default for PlanCache {
+    fn default() -> Self {
+        Self {
+            version: None,
+            resolutions: Vec::new(),
+            dead: false,
+            join_min_rows: JOIN_MIN_ROWS,
+            scratch: Scratch::default(),
+            join: None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -170,15 +187,16 @@ impl Plan {
         roots.retain(|root| marks.insert(*root as usize));
         drop(marks);
         let scan = roots.len() <= SCAN_LIMIT;
+        let mut ready = 0;
         if !scan {
-            self.group(db, &cache.resolutions, &self.steps);
+            ready = self.group(db, cache, &self.run, &self.joins);
             for not in &self.nots {
-                not.group(db, &cache.resolutions, &not.steps);
+                not.group(db, cache, &not.run, &[]);
             }
         }
         let groups = db.groups();
-        let scratch = std::mem::take(&mut cache.scratch);
-        let mut eval = self.eval(db, host, &groups, &cache.resolutions, allowed, scratch);
+        let mut eval = self.eval(db, host, &groups, cache, allowed);
+        eval.ready = ready;
         eval.scan = scan;
         eval.old_below = fresh.1;
         eval.only_new = fresh.0
@@ -223,11 +241,10 @@ impl Plan {
         for (table, _) in &cache.resolutions[rows.select.param as usize].tables {
             db.prepare_group(*table, rows.select.column as usize);
         }
-        self.group(db, &cache.resolutions, &anchor.steps[1..]);
+        let ready = self.group(db, cache, &anchor.steps[1..], &anchor.joins);
         let groups = db.groups();
-        let scratch = std::mem::take(&mut cache.scratch);
-        let mut eval =
-            self.eval::<C, S, Unchecked>(db, host, &groups, &cache.resolutions, None, scratch);
+        let mut eval = self.eval::<C, S, Unchecked>(db, host, &groups, cache, None);
+        eval.ready = ready;
         self.scan(&mut eval, root, false);
         let (out, scratch) = eval.finish();
         cache.scratch = scratch;
@@ -283,17 +300,21 @@ impl Plan {
             return Matches::default();
         }
         let scan = starts <= SCAN_LIMIT;
-        if !scan {
-            for &anchor in &live {
-                self.group(db, &cache.resolutions, &self.anchors()[anchor].steps[1..]);
-            }
-        }
+        let ready: SmallVec<[u64; 4]> = live
+            .iter()
+            .map(|&anchor| {
+                let anchor = &self.anchors()[anchor];
+                match scan {
+                    true => 0,
+                    false => self.group(db, cache, &anchor.steps[1..], &anchor.joins),
+                }
+            })
+            .collect();
         let groups = db.groups();
-        let scratch = std::mem::take(&mut cache.scratch);
-        let mut eval =
-            self.eval::<C, S, Unchecked>(db, host, &groups, &cache.resolutions, None, scratch);
+        let mut eval = self.eval::<C, S, Unchecked>(db, host, &groups, cache, None);
         eval.scan = scan;
-        for anchor in live {
+        for (anchor, ready) in live.into_iter().zip(ready) {
+            eval.ready = ready;
             self.scan(&mut eval, anchor, true);
         }
         let (out, scratch) = eval.finish();
@@ -351,20 +372,22 @@ impl Plan {
             return Matches::default();
         }
         let scan = total <= SCAN_LIMIT;
-        if !scan {
-            for anchor in self.fact_anchors() {
-                self.group(db, &cache.resolutions, &anchor.steps);
-            }
-        }
+        let ready: SmallVec<[u64; 4]> = self
+            .fact_anchors()
+            .iter()
+            .map(|anchor| match scan {
+                true => 0,
+                false => self.group(db, cache, &anchor.steps, &anchor.joins),
+            })
+            .collect();
         let groups = db.groups();
-        let scratch = std::mem::take(&mut cache.scratch);
-        let mut eval =
-            self.eval::<C, S, Unchecked>(db, host, &groups, &cache.resolutions, None, scratch);
+        let mut eval = self.eval::<C, S, Unchecked>(db, host, &groups, cache, None);
         eval.scan = scan;
         eval.only_new = true;
         eval.old_below = usize::MAX;
         for (index, anchor) in self.fact_anchors().iter().enumerate() {
             eval.fact_anchor = Some(index);
+            eval.ready = ready[index];
             eval.facts_old = anchor.earlier;
             for &minted in lists(anchor.first_on_key) {
                 for &key in db.risen(anchor.column, minted) {
@@ -384,10 +407,10 @@ impl Plan {
         db: &'a Database<C, S>,
         host: &'a dyn Host,
         groups: &'a Groups,
-        resolutions: &'a [Resolution],
+        cache: &'a mut PlanCache,
         allowed: Option<&'a A>,
-        mut scratch: Scratch,
     ) -> Eval<'a, C, S, A> {
+        let mut scratch = std::mem::take(&mut cache.scratch);
         // A lookup finds a representative in the cells, which name the
         // absorbed id until a canonicalization.
         debug_assert!(
@@ -403,7 +426,7 @@ impl Plan {
             db,
             host,
             groups,
-            resolutions,
+            resolutions: &cache.resolutions,
             nested: false,
             anchor: None,
             fact_anchor: None,
@@ -419,12 +442,15 @@ impl Plan {
             scan: false,
             pool: scratch.pool,
             fresh: 0,
+            join_min_rows: cache.join_min_rows,
+            ready: 0,
+            join: &mut cache.join,
             out: Matches::default(),
         }
     }
 
     /// The row atom at `atom`.
-    fn rows(&self, atom: usize) -> &RowShape {
+    pub(super) fn rows(&self, atom: usize) -> &RowShape {
         match &self.shapes[atom] {
             Shape::Rows(rows) => rows,
             Shape::Lattice(_) => unreachable!("an anchor is a row atom"),
@@ -432,7 +458,11 @@ impl Plan {
     }
 
     /// The cells of `table` whose rows also match swapped.
-    fn when<'r>(rows: &RowShape, resolutions: &'r [Resolution], table: u32) -> &'r [u32] {
+    pub(super) fn when<'r>(
+        rows: &RowShape,
+        resolutions: &'r [Resolution],
+        table: u32,
+    ) -> &'r [u32] {
         match rows.when {
             Some(when) => resolutions[when as usize].cells_of(table),
             None => &[],
@@ -475,13 +505,17 @@ impl Plan {
     }
 
     /// Build the grouping each of `steps` looks rows up in: by value for an
-    /// atom reached through it, by argument for one reached sideways.
+    /// atom reached through it, by argument for one reached sideways; then
+    /// the tries the joins among them read. Reports the joins whose tries it
+    /// built, as a mask over their indices.
     fn group<C, const S: usize>(
         &self,
         db: &Database<C, S>,
-        resolutions: &[Resolution],
+        cache: &PlanCache,
         steps: &[Step],
-    ) {
+        joins: &[JoinPlan],
+    ) -> u64 {
+        let resolutions = &cache.resolutions;
         for step in steps {
             let (atom, slot) = match *step {
                 Step::Atom(atom) => (atom, None),
@@ -507,9 +541,19 @@ impl Plan {
                 }
             }
         }
+        let mut ready = 0;
+        for step in steps {
+            if let Step::Join(join) = *step
+                && join < 64
+                && self.prepare_join(db, resolutions, &joins[join], cache.join_min_rows)
+            {
+                ready |= 1 << join;
+            }
+        }
+        ready
     }
 
-    fn step<C, const S: usize, A: Allow + ?Sized>(
+    pub(super) fn step<C, const S: usize, A: Allow + ?Sized>(
         &self,
         eval: &mut Eval<'_, C, S, A>,
         root: u32,
@@ -518,19 +562,37 @@ impl Plan {
         let steps = match (eval.anchor, eval.fact_anchor) {
             (Some(anchor), _) => &self.anchors()[anchor].steps,
             (None, Some(anchor)) => &self.fact_anchors()[anchor].steps,
-            (None, None) => &self.steps,
+            (None, None) => &self.run,
         };
-        let Some(&step) = steps.get(index) else {
-            // A negated conjunction asks only whether a solution exists.
-            if eval.counting {
-                eval.hits += 1;
+        let mut index = index;
+        let step = loop {
+            let Some(&step) = steps.get(index) else {
+                // A negated conjunction asks only whether a solution exists.
+                if eval.counting {
+                    eval.hits += 1;
+                    return;
+                }
+                if !eval.only_new || eval.fresh > 0 {
+                    let root = eval.bound[self.query.root as usize].unwrap_or(root);
+                    eval.out.push(root, &eval.bound, &eval.scalars);
+                }
                 return;
+            };
+            let Step::Join(join) = step else {
+                break step;
+            };
+            // A join that would not pay is the run of steps that follows.
+            if eval.ready >> join.min(63) & 1 == 1 {
+                let joins = match (eval.anchor, eval.fact_anchor) {
+                    (Some(anchor), _) => &self.anchors()[anchor].joins,
+                    (None, Some(anchor)) => &self.fact_anchors()[anchor].joins,
+                    (None, None) => &self.joins,
+                };
+                if self.pays(eval, &joins[join]) {
+                    return self.join(eval, root, index, &joins[join]);
+                }
             }
-            if !eval.only_new || eval.fresh > 0 {
-                let root = eval.bound[self.query.root as usize].unwrap_or(root);
-                eval.out.push(root, &eval.bound, &eval.scalars);
-            }
-            return;
+            index += 1;
         };
         if eval.counting && eval.hits > 0 {
             return;
@@ -578,6 +640,7 @@ impl Plan {
                 }
                 return;
             }
+            Step::Join(_) => unreachable!("a join is run or skipped above"),
             Step::Atom(atom) => atom,
         };
         match &self.shapes[index_of_atom] {
@@ -758,7 +821,7 @@ impl Plan {
 }
 
 /// Whether `cell` is one of `cells`, which is ascending.
-fn reads(cells: &[u32], cell: u32) -> bool {
+pub(super) fn reads(cells: &[u32], cell: u32) -> bool {
     match cells {
         [only] => *only == cell,
         _ => cells.binary_search(&cell).is_ok(),
@@ -766,14 +829,14 @@ fn reads(cells: &[u32], cell: u32) -> bool {
 }
 
 /// State one search threads through the loop nest.
-struct Eval<'a, C, const S: usize, A: ?Sized> {
-    db: &'a Database<C, S>,
+pub(super) struct Eval<'a, C, const S: usize, A: ?Sized> {
+    pub(super) db: &'a Database<C, S>,
     host: &'a dyn Host,
-    groups: &'a Groups,
+    pub(super) groups: &'a Groups,
     /// Per parameter, what it resolved to; shared by the plan and its nots.
-    resolutions: &'a [Resolution],
+    pub(super) resolutions: &'a [Resolution],
     /// Whether a negated sub-conjunction is being stepped.
-    nested: bool,
+    pub(super) nested: bool,
     /// The anchor whose order is being stepped, when the search started at a
     /// row atom rather than at the root.
     anchor: Option<usize>,
@@ -785,25 +848,30 @@ struct Eval<'a, C, const S: usize, A: ?Sized> {
     facts_old: u64,
     /// Row atoms below this index match only rows older than the previous
     /// epoch.
-    old_below: usize,
+    pub(super) old_below: usize,
     /// `None` allows every binding.
-    allowed: Option<&'a A>,
+    pub(super) allowed: Option<&'a A>,
     only_new: bool,
     /// Inside a negated conjunction: count solutions and stop at the first,
     /// rather than emit them.
     counting: bool,
     hits: usize,
-    bound: Vec<Option<u32>>,
-    scalars: Vec<u64>,
+    pub(super) bound: Vec<Option<u32>>,
+    pub(super) scalars: Vec<u64>,
     /// Variables this branch bound, to undo on the way out.
-    trail: Vec<Var>,
+    pub(super) trail: Vec<Var>,
     /// Whether rows are looked up by scanning, with no grouping built.
-    scan: bool,
+    pub(super) scan: bool,
     /// Vectors a scan's hits go in, reused.
     pool: Vec<Vec<u32>>,
     /// How many rows and values of the partial match the previous epoch
     /// touched.
-    fresh: usize,
+    pub(super) fresh: usize,
+    pub(super) join_min_rows: usize,
+    /// The joins of the order being stepped whose tries are built, as a mask
+    /// over their indices: the rest run as the loop nest.
+    ready: u64,
+    pub(super) join: &'a mut Option<Box<JoinScratch>>,
     out: Matches,
 }
 
@@ -832,7 +900,13 @@ impl<C, const S: usize, A: Allow + ?Sized> Eval<'_, C, S, A> {
     /// or not, or report the row inconsistent with what is already bound.
     /// Whatever it bound before failing is on the trail.
     #[inline]
-    fn bind_row(&mut self, args: &[Arg], table: &Table, row: u32, swapped: bool) -> bool {
+    pub(super) fn bind_row(
+        &mut self,
+        args: &[Arg],
+        table: &Table,
+        row: u32,
+        swapped: bool,
+    ) -> bool {
         args.iter().all(|arg| {
             let column = if swapped { arg.swapped } else { arg.column };
             // A canonical table names every id by its representative.
@@ -841,7 +915,7 @@ impl<C, const S: usize, A: Allow + ?Sized> Eval<'_, C, S, A> {
     }
 
     #[inline]
-    fn bind_one(&mut self, var: Var, id: u32) -> bool {
+    pub(super) fn bind_one(&mut self, var: Var, id: u32) -> bool {
         match self.bound[var as usize] {
             // A variable shared by two atoms must bind the same id.
             Some(prior) => prior == id,
@@ -901,7 +975,7 @@ impl<C, const S: usize, A: Allow + ?Sized> Eval<'_, C, S, A> {
         }
     }
 
-    fn unbind(&mut self, mark: usize) {
+    pub(super) fn unbind(&mut self, mark: usize) {
         for var in self.trail.drain(mark..) {
             self.bound[var as usize] = None;
         }

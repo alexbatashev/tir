@@ -14,7 +14,9 @@
 //! assumption scopes that snapshot all of it along with the client's own state.
 //!
 //! [`query`] is conjunctive queries over a database, with an evaluator that
-//! answers by loops over the tables; [`rule`] is what a match writes;
+//! answers by loops over the tables, or by a worst-case optimal join over
+//! sorted tries where several atoms share a variable; [`rule`] is what a match
+//! writes;
 //! [`saturate`] is the semi-naive fixpoint over a rule set; [`extract`] is the
 //! least-cost fold a client reads a solution off with. They name tables,
 //! columns and cells, and ask their client for whatever means more than that.
