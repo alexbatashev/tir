@@ -149,9 +149,9 @@ exchanged. Constants, types and pointer derivations are lattice columns over
 classes. The query evaluator, rule actions, saturation rounds and extraction
 see only tables, id spaces and lattice columns; the e-graph compiles its
 patterns and actions onto them. When several atoms of a pattern share an
-operand none of them has bound yet, the evaluator binds it by intersecting the
-cells each atom allows, read from tries of the tables, rather than by probing
-one atom for each row of another.
+operand none of them has bound yet or reaches its rows through, the evaluator
+binds it by intersecting the cells each atom allows, read from tries of the
+tables, rather than by probing one atom for each row of another.
 
 A saturation round searches the current graph, collects matches, applies
 their actions, and rebuilds congruence. Later rounds use recorded changes to

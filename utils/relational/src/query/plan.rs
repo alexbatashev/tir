@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use smallvec::SmallVec;
 
+use super::ghd::{Bag, decompose};
 use super::ir::{Atom, Lattice, Out, Param, Query, Scalar, Select, Var};
 use crate::db::LatticeId;
 
@@ -480,10 +481,10 @@ impl Plan {
     }
 }
 
-/// A run of row-atom steps two of whose atoms share a variable neither has
-/// bound when the run starts: joined by intersecting the cells each atom
-/// allows for that variable, rather than by probing one atom per row of the
-/// other.
+/// A run of row-atom steps two of whose atoms read a variable unbound when
+/// the run starts, neither reaching its rows through it: joined by
+/// intersecting the cells each atom allows for that variable, rather than by
+/// probing one atom per row of the other.
 #[derive(Clone, Debug)]
 pub(super) struct JoinPlan {
     /// How many steps after the join's own make up the run.
@@ -491,8 +492,11 @@ pub(super) struct JoinPlan {
     /// The variables the run binds, in the order the loop nest first binds
     /// them: the attribute order.
     pub(super) vars: SmallVec<[Var; 8]>,
-    /// The run's atoms, in step order, joined as one bag.
+    /// The run's atoms, in step order.
     pub(super) atoms: SmallVec<[JoinAtom; 4]>,
+    /// The run's decomposition: one bag of every atom when they are best
+    /// joined at once.
+    pub(super) bags: Vec<Bag>,
 }
 
 #[derive(Clone, Debug)]
@@ -581,8 +585,8 @@ fn joined(
 }
 
 impl JoinPlan {
-    /// The join of a run of row-atom steps, if two of its atoms share a
-    /// variable `bound` leaves free.
+    /// The join of a run of row-atom steps, if two of its atoms read a
+    /// variable `bound` leaves free, neither reaching its rows through it.
     fn of(query: &Query, shapes: &[Shape], run: &[Step], bound: &[bool]) -> Option<Self> {
         let shape = |step: &Step| match *step {
             Step::Atom(atom) | Step::Parents { atom, .. } => match &shapes[atom] {
@@ -601,8 +605,16 @@ impl JoinPlan {
         if run.len() < 2 {
             return None;
         }
+        // An atom reached through the variable reads only the rows holding
+        // it, so nothing is intersected there: the loop nest looks it up.
         let shared = (0..query.vars).any(|var| {
-            let readers = run.iter().filter(|step| vars(shape(step).1).contains(&var));
+            let readers = run.iter().filter(|step| {
+                let lookup = match **step {
+                    Step::Parents { slot, .. } => shape(step).1.args[slot as usize].var,
+                    _ => shape(step).1.key,
+                };
+                lookup != var && vars(shape(step).1).contains(&var)
+            });
             !bound[var as usize] && readers.count() >= 2
         });
         if !shared {
@@ -621,7 +633,11 @@ impl JoinPlan {
                 }
             }
         }
-        let atoms = run
+        // A decomposition's masks hold this many atoms and variables.
+        if run.len() > 64 || order.len() > 64 {
+            return None;
+        }
+        let atoms: SmallVec<[JoinAtom; 4]> = run
             .iter()
             .map(|step| {
                 let (atom, rows) = shape(step);
@@ -671,9 +687,19 @@ impl JoinPlan {
                 }
             })
             .collect();
+        let edges: SmallVec<[u64; 8]> = atoms
+            .iter()
+            .map(|atom| {
+                atom.levels.iter().fold(0, |vars, level| match level {
+                    Level::Attr(at) => vars | 1 << at,
+                    Level::Known(_) => vars,
+                })
+            })
+            .collect();
         Some(Self {
             len: run.len(),
             vars: order,
+            bags: decompose(&edges),
             atoms,
         })
     }

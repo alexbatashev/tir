@@ -6,6 +6,7 @@
 use smallvec::SmallVec;
 
 use super::eval::{Allow, Eval, reads};
+use super::ghd::Bag;
 use super::ir::Resolution;
 use super::plan::{JoinAtom, JoinPlan, Level, Plan, Step};
 use super::set::Set;
@@ -38,6 +39,16 @@ pub(super) struct JoinScratch {
     /// The ranks of a run's matches and the order they go in, one pair per
     /// join being bound.
     tuples: Vec<(Vec<u64>, Vec<u32>)>,
+    /// Per depth, the cell bound there.
+    path: Vec<u32>,
+    /// Every atom's cursors and where each atom's start, kept while the bags
+    /// of a decomposed run take turns.
+    starts: Vec<Cursor>,
+    start_spans: Vec<u32>,
+    /// Per bag, its tuples and their order by the separator with its parent.
+    bags: Vec<(Vec<u64>, Vec<u32>)>,
+    /// A parent's distinct separator cells, sorted, a row per tuple.
+    keys: Vec<u32>,
 }
 
 /// Where an atom's relation is read: under one selected cell of one table,
@@ -295,12 +306,26 @@ impl Plan {
         scratch
             .leaves
             .resize_with(join.atoms.len().max(scratch.leaves.len()), Vec::new);
-        let run = Run {
+        scratch
+            .path
+            .resize(join.vars.len().max(scratch.path.len()), 0);
+        let mut run = Run {
             join,
             sources,
             epoch: db.epoch(),
+            atoms: SmallVec::new(),
+            vars: SmallVec::new(),
+            held: SmallVec::new(),
+            stride: 0,
+            cells: false,
         };
-        run.descend(scratch, eval.allowed, 0, out);
+        match &join.bags[..] {
+            [bag] => {
+                run.enter(bag, true);
+                run.descend(scratch, eval.allowed, &[], 0, out);
+            }
+            bags => run.decomposed(scratch, eval.allowed, bags, out),
+        }
     }
 }
 
@@ -309,31 +334,197 @@ struct Run<'r, 'a> {
     join: &'r JoinPlan,
     sources: SmallVec<[Source<'a>; 16]>,
     epoch: u32,
+    /// The bag being joined: its atoms by position in the run, its variables
+    /// by index into the attribute order.
+    atoms: SmallVec<[usize; 8]>,
+    vars: SmallVec<[u32; 8]>,
+    /// Per variable of the bag, the column of its parent's separator cells it
+    /// is held to, and how many columns those have.
+    held: SmallVec<[Option<u8>; 8]>,
+    stride: usize,
+    /// Whether each tuple starts with the bag's cells, by which a decomposed
+    /// run's bags are matched to each other.
+    cells: bool,
+}
+
+/// Where the separator's cells sit in a tuple of a bag with variables `vars`.
+fn positions(vars: u64, separator: u64) -> SmallVec<[usize; 8]> {
+    bits(separator)
+        .map(|var| (vars & ((1 << var) - 1)).count_ones() as usize)
+        .collect()
+}
+
+fn bits(mask: u64) -> impl Iterator<Item = u32> {
+    (0..64).filter(move |bit| mask >> bit & 1 == 1)
+}
+
+/// The cells of tuple `at` at `positions`: its separator key.
+fn key<'t>(
+    tuples: &'t [u64],
+    width: usize,
+    positions: &'t [usize],
+    at: u32,
+) -> impl Iterator<Item = u64> + 't {
+    let tuple = &tuples[at as usize * width..];
+    positions.iter().map(move |&position| tuple[position])
 }
 
 impl Run<'_, '_> {
-    /// Bind the run's variable at `depth` to each cell every atom reading it
+    /// Join `bag` next, its separator held to its parent's cells unless it
+    /// is the root.
+    fn enter(&mut self, bag: &Bag, root: bool) {
+        self.atoms = bits(bag.atoms).map(|atom| atom as usize).collect();
+        self.vars = bits(bag.vars).collect();
+        let separator = if root { 0 } else { bag.separator };
+        self.held = SmallVec::from_elem(None, self.vars.len());
+        for (column, at) in positions(bag.vars, separator).into_iter().enumerate() {
+            self.held[at] = Some(column as u8);
+        }
+        self.stride = separator.count_ones() as usize;
+        self.cells = self.join.bags.len() > 1;
+    }
+
+    /// Join a decomposed run's bags root first, each child holding its
+    /// separator to the cells its parent's tuples have; drop, leaves first,
+    /// each parent tuple no child tuple agrees with; then combine one tuple
+    /// of every bag, each child's looked up by its parent's separator cells.
+    fn decomposed<A: Allow + ?Sized>(
+        &mut self,
+        scratch: &mut JoinScratch,
+        allowed: Option<&A>,
+        bags: &[Bag],
+        out: &mut Vec<u64>,
+    ) {
+        std::mem::swap(&mut scratch.cursors, &mut scratch.starts);
+        std::mem::swap(&mut scratch.spans, &mut scratch.start_spans);
+        scratch
+            .bags
+            .resize_with(bags.len().max(scratch.bags.len()), Default::default);
+        let width = |bag: &Bag| (bag.vars.count_ones() + bag.atoms.count_ones()) as usize;
+        let links: SmallVec<[Link; 4]> = bags
+            .iter()
+            .map(|bag| Link {
+                span: width(bag),
+                at: positions(bag.vars, bag.separator),
+                up_span: width(&bags[bag.parent]),
+                up_at: positions(bags[bag.parent].vars, bag.separator),
+            })
+            .collect();
+        let mut keys = std::mem::take(&mut scratch.keys);
+        let mut found = true;
+        for (index, bag) in bags.iter().enumerate() {
+            keys.clear();
+            if index > 0 {
+                // The parent's distinct separator cells, sorted.
+                let Link { up_span, up_at, .. } = &links[index];
+                let (tuples, order) = &mut scratch.bags[bag.parent];
+                let key = |tuple| key(tuples, *up_span, up_at, tuple);
+                order.clear();
+                order.extend(0..(tuples.len() / up_span) as u32);
+                order.sort_unstable_by(|&a, &b| key(a).cmp(key(b)));
+                for &tuple in order.iter() {
+                    let last = &keys[keys.len().saturating_sub(up_at.len())..];
+                    if keys.is_empty() || !key(tuple).eq(last.iter().map(|&cell| cell as u64)) {
+                        keys.extend(key(tuple).map(|cell| cell as u32));
+                    }
+                }
+            }
+            self.enter(bag, index == 0);
+            scratch.cursors.clear();
+            scratch.spans.clear();
+            for &atom in &self.atoms {
+                scratch.spans.push(scratch.cursors.len() as u32);
+                let from = scratch.start_spans[atom] as usize;
+                let to = scratch.start_spans[atom + 1] as usize;
+                scratch.cursors.extend_from_slice(&scratch.starts[from..to]);
+            }
+            scratch.spans.push(scratch.cursors.len() as u32);
+            let mut tuples = std::mem::take(&mut scratch.bags[index].0);
+            tuples.clear();
+            self.descend(scratch, allowed, &keys, 0, &mut tuples);
+            found = !tuples.is_empty();
+            scratch.bags[index].0 = tuples;
+            if !found {
+                break;
+            }
+        }
+        scratch.keys = keys;
+        // Leaves first: a child's tuples sorted by separator, and its parent
+        // left with the tuples that agree with one of them.
+        for (index, bag) in bags.iter().enumerate().skip(1).rev() {
+            if !found {
+                return;
+            }
+            let Link {
+                span,
+                at,
+                up_span,
+                up_at,
+            } = &links[index];
+            let (above, below) = scratch.bags.split_at_mut(index);
+            let (tuples, order) = &mut below[0];
+            let own = |tuple| key(tuples, *span, at, tuple);
+            order.clear();
+            order.extend(0..(tuples.len() / span) as u32);
+            order.sort_unstable_by(|&a, &b| own(a).cmp(own(b)));
+            let up = &mut above[bag.parent].0;
+            let mut kept = 0;
+            for tuple in 0..(up.len() / up_span) as u32 {
+                let agrees = order
+                    .binary_search_by(|&other| own(other).cmp(key(up, *up_span, up_at, tuple)))
+                    .is_ok();
+                if agrees {
+                    let from = tuple as usize * up_span;
+                    up.copy_within(from..from + up_span, kept * up_span);
+                    kept += 1;
+                }
+            }
+            up.truncate(kept * up_span);
+            found = kept > 0;
+        }
+        if !found {
+            return;
+        }
+        // Where each atom's rank sits: its bag, and its place in the tuple.
+        let mut place: SmallVec<[(usize, usize); 8]> =
+            SmallVec::from_elem((0, 0), self.join.atoms.len());
+        for (index, bag) in bags.iter().enumerate() {
+            for (slot, atom) in bits(bag.atoms).enumerate() {
+                place[atom as usize] = (index, bag.vars.count_ones() as usize + slot);
+            }
+        }
+        let mut chosen: SmallVec<[u32; 8]> = SmallVec::from_elem(0, bags.len());
+        combine(&scratch.bags, bags, &links, &place, &mut chosen, 0, out);
+    }
+
+    /// Bind the bag's variable at `depth` to each cell every atom reading it
     /// allows, descend the atoms' cursors under it, and go on to the next;
-    /// past the last, collect the leaves.
+    /// past the last, collect the leaves. `held` is the rows of the parent's
+    /// separator cells that agree with the cells bound so far.
     fn descend<A: Allow + ?Sized>(
         &self,
         scratch: &mut JoinScratch,
         allowed: Option<&A>,
+        held: &[u32],
         depth: usize,
         out: &mut Vec<u64>,
     ) {
-        let width = self.join.atoms.len();
+        let width = self.atoms.len();
         let frame = depth * (width + 1);
-        let Some(&var) = self.join.vars.get(depth) else {
+        let Some(&attr) = self.vars.get(depth) else {
             return self.leaves(scratch, frame, out);
         };
+        let var = self.join.vars[attr as usize];
         let span = |spans: &[u32], atom: usize| {
             spans[frame + atom] as usize..spans[frame + atom + 1] as usize
         };
-        let here = Level::Attr(depth as u32);
+        let here = Level::Attr(attr);
         let reads_here = |scratch: &JoinScratch, atom: usize| {
             let first = scratch.cursors[span(&scratch.spans, atom).start];
-            self.join.atoms[atom].levels.get(first.node.depth() - 1) == Some(&here)
+            self.join.atoms[self.atoms[atom]]
+                .levels
+                .get(first.node.depth() - 1)
+                == Some(&here)
         };
         // An atom read through several tries allows the union of their cells.
         let mut unions: SmallVec<[Vec<u32>; 4]> = SmallVec::new();
@@ -353,6 +544,19 @@ impl Run<'_, '_> {
                 unions.push(union);
             }
         }
+        // A separator variable allows only the cells the parent's tuples
+        // have, which are sorted in this column under the cells bound so far.
+        let column = self.held[depth].map(usize::from);
+        if let Some(column) = column {
+            let mut cells = scratch.unions.pop().unwrap_or_default();
+            cells.clear();
+            for row in held.chunks_exact(self.stride) {
+                if cells.last() != Some(&row[column]) {
+                    cells.push(row[column]);
+                }
+            }
+            unions.push(cells);
+        }
         let mut candidates = std::mem::take(&mut scratch.candidates[depth]);
         {
             let mut merged = unions.iter();
@@ -370,6 +574,7 @@ impl Run<'_, '_> {
                     _ => Set::Uint(merged.next().expect("a merged list")),
                 });
             }
+            sets.extend(merged.map(|cells| Set::Uint(cells)));
             Set::intersect(
                 &mut sets,
                 &mut candidates,
@@ -379,10 +584,26 @@ impl Run<'_, '_> {
         }
         scratch.unions.extend(unions);
         let next = frame + width + 1;
+        let mut from = 0;
         'cells: for &cell in &candidates {
+            let held = match column {
+                Some(column) => {
+                    let rows = held.len() / self.stride;
+                    let at = |row: usize| held[row * self.stride + column];
+                    while at(from) < cell {
+                        from += 1;
+                    }
+                    let to = (from..rows).find(|&row| at(row) != cell).unwrap_or(rows);
+                    let rows = &held[from * self.stride..to * self.stride];
+                    from = to;
+                    rows
+                }
+                None => held,
+            };
             if allowed.is_some_and(|allowed| !allowed(var, cell)) {
                 continue;
             }
+            scratch.path[depth] = cell;
             let end = scratch.spans[frame + width] as usize;
             scratch.cursors.truncate(end);
             scratch.spans.truncate(next);
@@ -393,7 +614,7 @@ impl Run<'_, '_> {
                     scratch.cursors.extend_from_within(cursors);
                     continue;
                 }
-                let levels = &self.join.atoms[atom].levels;
+                let levels = &self.join.atoms[self.atoms[atom]].levels;
                 for at in cursors {
                     let Cursor { source, mut node } = scratch.cursors[at];
                     let trie = self.sources[source as usize].trie;
@@ -413,15 +634,15 @@ impl Run<'_, '_> {
                 }
             }
             scratch.spans.push(scratch.cursors.len() as u32);
-            self.descend(scratch, allowed, depth + 1, out);
+            self.descend(scratch, allowed, held, depth + 1, out);
         }
         scratch.candidates[depth] = candidates;
     }
 
     /// Every atom is at its leaves: the product of the rows they hold, each
-    /// as a tuple of ranks.
+    /// as a tuple of ranks, after the bag's cells if it keeps them.
     fn leaves(&self, scratch: &mut JoinScratch, frame: usize, out: &mut Vec<u64>) {
-        let width = self.join.atoms.len();
+        let width = self.atoms.len();
         for atom in 0..width {
             let list = &mut scratch.leaves[atom];
             list.clear();
@@ -442,8 +663,10 @@ impl Run<'_, '_> {
             }
         }
         let leaves = &scratch.leaves[..width];
+        let cells = &scratch.path[..self.vars.len() * usize::from(self.cells)];
         let mut at: SmallVec<[usize; 8]> = SmallVec::from_elem(0, width);
         loop {
+            out.extend(cells.iter().map(|&cell| cell as u64));
             out.extend(leaves.iter().zip(&at).map(|(list, &at)| list[at]));
             let mut atom = width;
             loop {
@@ -458,6 +681,61 @@ impl Run<'_, '_> {
                 at[atom] = 0;
             }
         }
+    }
+}
+
+/// How a bag's tuples are laid out: their width and where the separator's
+/// cells sit in them, then the same of its parent's.
+struct Link {
+    span: usize,
+    at: SmallVec<[usize; 8]>,
+    up_span: usize,
+    up_at: SmallVec<[usize; 8]>,
+}
+
+/// One tuple per bag from bag `index` on, each child's agreeing with its
+/// parent's on their separator: the rank tuple of each such match of the
+/// run.
+fn combine(
+    tuples: &[(Vec<u64>, Vec<u32>)],
+    bags: &[Bag],
+    links: &[Link],
+    place: &[(usize, usize)],
+    chosen: &mut [u32],
+    index: usize,
+    out: &mut Vec<u64>,
+) {
+    if index == bags.len() {
+        out.extend(
+            place
+                .iter()
+                .map(|&(bag, at)| tuples[bag].0[chosen[bag] as usize * links[bag].span + at]),
+        );
+        return;
+    }
+    let Link {
+        span,
+        at,
+        up_span,
+        up_at,
+    } = &links[index];
+    let (own, order) = &tuples[index];
+    let range = match index {
+        0 => 0..own.len() / span,
+        _ => {
+            let parent = bags[index].parent;
+            let wanted = || key(&tuples[parent].0, *up_span, up_at, chosen[parent]);
+            let from = order.partition_point(|&other| key(own, *span, at, other).lt(wanted()));
+            let to = order.partition_point(|&other| key(own, *span, at, other).le(wanted()));
+            from..to
+        }
+    };
+    for position in range {
+        chosen[index] = match index {
+            0 => position as u32,
+            _ => order[position],
+        };
+        combine(tuples, bags, links, place, chosen, index + 1, out);
     }
 }
 
@@ -510,8 +788,8 @@ mod tests {
     type Db = Database<(), 1>;
 
     /// A bag and a keyed table of binary rows and a bag of unary ones, each
-    /// row `(label, args..) -> value` with a few labels and few argument
-    /// cells, filled over two epochs.
+    /// row `(kind, args..) -> value` with a few kinds and few argument cells,
+    /// filled over two epochs.
     fn database(rows: &[(u32, u32, u32, u32, u32)], split: usize) -> Db {
         let space = SpaceId::nth(0);
         let mut db = Db::new();
@@ -521,15 +799,15 @@ mod tests {
         db.add_table(Table::bag(3).plain(1), space);
         db.add_table(Table::new(3).plain(1), space);
         db.add_table(Table::bag(2).plain(1), space);
-        for (at, &(table, label, x, y, value)) in rows.iter().enumerate() {
+        for (at, &(table, kind, x, y, value)) in rows.iter().enumerate() {
             if at == split {
                 db.advance();
             }
             let tag = at as u32;
             match table % 3 {
-                2 => db.insert(2, &[label, x], value, tag),
-                1 if db.table(1).unwrap().get(&[label, x, y]).is_some() => continue,
-                table => db.insert(table, &[label, x, y], value, tag),
+                2 => db.insert(2, &[kind, x], value, tag),
+                1 if db.table(1).unwrap().get(&[kind, x, y]).is_some() => continue,
+                table => db.insert(table, &[kind, x, y], value, tag),
             };
         }
         db.advance();
@@ -553,9 +831,10 @@ mod tests {
 
     /// Queries with a variable two atoms share and neither has bound when
     /// they are reached: a chain, a triangle, a triangle whose second atom
-    /// reads one variable twice, and a triangle reached sideways.
+    /// reads one variable twice, a triangle reached sideways, and two
+    /// triangles joined by a bridge reached sideways.
     fn query(shape: usize, swap: bool, guard: bool) -> Query {
-        let (r, a, b, x, y, c, d) = (0, 1, 2, 3, 4, 5, 6);
+        let (r, a, b, x, y, c, d, e) = (0, 1, 2, 3, 4, 5, 6, 7);
         let atoms = match shape {
             0 => vec![
                 atom(BINARY, &[a, b], r, Some(0), swap),
@@ -572,15 +851,24 @@ mod tests {
                 atom(OTHER, &[x, x], a, Some(1), swap),
                 atom(BINARY, &[x, y], b, None, swap),
             ],
-            _ => vec![
+            3 => vec![
                 atom(BINARY, &[a, b], r, Some(0), swap),
                 atom(OTHER, &[a, x], c, Some(1), swap),
                 atom(BINARY, &[b, x], d, None, swap),
             ],
+            _ => vec![
+                atom(BINARY, &[a, b], r, Some(0), swap),
+                atom(UNARY, &[x], a, Some(1), swap),
+                atom(UNARY, &[x], b, None, swap),
+                atom(OTHER, &[x, c], y, None, swap),
+                atom(UNARY, &[d], c, None, swap),
+                atom(UNARY, &[e], d, None, swap),
+                atom(UNARY, &[e], c, None, swap),
+            ],
         };
         Query {
             space: SpaceId::nth(0),
-            vars: 7,
+            vars: 8,
             scalars: 2,
             params: 4,
             root: r,
@@ -604,6 +892,28 @@ mod tests {
             .collect()
     }
 
+    /// A chain whose every variable is looked up by the atom after the one
+    /// that binds it has nothing to intersect, so it is not joined.
+    #[test]
+    fn a_chain_of_lookups_is_not_joined() {
+        let (r, a, x, y) = (0, 1, 2, 3);
+        let plan = Plan::compile(Query {
+            space: SpaceId::nth(0),
+            vars: 4,
+            scalars: 0,
+            params: 4,
+            root: r,
+            atoms: vec![
+                atom(UNARY, &[a], r, None, false),
+                atom(UNARY, &[x], a, None, false),
+                atom(UNARY, &[y], x, None, false),
+            ],
+            guards: Vec::new(),
+            nots: Vec::new(),
+        });
+        assert!(plan.joins.is_empty(), "{:?}", plan.run);
+    }
+
     proptest! {
         /// The join emits exactly the loop nest's matches in the loop nest's
         /// order, from the root, from every row and from the new rows, under
@@ -612,7 +922,7 @@ mod tests {
         fn a_join_matches_the_loop_nest_in_order(
             rows in prop::collection::vec((0u32..3, 0u32..3, 0u32..8, 0u32..8, 0u32..IDS), 100..400),
             split in 0usize..400,
-            shape in 0usize..4,
+            shape in 0usize..5,
             swap in any::<bool>(),
             guard in any::<bool>(),
             prune in 0u32..4,
