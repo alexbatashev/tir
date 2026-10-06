@@ -141,6 +141,14 @@ For an expression such as `(x + y) - y`, the query joins a subtraction node
 to an addition node and requires both appearances of `y` to name the same
 class. A successful match can merge the subtraction's class with `x`.
 
+The e-graph is one client of a generic relational engine. Each label is a
+cell of a table keyed by its operands, a pattern node selects the labels it
+matches, and a commutative label lets a binary row match with its operands
+exchanged. Constants, types and pointer derivations are lattice columns over
+classes. The query evaluator, rule actions, saturation rounds and extraction
+see only tables, id spaces and lattice columns; the e-graph compiles its
+patterns and actions onto them.
+
 A saturation round searches the current graph, collects matches, applies
 their actions, and rebuilds congruence. Later rounds use recorded changes to
 restrict searches where a rule's dependencies permit that restriction.

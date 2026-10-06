@@ -7,8 +7,9 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use crate::Stats;
+use crate::rule::Client;
 use crate::saturate::Delta;
-use crate::{Engine, Label as ENode, Stats};
 
 /// Mirrors the core pass timer's switch; this crate cannot see it.
 pub fn enabled() -> bool {
@@ -45,28 +46,34 @@ struct RuleCounts {
     changed: usize,
 }
 
-pub(super) fn register_rules<L: ENode>(rules: &[crate::Rule<L>]) {
+pub(super) fn register_rules<'a>(names: impl IntoIterator<Item = &'a str>) {
     if rule_stats_enabled() {
         RULES.with(|counts| {
             let mut counts = counts.borrow_mut();
-            for rule in rules {
-                counts.entry(rule.name.clone()).or_default();
+            for name in names {
+                counts.entry(name.to_string()).or_default();
             }
         });
     }
 }
 
-pub(super) fn apply_rule<L: ENode>(
+/// Whether a match's application is counted at all: [`RoundStats::apply`]
+/// and [`apply_rule`] do nothing otherwise.
+pub(super) fn counting() -> bool {
+    enabled() || rule_stats_enabled()
+}
+
+pub(super) fn apply_rule<C, const S: usize, X: Client<C, S>>(
     name: &str,
-    eg: &mut Engine<L>,
-    apply: impl FnOnce(&mut Engine<L>),
+    client: &mut X,
+    apply: impl FnOnce(&mut X),
 ) {
     if !rule_stats_enabled() {
-        return apply(eg);
+        return apply(client);
     }
-    let before = eg.stats();
-    apply(eg);
-    let after = eg.stats();
+    let before = client.db().stats();
+    apply(client);
+    let after = client.db().stats();
     RULES.with(|counts| {
         let mut counts = counts.borrow_mut();
         let count = counts.get_mut(name).expect("registered saturation rule");
@@ -77,9 +84,8 @@ pub(super) fn apply_rule<L: ENode>(
     });
 }
 
-/// Record one [`Engine::extract_best`](super::Engine::extract_best): it costs a
-/// pass over every class, and instcombine runs one per region, so the count is as
-/// interesting as the time.
+/// Record one extraction: it costs a pass over every id, and instcombine runs
+/// one per region, so the count is as interesting as the time.
 pub(super) fn count_extract(elapsed: Duration) {
     if enabled() {
         EXTRACTED.with(|total| {
@@ -107,15 +113,15 @@ impl Timer {
 }
 
 /// One saturation round's counters, or nothing when telemetry is off — every
-/// method is then a plain pass-through. The engine counts its own work, so a
-/// round is the difference across it: `num_classes`/`total_size` cannot answer
-/// this, since a match may merge two classes and mint two more.
+/// method is then a plain pass-through. The database counts its own work, so a
+/// round is the difference across it: live ids and the client's size cannot
+/// answer this, since a match may equate two ids and mint two more.
 pub struct RoundStats(Option<(Round, Stats)>);
 
 impl RoundStats {
     /// Open a round searching against `delta` (`None` on the first round, which
     /// searches everything).
-    pub fn start<L: ENode>(eg: &Engine<L>, delta: Option<&Delta>) -> Self {
+    pub fn start<G>(stats: Stats, delta: Option<&Delta<G>>) -> Self {
         if !enabled() {
             return Self(None);
         }
@@ -124,12 +130,12 @@ impl RoundStats {
                 changed: delta.map_or(usize::MAX, Delta::len),
                 ..Round::default()
             },
-            eg.stats(),
+            stats,
         )))
     }
 
     /// One rule's root set for this round, drawn from `delta`'s frontier.
-    pub fn searched(&mut self, roots: usize, delta: Option<&Delta>) {
+    pub fn searched<G>(&mut self, roots: usize, delta: Option<&Delta<G>>) {
         let Some((round, _)) = &mut self.0 else {
             return;
         };
@@ -137,27 +143,31 @@ impl RoundStats {
         round.delta = round.delta.max(delta.map_or(0, Delta::frontier));
     }
 
-    /// Apply one match, counting it as a no-op if it merged nothing and minted
-    /// nothing — the match was already in the graph, as re-finding an old one is.
-    pub fn apply<L: ENode>(&mut self, eg: &mut Engine<L>, apply: impl FnOnce(&mut Engine<L>)) {
+    /// Apply one match, counting it as a no-op if it equated nothing, minted
+    /// nothing and raised nothing — the match was already there, as re-finding
+    /// an old one is.
+    pub fn apply<C, const S: usize, X: Client<C, S>>(
+        &mut self,
+        client: &mut X,
+        apply: impl FnOnce(&mut X),
+    ) {
         let Some((round, _)) = &mut self.0 else {
-            return apply(eg);
+            return apply(client);
         };
         round.found += 1;
-        let before = eg.stats();
-        apply(eg);
-        let after = eg.stats();
+        let before = client.db().stats();
+        apply(client);
+        let after = client.db().stats();
         round.noop += usize::from(
             (after.merges, after.adds, after.raises) == (before.merges, before.adds, before.raises),
         );
     }
 
     /// Close the round; call after the rebuild, whose merges and repairs it counts.
-    pub fn finish<L: ENode>(self, eg: &Engine<L>) {
+    pub fn finish(self, now: Stats) {
         let Some((mut round, base)) = self.0 else {
             return;
         };
-        let now = eg.stats();
         round.merged = now.merges - base.merges;
         round.repairs = now.repairs - base.repairs;
         ROUNDS.with(|rounds| rounds.borrow_mut().push(round));

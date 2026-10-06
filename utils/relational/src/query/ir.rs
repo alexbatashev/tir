@@ -1,0 +1,320 @@
+//! The query IR: atoms over a database's tables and lattice columns, guards
+//! over the words a match binds, and the host a search asks for what only the
+//! client knows.
+
+use smallvec::SmallVec;
+
+use crate::db::{LatticeId, SpaceId};
+
+/// An id variable of a [`Query`], numbered from zero.
+pub type Var = u32;
+
+/// A scalar variable: one word, read off a row or computed by a guard.
+pub type Scalar = u32;
+
+/// A set of cells the host resolves per database: which cells a selected
+/// column may hold, and in which tables. Shared by a query and its nots.
+pub type Param = u32;
+
+/// One of the host's functions over words.
+pub type ExternId = u32;
+
+/// An integer expression over bound scalars.
+#[derive(Clone, Debug)]
+pub enum Expr {
+    Lit(i64),
+    Scalar(Scalar),
+    Sub(Box<Expr>, Box<Expr>),
+    Add(Box<Expr>, Box<Expr>),
+    /// `2^e - 1`, the all-ones value of `e` bits.
+    Ones(Box<Expr>),
+    /// Bitwise conjunction, for masking a literal to the width the class spells
+    /// it at.
+    And(Box<Expr>, Box<Expr>),
+    /// One when the operand is zero, zero otherwise — a comparison's negation,
+    /// which is what a rule proving the complement of a settled comparison
+    /// needs to spell.
+    IsZero(Box<Expr>),
+}
+
+impl Expr {
+    pub(crate) fn eval(&self, scalars: &[u64]) -> Option<i64> {
+        Some(match self {
+            Expr::Lit(value) => *value,
+            Expr::Scalar(slot) => scalars[*slot as usize] as i64,
+            Expr::Sub(a, b) => a.eval(scalars)?.checked_sub(b.eval(scalars)?)?,
+            Expr::Add(a, b) => a.eval(scalars)?.checked_add(b.eval(scalars)?)?,
+            Expr::Ones(e) => match e.eval(scalars)? {
+                64 => u64::MAX as i64,
+                bits @ 0..64 => ((1u64 << bits) - 1) as i64,
+                _ => return None,
+            },
+            Expr::And(a, b) => a.eval(scalars)? & b.eval(scalars)?,
+            Expr::IsZero(e) => i64::from(e.eval(scalars)? == 0),
+        })
+    }
+
+    fn reads(&self, out: &mut Vec<Scalar>) {
+        match self {
+            Expr::Lit(_) => {}
+            Expr::Scalar(slot) => out.push(*slot),
+            Expr::Sub(a, b) | Expr::Add(a, b) | Expr::And(a, b) => {
+                a.reads(out);
+                b.reads(out);
+            }
+            Expr::Ones(e) | Expr::IsZero(e) => e.reads(out),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cmp {
+    Lt,
+    Le,
+    Eq,
+    Ne,
+}
+
+/// A conjunctive query. Every atom's key variable is reachable from
+/// [`Self::root`] through the variables earlier atoms bind, which is what
+/// lets a plan bind them in one pass.
+#[derive(Clone, Debug)]
+pub struct Query {
+    /// The id space every variable ranges over.
+    pub space: SpaceId,
+    pub vars: u32,
+    pub scalars: u32,
+    pub params: u32,
+    pub root: Var,
+    pub atoms: Vec<Atom>,
+    pub guards: Vec<Guard>,
+    /// Sub-conjunctions that must have no solution. Placed once everything they
+    /// read is bound.
+    pub nots: Vec<Nested>,
+}
+
+#[derive(Clone, Debug)]
+pub enum Atom {
+    Rows(Rows),
+    Lattice(Lattice),
+}
+
+impl Atom {
+    /// The variable this atom is looked up under: a row atom's value, a
+    /// lattice atom's key.
+    pub fn key(&self) -> Var {
+        match self {
+            Atom::Rows(rows) => rows.value(),
+            Atom::Lattice(lattice) => lattice.key,
+        }
+    }
+
+    /// The scalars this atom binds.
+    pub(crate) fn writes(&self) -> SmallVec<[Scalar; 2]> {
+        match self {
+            Atom::Rows(rows) => rows.tag.iter().copied().collect(),
+            Atom::Lattice(lattice) => lattice
+                .out
+                .iter()
+                .filter_map(|out| match out {
+                    Out::Word(slot) => Some(*slot),
+                    _ => None,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Rows of the tables `select.param` names. In each table, column
+/// `select.column` must hold one of the cells listed for that table.
+#[derive(Clone, Debug)]
+pub struct Rows {
+    pub select: Select,
+    /// One per column, the value column last, which must be a variable.
+    /// `terms[select.column]` is [`Term::Any`].
+    pub terms: SmallVec<[Term; 6]>,
+    /// Binds the row's tag.
+    pub tag: Option<Scalar>,
+    pub swap: Option<Swap>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Select {
+    pub column: u8,
+    pub param: Param,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Term {
+    Any,
+    Var(Var),
+}
+
+/// The atom also matches a row with columns `columns[0]` and `columns[1]`
+/// exchanged, if the row's selected cell is among `when`'s cells for its
+/// table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Swap {
+    pub columns: [u8; 2],
+    pub when: Param,
+}
+
+impl Rows {
+    /// The variable the value column binds.
+    pub fn value(&self) -> Var {
+        match self.terms.last() {
+            Some(Term::Var(var)) => *var,
+            _ => panic!("a row atom binds its value column"),
+        }
+    }
+
+    /// The key columns holding a variable, in column order: the atom's
+    /// arguments, which a sideways step numbers.
+    pub(crate) fn args(&self) -> impl Iterator<Item = (usize, Var)> + '_ {
+        let keys = &self.terms[..self.terms.len() - 1];
+        keys.iter()
+            .enumerate()
+            .filter_map(|(column, term)| match term {
+                Term::Var(var) => Some((column, *var)),
+                Term::Any => None,
+            })
+    }
+
+    /// The column whose cell sits in `column` when the row is read swapped.
+    pub(crate) fn swapped(&self, column: usize) -> usize {
+        match self.swap {
+            Some(Swap {
+                columns: [a, b], ..
+            }) if column == a as usize => b as usize,
+            Some(Swap {
+                columns: [a, b], ..
+            }) if column == b as usize => a as usize,
+            _ => column,
+        }
+    }
+}
+
+/// `key`'s value in a lattice column.
+#[derive(Clone, Debug)]
+pub struct Lattice {
+    pub column: LatticeId,
+    pub key: Var,
+    /// One per word the column reads back as.
+    pub out: SmallVec<[Out; 2]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Out {
+    /// The word is an id of the query's space, bound to the variable.
+    Var(Var),
+    /// The word is written to the scalar.
+    Word(Scalar),
+    /// The word must be one of the parameter's cells.
+    In(Param),
+}
+
+/// A predicate over bound scalars.
+#[derive(Clone, Debug)]
+pub enum Guard {
+    Cmp(Cmp, Expr, Expr),
+    /// Bind `out` to what `value` evaluates to.
+    Let {
+        out: Scalar,
+        value: Expr,
+    },
+    /// The pairs are not all bound to the same id. One pair is plain
+    /// disequality; several say "these two terms are not the same term".
+    Distinct(SmallVec<[(Var, Var); 4]>),
+    /// A host function over the words `args` evaluate to; it binds `out`, and
+    /// failing fails the match.
+    Extern {
+        call: ExternId,
+        args: SmallVec<[Expr; 4]>,
+        out: SmallVec<[Scalar; 2]>,
+    },
+}
+
+impl Guard {
+    pub(crate) fn reads(&self) -> Vec<Scalar> {
+        let mut out = Vec::new();
+        match self {
+            Guard::Cmp(_, a, b) => {
+                a.reads(&mut out);
+                b.reads(&mut out);
+            }
+            Guard::Let { value, .. } => value.reads(&mut out),
+            Guard::Distinct(..) => {}
+            Guard::Extern { args, .. } => {
+                for arg in args {
+                    arg.reads(&mut out);
+                }
+            }
+        }
+        out
+    }
+
+    /// The id variables the guard reads. Only a disequality has any: the rest
+    /// work on words.
+    pub(crate) fn vars(&self) -> SmallVec<[Var; 8]> {
+        match self {
+            Guard::Distinct(pairs) => pairs.iter().flat_map(|&(a, b)| [a, b]).collect(),
+            _ => SmallVec::new(),
+        }
+    }
+
+    pub(crate) fn writes(&self) -> SmallVec<[Scalar; 2]> {
+        match self {
+            Guard::Cmp(..) | Guard::Distinct(..) => SmallVec::new(),
+            Guard::Let { out, .. } => SmallVec::from_slice(&[*out]),
+            Guard::Extern { out, .. } => out.clone(),
+        }
+    }
+}
+
+/// A negated sub-conjunction: no solution of it exists, given what the outer
+/// match bound.
+///
+/// Evaluated against the whole database, never a delta. Rows and lattice
+/// values only accumulate and ids only merge, so the conjunction can only go
+/// from unsatisfied to satisfied over epochs: a match blocked once stays
+/// blocked and needs no re-check, and a match that fired cannot be un-fired.
+#[derive(Clone, Debug)]
+pub struct Nested {
+    pub atoms: Vec<Atom>,
+    pub guards: Vec<Guard>,
+}
+
+/// What a parameter resolves to: for a row atom's selection, tables in the
+/// order first met and each table's cells ascending; for a lattice atom's
+/// [`Out::In`], cells ascending. Resolutions only grow.
+#[derive(Clone, Debug, Default)]
+pub struct Resolution {
+    pub tables: SmallVec<[(u32, SmallVec<[u32; 4]>); 2]>,
+    pub cells: SmallVec<[u32; 4]>,
+}
+
+impl Resolution {
+    /// The cells listed for `table`.
+    pub(crate) fn cells_of(&self, table: u32) -> &[u32] {
+        let found = self.tables.iter().find(|(known, _)| *known == table);
+        found.map_or(&[], |(_, cells)| cells.as_slice())
+    }
+}
+
+/// What a search asks its client.
+pub trait Host {
+    /// Grows whenever some parameter's resolution may have grown.
+    fn version(&self) -> u64;
+    /// Extend `out` by what `param` resolves to among what appeared since
+    /// version `since` (`None`: from scratch, into an empty `out`). Appending
+    /// must keep the order a from-scratch resolution would give.
+    fn resolve(&self, param: Param, since: Option<u64>, out: &mut Resolution);
+    /// A guard's host function over words. Failing fails the match.
+    fn call(&self, id: ExternId, args: &[u64], out: &mut [u64]) -> bool;
+    /// Whether `param` resolves to nothing, when the host can tell without
+    /// resolving it: a plan reading no table is settled before it gets a
+    /// cache.
+    fn empty(&self, _param: Param) -> bool {
+        false
+    }
+}

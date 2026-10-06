@@ -1,11 +1,8 @@
-use std::collections::HashMap;
 use std::fmt::Debug;
 
-use tir_adt::{APFloat, APInt, FxBuildHasher};
+use tir_adt::{APFloat, APInt};
 
-use crate::{ClassId, LabelId};
-
-pub(crate) type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
+use crate::{ClassId, FxHashMap, LabelId};
 
 /// An e-node's label: everything about it except its operands. Operands are
 /// child class ids carried inline, as the term the label heads. Identity is
@@ -175,8 +172,8 @@ impl<L: Label> Labels<L> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::testing::Term;
     use super::*;
-    use crate::testing::Term;
 
     #[test]
     fn equal_labels_share_an_id_whatever_their_children() {

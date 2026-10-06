@@ -14,7 +14,7 @@
 
 use std::hash::Hash;
 
-use crate::label::FxHashMap;
+use crate::FxHashMap;
 
 /// What an id is known to be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

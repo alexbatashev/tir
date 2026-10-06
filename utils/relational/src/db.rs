@@ -15,10 +15,10 @@
 
 use std::cell::{Ref, RefCell, RefMut};
 
-use crate::Csr;
 use crate::column::{Column, Fact, Join};
 use crate::store::{Group, Repair, Table};
 use crate::unionfind::UnionFind;
+use crate::{Csr, FxHashMap};
 
 /// An id space: the ids one union-find partitions. A database has a fixed
 /// number of them, numbered from zero, so a client names them as constants.
@@ -43,6 +43,12 @@ impl LatticeId {
     pub const fn nth(index: u32) -> Self {
         Self(index)
     }
+
+    /// The position the column was declared at; also its bit in a mask of
+    /// columns.
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
 }
 
 /// Tables, id spaces and lattice columns, with the change log and the
@@ -53,7 +59,7 @@ impl LatticeId {
 pub struct Database<C, const SPACES: usize> {
     state: State<C, SPACES>,
     /// Lattice columns keep an undo log per scope rather than a snapshot.
-    lattices: Vec<(Column<u64>, SpaceId)>,
+    lattices: Vec<Lattice>,
     scopes: Vec<Scope<C, SPACES>>,
     /// Bumped whenever a table or a partition changes, so a derived index
     /// knows it is stale.
@@ -65,6 +71,39 @@ pub struct Database<C, const SPACES: usize> {
     /// sweep that visits a handful of ids does not first zero an array the size
     /// of the space.
     marks: RefCell<Marks>,
+    stats: Stats,
+}
+
+/// Cumulative work, for a fixpoint test and the saturation counters. A scope
+/// does not roll these back, since they count work, not state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stats {
+    /// Ids equated away.
+    pub merges: usize,
+    /// Ids minted.
+    pub adds: usize,
+    /// Rows a canonicalization re-keyed.
+    pub repairs: usize,
+    /// Lattice entries a raise moved. A round that only raised a fact changed
+    /// no table and no partition, and is not a fixpoint.
+    pub raises: usize,
+}
+
+/// A lattice column and the space its keys are ids of.
+struct Lattice {
+    column: Column<u64>,
+    space: SpaceId,
+    /// Set for an offset column: an id read as another id of the space plus a
+    /// distance. A value is one word, so the column holds an index into this.
+    offsets: Option<Offsets>,
+}
+
+/// Every `(base, distance)` an offset column has held. Only ever appended to,
+/// so an index a popped scope wrote never needs taking back.
+#[derive(Default)]
+struct Offsets {
+    list: Vec<(u32, i64)>,
+    index: FxHashMap<(u32, i64), u64>,
 }
 
 /// What a scope undoes: copied when one opens, put back when it closes.
@@ -118,13 +157,13 @@ struct Scope<C, const SPACES: usize> {
     touched: Vec<Vec<u32>>,
 }
 
-impl<C: Clone + Default, const SPACES: usize> Default for Database<C, SPACES> {
+impl<C: Default, const SPACES: usize> Default for Database<C, SPACES> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<C: Clone + Default, const SPACES: usize> Database<C, SPACES> {
+impl<C: Default, const SPACES: usize> Database<C, SPACES> {
     pub fn new() -> Self {
         Self {
             state: State {
@@ -150,9 +189,12 @@ impl<C: Clone + Default, const SPACES: usize> Database<C, SPACES> {
             groups: RefCell::default(),
             reverse: RefCell::default(),
             marks: RefCell::default(),
+            stats: Stats::default(),
         }
     }
+}
 
+impl<C, const SPACES: usize> Database<C, SPACES> {
     // ---- schema -----------------------------------------------------------
 
     /// Add `table`, whose cells past its plain columns name ids of `space`,
@@ -166,8 +208,24 @@ impl<C: Clone + Default, const SPACES: usize> Database<C, SPACES> {
     /// A new lattice column keyed on the ids of `space`. Declared with no
     /// scope open: a scope has nothing to put back for it.
     pub fn add_lattice(&mut self, space: SpaceId, join: Join) -> LatticeId {
+        self.declare(space, join, None)
+    }
+
+    /// A new offset column keyed on the ids of `space`: each id is known as
+    /// another id of the space plus a distance, a weighted forest whose chains
+    /// [`Self::offset`] follows to the root. Two values that disagree once
+    /// followed conflict, which reads back as "nowhere known".
+    pub fn add_offsets(&mut self, space: SpaceId) -> LatticeId {
+        self.declare(space, Join::Agree, Some(Offsets::default()))
+    }
+
+    fn declare(&mut self, space: SpaceId, join: Join, offsets: Option<Offsets>) -> LatticeId {
         assert!(self.scopes.is_empty(), "declared under a scope");
-        self.lattices.push((Column::new(join), space));
+        self.lattices.push(Lattice {
+            column: Column::new(join),
+            space,
+            offsets,
+        });
         self.state.rises.push(Rises::default());
         LatticeId(self.lattices.len() as u32 - 1)
     }
@@ -180,6 +238,7 @@ impl<C: Clone + Default, const SPACES: usize> Database<C, SPACES> {
         let state = &mut self.state.spaces[space.0 as usize];
         let id = state.uf.push();
         state.live += 1;
+        self.stats.adds += 1;
         if let Some(scope) = self.scopes.last_mut() {
             scope.touched[space.0 as usize].push(id);
         }
@@ -208,8 +267,9 @@ impl<C: Clone + Default, const SPACES: usize> Database<C, SPACES> {
     }
 
     /// Equate `a` and `b`, returning the representative of the merged set and,
-    /// unless they were equal already, the id it absorbed. The tables keep
-    /// naming the absorbed id until [`Self::canonicalize`].
+    /// unless they were equal already, the id it absorbed. The lattice columns
+    /// over the space join the absorbed id's value onto the survivor's; the
+    /// tables keep naming the absorbed id until [`Self::canonicalize`].
     #[inline]
     pub fn equate(&mut self, space: SpaceId, a: u32, b: u32) -> (u32, Option<u32>) {
         let state = &mut self.state.spaces[space.0 as usize];
@@ -229,6 +289,13 @@ impl<C: Clone + Default, const SPACES: usize> Database<C, SPACES> {
             scope.touched[space.0 as usize].push(survivor);
         }
         self.log_change(space, survivor);
+        self.stats.merges += 1;
+        for at in 0..self.lattices.len() {
+            let lattice = &self.lattices[at];
+            if lattice.space == space && !lattice.column.is_empty() {
+                self.merge(LatticeId(at as u32), absorbed, survivor);
+            }
+        }
         (survivor, Some(absorbed))
     }
 
@@ -266,6 +333,7 @@ impl<C: Clone + Default, const SPACES: usize> Database<C, SPACES> {
                 table.repair(state.uf.parents(), *epoch, report);
             }
         }
+        self.stats.repairs += report.rekeyed.len();
         for &id in &report.rekeyed {
             self.log_change(space, id);
         }
@@ -323,28 +391,30 @@ impl<C: Clone + Default, const SPACES: usize> Database<C, SPACES> {
     }
 
     /// List the rows of the table at `slot` the epoch before wrote, by their
-    /// first column, unless that is already done for the table as it is. Read
-    /// through [`Self::groups`].
-    pub fn prepare_new_rows(&self, slot: u32) {
+    /// cell in `column`, unless that is already done for the table as it is.
+    /// Read through [`Self::groups`].
+    pub fn prepare_new_rows(&self, slot: u32, column: usize) {
         let Some(table) = self.table(slot) else {
             return;
         };
         let mut groups = self.groups.borrow_mut();
         let groups = &mut *groups;
         if groups.new_rows.len() <= slot as usize {
-            groups
-                .new_rows
-                .resize_with(slot as usize + 1, Default::default);
+            groups.new_rows.resize_with(slot as usize + 1, Vec::new);
         }
-        let NewRows { made, rows } = &mut groups.new_rows[slot as usize];
+        let columns = &mut groups.new_rows[slot as usize];
+        if columns.len() <= column {
+            columns.resize_with(column + 1, Default::default);
+        }
+        let NewRows { made, rows } = &mut columns[column];
         let now = (table.version() + 1, self.state.epoch);
         if *made != now {
             *made = now;
             groups.scratch.clear();
             tir_adt::simd::select_eq(table.stamps(), self.state.epoch - 1, &mut groups.scratch);
             rows.clear();
-            let first = table.column(0);
-            rows.extend(groups.scratch.iter().map(|&row| (first[row as usize], row)));
+            let cells = table.column(column);
+            rows.extend(groups.scratch.iter().map(|&row| (cells[row as usize], row)));
             rows.sort_unstable();
         }
     }
@@ -371,62 +441,201 @@ impl<C: Clone + Default, const SPACES: usize> Database<C, SPACES> {
 
     #[inline]
     pub fn lattice(&self, lattice: LatticeId) -> &Column<u64> {
-        &self.lattices[lattice.0 as usize].0
+        &self.lattices[lattice.0 as usize].column
     }
 
     /// Join `value` onto what canonical `key` is known to be; see
     /// [`Column::raise`]. A rise is logged against the key.
     #[inline]
     pub fn raise(&mut self, lattice: LatticeId, key: u32, value: u64) -> bool {
-        let epoch = self.state.epoch;
-        let moved = self.lattices[lattice.0 as usize].0.raise(key, value, epoch);
-        if moved {
-            self.rose(lattice, key, false);
-        }
-        moved
+        self.write(lattice, key, Fact::Known(value), false, true)
     }
 
     /// [`Self::raise`] for the value `key` is minted with, which
     /// [`Self::risen`] keeps apart.
     #[inline]
     pub fn seed(&mut self, lattice: LatticeId, key: u32, value: u64) -> bool {
+        self.write(lattice, key, Fact::Known(value), true, true)
+    }
+
+    /// Join `fact` onto `key`'s entry, or replace it for an offset column,
+    /// whose stored values only [`Self::raise_offset`] can compare.
+    fn write(
+        &mut self,
+        lattice: LatticeId,
+        key: u32,
+        fact: Fact<u64>,
+        minted: bool,
+        counted: bool,
+    ) -> bool {
         let epoch = self.state.epoch;
-        let moved = self.lattices[lattice.0 as usize].0.raise(key, value, epoch);
+        let entry = &mut self.lattices[lattice.0 as usize];
+        let moved = match entry.offsets {
+            Some(_) => entry.column.put(key, fact, epoch),
+            None => entry.column.write(key, fact, epoch),
+        };
         if moved {
-            self.rose(lattice, key, true);
+            self.log_rise(lattice, key, minted);
+            self.stats.raises += usize::from(counted);
         }
         moved
     }
 
-    /// Replace `key`'s entry, no join; see [`Column::put`].
-    #[inline]
-    pub fn put(&mut self, lattice: LatticeId, key: u32, fact: Fact<u64>) -> bool {
-        let epoch = self.state.epoch;
-        let moved = self.lattices[lattice.0 as usize].0.put(key, fact, epoch);
-        if moved {
-            self.rose(lattice, key, false);
+    /// Join `absorbed`'s entry onto `survivor`'s, for ids just equated.
+    fn merge(&mut self, lattice: LatticeId, absorbed: u32, survivor: u32) {
+        let entry = &mut self.lattices[lattice.0 as usize];
+        let Some(fact) = entry.column.detach(absorbed) else {
+            return;
+        };
+        match (fact, &entry.offsets) {
+            (Fact::Known(index), Some(offsets)) => {
+                let (base, offset) = offsets.list[index as usize];
+                self.raise_offset(lattice, survivor, base, offset);
+            }
+            (fact, _) => {
+                self.write(lattice, survivor, fact, false, false);
+            }
         }
-        moved
     }
 
-    /// Remove `key`'s entry; a scope puts it back.
-    #[inline]
-    pub fn detach(&mut self, lattice: LatticeId, key: u32) -> Option<Fact<u64>> {
-        self.lattices[lattice.0 as usize].0.detach(key)
+    /// Raise "`key` is `base` plus `offset`" in an offset column. The value is
+    /// followed to the end of its chain first, so learning one location by two
+    /// routes (`q` from `p + 4`, then `q` from `(p + 4) + 0`) states one fact
+    /// rather than two that disagree. Reports whether the column moved.
+    pub fn raise_offset(&mut self, lattice: LatticeId, key: u32, base: u32, offset: i64) -> bool {
+        let key = self.find(self.lattices[lattice.0 as usize].space, key);
+        let raised = match self.resolve(lattice, base, offset) {
+            // An id derived from itself at no distance is not derived at all;
+            // at a distance it is a contradiction.
+            Some((base, 0)) if base == key => return false,
+            Some(value) => Fact::Known(value),
+            None => Fact::Conflict,
+        };
+        // Both sides are read back to where they land before they are
+        // compared. What is stored may name an id since absorbed, or a base
+        // whose own value deepened after it was written, and neither is a
+        // second opinion: it is the same one, spelled when it was learned.
+        let stored = self.resolved(lattice, key);
+        let joined = match stored {
+            Some(stored) => stored.join(raised, Join::Agree),
+            None => raised,
+        };
+        if stored == Some(joined) {
+            return false;
+        }
+        let joined = match joined {
+            Fact::Known(value) => {
+                let offsets = self.lattices[lattice.0 as usize]
+                    .offsets
+                    .as_mut()
+                    .expect("an offset column");
+                Fact::Known(*offsets.index.entry(value).or_insert_with(|| {
+                    offsets.list.push(value);
+                    offsets.list.len() as u64 - 1
+                }))
+            }
+            Fact::Conflict => Fact::Conflict,
+        };
+        self.write(lattice, key, joined, false, false);
+        self.stats.raises += 1;
+        true
     }
 
-    /// Join `absorbed`'s entry onto `survivor`'s, for a client that equated
-    /// them; see [`Column::merge`].
-    #[inline]
-    pub fn merge(&mut self, lattice: LatticeId, absorbed: u32, survivor: u32) -> bool {
-        let epoch = self.state.epoch;
-        let moved = self.lattices[lattice.0 as usize]
-            .0
-            .merge(absorbed, survivor, epoch);
-        if moved {
-            self.rose(lattice, survivor, false);
+    /// Raise `key`'s value in `lattice` to `value`: one word for a plain
+    /// column, a base id and a distance for an offset one.
+    pub fn raise_value(&mut self, lattice: LatticeId, key: u32, value: &[u64]) -> bool {
+        let entry = &self.lattices[lattice.0 as usize];
+        match entry.offsets {
+            Some(_) => self.raise_offset(lattice, key, value[0] as u32, value[1] as i64),
+            None => {
+                let key = self.find(entry.space, key);
+                self.raise(lattice, key, value[0])
+            }
         }
-        moved
+    }
+
+    /// Where `key` lands in an offset column: the end of its chain, or itself
+    /// at zero when nothing placed it. `None` once two values have disagreed,
+    /// and for a chain that does not end: an id placed relative to itself is a
+    /// contradiction, and "nowhere known" is the conservative reading of one.
+    pub fn offset(&self, lattice: LatticeId, key: u32) -> Option<(u32, i64)> {
+        self.resolve(lattice, key, 0)
+    }
+
+    /// Follow the chain from `base` to the id nothing places, adding the
+    /// distances. Bounded: chains are followed as they are written, so
+    /// anything this long is a cycle.
+    fn resolve(&self, lattice: LatticeId, base: u32, offset: i64) -> Option<(u32, i64)> {
+        const CHAIN_LIMIT: usize = 64;
+        let mut base = self.find(self.lattices[lattice.0 as usize].space, base);
+        let mut offset = offset;
+        for _ in 0..CHAIN_LIMIT {
+            match self.canonical(lattice, base) {
+                // Nothing places it: the end of the chain.
+                None => return Some((base, offset)),
+                // An id placed at itself ends the chain when it adds nothing,
+                // and contradicts itself when it adds something.
+                Some(Fact::Known((next, step))) if next == base => {
+                    return (step == 0).then_some((base, offset));
+                }
+                Some(Fact::Known((next, step))) => {
+                    base = next;
+                    offset = offset.checked_add(step)?;
+                }
+                Some(Fact::Conflict) => return None,
+            }
+        }
+        None
+    }
+
+    /// The stored entry with its base read through the union-find, or `None`
+    /// when nothing placed the id. The base may have been absorbed since.
+    fn canonical(&self, lattice: LatticeId, id: u32) -> Option<Fact<(u32, i64)>> {
+        let entry = &self.lattices[lattice.0 as usize];
+        Some(match entry.column.entry(id)? {
+            Fact::Known(index) => {
+                let offsets = entry.offsets.as_ref().expect("an offset column");
+                let (base, offset) = offsets.list[index as usize];
+                Fact::Known((self.find(entry.space, base), offset))
+            }
+            Fact::Conflict => Fact::Conflict,
+        })
+    }
+
+    /// The stored entry followed all the way to where it lands.
+    fn resolved(&self, lattice: LatticeId, id: u32) -> Option<Fact<(u32, i64)>> {
+        Some(match self.canonical(lattice, id)? {
+            Fact::Known((base, offset)) => match self.resolve(lattice, base, offset) {
+                Some(value) => Fact::Known(value),
+                None => Fact::Conflict,
+            },
+            Fact::Conflict => Fact::Conflict,
+        })
+    }
+
+    /// What `key` is known to be in `lattice`, as words: a plain column's
+    /// value, or an offset column's base and distance once its chain is
+    /// followed. `None` for unknown and for a conflict.
+    pub fn read(&self, lattice: LatticeId, key: u32) -> Option<[u64; 2]> {
+        let entry = &self.lattices[lattice.0 as usize];
+        match entry.offsets {
+            Some(_) => self
+                .offset(lattice, key)
+                .map(|(base, offset)| [u64::from(base), offset as u64]),
+            None => entry
+                .column
+                .get(self.find(entry.space, key))
+                .map(|value| [value, 0]),
+        }
+    }
+
+    /// Whether `key`'s entry in `lattice` rose during the epoch the last
+    /// [`Self::advance`] closed.
+    pub fn is_new(&self, lattice: LatticeId, key: u32) -> bool {
+        let entry = &self.lattices[lattice.0 as usize];
+        entry
+            .column
+            .is_new(self.find(entry.space, key), self.state.epoch)
     }
 
     /// The keys whose value rose during the epoch the last [`Self::advance`]
@@ -437,10 +646,19 @@ impl<C: Clone + Default, const SPACES: usize> Database<C, SPACES> {
         &self.state.rises[lattice.0 as usize].risen[usize::from(minted)]
     }
 
+    /// The lattice columns [`Self::risen`] is not empty for, as a mask over
+    /// their ids.
+    pub fn rose(&self, minted: bool) -> u64 {
+        let rises = self.state.rises.iter().enumerate();
+        rises
+            .filter(|(_, rises)| !rises.risen[usize::from(minted)].is_empty())
+            .fold(0, |mask, (at, _)| mask | 1 << at)
+    }
+
     /// Log that `key`'s value in `lattice` moved.
-    fn rose(&mut self, lattice: LatticeId, key: u32, minted: bool) {
+    fn log_rise(&mut self, lattice: LatticeId, key: u32, minted: bool) {
         self.state.rises[lattice.0 as usize].rising[usize::from(minted)].push(key);
-        self.log_change(self.lattices[lattice.0 as usize].1, key);
+        self.log_change(self.lattices[lattice.0 as usize].space, key);
     }
 
     // ---- epochs and the change log ----------------------------------------
@@ -462,7 +680,7 @@ impl<C: Clone + Default, const SPACES: usize> Database<C, SPACES> {
             ..
         } = &mut self.state;
         *epoch += 1;
-        for (rises, (_, space)) in rises.iter_mut().zip(&self.lattices) {
+        for (rises, Lattice { space, .. }) in rises.iter_mut().zip(&self.lattices) {
             let uf = &spaces[space.0 as usize].uf;
             for list in 0..2 {
                 let mut risen = std::mem::take(&mut rises.rising[list]);
@@ -602,41 +820,6 @@ impl<C: Clone + Default, const SPACES: usize> Database<C, SPACES> {
         Ref::map(self.reverse.borrow(), |reverse| &reverse[at].1)
     }
 
-    // ---- scopes -----------------------------------------------------------
-
-    /// Open a scope: everything until the matching [`Self::pop_scope`] is
-    /// undone by it.
-    pub fn push_scope(&mut self) {
-        self.scopes.push(Scope {
-            saved: self.state.clone(),
-            touched: vec![Vec::new(); SPACES],
-        });
-        for (column, _) in &mut self.lattices {
-            column.push_scope();
-        }
-    }
-
-    /// Close the scope, putting back the tables, partitions, client state,
-    /// lattice columns and change log it found. Ids minted under it stay minted, each
-    /// in a set of its own, so a caller still holding one can ask about it.
-    pub fn pop_scope(&mut self) {
-        let scope = self.scopes.pop().expect("open scope");
-        for (column, _) in &mut self.lattices {
-            column.pop_scope();
-        }
-        let mut saved = scope.saved;
-        for (space, now) in saved.spaces.iter_mut().zip(&self.state.spaces) {
-            space.uf.extend_to(now.uf.len());
-        }
-        self.state = saved;
-        self.version += 1;
-        // Table versions restart from the scope's copy, so a grouping built
-        // inside the scope could pass for one of a later table.
-        let groups = self.groups.get_mut();
-        groups.built.clear();
-        groups.new_rows.clear();
-    }
-
     /// How many scopes are open.
     #[inline]
     pub fn depth(&self) -> usize {
@@ -651,6 +834,49 @@ impl<C: Clone + Default, const SPACES: usize> Database<C, SPACES> {
             .flat_map(move |scope| &scope.touched[space.0 as usize])
             .copied()
     }
+
+    /// Work done since the database was made.
+    #[inline]
+    pub fn stats(&self) -> Stats {
+        self.stats
+    }
+}
+
+impl<C: Clone, const SPACES: usize> Database<C, SPACES> {
+    // ---- scopes -----------------------------------------------------------
+
+    /// Open a scope: everything until the matching [`Self::pop_scope`] is
+    /// undone by it.
+    pub fn push_scope(&mut self) {
+        self.scopes.push(Scope {
+            saved: self.state.clone(),
+            touched: vec![Vec::new(); SPACES],
+        });
+        for Lattice { column, .. } in &mut self.lattices {
+            column.push_scope();
+        }
+    }
+
+    /// Close the scope, putting back the tables, partitions, client state,
+    /// lattice columns and change log it found. Ids minted under it stay minted, each
+    /// in a set of its own, so a caller still holding one can ask about it.
+    pub fn pop_scope(&mut self) {
+        let scope = self.scopes.pop().expect("open scope");
+        for Lattice { column, .. } in &mut self.lattices {
+            column.pop_scope();
+        }
+        let mut saved = scope.saved;
+        for (space, now) in saved.spaces.iter_mut().zip(&self.state.spaces) {
+            space.uf.extend_to(now.uf.len());
+        }
+        self.state = saved;
+        self.version += 1;
+        // Table versions restart from the scope's copy, so a grouping built
+        // inside the scope could pass for one of a later table.
+        let groups = self.groups.get_mut();
+        groups.built.clear();
+        groups.new_rows.clear();
+    }
 }
 
 /// Per table and column, the rows grouped by that column and the table version
@@ -658,12 +884,12 @@ impl<C: Clone + Default, const SPACES: usize> Database<C, SPACES> {
 #[derive(Default)]
 pub struct Groups {
     built: Vec<Vec<(u64, Group)>>,
-    new_rows: Vec<NewRows>,
+    new_rows: Vec<Vec<NewRows>>,
     scratch: Vec<u32>,
 }
 
-/// The rows of one table the epoch before wrote, as `(first cell, row)`,
-/// ascending.
+/// The rows of one table the epoch before wrote, as `(cell, row)` for the
+/// cell of one column, ascending.
 #[derive(Default)]
 struct NewRows {
     /// The table version and epoch the list was made at.
@@ -678,17 +904,18 @@ impl Groups {
     }
 
     /// The rows of the table at `slot` that the epoch before wrote, as
-    /// `(first cell, row)`, ascending; prepared by
+    /// `(cell in column, row)`, ascending; prepared by
     /// [`Database::prepare_new_rows`].
-    pub fn new_rows(&self, slot: u32) -> &[(u32, u32)] {
+    pub fn new_rows(&self, slot: u32, column: usize) -> &[(u32, u32)] {
         self.new_rows
             .get(slot as usize)
+            .and_then(|columns| columns.get(column))
             .map_or(&[], |new| new.rows.as_slice())
     }
 
-    /// The part of [`Self::new_rows`] whose first column holds `cell`.
-    pub fn new_rows_with(&self, slot: u32, cell: u32) -> &[(u32, u32)] {
-        let rows = self.new_rows(slot);
+    /// The part of [`Self::new_rows`] whose cell is `cell`.
+    pub fn new_rows_with(&self, slot: u32, column: usize, cell: u32) -> &[(u32, u32)] {
+        let rows = self.new_rows(slot, column);
         let from = rows.partition_point(|&(other, _)| other < cell);
         let to = rows.partition_point(|&(other, _)| other <= cell);
         &rows[from..to]

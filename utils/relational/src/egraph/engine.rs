@@ -3,12 +3,13 @@ use std::marker::PhantomData;
 
 use smallvec::SmallVec;
 
-use crate::column::{Fact, Join};
-use crate::db::{Database, LatticeId, SpaceId};
-use crate::label::{FxHashMap, Labels};
-use crate::saturate::{RuleCache, RuleIndex};
+use super::label::Labels;
+use crate::column::Join;
+use crate::db::{Database, LatticeId, SpaceId, Stats};
+use crate::query::Resolution;
+use crate::saturate::Caches;
 use crate::store::{Repair, Table};
-use crate::{ClassId, ColumnId, Label, LabelId, RowId};
+use crate::{ClassId, ColumnId, FxHashMap, Label, LabelId, RowId};
 
 /// Empty link in an intrusive list.
 const NONE: u32 = u32::MAX;
@@ -17,26 +18,21 @@ const NONE: u32 = u32::MAX;
 pub(crate) const CLASSES: SpaceId = SpaceId::nth(0);
 
 /// The constant a class is known to be, as a label: seeded by every literal
-/// row, raised by a scope's assumption, joined by a union. The lattice columns
-/// are declared in [`column_bit`] order, so a column's bit is its id.
-const CONSTS: LatticeId = LatticeId::nth(0);
+/// row, raised by a scope's assumption, joined by a union.
+///
+/// The lattice columns are declared in the order a search from a risen fact
+/// tries them, which is how rarely they rise: a constant, then a derivation,
+/// then a type, which nearly every new class is minted with.
+pub(crate) const CONSTS: LatticeId = LatticeId::nth(0);
+/// The class a class is derived from and the distance to it: pointer
+/// provenance, for the vocabulary that has any. Two derivations that disagree
+/// conflict, which reads back as "derived from nothing known", the
+/// conservative answer.
+pub(crate) const OBJECTS: LatticeId = LatticeId::nth(1);
 /// The type a class's terms carry, seeded by every typed row. Congruence
 /// already forces a class's rows to agree on it, so the first row to say wins
 /// and a merge does not make the answer depend on merge order.
-const TYPES: LatticeId = LatticeId::nth(1);
-/// The class a class is derived from and the distance to it, as an index into
-/// [`Engine::derivations`]: pointer provenance, for the vocabulary that has
-/// any. A fact naming a class is canonicalized like a child, and two
-/// derivations that disagree conflict — which reads back as "derived from
-/// nothing known", the conservative answer.
-const OBJECTS: LatticeId = LatticeId::nth(2);
-
-/// A class read as a distance from another class.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct Object {
-    base: ClassId,
-    offset: i64,
-}
+pub(crate) const TYPES: LatticeId = LatticeId::nth(2);
 
 /// The e-graph: equivalence classes of terms, as a client of a [`Database`].
 ///
@@ -70,28 +66,19 @@ pub struct Engine<L: Label> {
     /// binary operator.
     label_slot: Vec<u32>,
     label_commutes: Vec<bool>,
-    label_op: Vec<u64>,
 
-    /// Every derivation [`OBJECTS`] has held. A lattice value is one word, so the
-    /// column holds the index; only ever appended to, like the labels, so an
-    /// index a popped scope wrote never needs taking back.
-    derivations: Vec<Object>,
-    derivation_ids: FxHashMap<Object, u64>,
     /// Per open scope, the classes it found distinct, grouped under the class
     /// it merged them into; merged groups only. Starts as the enclosing
     /// scope's, so a nested scope keeps naming base classes.
     members: Vec<FxHashMap<ClassId, Vec<ClassId>>>,
 
     repair: Repair,
-    /// Per plan, what its searches keep: the labels its atoms read and the
-    /// labels its head builds. Labels only accumulate, so an entry stays
-    /// valid for the engine's life.
-    caches: RefCell<FxHashMap<u64, RuleCache>>,
-    /// Which rules a round visits, for the rule set last saturated with.
-    pub(crate) rule_index: Option<std::sync::Arc<RuleIndex>>,
+    /// Per plan, what its searches keep, and which rules a round visits for
+    /// the rule set last saturated with. Labels only accumulate, so an entry
+    /// stays valid for the engine's life.
+    pub(crate) caches: RefCell<Caches>,
     /// Scratch for the variables a rule head binds.
-    pub(crate) head_bound: Vec<Option<ClassId>>,
-    stats: Stats,
+    pub(crate) head_bound: Vec<Option<u32>>,
 }
 
 /// The e-nodes of each class as an intrusive list, kept in the database so a
@@ -106,21 +93,6 @@ pub(crate) struct Lists {
     size: Vec<u32>,
 }
 
-/// The labels an atom reads, by the table they live in; ascending within one.
-pub(crate) type Candidates = SmallVec<[(u32, SmallVec<[LabelId; 4]>); 2]>;
-
-/// Cumulative engine work, for the saturation counters.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Stats {
-    pub merges: usize,
-    pub adds: usize,
-    /// Rows a rebuild re-keyed.
-    pub repairs: usize,
-    /// Column entries that rose. A round that only raised a fact changed
-    /// nothing the class and node counts see, and is not a fixpoint.
-    pub raises: usize,
-}
-
 impl<L: Label> Default for Engine<L> {
     fn default() -> Self {
         Self::new()
@@ -132,10 +104,10 @@ impl<L: Label> Engine<L> {
         let mut db = Database::new();
         let facts = [
             db.add_lattice(CLASSES, Join::Agree),
+            db.add_offsets(CLASSES),
             db.add_lattice(CLASSES, Join::First),
-            db.add_lattice(CLASSES, Join::Agree),
         ];
-        debug_assert_eq!(facts, [CONSTS, TYPES, OBJECTS]);
+        debug_assert_eq!(facts, [CONSTS, OBJECTS, TYPES]);
         Self {
             db,
             labels: Labels::default(),
@@ -144,15 +116,10 @@ impl<L: Label> Engine<L> {
             op_labels: FxHashMap::default(),
             label_slot: Vec::new(),
             label_commutes: Vec::new(),
-            label_op: Vec::new(),
-            derivations: Vec::new(),
-            derivation_ids: FxHashMap::default(),
             members: Vec::new(),
             repair: Repair::default(),
             caches: RefCell::default(),
-            rule_index: None,
             head_bound: Vec::new(),
-            stats: Stats::default(),
         }
     }
 
@@ -206,7 +173,7 @@ impl<L: Label> Engine<L> {
     /// difference across it; a scope does not roll these back, since they count
     /// work, not state.
     pub fn stats(&self) -> Stats {
-        self.stats
+        self.db.stats()
     }
 
     fn in_scope(&self) -> bool {
@@ -275,123 +242,77 @@ impl<L: Label> Engine<L> {
         }
     }
 
-    /// Whether `label` is a commutative binary operator.
-    pub(crate) fn commutes(&self, label: LabelId) -> bool {
-        self.label_commutes[label.index()]
-    }
-
     /// The labels whose operator bucket is `op`, in the order first seen.
     pub(crate) fn labels_with_op(&self, op: u64) -> &[LabelId] {
         self.op_labels.get(&op).map_or(&[], Vec::as_slice)
     }
-    /// Add to `reads` the labels in the `op` bucket that `template` matches at
-    /// its arity, or every label in the bucket without one. With `since`, only
-    /// the labels met from that count on are looked at, and `reads` already
-    /// holds the rest.
+
+    /// The labels of the `op` bucket that `keep` accepts, ascending: all of
+    /// them, or with `since` those met from that count on.
+    fn labels_in(&self, op: u64, since: Option<usize>, keep: impl FnMut(LabelId)) {
+        let labels = self.labels_with_op(op);
+        // A bucket lists its labels in the order met, so ascending.
+        let from = since.map_or(0, |since| {
+            labels.partition_point(|label| label.index() < since)
+        });
+        labels[from..].iter().copied().for_each(keep);
+    }
+
+    /// Add to `out` the labels in the `op` bucket that `template` matches at
+    /// its arity, by the table their rows live in; with `commuting`, only the
+    /// commutative binary ones. Tables come in the order of their lowest such
+    /// label. With `since`, only the labels met from that count on are looked
+    /// at, and `out` already holds the rest.
     pub(crate) fn labels_matching(
         &self,
         op: u64,
-        template: Option<(&L, usize)>,
+        (template, arity): (&L, usize),
+        commuting: bool,
         since: Option<usize>,
-        reads: &mut Candidates,
+        out: &mut Resolution,
     ) {
-        let matches = |label: LabelId| {
+        let tables = &mut out.tables;
+        self.labels_in(op, since, |label| {
             let node = self.labels.node(label);
-            template.is_none_or(|(template, arity)| {
-                node.children().len() == arity && template.matches_template(node)
-            })
-        };
-        let mut add = |label: LabelId| {
+            let matches = node.children().len() == arity && template.matches_template(node);
+            if !matches || commuting && !self.label_commutes[label.index()] {
+                return;
+            }
             let slot = self.label_slot[label.index()];
             // Labels arrive ascending, so each table's list stays sorted.
-            match reads.iter_mut().find(|(known, _)| *known == slot) {
-                Some((_, labels)) => labels.push(label),
-                None => reads.push((slot, SmallVec::from_slice(&[label]))),
+            match tables.iter_mut().find(|(known, _)| *known == slot) {
+                Some((_, labels)) => labels.push(label.0),
+                None => tables.push((slot, SmallVec::from_slice(&[label.0]))),
             }
-        };
-        match since {
-            None => {
-                for &label in self.labels_with_op(op) {
-                    if matches(label) {
-                        add(label);
-                    }
-                }
+        });
+    }
+
+    /// Add to `out` the labels in the `op` bucket that `value` matches,
+    /// ascending; `since` as for [`Self::labels_matching`].
+    pub(crate) fn labels_equal(
+        &self,
+        op: u64,
+        value: &L,
+        since: Option<usize>,
+        out: &mut Resolution,
+    ) {
+        let cells = &mut out.cells;
+        self.labels_in(op, since, |label| {
+            if value.matches(self.labels.node(label)) {
+                cells.push(label.0);
             }
-            Some(since) => {
-                for index in since..self.label_op.len() {
-                    let label = LabelId(index as u32);
-                    if self.label_op[index] == op && matches(label) {
-                        add(label);
-                    }
-                }
-            }
-        }
+        });
+    }
+
+    /// The table `label`'s rows live in.
+    pub(crate) fn label_slot(&self, label: LabelId) -> u32 {
+        self.label_slot[label.index()]
     }
 
     /// How many labels the graph has met. What a plan's atoms read is fixed
     /// between two readings that agree.
     pub(crate) fn labels_len(&self) -> usize {
         self.labels.len()
-    }
-
-    /// The columns, as a mask of [`column_bit`], in which a fact rose during
-    /// the round the last [`Self::take_changed`] closed: on a class that
-    /// already existed, or with `minted` on a class minted with it.
-    pub(crate) fn facts_rose(&self, minted: bool) -> u8 {
-        [ColumnId::Const, ColumnId::Type, ColumnId::Object]
-            .into_iter()
-            .filter(|&column| !self.db.risen(lattice(column), minted).is_empty())
-            .fold(0, |mask, column| mask | 1 << column_bit(column))
-    }
-
-    /// The classes whose fact in `column` rose during the round the last
-    /// [`Self::take_changed`] closed; `minted` as for [`Self::facts_rose`].
-    pub(crate) fn risen(&self, column: ColumnId, minted: bool) -> impl Iterator<Item = ClassId> {
-        let risen = self.db.risen(lattice(column), minted);
-        risen.iter().map(|&class| ClassId(class))
-    }
-
-    /// Take the cache of plan `id` out for a search; [`Self::put_cache`] puts
-    /// it back. Plan zero has none.
-    pub(crate) fn take_cache(&self, id: u64) -> RuleCache {
-        self.caches.borrow_mut().remove(&id).unwrap_or_default()
-    }
-
-    pub(crate) fn put_cache(&self, id: u64, cache: RuleCache) {
-        if id != 0 {
-            self.caches.borrow_mut().insert(id, cache);
-        }
-    }
-
-    /// Every plan's cache, for a saturation to use and hand back.
-    pub(crate) fn take_caches(&mut self) -> FxHashMap<u64, RuleCache> {
-        std::mem::take(self.caches.get_mut())
-    }
-
-    pub(crate) fn put_caches(&mut self, caches: FxHashMap<u64, RuleCache>) {
-        *self.caches.get_mut() = caches;
-    }
-
-    /// The operator buckets of the rows the previous round wrote, each once.
-    pub(crate) fn new_ops(&self) -> Vec<u64> {
-        let slots = self.db.tables().len() as u32;
-        for slot in 0..slots {
-            self.db.prepare_new_rows(slot);
-        }
-        let groups = self.db.groups();
-        let mut ops = Vec::new();
-        for slot in 0..slots {
-            let mut last = None;
-            // The rows are sorted by label, so each label shows up as a run.
-            for &(label, _) in groups.new_rows(slot) {
-                if last.replace(label) != Some(label) {
-                    ops.push(self.label_op[label as usize]);
-                }
-            }
-        }
-        ops.sort_unstable();
-        ops.dedup();
-        ops
     }
 
     /// Canonical classes holding a node in the `op` bucket, each once, in the
@@ -451,12 +372,6 @@ impl<L: Label> Engine<L> {
         key.extend(node.children().iter().map(|child| child.0));
         self.add_labelled(label, &key, || node)
     }
-    /// Whether `label` is `node`'s label.
-    pub(crate) fn label_is(&self, label: LabelId, node: &L) -> bool {
-        let known = self.labels.node(label);
-        known.children().len() == node.children().len() && known.matches(node)
-    }
-
     /// The id of `node`'s label, for [`Self::add_labelled`].
     pub(crate) fn intern(&mut self, node: &L) -> LabelId {
         let label = self.labels.intern(node);
@@ -468,7 +383,6 @@ impl<L: Label> Engine<L> {
                 .push(2 * arity as u32 + u32::from(node.is_unique()));
             self.label_commutes.push(arity == 2 && node.commutative());
             let op = node.op_key();
-            self.label_op.push(op);
             self.op_labels
                 .entry(op)
                 .or_default()
@@ -504,12 +418,6 @@ impl<L: Label> Engine<L> {
             (root, None) => return ClassId(root),
             (survivor, Some(absorbed)) => (survivor, absorbed),
         };
-        self.stats.merges += 1;
-        self.db.merge(CONSTS, absorbed, survivor);
-        self.db.merge(TYPES, absorbed, survivor);
-        if !self.db.lattice(OBJECTS).is_empty() {
-            self.merge_object(ClassId(absorbed), ClassId(survivor));
-        }
         self.splice_class(survivor as usize, absorbed as usize);
         let (survivor, absorbed) = (ClassId(survivor), ClassId(absorbed));
         if let Some(members) = self.members.last_mut() {
@@ -532,7 +440,6 @@ impl<L: Label> Engine<L> {
     pub fn rebuild(&mut self) {
         let mut report = std::mem::take(&mut self.repair);
         while self.db.canonicalize(CLASSES, &mut report) {
-            self.stats.repairs += report.rekeyed.len();
             for collision in report.collisions.drain(..) {
                 self.union(ClassId(collision.kept), ClassId(collision.removed));
             }
@@ -548,7 +455,7 @@ impl<L: Label> Engine<L> {
 
     // ---- rows -------------------------------------------------------------
 
-    fn make_class(&mut self, node: L, label: LabelId, key: &[u32]) -> ClassId {
+    pub(crate) fn make_class(&mut self, node: L, label: LabelId, key: &[u32]) -> ClassId {
         let constant = node.constant();
         let type_key = node.type_key();
         let row = self.node.len() as u32;
@@ -580,14 +487,11 @@ impl<L: Label> Engine<L> {
         self.node_label.push(label);
         if let Some(constant) = constant {
             let label = self.intern(&constant);
-            if self.db.seed(CONSTS, class, u64::from(label.0)) {
-                self.stats.raises += 1;
-            }
+            self.db.seed(CONSTS, class, u64::from(label.0));
         }
         if let Some(key) = type_key {
             self.db.seed(TYPES, class, key);
         }
-        self.stats.adds += 1;
         ClassId(class)
     }
 
@@ -636,7 +540,8 @@ impl<L: Label> Engine<L> {
             "an assumption needs a scope to be undone by"
         );
         let label = self.intern(&node);
-        self.raise_const(self.find(class), label);
+        self.db
+            .raise(CONSTS, self.find(class).0, u64::from(label.0));
     }
 
     /// The constant `class` is known to be — its own literal row, or what an
@@ -703,117 +608,18 @@ impl<L: Label> Engine<L> {
     /// — `q` from `p + 4`, then `q` from `(p + 4) + 0` — states one fact rather
     /// than two that disagree. Reports whether the column moved.
     pub fn raise_object(&mut self, class: ClassId, base: ClassId, offset: i64) -> bool {
-        let class = self.find(class);
-        let raised = match self.resolve(base, offset) {
-            // A class derived from itself at no distance is not derived at all;
-            // at a distance it is a contradiction.
-            Some((base, 0)) if base == class => return false,
-            Some((base, offset)) => Fact::Known(Object { base, offset }),
-            None => Fact::Conflict,
-        };
-        // Both sides are read back to where they land before they are compared.
-        // What is stored may name a class since absorbed, or a base whose own
-        // derivation deepened after it was written, and neither is a second
-        // opinion — it is the same one, spelled at the time it was learned.
-        let stored = self.resolved_object(class);
-        let joined = match stored {
-            Some(stored) => stored.join(raised, Join::Agree),
-            None => raised,
-        };
-        if stored == Some(joined) {
-            return false;
-        }
-        let joined = match joined {
-            Fact::Known(object) => Fact::Known(self.derivation_id(object)),
-            Fact::Conflict => Fact::Conflict,
-        };
-        self.db.put(OBJECTS, class.0, joined);
-        self.stats.raises += 1;
-        true
+        self.db.raise_offset(OBJECTS, class.0, base.0, offset)
     }
 
-    /// The index `object` is stored under in the `objects` column.
-    fn derivation_id(&mut self, object: Object) -> u64 {
-        *self.derivation_ids.entry(object).or_insert_with(|| {
-            self.derivations.push(object);
-            self.derivations.len() as u64 - 1
-        })
-    }
     /// What `class` is derived from: the end of its derivation chain, or itself
     /// at offset zero when nothing derived it. `None` once two derivations have
     /// disagreed, and for a chain that does not end — a class derived from
     /// itself is a contradiction, and "nowhere known" is the conservative
     /// reading of one.
     pub fn object_of(&self, class: ClassId) -> Option<(ClassId, i64)> {
-        self.resolve(class, 0)
+        let (base, offset) = self.db.offset(OBJECTS, class.0)?;
+        Some((ClassId(base), offset))
     }
-
-    /// Follow the chain from `base` to the class nothing derives, adding the
-    /// distances. Bounded: the chain is flattened as it is written, so anything
-    /// this long is a cycle.
-    fn resolve(&self, base: ClassId, offset: i64) -> Option<(ClassId, i64)> {
-        const CHAIN_LIMIT: usize = 64;
-        let mut base = self.find(base);
-        let mut offset = offset;
-        for _ in 0..CHAIN_LIMIT {
-            match self.canonical_object(base) {
-                // Nothing derives it: the end of the chain.
-                None => return Some((base, offset)),
-                // A class that derives itself ends the chain when it adds
-                // nothing, and contradicts itself when it adds something.
-                Some(Fact::Known(object)) if object.base == base => {
-                    return (object.offset == 0).then_some((base, offset));
-                }
-                Some(Fact::Known(object)) => {
-                    base = object.base;
-                    offset = offset.checked_add(object.offset)?;
-                }
-                Some(Fact::Conflict) => return None,
-            }
-        }
-        None
-    }
-
-    /// The stored entry with its base read through the union-find, or `None`
-    /// when nothing derived the class. A class the entry names may have been
-    /// absorbed since it was written.
-    fn canonical_object(&self, class: ClassId) -> Option<Fact<Object>> {
-        Some(match self.db.lattice(OBJECTS).entry(class.0)? {
-            Fact::Known(id) => {
-                let object = self.derivations[id as usize];
-                Fact::Known(Object {
-                    base: self.find(object.base),
-                    offset: object.offset,
-                })
-            }
-            Fact::Conflict => Fact::Conflict,
-        })
-    }
-
-    /// The stored entry read all the way back to where it lands.
-    fn resolved_object(&self, class: ClassId) -> Option<Fact<Object>> {
-        Some(match self.canonical_object(class)? {
-            Fact::Known(object) => match self.resolve(object.base, object.offset) {
-                Some((base, offset)) => Fact::Known(Object { base, offset }),
-                None => Fact::Conflict,
-            },
-            Fact::Conflict => Fact::Conflict,
-        })
-    }
-
-    fn merge_object(&mut self, absorbed: ClassId, survivor: ClassId) {
-        match self.db.detach(OBJECTS, absorbed.0) {
-            Some(Fact::Known(id)) => {
-                let object = self.derivations[id as usize];
-                self.raise_object(survivor, object.base, object.offset);
-            }
-            Some(Fact::Conflict) => {
-                self.db.put(OBJECTS, survivor.0, Fact::Conflict);
-            }
-            None => {}
-        }
-    }
-
     /// `class`'s value in `column`, as one word.
     pub fn fact(&self, column: ColumnId, class: ClassId) -> Option<u64> {
         match column {
@@ -830,23 +636,13 @@ impl<L: Label> Engine<L> {
     /// keeps outside the node.
     pub fn raise_type(&mut self, class: ClassId, key: u64) {
         let class = self.find(class);
-        if self.db.raise(TYPES, class.0, key) {
-            self.stats.raises += 1;
-        }
+        self.db.raise(TYPES, class.0, key);
     }
 
     /// Whether `class`'s value in `column` rose during the round the last
     /// [`Self::take_changed`] closed — the fact-level [`Self::row_is_new`].
     pub fn fact_is_new(&self, column: ColumnId, class: ClassId) -> bool {
-        self.db
-            .lattice(lattice(column))
-            .is_new(self.find(class).0, self.db.epoch())
-    }
-
-    fn raise_const(&mut self, class: ClassId, label: LabelId) {
-        if self.db.raise(CONSTS, class.0, u64::from(label.0)) {
-            self.stats.raises += 1;
-        }
+        self.db.is_new(lattice(column), class.0)
     }
 
     // ---- scopes -----------------------------------------------------------
@@ -931,16 +727,11 @@ fn class_ids(ids: Vec<u32>) -> Vec<ClassId> {
 }
 
 /// The lattice column of `column`.
-fn lattice(column: ColumnId) -> LatticeId {
-    LatticeId::nth(column_bit(column) as u32)
-}
-
-/// The position of `column` in a mask of columns.
-pub(crate) fn column_bit(column: ColumnId) -> usize {
+pub(crate) fn lattice(column: ColumnId) -> LatticeId {
     match column {
-        ColumnId::Const => 0,
-        ColumnId::Type => 1,
-        ColumnId::Object => 2,
+        ColumnId::Const => CONSTS,
+        ColumnId::Object => OBJECTS,
+        ColumnId::Type => TYPES,
     }
 }
 
@@ -1013,8 +804,8 @@ impl<L: Label> Iterator for Rows<'_, L> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::testing::Term;
     use super::*;
-    use crate::testing::Term;
 
     #[test]
     fn commutative_operands_keep_the_order_they_were_written_in() {

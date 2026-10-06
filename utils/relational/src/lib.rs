@@ -1,4 +1,5 @@
-//! The relational engine behind TIR's e-graph, in three layers.
+//! A relational engine: tables of ids, the equalities over them, and the
+//! queries and fixpoints a compiler runs over both.
 //!
 //! [`store`] holds tables of `u32` cells whose key columns determine a value
 //! column, with the whole-column loops done by [`tir_adt::simd`]. A table holds
@@ -12,43 +13,37 @@
 //! by a column, ids to the rows naming them) built once per change, and
 //! assumption scopes that snapshot all of it along with the client's own state.
 //!
-//! [`Engine`] is the e-graph, a client of the database. Classes are one id
-//! space; each label is a table from child classes to the class the node
-//! belongs to, so hash-consing is a key lookup, congruence is the table's
-//! functional dependency, and a rewrite's left-hand side is a join. Rewrites
-//! are conjunctive queries; saturation is the least fixpoint of the rule set.
+//! [`query`] is conjunctive queries over a database, with an evaluator that
+//! answers by loops over the tables; [`rule`] is what a match writes;
+//! [`saturate`] is the semi-naive fixpoint over a rule set; [`extract`] is the
+//! least-cost fold a client reads a solution off with. They name tables,
+//! columns and cells, and ask their client for whatever means more than that.
+//!
+//! The e-graph is one such client: [`Engine`], its rule front end ([`Query`],
+//! [`Rule`]) and [`Extraction`].
 
 mod column;
 mod csr;
 mod db;
-mod engine;
-mod extract;
-mod label;
-mod query;
-mod rule;
-mod saturate;
+mod egraph;
+pub mod extract;
+pub mod query;
+pub mod rule;
+pub mod saturate;
 pub mod store;
 mod telemetry;
 mod unionfind;
 
-#[cfg(test)]
-mod testing;
-
 pub use column::{Column, Fact, Join};
 pub use csr::Csr;
-pub use db::{Database, Groups, LatticeId, Marks, SpaceId};
-pub use engine::{ClassRef, Engine, Rows, Stats};
-pub use extract::Extraction;
-pub use label::Label;
-pub use query::{
-    Atom, Cmp, ColumnId, Expr, Externs, Field, Guard, Match, Nested, NoExterns, Plan, Query,
-    Scalar, Source, Step, Var,
-};
-pub use rule::{HeadOp, LabelFill, Rule};
-pub use saturate::{Delta, round_roots};
+pub use db::{Database, Groups, LatticeId, Marks, SpaceId, Stats};
+pub use egraph::*;
+pub use query::{Cmp, Expr, Scalar, Step, Var};
 pub use telemetry::{RoundStats, Timer, report_saturation};
 
-/// Whether `TIR_SAT_TRACE` asked for a saturation trace on stderr: every class
+pub(crate) type FxHashMap<K, V> = std::collections::HashMap<K, V, tir_adt::FxBuildHasher>;
+
+/// Whether `TIR_SAT_TRACE` asked for a saturation trace on stderr: every id
 /// minted (`A id node children`) and every merge (`U a b -> survivor`), plus
 /// whatever the drivers add.
 ///
@@ -60,38 +55,4 @@ pub use telemetry::{RoundStats, Timer, report_saturation};
 pub fn trace_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("TIR_SAT_TRACE").is_some_and(|value| value != "0"))
-}
-
-/// An e-class. Only [`UnionFind::find`] turns one into its canonical form.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ClassId(pub u32);
-
-impl ClassId {
-    pub fn index(self) -> usize {
-        self.0 as usize
-    }
-
-    pub fn from_raw(raw: u32) -> Self {
-        ClassId(raw)
-    }
-}
-
-/// A row of one relation: an e-node.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RowId(pub u32);
-
-impl RowId {
-    pub fn index(self) -> usize {
-        self.0 as usize
-    }
-}
-
-/// An interned label: an e-node stripped of its children.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LabelId(pub u32);
-
-impl LabelId {
-    pub fn index(self) -> usize {
-        self.0 as usize
-    }
 }
