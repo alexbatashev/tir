@@ -339,7 +339,10 @@ admit an order. Register allocation and final emission consume those blocks.
 The [Instruction selection chapter](isel.md) explains how TIR chooses the
 instructions.
 
-The shared backend also accepts raw CFG input from other clients. Its prologue
-runs `restructure-nodes` before selection and verifies the state dependencies.
-Functions that already have unordered bodies retain their existing structure
-and dependencies.
+The shared backend takes functions with unordered bodies and verifies their
+state dependencies; it does not convert control-flow graphs. A client whose
+input is a raw CFG runs `tir::backend::pipeline::structure` first, which lowers
+`ptr.disjoint`, runs `restructure-nodes` and schedules loops. `tir mc` does so
+for IR text and LLVM IR, and the C API does for the modules its callers build.
+A front end that builds regions itself, as fcc does, hands them over as they
+are.

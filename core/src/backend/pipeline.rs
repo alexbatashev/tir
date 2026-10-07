@@ -108,6 +108,23 @@ impl Pass for TargetIntegerLegalizer {
     }
 }
 
+/// Turn every function under `root` that still holds a control-flow graph into
+/// regions, memory order constructed on the way, and schedule its loops. A
+/// caller whose input is a raw graph (IR text, LLVM IR, the C API) runs this
+/// ahead of [`build_pipeline`]; a front end that builds regions itself does
+/// not.
+pub fn structure(context: &Context, root: tir::OpHandle) -> Result<(), PassError> {
+    let mut pm = PassManager::new();
+    let functions = pm.nest::<FuncOp>();
+    // A no-alias fact is mid-end vocabulary: no machine has an instruction
+    // for it, so it becomes the range check it stands for. The lowering reads
+    // blocks, so it goes ahead of the conversion.
+    functions.add_pass(LowerPtrDisjointPass::new());
+    functions.add_pass(RestructureNodesPass::new());
+    functions.add_pass(AffineSchedulePass::new());
+    pm.run(context, root)
+}
+
 /// Build the lowering pipeline for `target`: instruction selection, pre-RA
 /// lowerings, register allocation, and post-RA finalization. Rooted at a module,
 /// it lowers every function in it.
@@ -128,18 +145,12 @@ fn module_prologue(target: &dyn TargetMachine) -> PassManager {
     let mut pm = PassManager::new();
     {
         let functions = pm.nest::<FuncOp>();
-        // A no-alias fact is mid-end vocabulary: no machine has an instruction
-        // for it, so it becomes the range check it stands for.
-        functions.add_pass(LowerPtrDisjointPass::new());
-        // Selection takes an unordered body: a function that still holds a raw
-        // CFG (a `.tir` input, or JIT text) is converted here, memory order
-        // constructed on the way. One already unordered is left alone, and
-        // its chains are checked rather than rebuilt. Both run while the
-        // module is whole: they read a function's calls, and by the time it is
-        // lowered one at a time the λ those name may already be a machine
-        // symbol.
-        functions.add_pass(RestructureNodesPass::new());
-        functions.add_pass(AffineSchedulePass::new());
+        // Selection takes an unordered body, and whoever hands the module over
+        // builds one: a front end restructures its own control flow, and a
+        // caller with a raw graph runs [`structure`] first. The chains are
+        // checked here, while the module is whole: the check reads
+        // a function's calls, and by the time it is lowered one at a time the
+        // λ those name may already be a machine symbol.
         functions.add_pass(DeadCodeEliminationPass::new());
         functions.add_pass(VerifyDepsPass::new());
     }
