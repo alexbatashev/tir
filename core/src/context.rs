@@ -750,6 +750,25 @@ impl Context {
         self.uses_of(value).len()
     }
 
+    /// Every region result slot naming `value`, as `(region, index)`: where
+    /// an unordered region publishes it. Region results sit in no use list.
+    pub fn result_uses(&self, value: ValueId) -> Vec<(RegionId, usize)> {
+        self.db_mut().result_uses(value)
+    }
+
+    /// Whether `region` or a region nested in it names `value` as a result.
+    pub(crate) fn published_under(&self, region: RegionId, value: ValueId) -> bool {
+        let mut db = self.db_mut();
+        let uses = db.result_uses(value);
+        uses.into_iter()
+            .any(|(naming, _)| db.region_under(naming, region))
+    }
+
+    /// Whether `region` is `root` or nested in it, at any depth.
+    pub(crate) fn region_under(&self, region: RegionId, root: RegionId) -> bool {
+        self.db().region_under(region, root)
+    }
+
     pub fn is_block_argument(&self, id: ValueId) -> bool {
         self.block_of_argument(id).is_some()
     }

@@ -72,51 +72,54 @@ impl Context {
         new: ValueId,
         except: &[OpId],
     ) {
-        for nested in self.nested_regions(region) {
+        let mut naming: Vec<RegionId> = self
+            .result_uses(old)
+            .into_iter()
+            .map(|(naming, _)| naming)
+            .collect();
+        naming.dedup();
+        for nested in naming {
             let handle = self.get_region(nested);
-            if handle
-                .parent_op()
-                .is_some_and(|owner| self.op_under(owner, except))
+            if !self.region_under(nested, region)
+                || handle
+                    .parent_op()
+                    .is_some_and(|owner| self.op_under(owner, except))
             {
                 continue;
             }
             let mut results = handle.results();
-            if results.contains(&old) {
-                for result in &mut results {
-                    if *result == old {
-                        *result = new;
-                    }
+            for result in &mut results {
+                if *result == old {
+                    *result = new;
                 }
-                self.set_region_results(nested, results);
             }
+            self.set_region_results(nested, results);
         }
     }
 
-    /// [`Context::rename_region_results`] for a set of renames, in one walk:
-    /// finding the nested regions costs the whole subtree, so a rename per
-    /// value is quadratic in the operations under `region`. A result named by
-    /// `renames` follows the chain to the value nothing renames.
+    /// [`Context::rename_region_results`] for a set of renames. A result
+    /// named by `renames` follows the chain to the value nothing renames.
     pub(crate) fn rename_region_results_batch(
         &self,
         region: RegionId,
         renames: &crate::IdMap<ValueId, ValueId>,
     ) {
-        if renames.is_empty() {
-            return;
-        }
-        for nested in self.nested_regions(region) {
-            let handle = self.get_region(nested);
-            let mut results = handle.results();
-            let mut renamed = false;
+        let mut naming: Vec<RegionId> = renames
+            .keys()
+            .flat_map(|old| self.result_uses(*old))
+            .map(|(naming, _)| naming)
+            .filter(|naming| self.region_under(*naming, region))
+            .collect();
+        naming.sort_unstable();
+        naming.dedup();
+        for nested in naming {
+            let mut results = self.get_region(nested).results();
             for result in &mut results {
                 while let Some(&next) = renames.get(result) {
                     *result = next;
-                    renamed = true;
                 }
             }
-            if renamed {
-                self.set_region_results(nested, results);
-            }
+            self.set_region_results(nested, results);
         }
     }
 

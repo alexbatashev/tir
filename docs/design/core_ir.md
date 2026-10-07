@@ -291,7 +291,8 @@ operation; ports and results of a region; arguments of a block. Reading one is a
 offset load and a slice.
 
 Every other access path is derived from those rows. Use lists are operand rows
-grouped by value. The operations of a block or unordered region are operation
+grouped by value, and the regions that publish a value are region result rows
+grouped the same way. The operations of a block or unordered region are operation
 rows grouped by holder and ordered by position, and the blocks of a region
 likewise. Positions leave gaps, so an insert between two neighbours writes one
 row. The groupings are built per partition when first read and brought up to date

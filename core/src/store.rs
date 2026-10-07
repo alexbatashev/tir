@@ -156,6 +156,11 @@ fn holder_of(key: u32) -> Option<Parent> {
 struct Part {
     op_chunks: Vec<u32>,
     block_chunks: Vec<u32>,
+    region_chunks: Vec<u32>,
+    /// The regions written since the result lists last looked.
+    region_log: Vec<u32>,
+    /// Region result rows by value: where each value is published.
+    results: Grouping,
     /// The ops written since the use lists last looked.
     op_log: Vec<u32>,
     /// The ops that joined, left or moved inside a holder since the op lists
@@ -185,9 +190,12 @@ impl Part {
         self.uses.reset();
         self.held.reset();
         self.blocks.reset();
+        self.results.reset();
         self.uses.rewind();
         self.held.rewind();
         self.blocks.rewind();
+        self.results.rewind();
+        self.region_log.clear();
         self.op_log.clear();
         self.held_log.clear();
         self.block_log.clear();
@@ -258,6 +266,30 @@ impl Rows for HeldRows<'_> {
 struct BlockRows<'a> {
     blocks: &'a Blocks,
     chunks: &'a [u32],
+}
+
+struct ResultRows<'a> {
+    regions: &'a Regions,
+    chunks: &'a [u32],
+}
+
+impl Rows for ResultRows<'_> {
+    fn owners(&self, each: &mut dyn FnMut(u32)) {
+        live_rows(self.regions, self.chunks, each);
+    }
+
+    fn stamp(&self, owner: u32) -> u32 {
+        self.regions.chunk(chunk_of(owner)).stamp(row_of(owner))
+    }
+
+    fn entries(&self, owner: u32, each: &mut dyn FnMut(u32, u32)) {
+        let (chunk, row) = (self.regions.chunk(chunk_of(owner)), row_of(owner));
+        if chunk.is_live(row) {
+            for (index, value) in chunk.seg(region::RESULT).of(row).iter().enumerate() {
+                each(*value, index as u32);
+            }
+        }
+    }
 }
 
 impl Rows for BlockRows<'_> {
@@ -505,13 +537,16 @@ impl Db {
                 let mut chunk = Chunk::new(self.mint.target);
                 chunk.touched = self.tick;
                 self.regions.put(index, Arc::new(chunk));
+                self.part_mut(self.mint.target).region_chunks.push(index);
                 index
             }
         };
         let tick = self.tick;
         let row = touch!(self, regions, REGIONS, index).push(cells, tick);
         self.minted(REGIONS, index);
-        RegionId::new(id_at(index, row))
+        let id = id_at(index, row);
+        self.part_mut(self.mint.target).region_log.push(id);
+        RegionId::new(id)
     }
 
     fn mint_block(&mut self, cells: [u32; 3]) -> BlockId {
@@ -591,7 +626,10 @@ impl Db {
         let (index, row) = (chunk_of(id.raw()), row_of(id.raw()));
         let tick = self.tick;
         let chunk = touch!(self, regions, REGIONS, index);
-        chunk.set_stamp(row, tick);
+        let (owner, logged) = (chunk.owner, chunk.set_stamp(row, tick));
+        if logged {
+            self.part_mut(owner).region_log.push(id.raw());
+        }
         (self.regions.chunk_mut(index), row)
     }
 
@@ -1544,10 +1582,9 @@ impl Db {
             !self.region_is_nodes(id) && self.region_blocks(id).is_empty(),
             "only an empty ordered region becomes unordered",
         );
-        let results: Vec<u32> = results.iter().map(|value| value.number()).collect();
         let (chunk, row) = self.region_row(id);
         chunk.set(region::NODES, row, 1);
-        chunk.seg_mut(region::RESULT).replace(row, &results);
+        self.splice_region_results(id, 0, 0, results);
         self.splice_region_ports(id, 0, 0, ports);
     }
 
@@ -1568,6 +1605,73 @@ impl Db {
         chunk
             .seg_mut(region::RESULT)
             .splice(row, at, remove, &cells);
+        let part = chunk.owner;
+        for value in cells {
+            self.note_value(value, part);
+        }
+    }
+
+    fn refresh_results(&mut self, part: u32) {
+        let current = self
+            .parts
+            .get(part as usize)
+            .is_some_and(|part| part.results.cursor() == Some(part.region_log.len()));
+        if current {
+            return;
+        }
+        let tick = self.tick;
+        let Some(held) = self.parts.get_mut(part as usize) else {
+            return;
+        };
+        let rows = ResultRows {
+            regions: &self.regions,
+            chunks: &held.region_chunks,
+        };
+        held.results.refresh(&rows, &held.region_log, tick);
+        held.region_log.clear();
+        held.results.rewind();
+        self.tick += 1;
+    }
+
+    /// Every region result slot naming `value`, as `(region, index)`.
+    pub(crate) fn result_uses(&mut self, value: ValueId) -> Vec<(RegionId, usize)> {
+        let Some(chunk) = self.values.find(chunk_of(value.number())) else {
+            return Vec::new();
+        };
+        let readers = Self::readers(chunk.owner, &chunk.foreign);
+        let mut found = Vec::new();
+        for part in readers {
+            self.refresh_results(part);
+            let Some(held) = self.parts.get(part as usize) else {
+                continue;
+            };
+            let rows = ResultRows {
+                regions: &self.regions,
+                chunks: &held.region_chunks,
+            };
+            held.results.read(&rows, value.number(), &mut found);
+        }
+        found
+            .into_iter()
+            .map(|(region, index)| (RegionId::new(region), index as usize))
+            .collect()
+    }
+
+    /// Whether `region` is `root` or nested in it, at any depth.
+    pub(crate) fn region_under(&self, region: RegionId, root: RegionId) -> bool {
+        let mut current = Some(region);
+        while let Some(here) = current {
+            if here == root {
+                return true;
+            }
+            current = self
+                .region_parent_if_live(here)
+                .and_then(|op| match self.op_parent(op)? {
+                    Parent::Region(holder) => Some(holder),
+                    Parent::Block(block) => self.block_parent(block),
+                });
+        }
+        false
     }
 
     pub(crate) fn set_region_results(&mut self, id: RegionId, results: &[ValueId]) {
@@ -1877,8 +1981,13 @@ impl Db {
             self.values.put(index, chunk);
         }
         for (index, chunk, _) in regions {
-            written.push(chunk.owner);
+            let fresh = self.regions.find(index).is_none();
+            let owner = chunk.owner;
             self.regions.put(index, chunk);
+            if fresh {
+                self.part_mut(owner).region_chunks.push(index);
+            }
+            written.push(owner);
         }
         written.sort_unstable();
         written.dedup();
@@ -1886,6 +1995,7 @@ impl Db {
             let part = self.part_mut(owner);
             part.op_chunks.sort_unstable();
             part.block_chunks.sort_unstable();
+            part.region_chunks.sort_unstable();
             part.forget();
         }
         // Every partition's edit count moves by what each batch counted for

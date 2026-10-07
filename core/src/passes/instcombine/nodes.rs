@@ -129,12 +129,9 @@ impl Driver<'_> {
             }
         }
         // Once every read the rewrites answered has let go of its state, a
-        // write nothing else observes is unread. Finding the regions a result
-        // list can sit in walks every operation under `region`, and nothing in
-        // this loop adds or removes one, so it is found once.
-        let scope = self.context.nested_regions(region);
+        // write nothing else observes is unread.
         for &op in &ops {
-            self.forward_dead_write(op, &scope);
+            self.forward_dead_write(op, region);
         }
         for &op in &ops {
             let instance = self.context.get_op(op);
@@ -205,7 +202,7 @@ impl Driver<'_> {
     /// overwritten unread: its readers take the state it was handed, and the
     /// sweep takes it. Disjoint reads may remain on that chain: their state
     /// outputs still order the overwriting write after them.
-    fn forward_dead_write(&self, op: OpId, scope: &[RegionId]) {
+    fn forward_dead_write(&self, op: OpId, scope: RegionId) {
         let instance = self.context.get_op(op);
         if !instance.has_interface::<dyn MemoryWrite>() {
             return;
@@ -274,7 +271,7 @@ impl Driver<'_> {
         state: ValueId,
         written: ValueId,
         readers: &[OpId],
-        scope: &[RegionId],
+        scope: RegionId,
     ) -> Option<ValueId> {
         let (object, offset, bytes) = self.extent(written)?;
         let written_end = offset.checked_add(i64::try_from(bytes).ok()?);
@@ -390,9 +387,7 @@ impl Driver<'_> {
         let Some(&class) = self.value_class.get(&value) else {
             return Ok(false);
         };
-        if !self.context.is_used(value)
-            && !published(self.context, &self.context.nested_regions(region), value)
-        {
+        if !self.context.is_used(value) && !published(self.context, region, value) {
             return Ok(false);
         }
         let ty = self.context.get_value(value).ty();
@@ -613,8 +608,7 @@ fn drop_untouched_chains(context: &Context, region: RegionId) {
                 .state_results()
                 .into_iter()
                 .filter(|&state| {
-                    !context.users_of(state).is_empty()
-                        || published(context, &context.nested_regions(region), state)
+                    !context.users_of(state).is_empty() || published(context, region, state)
                 })
                 .collect();
             if let [kept] = read[..] {
@@ -655,10 +649,9 @@ fn carries_nothing(context: &Context, op: OpId, ordinal: usize) -> Option<StateC
         .zip(&chain.ports)
         .all(|(&region, &port)| {
             let named = context
-                .nested_regions(region)
-                .iter()
-                .flat_map(|&nested| context.get_region(nested).results())
-                .filter(|&named| named == port)
+                .result_uses(port)
+                .into_iter()
+                .filter(|&(naming, _)| context.region_under(naming, region))
                 .count();
             named == groups && context.users_of(port).is_empty()
         });
@@ -669,7 +662,6 @@ fn carries_nothing(context: &Context, op: OpId, ordinal: usize) -> Option<StateC
 /// write leaves the state it was handed, and the sweep takes the writes and
 /// the allocation with nothing left demanding them.
 fn forget_write_only_slots(context: &Context, body: RegionId) {
-    let scope = context.nested_regions(body);
     let mut renames: IdMap<ValueId, ValueId> = IdMap::new();
     for op in context.get_region(body).op_ids() {
         let instance = context.get_op(op);
@@ -677,7 +669,7 @@ fn forget_write_only_slots(context: &Context, body: RegionId) {
             continue;
         };
         let mut writes = Vec::new();
-        if !only_written(context, &scope, allocation.promoted_location(), &mut writes) {
+        if !only_written(context, body, allocation.promoted_location(), &mut writes) {
             continue;
         }
         for write in writes {
@@ -699,7 +691,7 @@ fn forget_write_only_slots(context: &Context, body: RegionId) {
 
 /// A read nothing demands: its value and state are read by nothing, so the
 /// sweep takes it and the state it observed has one reader fewer.
-fn is_dead_read(context: &Context, scope: &[RegionId], op: OpId) -> bool {
+fn is_dead_read(context: &Context, scope: RegionId, op: OpId) -> bool {
     let instance = context.get_op(op);
     instance.has_interface::<dyn MemoryRead>()
         && !instance.has_interface::<dyn MemoryWrite>()
@@ -708,20 +700,18 @@ fn is_dead_read(context: &Context, scope: &[RegionId], op: OpId) -> bool {
         })
 }
 
-/// Whether any region in `scope` publishes `value` as a result, which no use
-/// list says. Only a region that can see `value` names it, so a `scope` wider
+/// Whether `scope` or a region nested in it publishes `value` as a result,
+/// which no use list says. Only a region that can see `value` names it, so a `scope` wider
 /// than the one it is defined in answers the same.
-fn published(context: &Context, scope: &[RegionId], value: ValueId) -> bool {
-    scope
-        .iter()
-        .any(|&region| context.get_region(region).results().contains(&value))
+fn published(context: &Context, scope: RegionId, value: ValueId) -> bool {
+    context.published_under(scope, value)
 }
 
 /// Whether every use of `address`, through pointer arithmetic, is as the
 /// location of a write or of a read nothing demands; the writes are collected.
 fn only_written(
     context: &Context,
-    scope: &[RegionId],
+    scope: RegionId,
     address: ValueId,
     writes: &mut Vec<OpId>,
 ) -> bool {
