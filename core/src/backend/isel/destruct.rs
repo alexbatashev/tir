@@ -5,7 +5,8 @@
 //! outcome arrives as the [`AuxEmit`] selected where its predicate is defined.
 //! Edge values arrive through the map of selection results.
 
-use std::collections::{HashMap, HashSet};
+use crate::{IdMap, IdSet};
+use std::collections::HashMap;
 
 use tir::{BlockId, Context, OpHandle, OpId, PassError, ValueId};
 
@@ -68,10 +69,10 @@ pub(crate) struct MachineEdges<'a> {
     pub(crate) context: &'a Context,
     pub(crate) emitters: &'a BranchEmitters,
     /// What selection left each IR value as.
-    pub(crate) emitted: &'a HashMap<ValueId, ValueId>,
+    pub(crate) emitted: &'a IdMap<ValueId, ValueId>,
     pub(crate) controls: &'a HashMap<(ControlId, usize), SelectedControl>,
-    pub(crate) domains: &'a HashMap<OpId, DemandDomainId>,
-    pub(crate) literals: &'a HashSet<OpId>,
+    pub(crate) domains: &'a IdMap<OpId, DemandDomainId>,
+    pub(crate) literals: &'a IdSet<OpId>,
     /// The operations each instruction runs after besides those defining its
     /// operands: the instruction before it in a rule's plan, a call's tuple
     /// extractions.
@@ -224,7 +225,7 @@ impl Edges for MachineEdges<'_> {
         let selected = self.controls.get(&(control.id, outcome)).ok_or_else(|| {
             PassError::InvalidRuleSet(format!("control {:?} has no selected branch", control.id))
         })?;
-        let substitutions: HashMap<ValueId, ValueId> = bindings
+        let substitutions: IdMap<ValueId, ValueId> = bindings
             .iter()
             .map(|binding| (self.value(binding.source), self.value(binding.current)))
             .collect();

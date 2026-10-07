@@ -40,6 +40,10 @@ impl Pass for PromoteNodesPass {
         PassTarget::operation_on::<FuncOp>(RegionKind::Nodes)
     }
 
+    fn settles(&self) -> bool {
+        true
+    }
+
     fn run(
         &mut self,
         op: &OperationRef,

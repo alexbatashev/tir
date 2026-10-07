@@ -13,6 +13,7 @@
 //! one is excluded from the next query. Running out of budget keeps the
 //! incumbent: it says nothing about whether the problem is feasible.
 
+use crate::IdMap;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
@@ -250,7 +251,7 @@ fn encode(problems: &[RegionProblem], fixed: &HashSet<(Id, RegionId)>) -> Encodi
     let mut constraints = Vec::new();
     let mut costs = Vec::new();
     let mut regions: Vec<RegionVars> = Vec::new();
-    let mut index: HashMap<RegionId, usize> = HashMap::new();
+    let mut index: IdMap<RegionId, usize> = IdMap::new();
     for problem in problems {
         // The register an enclosing region leaves for a base member: one its
         // demand policy fixes, one an instance of it defines, or none.

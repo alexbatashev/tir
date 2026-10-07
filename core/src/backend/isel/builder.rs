@@ -1,5 +1,6 @@
 //! Lowering of a function's IR operations into the semantic e-graph.
 
+use crate::IdMap;
 use std::collections::{HashMap, HashSet};
 
 use tir::{
@@ -24,7 +25,7 @@ use crate::passes::destructure::{ControlDefinition, ControlId, ControlKind, Cont
 /// the float constants a target materializer could build.
 #[derive(Default)]
 pub(crate) struct Seeds {
-    pub(crate) roots_by_op: HashMap<OpId, Id>,
+    pub(crate) roots_by_op: IdMap<OpId, Id>,
     pub(crate) constant_candidates: Vec<(OpId, Id)>,
 }
 
@@ -41,7 +42,7 @@ pub(crate) struct ControlSlot {
 /// materializes them.
 #[derive(Default)]
 pub(crate) struct RegionControl {
-    pub(crate) aux: HashMap<RegionId, Vec<(OpId, ControlSlot, Id)>>,
+    pub(crate) aux: IdMap<RegionId, Vec<(OpId, ControlSlot, Id)>>,
     pub(crate) inverses: HashMap<ControlSlot, Id>,
 }
 
@@ -57,15 +58,15 @@ impl RegionControl {
 /// the class built for each IR value so operands share and cross-block uses expand.
 pub(crate) struct SemDagBuilder<'a> {
     context: &'a Context,
-    value_to_def: &'a HashMap<ValueId, OpId>,
+    value_to_def: &'a IdMap<ValueId, OpId>,
     /// Each region's operations in the order they are solved in: a value is
     /// lowered by its defining operation before anything reading it, whatever
     /// order the region was built in.
-    order: &'a HashMap<RegionId, Vec<OpId>>,
+    order: &'a IdMap<RegionId, Vec<OpId>>,
     egraph: &'a mut SemEGraph,
     pointer_width: Option<u32>,
     /// The e-class built for each already-lowered IR value (operand sharing / CSE).
-    pub(crate) value_to_class: HashMap<ValueId, Id>,
+    pub(crate) value_to_class: IdMap<ValueId, Id>,
     /// Serial of the next opaque leaf; each un-lowerable node gets its own.
     opaque_serial: u32,
 }
@@ -73,8 +74,8 @@ pub(crate) struct SemDagBuilder<'a> {
 impl<'a> SemDagBuilder<'a> {
     pub(crate) fn new(
         context: &'a Context,
-        value_to_def: &'a HashMap<ValueId, OpId>,
-        order: &'a HashMap<RegionId, Vec<OpId>>,
+        value_to_def: &'a IdMap<ValueId, OpId>,
+        order: &'a IdMap<RegionId, Vec<OpId>>,
         egraph: &'a mut SemEGraph,
         pointer_width: Option<u32>,
     ) -> Self {
@@ -84,7 +85,7 @@ impl<'a> SemDagBuilder<'a> {
             order,
             egraph,
             pointer_width,
-            value_to_class: HashMap::new(),
+            value_to_class: IdMap::new(),
             opaque_serial: 0,
         }
     }

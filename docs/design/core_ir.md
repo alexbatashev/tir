@@ -297,6 +297,12 @@ likewise. Positions leave gaps, so an insert between two neighbours writes one
 row. The groupings are built per partition when first read and brought up to date
 from the rows written since.
 
+A pass that derives a fact per operation, value, block, or region of one
+function keeps it in an `IdMap` or `IdSet`. These are columns indexed by row
+position, one vector per chunk the function touches, so a lookup hashes nothing
+and iteration is in ID order. An operation's interfaces are found the same way,
+through its name column.
+
 Each chunk belongs to one partition. The module is a partition, and a frontend
 opens another for each function it builds with `Context::function_scope`.
 Everything created inside the scope lands in that function's chunks, so a

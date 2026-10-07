@@ -128,6 +128,7 @@ mod core {
     mod fixtures;
     mod float;
     mod float_refinement;
+    mod idmap;
     mod instcombine;
     mod interfaces;
     mod isel;

@@ -856,7 +856,9 @@ impl OpHandle {
 
     pub fn has_interface<I: ?Sized + 'static>(&self) -> bool {
         let context = self.context();
-        context.find_op_interface::<I>(self.identity()).is_some()
+        context
+            .find_op_interface::<I>(context.op_name_id(self.id))
+            .is_some()
     }
 }
 

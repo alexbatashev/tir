@@ -382,6 +382,13 @@ pub trait Pass: Send {
         context: &Context,
         analyses: &AnalysisManager,
     ) -> Result<(), PassError>;
+
+    /// Whether a run is a function of the operation it runs on and nothing
+    /// else in the module. The pass manager then skips a run on an operation
+    /// the pass already left unchanged, for as long as nothing edits it.
+    fn settles(&self) -> bool {
+        false
+    }
 }
 
 impl Context {
@@ -866,7 +873,19 @@ impl PassManager {
                             expected,
                         });
                     }
-                    pass.run(&op_ref, context, analyses)
+                    if !pass.settles() {
+                        return pass.run(&op_ref, context, analyses);
+                    }
+                    let id = op_ref.op().id;
+                    if context.is_settled(pass.name(), id) {
+                        return Ok(());
+                    }
+                    let version = context.op_version(id);
+                    pass.run(&op_ref, context, analyses)?;
+                    if context.has_operation(id) && context.op_version(id) == version {
+                        context.settle(pass.name(), id);
+                    }
+                    Ok(())
                 })?;
                 // Any edit under `root` bumps its version, so this is the "did
                 // the pass touch the IR" signal, taken from the IR itself rather

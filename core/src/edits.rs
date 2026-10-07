@@ -62,31 +62,6 @@ impl Context {
         false
     }
 
-    /// Every op under `roots`, the roots included.
-    fn subtree_ops(&self, roots: &[OpId]) -> Vec<OpId> {
-        let mut found = roots.to_vec();
-        let mut index = 0;
-        while index < found.len() {
-            for region in self.get_op(found[index]).regions() {
-                found.extend(self.get_region(region).op_ids());
-            }
-            index += 1;
-        }
-        found
-    }
-
-    /// `region` and every region nested in it.
-    pub(crate) fn nested_regions(&self, region: RegionId) -> Vec<RegionId> {
-        let ops = self.get_region(region).op_ids();
-        let mut regions = vec![region];
-        regions.extend(
-            self.subtree_ops(&ops)
-                .iter()
-                .flat_map(|&op| self.get_op(op).regions()),
-        );
-        regions
-    }
-
     /// Region results sit in no use list; rename `old` to `new` in the result
     /// list of `region` and every region nested in it, except regions under
     /// `except`, which keep naming the value they define.
@@ -124,7 +99,7 @@ impl Context {
     pub(crate) fn rename_region_results_batch(
         &self,
         region: RegionId,
-        renames: &std::collections::HashMap<ValueId, ValueId>,
+        renames: &crate::IdMap<ValueId, ValueId>,
     ) {
         if renames.is_empty() {
             return;

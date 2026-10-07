@@ -27,6 +27,7 @@ mod rules;
 mod scopes;
 mod search;
 
+use crate::{IdMap, IdSet};
 use std::collections::{HashMap, HashSet};
 
 use tir::{
@@ -116,7 +117,7 @@ impl RuleMatch {
         }
     }
 
-    fn remap_values(&mut self, remaps: &HashMap<ValueId, ValueId>) {
+    fn remap_values(&mut self, remaps: &IdMap<ValueId, ValueId>) {
         for (_, value) in &mut self.value_bindings {
             if let Some(replacement) = remaps.get(value) {
                 *value = *replacement;
@@ -587,25 +588,25 @@ struct FunctionSelection {
     /// Every class rooting a lowered op, across all regions.
     op_roots: HashSet<Id>,
     /// The canonical e-class of every lowered op's root (total over all ops).
-    op_root: HashMap<OpId, Id>,
+    op_root: IdMap<OpId, Id>,
     /// Every IR value a (canonical) class computes, so a boundary can resolve to a
     /// register value under the dominance rule at emit time.
     class_values: HashMap<Id, Vec<ValueId>>,
     /// The regions of the function, and the order each one's operations take.
     scopes: Scopes,
     /// The op defining each IR value (function-wide).
-    value_to_def: HashMap<ValueId, OpId>,
+    value_to_def: IdMap<ValueId, OpId>,
     /// The region defining each value, or `None` for a port / entry input
     /// (always available in a register).
-    value_region: HashMap<ValueId, Option<RegionId>>,
+    value_region: IdMap<ValueId, Option<RegionId>>,
     /// The region each nested port belongs to. Its register is written on the
     /// way in, so it holds the port only inside that region. The function's
     /// own ports are absent (available everywhere).
-    port_region: HashMap<ValueId, RegionId>,
+    port_region: IdMap<ValueId, RegionId>,
     /// The earliest structured operation of a value's own region under whose
     /// regions the value is read. What a region reads has to have run before the
     /// region does, so a spelling bound for the value's class must precede it.
-    region_use: HashMap<ValueId, OpId>,
+    region_use: IdMap<ValueId, OpId>,
     /// E-classes used as an operand by more than one consumer (function-wide). A
     /// memory effect in such a class cannot be internalized into a match.
     shared_classes: HashSet<Id>,
@@ -616,12 +617,12 @@ struct FunctionSelection {
     /// condition's class and, when its definer is a comparison, the comparison
     /// class with its kind and operand classes. Keyed by the condition value; the
     /// per-region truth (`holds`) is applied when the scope asserts it.
-    prepared: HashMap<ValueId, ConditionExpr>,
+    prepared: IdMap<ValueId, ConditionExpr>,
     /// The assumption a region is entered under, read off the structured
     /// operation's own binding (see [`entry_facts`]).
-    region_facts: HashMap<RegionId, (ValueId, bool)>,
+    region_facts: IdMap<RegionId, (ValueId, bool)>,
     /// What each region must materialize for a destruction to branch on it.
-    region_aux: HashMap<RegionId, Vec<(OpId, ControlSlot, Id)>>,
+    region_aux: IdMap<RegionId, Vec<(OpId, ControlSlot, Id)>>,
     control_inverses: HashMap<ControlSlot, Id>,
 }
 
@@ -1000,23 +1001,23 @@ pub struct InstructionSelectPass {
     call_lowering: Option<crate::backend::call_lowering::CallLowering>,
     /// The solved emission plan of every region (or the error explaining why it
     /// cannot be selected), populated up front when the pass visits each function.
-    plans: HashMap<RegionId, Result<RegionPlan, String>>,
+    plans: IdMap<RegionId, Result<RegionPlan, String>>,
     /// Semantic control provenance must survive replacement of the source
     /// computations by selected instructions.
     recovery: Option<RecoveryPlan>,
     /// The demand domain inherited by every instruction a selected rule emits.
-    execution_domains: HashMap<OpId, DemandDomainId>,
-    literal_ops: HashSet<OpId>,
+    execution_domains: IdMap<OpId, DemandDomainId>,
+    literal_ops: IdSet<OpId>,
     /// Control uses that PCF normalization represents as local tests of data.
     materialized_tests: HashSet<ControlId>,
-    emitted_values: HashMap<ValueId, ValueId>,
+    emitted_values: IdMap<ValueId, ValueId>,
     /// Selected recovery controls, filled as their regions commit.
     region_values: HashMap<(OpId, ControlSlot), AuxEmit>,
     /// The instruction a rule's plan put ahead of each one it emitted, defining
     /// machine state that one reads implicitly.
-    preceding: HashMap<OpId, OpId>,
+    preceding: IdMap<OpId, OpId>,
     /// Function roots already solved, so a re-visit does not rebuild the graph.
-    solved: HashSet<OpId>,
+    solved: IdSet<OpId>,
     /// What the target's branch-if-nonzero costs. Target data, read once.
     nonzero_cost: std::cell::OnceCell<u64>,
 }
@@ -1533,15 +1534,15 @@ impl InstructionSelectPass {
             op_lowerings: vec![],
             function_check: None,
             call_lowering: None,
-            plans: HashMap::new(),
+            plans: IdMap::new(),
             recovery: None,
-            execution_domains: HashMap::new(),
-            literal_ops: HashSet::new(),
+            execution_domains: IdMap::new(),
+            literal_ops: IdSet::new(),
             materialized_tests: HashSet::new(),
-            emitted_values: HashMap::new(),
+            emitted_values: IdMap::new(),
             region_values: HashMap::new(),
-            preceding: HashMap::new(),
-            solved: HashSet::new(),
+            preceding: IdMap::new(),
+            solved: IdSet::new(),
             nonzero_cost: std::cell::OnceCell::new(),
         }
     }
@@ -1845,7 +1846,7 @@ impl InstructionSelectPass {
         // Function-wide value/op layout: with a single `value_to_def` a
         // cross-region operand expands to its defining expression naturally (no
         // remat special case), and a port / entry input stays an `Input` leaf.
-        let mut value_to_def = HashMap::new();
+        let mut value_to_def = IdMap::new();
         for &op_id in scopes.op_region.keys() {
             for result in context.get_op(op_id).value_results() {
                 value_to_def.insert(result, op_id);
@@ -1889,7 +1890,7 @@ impl InstructionSelectPass {
 
         // Saturation may merge classes, so every root recorded against the
         // pre-saturation graph is re-resolved here.
-        let op_root: HashMap<OpId, Id> = lowering
+        let op_root: IdMap<OpId, Id> = lowering
             .roots_by_op
             .iter()
             .map(|(&op, &root)| (op, egraph.find(root)))
@@ -1951,12 +1952,12 @@ impl InstructionSelectPass {
         context: &Context,
         op: &OperationRef,
         scopes: &Scopes,
-        value_to_def: &HashMap<ValueId, OpId>,
+        value_to_def: &IdMap<ValueId, OpId>,
         egraph: &mut SemEGraph,
         pointer_width: Option<u32>,
     ) -> RegionLowering {
-        let mut prepared: HashMap<ValueId, ConditionExpr> = HashMap::new();
-        let mut region_facts: HashMap<RegionId, (ValueId, bool)> = HashMap::new();
+        let mut prepared: IdMap<ValueId, ConditionExpr> = IdMap::new();
+        let mut region_facts: IdMap<RegionId, (ValueId, bool)> = IdMap::new();
         let mut region_control = builder::RegionControl::default();
         let mut builder =
             SemDagBuilder::new(context, value_to_def, &scopes.order, egraph, pointer_width);
@@ -1973,13 +1974,12 @@ impl InstructionSelectPass {
                 }
                 for (entered, condition, holds) in entry_facts(context, &inner) {
                     region_facts.insert(entered, (condition, holds));
-                    if let std::collections::hash_map::Entry::Vacant(slot) =
-                        prepared.entry(condition)
-                    {
-                        slot.insert(ConditionExpr {
+                    if !prepared.contains_key(&condition) {
+                        let expr = ConditionExpr {
                             condition: builder.build_from_value(condition),
                             compare: builder.build_defining_compare(condition),
-                        });
+                        };
+                        prepared.insert(condition, expr);
                     }
                 }
             }
@@ -2009,7 +2009,7 @@ impl InstructionSelectPass {
         egraph: &SemEGraph,
         lowering: &RegionLowering,
         scopes: &Scopes,
-        operand_uses: &HashMap<ValueId, usize>,
+        operand_uses: &IdMap<ValueId, usize>,
     ) -> PlacementDemand {
         let RegionLowering {
             roots_by_op,
@@ -2220,7 +2220,7 @@ impl InstructionSelectPass {
         // plan's own order is never broken, since that is the order the values
         // the tiles pass each other admit. A tile rooted at no operation of this
         // region is a pure value and takes the head.
-        let position: HashMap<OpId, usize> = plan
+        let position: IdMap<OpId, usize> = plan
             .order
             .iter()
             .enumerate()
@@ -2309,7 +2309,7 @@ impl InstructionSelectPass {
         // The chains the emitted instructions took over. One tile answers a
         // whole group of accesses, so the group's other members publish no
         // state of their own.
-        let claimed: HashSet<ValueId> = plan
+        let claimed: IdSet<ValueId> = plan
             .schedule
             .iter()
             .flat_map(|scheduled| &scheduled.states)
@@ -2360,7 +2360,7 @@ impl InstructionSelectPass {
         // behind is the tie-break that derivation reads, and it is the order
         // selection meant: the tiles as the cover ordered them, each at the
         // place its root operation held, and the survivors between them.
-        let tiles: HashSet<OpId> = emitted.iter().map(|&(op, _)| op).collect();
+        let tiles: IdSet<OpId> = emitted.iter().map(|&(op, _)| op).collect();
         let survivors: Vec<OpId> = plan
             .order
             .iter()
@@ -3045,7 +3045,7 @@ impl InstructionSelectPass {
             .map(|binding| binding.class)
             .filter(|class| !root_match.contains_key(class))
             .collect();
-        let position: HashMap<OpId, usize> = op_ids
+        let position: IdMap<OpId, usize> = op_ids
             .iter()
             .enumerate()
             .map(|(position, &op)| (op, position))
@@ -3784,11 +3784,11 @@ impl Pass for InstructionSelectPass {
 
 /// What lowering every region of a function into one e-graph yields.
 struct RegionLowering {
-    value_to_class: HashMap<ValueId, Id>,
-    roots_by_op: HashMap<OpId, Id>,
+    value_to_class: IdMap<ValueId, Id>,
+    roots_by_op: IdMap<OpId, Id>,
     constant_candidates: Vec<(OpId, Id)>,
-    prepared: HashMap<ValueId, ConditionExpr>,
-    region_facts: HashMap<RegionId, (ValueId, bool)>,
+    prepared: IdMap<ValueId, ConditionExpr>,
+    region_facts: IdMap<RegionId, (ValueId, bool)>,
     region_control: builder::RegionControl,
 }
 
@@ -3804,13 +3804,10 @@ struct RegionLowering {
 fn class_value_tables(
     context: &Context,
     egraph: &SemEGraph,
-    value_to_class: &HashMap<ValueId, Id>,
-    value_to_def: &HashMap<ValueId, OpId>,
-    op_region: &HashMap<OpId, RegionId>,
-) -> (
-    HashMap<Id, Vec<ValueId>>,
-    HashMap<ValueId, Option<RegionId>>,
-) {
+    value_to_class: &IdMap<ValueId, Id>,
+    value_to_def: &IdMap<ValueId, OpId>,
+    op_region: &IdMap<OpId, RegionId>,
+) -> (HashMap<Id, Vec<ValueId>>, IdMap<ValueId, Option<RegionId>>) {
     let mut class_values: HashMap<Id, Vec<ValueId>> = HashMap::new();
     for (&value, &class) in value_to_class {
         if context.is_state_type(context.get_value(value).ty()) {
@@ -3826,7 +3823,7 @@ fn class_value_tables(
         values.dedup();
     }
 
-    let mut value_region: HashMap<ValueId, Option<RegionId>> = HashMap::new();
+    let mut value_region: IdMap<ValueId, Option<RegionId>> = IdMap::new();
     for values in class_values.values() {
         for &value in values {
             value_region
@@ -3846,18 +3843,18 @@ fn region_uses(
     context: &Context,
     op: &OperationRef,
     scopes: &Scopes,
-    value_to_def: &HashMap<ValueId, OpId>,
+    value_to_def: &IdMap<ValueId, OpId>,
 ) -> (
-    HashMap<ValueId, RegionId>,
-    HashMap<ValueId, usize>,
-    HashMap<ValueId, OpId>,
+    IdMap<ValueId, RegionId>,
+    IdMap<ValueId, usize>,
+    IdMap<ValueId, OpId>,
 ) {
     // A value used as an operand by more than one consumer must stay a register.
     // Every nested region counts here too: its ports are written on the way
     // in, so they hold their value only inside, and a use inside is a use.
     let body = op.op().regions().first().copied();
-    let mut port_region: HashMap<ValueId, RegionId> = HashMap::new();
-    let mut uses: HashMap<ValueId, usize> = HashMap::new();
+    let mut port_region: IdMap<ValueId, RegionId> = IdMap::new();
+    let mut uses: IdMap<ValueId, usize> = IdMap::new();
     for &region in &scopes.regions {
         let handle = context.get_region(region);
         if Some(region) != body {
@@ -3874,7 +3871,7 @@ fn region_uses(
             }
         }
     }
-    let mut region_use: HashMap<ValueId, OpId> = HashMap::new();
+    let mut region_use: IdMap<ValueId, OpId> = IdMap::new();
     let mut note = |operand: ValueId, region: RegionId| {
         let Some(def_region) = value_to_def
             .get(&operand)

@@ -175,6 +175,9 @@ struct Part {
     /// function's, by any partition for the module's.
     open: [Option<u32>; 4],
     seen: [u32; 4],
+    /// `(pass, root, version)`: a pass that ran on `root` at that version
+    /// and edited nothing.
+    settled: Vec<(&'static str, u32, u32)>,
 }
 
 impl Part {
@@ -348,6 +351,8 @@ pub(crate) struct Db {
     mint: Mint,
     /// Bumped by every edit, whichever partition it lands in.
     edits: u32,
+    /// The partitions an edit was counted for since the last commit.
+    bumped: Vec<u32>,
     /// Ops whose subtree an edit touched, innermost per edit.
     dirty: Vec<OpId>,
     /// Erased op → the op that took its place, so a pipeline can follow its
@@ -386,6 +391,7 @@ impl Db {
             touched: Default::default(),
             mint: Mint::default(),
             edits: 0,
+            bumped: Vec::new(),
             dirty: Vec::new(),
             replaced_ops: HashMap::new(),
             retargets: Vec::new(),
@@ -869,8 +875,39 @@ impl Db {
 
     fn bump(&mut self, part: u32) {
         self.edits = self.edits.wrapping_add(1);
+        if !self.bumped.contains(&part) {
+            self.bumped.push(part);
+        }
         let part = self.part_mut(part);
         part.edits = part.edits.wrapping_add(1);
+    }
+
+    /// Whether `pass` already ran on `op` as it stands and edited nothing.
+    /// Only an op with a partition of its own is tracked: its version counts
+    /// the edits under it and no other function's.
+    pub(crate) fn is_settled(&self, pass: &'static str, op: OpId) -> bool {
+        let (part, version) = (self.partition_of(op), self.version(op));
+        part != 0
+            && self
+                .parts
+                .get(part as usize)
+                .is_some_and(|part| part.settled.contains(&(pass, op.raw(), version)))
+    }
+
+    /// Record that `pass` ran on `op` as it stands and edited nothing.
+    pub(crate) fn settle(&mut self, pass: &'static str, op: OpId) {
+        let (part, version) = (self.partition_of(op), self.version(op));
+        if part == 0 {
+            return;
+        }
+        let settled = &mut self.part_mut(part).settled;
+        match settled
+            .iter_mut()
+            .find(|held| held.0 == pass && held.1 == op.raw())
+        {
+            Some(held) => held.2 = version,
+            None => settled.push((pass, op.raw(), version)),
+        }
     }
 
     /// Count an edit of `op`. An op the module's partition minted counts
@@ -1103,6 +1140,60 @@ impl Db {
             });
         }
         found.into_iter().map(BlockId::new).collect()
+    }
+
+    /// The regions `op` owns, or nothing for an erased op.
+    fn regions_raw(&self, op: u32) -> &[u32] {
+        self.op(OpId::new(op))
+            .map_or(&[], |(chunk, row)| chunk.seg(op::REGION).of(row))
+    }
+
+    /// Every op `region` holds: its own for an unordered region, its blocks'
+    /// in block order for an ordered one.
+    fn region_op_ids(&mut self, region: RegionId, out: &mut Vec<u32>) {
+        if self.region_is_nodes(region) {
+            let held = self.held(Parent::Region(region));
+            out.extend(held);
+            return;
+        }
+        for block in self.region_blocks(region) {
+            let held = self.held(Parent::Block(block));
+            out.extend(held);
+        }
+    }
+
+    /// Every op under `roots`, the roots included, each ahead of the ops
+    /// its regions hold.
+    fn subtree(&mut self, mut found: Vec<u32>) -> Vec<u32> {
+        let mut index = 0;
+        while index < found.len() {
+            // Most ops own no region, and those cost two offset loads here.
+            let regions: smallvec::SmallVec<[u32; 2]> =
+                self.regions_raw(found[index]).iter().copied().collect();
+            for region in regions {
+                self.region_op_ids(RegionId::new(region), &mut found);
+            }
+            index += 1;
+        }
+        found
+    }
+
+    pub(crate) fn subtree_ops(&mut self, roots: &[OpId]) -> Vec<OpId> {
+        let found = self.subtree(roots.iter().map(|op| op.raw()).collect());
+        found.into_iter().map(OpId::new).collect()
+    }
+
+    /// `region` and every region nested in it, each ahead of the regions
+    /// inside it.
+    pub(crate) fn nested_regions(&mut self, region: RegionId) -> Vec<RegionId> {
+        let mut ops = Vec::new();
+        self.region_op_ids(region, &mut ops);
+        let ops = self.subtree(ops);
+        let mut regions = vec![region];
+        for op in ops {
+            regions.extend(self.regions_raw(op).iter().map(|raw| RegionId::new(*raw)));
+        }
+        regions
     }
 
     // Edits.
@@ -1671,6 +1762,7 @@ impl Db {
             touched.clear();
         }
         self.retargets.clear();
+        self.bumped.clear();
         self.committed = self.tick;
         self.tick += 1;
     }
@@ -1681,6 +1773,7 @@ impl Db {
     pub(crate) fn lane(&self, index: u32, count: u32, target: u32, exclusive: bool) -> Db {
         let mut db = self.clone();
         db.retargets.clear();
+        db.bumped.clear();
         db.mint.target = target;
         db.mint.lane = Some(Lane {
             index,
@@ -1793,11 +1886,26 @@ impl Db {
             let part = self.part_mut(owner);
             part.op_chunks.sort_unstable();
             part.block_chunks.sort_unstable();
-            part.edits = part.edits.wrapping_add(1);
             part.forget();
-            self.edits = self.edits.wrapping_add(1);
         }
-        let before = self.mint;
+        // Every partition's edit count moves by what each batch counted for
+        // it, so a version read inside a task reads the same after the commit
+        // unless another task edited under it.
+        let (before, edits) = (self.mint, self.edits);
+        let mut counted: HashMap<u32, u32> = HashMap::new();
+        for batch in &batches {
+            self.edits = self.edits.wrapping_add(batch.edits.wrapping_sub(edits));
+            for &part in &batch.bumped {
+                let Some(theirs) = batch.parts.get(part as usize) else {
+                    continue;
+                };
+                let was = *counted
+                    .entry(part)
+                    .or_insert_with(|| self.parts.get(part as usize).map_or(0, |part| part.edits));
+                let ours = self.part_mut(part);
+                ours.edits = ours.edits.wrapping_add(theirs.edits.wrapping_sub(was));
+            }
+        }
         for batch in batches {
             self.tick = self.tick.max(batch.tick);
             self.replaced_ops.extend(batch.replaced_ops);
@@ -1814,10 +1922,11 @@ impl Db {
             if batch.mint.lane.is_some_and(|lane| lane.exclusive)
                 && let Some(theirs) = batch.parts.get(target as usize)
             {
-                let (open, seen) = (theirs.open, theirs.seen);
+                let (open, seen, settled) = (theirs.open, theirs.seen, theirs.settled.clone());
                 let part = self.part_mut(target);
                 part.open = open;
                 part.seen = seen;
+                part.settled = settled;
             }
         }
         self.retargets.clear();

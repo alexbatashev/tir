@@ -24,9 +24,8 @@ mod state;
 
 pub use nodes::InstCombineNodesPass;
 
+use crate::IdMap;
 use seed::{LoopPorts, Port};
-
-use std::collections::HashMap;
 
 use tir_egraph::{ClassId as Id, Engine};
 
@@ -49,7 +48,7 @@ const NODE_LIMIT: usize = 100_000;
 struct Driver<'a> {
     context: &'a Context,
     eg: Engine<Node>,
-    value_class: HashMap<ValueId, Id>,
+    value_class: IdMap<ValueId, Id>,
     ruleset: Ruleset,
     /// The value whose readers are being rewired. It answers for its own class
     /// and would answer every rewrite with itself, so no spelling may pick it.

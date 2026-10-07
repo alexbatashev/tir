@@ -48,6 +48,7 @@ mod dialect;
 mod dialects;
 mod edits;
 mod error;
+mod idmap;
 mod interfaces;
 pub mod interp;
 mod intrinsic;
@@ -84,6 +85,7 @@ pub use context::{Census, Context, ContextIterator, FunctionScope, GetFromContex
 pub use diagnostics::{print_error_range, print_parse_error};
 pub use dialect::{Dialect, OperationParser};
 pub use error::Error;
+pub use idmap::{IdMap, IdSet, RowId};
 pub use interfaces::{
     Apply, Binding, BranchGuard, BranchTerminator, Callable, CaseGuard, Commutative, ConstantFold,
     ConstantLike, CountedLoop, ExitScope, ExitScopeKind, ExitTarget, Gamma, Global,

@@ -10,7 +10,7 @@
 //! carrying the region, which the topological order already says, since a
 //! region's reads are reads of the operation holding it.
 
-use std::collections::HashMap;
+use crate::IdMap;
 
 use tir::{Context, Dag, NodeId, OpId, OperationRef, PassError, RegionId};
 
@@ -18,27 +18,27 @@ pub(crate) struct Scopes {
     /// Every region of the function, each ahead of the regions nested in it.
     pub(crate) regions: Vec<RegionId>,
     /// Each region's operations in canonical order.
-    pub(crate) order: HashMap<RegionId, Vec<OpId>>,
+    pub(crate) order: IdMap<RegionId, Vec<OpId>>,
     /// The place of every operation in its region's order.
-    pub(crate) position: HashMap<OpId, usize>,
+    pub(crate) position: IdMap<OpId, usize>,
     /// The region holding every operation.
-    pub(crate) op_region: HashMap<OpId, RegionId>,
+    pub(crate) op_region: IdMap<OpId, RegionId>,
     /// The region enclosing each nested region, and the operation carrying it.
-    parent: HashMap<RegionId, (RegionId, OpId)>,
+    parent: IdMap<RegionId, (RegionId, OpId)>,
     dependencies: Dag<OpId, ()>,
-    dependency_nodes: HashMap<OpId, NodeId>,
+    dependency_nodes: IdMap<OpId, NodeId>,
 }
 
 impl Scopes {
     pub(crate) fn build(context: &Context, op: &OperationRef) -> Result<Self, PassError> {
         let mut scopes = Self {
             regions: Vec::new(),
-            order: HashMap::new(),
-            position: HashMap::new(),
-            op_region: HashMap::new(),
-            parent: HashMap::new(),
+            order: IdMap::new(),
+            position: IdMap::new(),
+            op_region: IdMap::new(),
+            parent: IdMap::new(),
             dependencies: Dag::new(),
-            dependency_nodes: HashMap::new(),
+            dependency_nodes: IdMap::new(),
         };
         let mut pending: Vec<RegionId> = op.op().regions().iter().rev().copied().collect();
         while let Some(region) = pending.pop() {

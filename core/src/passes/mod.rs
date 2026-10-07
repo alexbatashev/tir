@@ -31,8 +31,6 @@ pub use restructure::RestructureNodesPass;
 pub use symbol_uniqueness::CheckUniqueSymbolsPass;
 pub use verify_deps::{VerifyDepsPass, verify_deps};
 
-use std::collections::HashSet;
-
 use crate::{ConstantLike, Context, OpHandle, OpId, Pure, RegionId, ValueId};
 
 /// Every region under `root`, each one ahead of the regions nested inside it.
@@ -49,7 +47,7 @@ pub(crate) fn regions_under(context: &Context, root: OpId) -> Vec<RegionId> {
 /// through an operand of a demanded one, or through the results of a region of
 /// one. An operation in a region nobody demands is demanded by nothing, however
 /// its own region reads it.
-pub(crate) fn demanded_ops(context: &Context, roots: &[RegionId]) -> HashSet<OpId> {
+pub(crate) fn demanded_ops(context: &Context, roots: &[RegionId]) -> crate::IdSet<OpId> {
     let defining = |values: Vec<ValueId>| {
         values
             .into_iter()
@@ -60,7 +58,7 @@ pub(crate) fn demanded_ops(context: &Context, roots: &[RegionId]) -> HashSet<OpI
         .iter()
         .flat_map(|&region| defining(context.get_region(region).results()))
         .collect();
-    let mut demanded = HashSet::new();
+    let mut demanded = crate::IdSet::new();
     while let Some(op) = worklist.pop() {
         if !demanded.insert(op) {
             continue;

@@ -88,9 +88,13 @@ struct Registry {
     /// Register-class names of registered targets, for resolving a parsed
     /// `CLASS[n]` register attribute back to a [`RegClassId`].
     reg_classes: HashMap<&'static str, crate::backend::regalloc::RegClassId>,
-    op_interface_converters:
-        HashMap<(&'static str, &'static str, std::any::TypeId), OpInterfaceConverter>,
+    /// The interfaces each op name implements, by [`OpNameId`]: an op's name
+    /// is a column, so a lookup indexes by it and compares a few type ids.
+    interfaces: Vec<Vec<(std::any::TypeId, OpInterfaceConverter)>>,
     type_cache: Vec<Arc<dyn Type>>,
+    /// The resource each interned type is a state of, by type id: asked of
+    /// every operand and result when values are told from states.
+    state_types: Vec<Option<crate::builtin::StateResource>>,
     /// Interned type ids bucketed by [`Type::hash`], so [`Context::get_type_id`]
     /// only runs [`Type::eq`] against colliding candidates.
     type_lookup: HashMap<u64, Vec<TypeId>>,
@@ -189,8 +193,9 @@ impl Context {
             registry: Arc::new(RwLock::new(Registry {
                 dialects: HashMap::new(),
                 reg_classes: HashMap::new(),
-                op_interface_converters: HashMap::new(),
+                interfaces: Vec::new(),
                 type_cache: vec![],
+                state_types: vec![],
                 type_lookup: HashMap::new(),
                 fp_semantics: HashMap::new(),
                 evaluation_contracts: HashMap::new(),
@@ -469,9 +474,17 @@ impl Context {
         op_name: &'static str,
         converter: OpInterfaceConverter,
     ) {
-        self.registry_mut()
-            .op_interface_converters
-            .insert((dialect, op_name, std::any::TypeId::of::<I>()), converter);
+        let name = self.intern_op_name(dialect, op_name).index();
+        let interface = std::any::TypeId::of::<I>();
+        let mut registry = self.registry_mut();
+        if registry.interfaces.len() <= name {
+            registry.interfaces.resize_with(name + 1, Vec::new);
+        }
+        let held = &mut registry.interfaces[name];
+        match held.iter_mut().find(|(ty, _)| *ty == interface) {
+            Some(entry) => entry.1 = converter,
+            None => held.push((interface, converter)),
+        }
     }
 
     pub fn register_operation_interface<Op, I>(&self)
@@ -489,19 +502,22 @@ impl Context {
     }
 
     pub(crate) fn get_op_interface<I: ?Sized + 'static>(&self, op: OpHandle) -> Option<Box<I>> {
-        let converter = self.find_op_interface::<I>(self.op_identity(op.id))?;
+        let converter = self.find_op_interface::<I>(self.op_name_id(op.id))?;
         let erased = converter(op);
         downcast_op_interface::<I>(erased)
     }
 
     pub(crate) fn find_op_interface<I: ?Sized + 'static>(
         &self,
-        identity: (&'static str, &'static str),
+        name: OpNameId,
     ) -> Option<OpInterfaceConverter> {
+        let interface = std::any::TypeId::of::<I>();
         self.registry()
-            .op_interface_converters
-            .get(&(identity.0, identity.1, std::any::TypeId::of::<I>()))
-            .copied()
+            .interfaces
+            .get(name.index())?
+            .iter()
+            .find(|(ty, _)| *ty == interface)
+            .map(|(_, converter)| *converter)
     }
 
     pub fn get_parser(&self, dialect: &str, name: &str) -> Result<OperationParser, Error> {
@@ -553,6 +569,10 @@ impl Context {
             }
         }
         let id = TypeId::from_number(registry.type_cache.len() as u32);
+        let state = (ty.as_ref() as &dyn Any)
+            .downcast_ref::<crate::builtin::StateType>()
+            .map(crate::builtin::StateType::resource);
+        registry.state_types.push(state);
         registry.type_cache.push(ty);
         registry.type_lookup.entry(hash).or_default().push(id);
         id
@@ -567,10 +587,7 @@ impl Context {
     }
 
     pub fn state_resource(&self, ty: TypeId) -> Option<crate::builtin::StateResource> {
-        let data = self.get_type_data(ty);
-        (data.as_ref() as &dyn Any)
-            .downcast_ref::<crate::builtin::StateType>()
-            .map(crate::builtin::StateType::resource)
+        self.registry().state_types[ty.as_index()]
     }
 
     pub fn is_state_type(&self, ty: TypeId) -> bool {
@@ -664,6 +681,16 @@ impl Context {
         self.db().version(op)
     }
 
+    /// Whether `pass` already ran on `op` as it stands now and edited nothing.
+    pub(crate) fn is_settled(&self, pass: &'static str, op: OpId) -> bool {
+        self.db().is_settled(pass, op)
+    }
+
+    /// Record that `pass` ran on `op` as it stands now and edited nothing.
+    pub(crate) fn settle(&self, pass: &'static str, op: OpId) {
+        self.db_mut().settle(pass, op);
+    }
+
     /// The subtrees edited since the last call, innermost-dirtied op per edit and
     /// deduplicated. The pass manager drains this to scope post-pass verification.
     pub(crate) fn take_dirty_ops(&self) -> Vec<OpId> {
@@ -686,11 +713,12 @@ impl Context {
 
     fn filter_states(&self, ids: &[ValueId], states: bool) -> crate::operation::ValueIds {
         let db = self.db();
+        let registry = self.registry();
         ids.iter()
             .copied()
             .filter(|&id| {
                 db.value(id)
-                    .is_some_and(|value| self.is_state_type(value.ty()))
+                    .is_some_and(|value| registry.state_types[value.ty().as_index()].is_some())
                     == states
             })
             .collect()
@@ -824,6 +852,11 @@ impl Context {
             .map(|attribute| attribute.value.clone())
     }
 
+    /// The interned name of `id`.
+    pub(crate) fn op_name_id(&self, id: OpId) -> OpNameId {
+        self.db().op_name(id)
+    }
+
     /// The `(dialect, name)` pair `id` is spelled by.
     pub(crate) fn op_identity(&self, id: OpId) -> (&'static str, &'static str) {
         let name = self.db().op_name(id);
@@ -870,6 +903,16 @@ impl Context {
     /// joined it; none for an ordered one.
     pub(crate) fn region_ops(&self, id: RegionId) -> Vec<OpId> {
         self.db_mut().region_ops(id)
+    }
+
+    /// Every op under `roots`, the roots included.
+    pub(crate) fn subtree_ops(&self, roots: &[OpId]) -> Vec<OpId> {
+        self.db_mut().subtree_ops(roots)
+    }
+
+    /// `region` and every region nested in it.
+    pub(crate) fn nested_regions(&self, region: RegionId) -> Vec<RegionId> {
+        self.db_mut().nested_regions(region)
     }
 
     /// The ports an unordered region owns itself; none for an ordered one.

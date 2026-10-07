@@ -6,7 +6,7 @@
 //! else the vocabulary cannot spell — a loop's carried port and results, a
 //! multi-result or effectful op — anchors as an input leaf.
 
-use std::collections::{HashMap, HashSet};
+use crate::{IdMap, IdSet};
 
 use tir_egraph::{ClassId as Id, Engine};
 
@@ -28,7 +28,7 @@ const STORE_OPERANDS: usize = 3;
 /// observes, and the value ports each loop carries.
 pub struct Seeded {
     pub eg: Engine<Node>,
-    pub value_class: HashMap<ValueId, Id>,
+    pub value_class: IdMap<ValueId, Id>,
     pub loop_ports: Vec<LoopPorts>,
 }
 
@@ -56,8 +56,8 @@ pub fn seed(context: &Context, root: OpId) -> Seeded {
     let mut seeder = Seeder {
         context,
         eg: Engine::new(),
-        value_class: HashMap::new(),
-        seeded: HashSet::new(),
+        value_class: IdMap::new(),
+        seeded: IdSet::new(),
         pointer_width: crate::DataLayout::for_op(context, root)
             .and_then(|layout| layout.pointer_size()),
         loop_ports: Vec::new(),
@@ -75,8 +75,8 @@ pub fn seed(context: &Context, root: OpId) -> Seeded {
 struct Seeder<'a> {
     context: &'a Context,
     eg: Engine<Node>,
-    value_class: HashMap<ValueId, Id>,
-    seeded: HashSet<OpId>,
+    value_class: IdMap<ValueId, Id>,
+    seeded: IdSet<OpId>,
     pointer_width: Option<u32>,
     loop_ports: Vec<LoopPorts>,
 }
@@ -466,14 +466,14 @@ impl Seeder<'_> {
 /// remember what it has answered; without that a run of forks costs one path
 /// per read of each.
 fn names_same_memory(context: &Context, state: ValueId, port: ValueId) -> bool {
-    names_same_memory_seen(context, state, port, &mut HashSet::new())
+    names_same_memory_seen(context, state, port, &mut IdSet::new())
 }
 
 fn names_same_memory_seen(
     context: &Context,
     state: ValueId,
     port: ValueId,
-    seen: &mut HashSet<ValueId>,
+    seen: &mut IdSet<ValueId>,
 ) -> bool {
     if state == port {
         return true;

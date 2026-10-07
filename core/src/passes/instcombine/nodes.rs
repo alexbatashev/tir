@@ -15,7 +15,8 @@
 //! demanded by the state it leaves however unread its values are; a loop in
 //! no cone at all never ran under the demand semantics, and goes.
 
-use std::collections::{HashMap, HashSet};
+use crate::{IdMap, IdSet};
+use std::collections::HashMap;
 
 /// The spelling a class already has, so a form rebuilt for one reader answers
 /// every reader that can see it. `add_auto` places a rebuilt form where its
@@ -54,6 +55,10 @@ impl Pass for InstCombineNodesPass {
 
     fn target(&self) -> PassTarget {
         PassTarget::operation_on::<FuncOp>(RegionKind::Nodes)
+    }
+
+    fn settles(&self) -> bool {
+        true
     }
 
     fn run(
@@ -665,7 +670,7 @@ fn carries_nothing(context: &Context, op: OpId, ordinal: usize) -> Option<StateC
 /// the allocation with nothing left demanding them.
 fn forget_write_only_slots(context: &Context, body: RegionId) {
     let scope = context.nested_regions(body);
-    let mut renames: HashMap<ValueId, ValueId> = HashMap::new();
+    let mut renames: IdMap<ValueId, ValueId> = IdMap::new();
     for op in context.get_region(body).op_ids() {
         let instance = context.get_op(op);
         let Some(allocation) = instance.clone().as_interface::<dyn PromotableAllocation>() else {
@@ -764,7 +769,7 @@ fn sweep(context: &Context, body: RegionId) -> Result<(), PassError> {
 fn sweep_region(
     context: &Context,
     region: RegionId,
-    demanded: &HashSet<OpId>,
+    demanded: &IdSet<OpId>,
 ) -> Result<(), PassError> {
     for op in context.get_region(region).op_ids() {
         if !demanded.contains(&op) {
