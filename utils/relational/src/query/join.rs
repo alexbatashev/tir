@@ -20,6 +20,11 @@ use crate::store::{Group, Table};
 /// less than building and intersecting sets.
 pub(crate) const JOIN_MIN_ROWS: usize = 32;
 
+/// An atom read through several nodes intersects by its widest alone, and
+/// admits the others' cells after, when those are at most this fraction of
+/// it; else it intersects by their union.
+const PATCH_DIVISOR: usize = 8;
+
 /// A join's working arrays, kept so a search allocates nothing.
 #[derive(Default)]
 pub(super) struct JoinScratch {
@@ -279,18 +284,22 @@ impl Plan {
                         if reading == 1 && !reads(when, cell) {
                             continue;
                         }
-                        let found = atom.levels.iter().try_fold(
-                            trie.child(trie.root(), cell),
-                            |node, level| match level {
-                                Level::Known(var) => {
-                                    let cell = eval.bound[*var as usize].expect("bound before");
-                                    Ok(node.and_then(|node| trie.child(node, cell)))
-                                }
-                                Level::Attr(_) => Err(node),
-                            },
-                        );
-                        if let Some(node) = found.unwrap_or_else(|node| node) {
-                            scratch.cursors.push(Cursor { source, node });
+                        // The rows placed since the trie's base are read as
+                        // a trie of their own.
+                        for root in [Some(trie.root()), trie.delta_root()].into_iter().flatten() {
+                            let found = atom.levels.iter().try_fold(
+                                trie.child(root, cell),
+                                |node, level| match level {
+                                    Level::Known(var) => {
+                                        let cell = eval.bound[*var as usize].expect("bound before");
+                                        Ok(node.and_then(|node| trie.child(node, cell)))
+                                    }
+                                    Level::Attr(_) => Err(node),
+                                },
+                            );
+                            if let Some(node) = found.unwrap_or_else(|node| node) {
+                                scratch.cursors.push(Cursor { source, node });
+                            }
                         }
                     }
                 }
@@ -526,28 +535,11 @@ impl Run<'_, '_> {
                 .get(first.node.depth() - 1)
                 == Some(&here)
         };
-        // An atom read through several tries allows the union of their cells.
-        let mut unions: SmallVec<[Vec<u32>; 4]> = SmallVec::new();
-        for atom in 0..width {
-            let cursors = span(&scratch.spans, atom);
-            if cursors.len() > 1 && reads_here(scratch, atom) {
-                let mut union = scratch.unions.pop().unwrap_or_default();
-                union.clear();
-                for cursor in &scratch.cursors[cursors] {
-                    self.sources[cursor.source as usize]
-                        .trie
-                        .set(cursor.node)
-                        .list(&mut union);
-                }
-                union.sort_unstable();
-                union.dedup();
-                unions.push(union);
-            }
-        }
+        let trie = |cursor: &Cursor| self.sources[cursor.source as usize].trie;
         // A separator variable allows only the cells the parent's tuples
         // have, which are sorted in this column under the cells bound so far.
         let column = self.held[depth].map(usize::from);
-        if let Some(column) = column {
+        let cells = column.map(|column| {
             let mut cells = scratch.unions.pop().unwrap_or_default();
             cells.clear();
             for row in held.chunks_exact(self.stride) {
@@ -555,34 +547,99 @@ impl Run<'_, '_> {
                     cells.push(row[column]);
                 }
             }
-            unions.push(cells);
-        }
+            cells
+        });
+        // An atom read through one node allows its set; one read through
+        // several allows the union of their cells, taken as the widest set
+        // and the others' cells admitted after when those are few.
+        let mut several: SmallVec<[usize; 8]> = SmallVec::new();
+        let mut patched: SmallVec<[(usize, usize); 8]> = SmallVec::new();
         let mut candidates = std::mem::take(&mut scratch.candidates[depth]);
         {
-            let mut merged = unions.iter();
-            let mut sets: SmallVec<[Set<'_>; 8]> = SmallVec::new();
+            let mut sets: SmallVec<[Set<'_>; 8]> =
+                cells.iter().map(|cells| Set::Uint(cells)).collect();
             for atom in 0..width {
-                let cursors = span(&scratch.spans, atom);
                 if !reads_here(scratch, atom) {
                     continue;
                 }
-                sets.push(match cursors.len() {
-                    1 => {
-                        let cursor = scratch.cursors[cursors.start];
-                        self.sources[cursor.source as usize].trie.set(cursor.node)
+                let cursors = &scratch.cursors[span(&scratch.spans, atom)];
+                let width = |cursor: &Cursor| trie(cursor).set(cursor.node).len();
+                let (widest, _) = cursors
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(_, cursor)| width(cursor))
+                    .expect("an atom has a cursor");
+                let rest: usize =
+                    cursors.iter().map(width).sum::<usize>() - width(&cursors[widest]);
+                if rest * PATCH_DIVISOR <= width(&cursors[widest]) {
+                    sets.push(trie(&cursors[widest]).set(cursors[widest].node));
+                    if cursors.len() > 1 {
+                        patched.push((atom, widest));
                     }
-                    _ => Set::Uint(merged.next().expect("a merged list")),
-                });
+                } else {
+                    several.push(atom);
+                }
             }
-            sets.extend(merged.map(|cells| Set::Uint(cells)));
-            Set::intersect(
-                &mut sets,
+            if sets.is_empty() {
+                // Only unions read the variable: the one over fewest cells
+                // starts the candidates.
+                let reach = |&atom: &usize| -> usize {
+                    let cursors = &scratch.cursors[span(&scratch.spans, atom)];
+                    cursors
+                        .iter()
+                        .map(|cursor| trie(cursor).set(cursor.node).len())
+                        .sum()
+                };
+                let at = (0..several.len()).min_by_key(|&at| reach(&several[at]));
+                let atom = several.remove(at.expect("an atom reads the variable"));
+                let mut pool = || scratch.unions.pop().unwrap_or_default();
+                let (mut listed, mut spare) = (pool(), pool());
+                candidates.clear();
+                for cursor in &scratch.cursors[span(&scratch.spans, atom)] {
+                    listed.clear();
+                    trie(cursor).set(cursor.node).list(&mut listed);
+                    merge(&mut candidates, &listed, &mut spare);
+                }
+                scratch.unions.extend([listed, spare]);
+            } else {
+                Set::intersect(
+                    &mut sets,
+                    &mut candidates,
+                    &mut scratch.words,
+                    &mut scratch.spare,
+                );
+            }
+        }
+        // The unions are applied last, a node at a time.
+        for atom in several {
+            let mut pool = || scratch.unions.pop().unwrap_or_default();
+            let (mut part, mut out, mut spare) = (pool(), pool(), pool());
+            out.clear();
+            for cursor in &scratch.cursors[span(&scratch.spans, atom)] {
+                let (trie, node) = (trie(cursor), cursor.node);
+                let set = trie.set(node);
+                Set::intersect(
+                    &mut [Set::Uint(&candidates), set],
+                    &mut part,
+                    &mut scratch.words,
+                    &mut scratch.spare,
+                );
+                merge(&mut out, &part, &mut spare);
+            }
+            std::mem::swap(&mut candidates, &mut out);
+            scratch.unions.extend([part, out, spare]);
+        }
+        if !patched.is_empty() {
+            self.admit(
+                scratch,
+                frame,
+                here,
+                cells.as_deref(),
+                &patched,
                 &mut candidates,
-                &mut scratch.words,
-                &mut scratch.spare,
             );
         }
-        scratch.unions.extend(unions);
+        scratch.unions.extend(cells);
         let next = frame + width + 1;
         let mut from = 0;
         'cells: for &cell in &candidates {
@@ -639,6 +696,60 @@ impl Run<'_, '_> {
         scratch.candidates[depth] = candidates;
     }
 
+    /// Admit to `candidates` the cells of the nodes beside the widest of each
+    /// atom in `patched` that every atom allows and the separator's `cells`,
+    /// if held, have.
+    fn admit(
+        &self,
+        scratch: &mut JoinScratch,
+        frame: usize,
+        here: Level,
+        cells: Option<&[u32]>,
+        patched: &[(usize, usize)],
+        candidates: &mut Vec<u32>,
+    ) {
+        let span = |atom: usize| {
+            scratch.spans[frame + atom] as usize..scratch.spans[frame + atom + 1] as usize
+        };
+        let trie = |cursor: &Cursor| self.sources[cursor.source as usize].trie;
+        let reads_here = |atom: usize| {
+            let first = scratch.cursors[span(atom).start];
+            self.join.atoms[self.atoms[atom]]
+                .levels
+                .get(first.node.depth() - 1)
+                == Some(&here)
+        };
+        let mut pool = || scratch.unions.pop().unwrap_or_default();
+        let (mut extras, mut listed, mut part, mut spare) = (pool(), pool(), pool(), pool());
+        extras.clear();
+        for &(atom, widest) in patched {
+            for (at, cursor) in scratch.cursors[span(atom)].iter().enumerate() {
+                if at != widest {
+                    listed.clear();
+                    trie(cursor).set(cursor.node).list(&mut listed);
+                    merge(&mut extras, &listed, &mut spare);
+                }
+            }
+        }
+        part.clear();
+        'extras: for &cell in &extras {
+            if cells.is_some_and(|cells| cells.binary_search(&cell).is_err()) {
+                continue;
+            }
+            for atom in 0..self.atoms.len() {
+                let allows = |cursor: &Cursor| trie(cursor).child(cursor.node, cell).is_some();
+                if reads_here(atom) && !scratch.cursors[span(atom)].iter().any(allows) {
+                    continue 'extras;
+                }
+            }
+            part.push(cell);
+        }
+        if !part.is_empty() {
+            merge(candidates, &part, &mut spare);
+        }
+        scratch.unions.extend([extras, listed, part, spare]);
+    }
+
     /// Every atom is at its leaves: the product of the rows they hold, each
     /// as a tuple of ranks, after the bag's cells if it keeps them.
     fn leaves(&self, scratch: &mut JoinScratch, frame: usize, out: &mut Vec<u64>) {
@@ -682,6 +793,21 @@ impl Run<'_, '_> {
             }
         }
     }
+}
+
+// Both lists are ascending and distinct, and `union` stays so.
+fn merge(union: &mut Vec<u32>, cells: &[u32], spare: &mut Vec<u32>) {
+    spare.clear();
+    let (mut a, mut b) = (0, 0);
+    while a < union.len() && b < cells.len() {
+        let (x, y) = (union[a], cells[b]);
+        spare.push(x.min(y));
+        a += usize::from(x <= y);
+        b += usize::from(y <= x);
+    }
+    spare.extend_from_slice(&union[a..]);
+    spare.extend_from_slice(&cells[b..]);
+    std::mem::swap(union, spare);
 }
 
 /// How a bag's tuples are laid out: their width and where the separator's
@@ -789,8 +915,8 @@ mod tests {
 
     /// A bag and a keyed table of binary rows and a bag of unary ones, each
     /// row `(kind, args..) -> value` with a few kinds and few argument cells,
-    /// filled over two epochs.
-    fn database(rows: &[(u32, u32, u32, u32, u32)], split: usize) -> Db {
+    /// filled over two epochs, with `between` run on the first.
+    fn database(rows: &[(u32, u32, u32, u32, u32)], split: usize, between: impl Fn(&Db)) -> Db {
         let space = SpaceId::nth(0);
         let mut db = Db::new();
         for _ in 0..IDS {
@@ -801,6 +927,7 @@ mod tests {
         db.add_table(Table::bag(2).plain(1), space);
         for (at, &(table, kind, x, y, value)) in rows.iter().enumerate() {
             if at == split {
+                between(&db);
                 db.advance();
             }
             let tag = at as u32;
@@ -928,8 +1055,13 @@ mod tests {
             prune in 0u32..4,
             old_below in 0usize..4,
         ) {
-            let db = database(&rows, split.min(rows.len() - 20));
             let plan = Plan::compile(query(shape, swap, guard));
+            // Indexes built over the first epoch's rows merge the second's.
+            let db = database(&rows, split.min(rows.len() - 20), |db| {
+                let mut cache = PlanCache::default();
+                cache.join_min_rows = 0;
+                plan.search_all(db, &Selections, &mut cache);
+            });
             prop_assert!(plan.joins.len() == 1, "the query has a join: {:?}", plan.run);
             let allowed = |var: u32, id: u32| prune == 0 || !(var * 7 + id).is_multiple_of(prune + 3);
             let search = |join_min_rows| {

@@ -12,6 +12,11 @@
 //! so a semi-naive client asks only what the epoch before wrote. A scope is a
 //! snapshot of all of it, and of whatever state of its own the client keeps in
 //! the database, put back when the scope pops.
+//!
+//! The indexes a search reads, rows grouped by a column and tries over a
+//! column order, keep a base built over the rows a table had and place the
+//! rows appended or moved since into it; the base is rebuilt only when those
+//! outgrow a fraction of it.
 
 use std::cell::{Ref, RefCell, RefMut};
 
@@ -363,8 +368,8 @@ impl<C, const SPACES: usize> Database<C, SPACES> {
         row
     }
 
-    /// Group the rows of the table at `slot` by `column`, unless that is
-    /// already done for the table as it is. Read through [`Self::groups`].
+    /// Group the rows of the table at `slot` by `column`, or bring the
+    /// grouping up to date. Read through [`Self::groups`].
     pub fn prepare_group(&self, slot: u32, column: usize) {
         let Some(table) = self.table(slot) else {
             return;
@@ -377,18 +382,8 @@ impl<C, const SPACES: usize> Database<C, SPACES> {
         if columns.len() <= column {
             columns.resize_with(column + 1, Default::default);
         }
-        let version = table.version() + 1;
-        let (built, group) = &mut columns[column];
-        if *built != version {
-            *built = version;
-            let cells = table.column(column);
-            let bound = if column < table.plain_columns() {
-                cells.iter().max().map_or(0, |&max| max as usize + 1)
-            } else {
-                self.ids(self.state.table_space[slot as usize])
-            };
-            group.build(cells, bound);
-        }
+        let ids = self.ids(self.state.table_space[slot as usize]);
+        columns[column].refresh(table, column, ids);
     }
 
     /// List the rows of the table at `slot` the epoch before wrote, by their
@@ -420,9 +415,8 @@ impl<C, const SPACES: usize> Database<C, SPACES> {
         }
     }
 
-    /// Index the rows of the table at `slot` as a trie over `columns`, unless
-    /// that is already done for the table as it is. Read through
-    /// [`Self::groups`].
+    /// Index the rows of the table at `slot` as a trie over `columns`, or
+    /// bring the trie up to date. Read through [`Self::groups`].
     pub fn prepare_trie(&self, slot: u32, columns: &[u8]) {
         let Some(table) = self.table(slot) else {
             return;
@@ -432,19 +426,14 @@ impl<C, const SPACES: usize> Database<C, SPACES> {
             groups.tries.resize_with(slot as usize + 1, Vec::new);
         }
         let tries = &mut groups.tries[slot as usize];
-        let at = match tries.iter().position(|(_, trie)| trie.columns() == columns) {
+        let at = match tries.iter().position(|trie| trie.columns() == columns) {
             Some(at) => at,
             None => {
-                tries.push((0, Trie::default()));
+                tries.push(Trie::new(columns));
                 tries.len() - 1
             }
         };
-        let version = table.version() + 1;
-        let (built, trie) = &mut tries[at];
-        if *built != version {
-            *built = version;
-            trie.build(table, columns);
-        }
+        tries[at].refresh(table);
     }
 
     #[inline]
@@ -908,14 +897,14 @@ impl<C: Clone, const SPACES: usize> Database<C, SPACES> {
     }
 }
 
-/// Per table and column, the rows grouped by that column and the table version
-/// the grouping was built at; per table, the rows the epoch before wrote; and
-/// per table and column order, the trie a join reads.
+/// Per table and column, the rows grouped by that column; per table, the rows
+/// the epoch before wrote; and per table and column order, the trie a join
+/// reads.
 #[derive(Default)]
 pub struct Groups {
-    built: Vec<Vec<(u64, Group)>>,
+    built: Vec<Vec<Group>>,
     new_rows: Vec<Vec<NewRows>>,
-    tries: Vec<Vec<(u64, Trie)>>,
+    tries: Vec<Vec<Trie>>,
     scratch: Vec<u32>,
 }
 
@@ -931,7 +920,7 @@ struct NewRows {
 impl Groups {
     /// The grouping [`Database::prepare_group`] built.
     pub fn get(&self, slot: u32, column: usize) -> &Group {
-        &self.built[slot as usize][column].1
+        &self.built[slot as usize][column]
     }
 
     /// The rows of the table at `slot` that the epoch before wrote, as
@@ -947,8 +936,8 @@ impl Groups {
     /// The trie [`Database::prepare_trie`] built over `columns`.
     pub(crate) fn trie(&self, slot: u32, columns: &[u8]) -> &Trie {
         let tries = &self.tries[slot as usize];
-        let found = tries.iter().find(|(_, trie)| trie.columns() == columns);
-        &found.expect("a prepared trie").1
+        let found = tries.iter().find(|trie| trie.columns() == columns);
+        found.expect("a prepared trie")
     }
 
     /// The part of [`Self::new_rows`] whose cell is `cell`.
