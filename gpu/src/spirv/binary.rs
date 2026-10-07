@@ -792,6 +792,8 @@ impl<'a> Reader<'a> {
     }
 
     fn read_function(&mut self, instructions: &[RawInst]) -> Result<FuncOp> {
+        // The function's rows share chunks with no other function's.
+        let _scope = self.context.function_scope();
         let header = &instructions[0].operands;
         let return_type = self.type_ref(header[0])?;
         let function_id = header[1];

@@ -124,6 +124,8 @@ impl Pass for LowerCirStructsPass {
             let Some(member) = target.as_op::<cir::GetMemberOp>() else {
                 continue;
             };
+            // The replacement belongs to the function the access sits in.
+            let _scope = context.partition_scope(target.op().id);
             let name = member.struct_name();
             let field = member.field() as usize;
             let offset = layouts[&name].offsets[field];

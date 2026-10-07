@@ -568,7 +568,7 @@ fn matches_op_name(op: &OpHandle, spec: &str) -> bool {
 
 /// `root` as it stands now: a pipeline holds its root across passes that erase
 /// and replace it, and an [`OpHandle`] to an erased op reads as a panic. An
-/// erased root is followed through the replacements the overlay recorded;
+/// erased root is followed through the replacements the context recorded;
 /// that is how selection's machine symbol takes over from the function it was
 /// made of.
 fn refreshed(context: &Context, root: &OperationRef) -> Option<OperationRef> {
@@ -671,7 +671,7 @@ enum PassNode {
 }
 
 /// Whether the pipeline may commit: the top level owns the base, a callable's
-/// task shares the overlay of the task and commits nothing.
+/// task shares the context of the task and commits nothing.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Exclusive,
@@ -712,7 +712,7 @@ impl PassManager {
     }
 
     /// Add a pass that has no copy: the nest holding it runs its callables one
-    /// at a time, each still in an overlay of its own.
+    /// at a time, each still in a context of its own.
     pub fn add_boxed_pass(&mut self, pass: Box<dyn Pass>) -> &mut Self {
         self.passes.push(PassNode::Pass {
             pass,
@@ -819,7 +819,7 @@ impl PassManager {
         self.run_with(context, root, analyses, Mode::Exclusive)
     }
 
-    /// [`PassManager::run_on_op_ref`] inside a task's overlay when `mode` is
+    /// [`PassManager::run_on_op_ref`] inside a task's context when `mode` is
     /// shared: a nested pipeline's edits stay pending with the enclosing one's.
     fn run_with(
         &mut self,
@@ -835,33 +835,10 @@ impl PassManager {
                 root = current;
             }
             if mode == Mode::Exclusive {
-                Self::commit(context)?;
+                context.commit();
             }
         }
         Ok(root)
-    }
-
-    /// Apply the overlay to the base. The overlay was verified as the passes
-    /// left it; with verification on, the base's use lists are checked once
-    /// more as the commit left them.
-    fn commit(context: &Context) -> Result<(), PassError> {
-        if !context.has_pending_edits() {
-            return Ok(());
-        }
-        context.commit();
-        Self::verify_committed(context)
-    }
-
-    fn verify_committed(context: &Context) -> Result<(), PassError> {
-        if ir_verification_enabled() {
-            context
-                .verify_use_lists()
-                .map_err(|error| PassError::InvalidIR {
-                    pass: "commit",
-                    error,
-                })?;
-        }
-        Ok(())
     }
 
     fn run_entry(
@@ -897,12 +874,6 @@ impl PassManager {
                 let mutated = context.op_version(root.op.id) != version_before;
                 let dirty = context.take_dirty_ops();
                 if mutated && ir_verification_enabled() {
-                    context
-                        .verify_use_lists()
-                        .map_err(|error| PassError::InvalidIR {
-                            pass: pass.name(),
-                            error,
-                        })?;
                     let result = if is_machine_ir(context, root.op.id) {
                         crate::backend::verify_machine_ir(context, root.op.id)
                     } else {
@@ -917,7 +888,7 @@ impl PassManager {
                     timing::record(pass.name(), started.elapsed());
                 }
                 if let Some(scope) = scope {
-                    scope.finish(context.slab_census());
+                    scope.finish(context.census());
                 }
                 crate::memstats::analysis_census(pass.name(), analyses.cached_count());
                 Ok(())
@@ -938,13 +909,12 @@ impl PassManager {
                     }
                     Ok(())
                 })?;
-                Self::commit(context)?;
+                context.commit();
                 let done = tasks::run(context, manager, &targets, workers)?;
                 tasks::report(op_name, context, &done);
                 context
                     .commit_batches(done.into_iter().map(|d| d.batch).collect())
-                    .map_err(PassError::OverlappingEdits)?;
-                Self::verify_committed(context)
+                    .map_err(PassError::OverlappingEdits)
             }
             PassNode::Fixpoint { cap, manager } => {
                 let mut current = root.clone();
@@ -972,6 +942,8 @@ impl PassManager {
             .iter()
             .map(|id| context.get_region(*id))
             .collect();
+        // What a pass builds under a function goes into that function's chunks.
+        let _scope = context.partition_scope(root.op.id);
         f(root.clone())?;
         for region in regions {
             // The visit may have erased `root`, reclaiming the regions it owned;
@@ -1022,7 +994,7 @@ pub fn report_pass_timing(wall: std::time::Duration) {
     timing::summary(wall);
 }
 
-/// One epoch's callable tasks: every target gets an overlay of its own over
+/// One epoch's callable tasks: every target gets a context of its own over
 /// the committed base, at most `workers` run at once, and the finished
 /// batches come back in target order for the commit.
 mod tasks {
@@ -1030,11 +1002,10 @@ mod tasks {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::{AnalysisManager, Mode, OperationRef, PassError, PassManager};
-    use crate::context::Snapshot;
-    use crate::overlay::EditBatch;
+    use crate::context::{EditBatch, Snapshot};
     use crate::{Context, OpId};
 
-    /// A finished task: its batch and how large its overlay grew.
+    /// A finished task: its batch and the bytes of the chunks it wrote.
     pub(super) struct Done {
         pub batch: EditBatch,
         pub overlay_bytes: usize,
@@ -1047,6 +1018,18 @@ mod tasks {
         workers: usize,
     ) -> Result<Vec<Done>, PassError> {
         let snapshot = context.snapshot();
+        // A task whose partition no other target shares keeps filling it.
+        let partitions = snapshot.partitions(targets);
+        let mut sorted = partitions.clone();
+        sorted.sort_unstable();
+        let exclusive: Vec<bool> = partitions
+            .iter()
+            .map(|&part| {
+                let sharing = sorted.partition_point(|other| *other <= part)
+                    - sorted.partition_point(|other| *other < part);
+                part != 0 && sharing == 1
+            })
+            .collect();
         let workers = workers.min(targets.len()).max(1);
         let replicas: Option<Vec<PassManager>> = (1..workers).map(|_| manager.replica()).collect();
         let mut results: Vec<Option<Result<Done, PassError>>> =
@@ -1061,7 +1044,14 @@ mod tasks {
                         let Some(&target) = targets.get(index) else {
                             return;
                         };
-                        let done = one(&snapshot, manager, target);
+                        let done = one(
+                            &snapshot,
+                            manager,
+                            index,
+                            targets.len(),
+                            target,
+                            exclusive[index],
+                        );
                         slots.lock().unwrap()[index] = Some(done);
                     }
                 };
@@ -1075,8 +1065,15 @@ mod tasks {
                 results = slots.into_inner().unwrap();
             }
             _ => {
-                for (slot, &target) in results.iter_mut().zip(targets) {
-                    *slot = Some(one(&snapshot, manager, target));
+                for (index, (slot, &target)) in results.iter_mut().zip(targets).enumerate() {
+                    *slot = Some(one(
+                        &snapshot,
+                        manager,
+                        index,
+                        targets.len(),
+                        target,
+                        exclusive[index],
+                    ));
                 }
             }
         }
@@ -1090,12 +1087,15 @@ mod tasks {
     fn one(
         snapshot: &Snapshot,
         manager: &mut PassManager,
+        index: usize,
+        count: usize,
         target: OpId,
+        exclusive: bool,
     ) -> Result<Done, PassError> {
-        let context = Context::open(snapshot.clone());
+        let context = Context::open(snapshot, index, count, target, exclusive);
         let root = OperationRef::new(context.get_op(target));
         manager.run_with(&context, root, &AnalysisManager::new(), Mode::Shared)?;
-        let overlay_bytes = context.overlay_census().bytes;
+        let overlay_bytes = context.census().touched_bytes;
         Ok(Done {
             batch: context.finish(),
             overlay_bytes,
@@ -1103,7 +1103,7 @@ mod tasks {
     }
 
     /// The epoch's memory, at the moment every task is done and nothing is
-    /// committed: the base, the largest overlay any task held, and what the
+    /// committed: the base, the most any task wrote, and what the
     /// batches hold while they wait.
     pub(super) fn report(op_name: &str, context: &Context, done: &[Done]) {
         if !crate::memstats::enabled() {
@@ -1112,7 +1112,7 @@ mod tasks {
         crate::memstats::epoch_census(
             op_name,
             done.len(),
-            context.slab_census().slab_bytes,
+            context.census().bytes(),
             done.iter().map(|d| d.overlay_bytes).max().unwrap_or(0),
             done.iter().map(|d| d.batch.bytes()).sum(),
         );

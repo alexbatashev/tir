@@ -204,6 +204,8 @@ impl FuncOp {
         parser: &mut tir::parse::text::Parser,
         context: &tir::Context,
     ) -> Result<Box<dyn tir::Operation>, (tir::parse::Span, tir::Error)> {
+        // The function's rows share chunks with no other function's.
+        let _scope = context.function_scope();
         use tir::parse::common::Cursor;
 
         let is_private = parser.parse_token("private");

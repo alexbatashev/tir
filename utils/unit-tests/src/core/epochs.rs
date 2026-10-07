@@ -1,5 +1,5 @@
-//! The overlay contract: a pass reads its own edits before commit, and the
-//! committed graph is the visible graph modulo the id map.
+//! The edit contract: a pass reads its own edits at once, and a commit moves
+//! no id and changes nothing a read answers.
 
 use tir::{
     builtin::{self, IntegerType},
@@ -9,8 +9,7 @@ use tir::{
 
 use super::fixtures;
 
-/// `module { func demo() -> i32 {} }`, committed, so every id the test holds
-/// is a base id and everything the test builds is local.
+/// `module { func demo() -> i32 {} }`, committed.
 fn committed_function(context: &Context) -> (OpId, BlockHandle) {
     let module = fixtures::parse_in(
         context,
@@ -43,23 +42,6 @@ fn add_fixture(context: &Context) -> (ValueId, ValueId, OpId) {
 }
 
 #[test]
-fn a_parsed_module_is_committed_and_a_built_op_is_pending() {
-    let context = Context::with_default_dialects();
-    let (func, body) = committed_function(&context);
-    let i32_ty = IntegerType::new(&context, 32);
-
-    let c = builtin::ops::constant(&context, 1, i32_ty).build();
-    body.append(c.id());
-
-    assert!(!context.is_pending_op(func));
-    assert!(context.is_pending_op(c.id()));
-    assert!(context.is_pending_value(c.result()));
-    assert_eq!(context.get_op(c.id()).operands().len(), 0);
-    assert_eq!(body.op_ids(), [c.id()]);
-    assert_eq!(context.parent_block(c.id()), Some(body.id()));
-}
-
-#[test]
 fn commit_keeps_every_id_and_every_handle() {
     let context = Context::with_default_dialects();
     let (func, body) = committed_function(&context);
@@ -72,7 +54,6 @@ fn commit_keeps_every_id_and_every_handle() {
 
     context.commit();
 
-    assert!(!context.is_pending_op(c.id()) && !context.is_pending_op(add.id()));
     assert!(context.has_operation(func));
     assert_eq!(body.op_ids(), [c.id(), add.id()]);
     assert_eq!(
@@ -85,25 +66,6 @@ fn commit_keeps_every_id_and_every_handle() {
     );
     assert_eq!(context.get_value(c.result()).defining_op(), Some(c.id()));
     assert!(handle.is_live(), "a committed entity keeps its handle");
-    assert!(body.is_live());
-    context.verify_use_lists().expect("base lists agree");
-}
-
-#[test]
-fn a_handle_from_a_discarded_overlay_is_stale() {
-    let context = Context::with_default_dialects();
-    let (_, body) = committed_function(&context);
-    let i32_ty = IntegerType::new(&context, 32);
-    let c = builtin::ops::constant(&context, 1, i32_ty).build();
-    body.append(c.id());
-    let handle = context.get_op(c.id());
-
-    context.discard();
-    let again = builtin::ops::constant(&context, 2, i32_ty).build();
-
-    assert_eq!(again.id(), c.id(), "the id is reissued");
-    assert!(!handle.is_live(), "but the old handle knows its op is gone");
-    assert!(context.get_op(again.id()).is_live());
     assert!(body.is_live());
 }
 
@@ -141,7 +103,6 @@ fn setting_a_duplicate_slot_moves_one_use() {
     context.commit();
     assert_eq!(context.uses_of(c), [Use::new(add, 0)]);
     assert_eq!(context.uses_of(d), [Use::new(add, 1)]);
-    context.verify_use_lists().expect("base lists agree");
 }
 
 #[test]
@@ -200,7 +161,6 @@ fn rauw_resolves_transitively_and_commit_agrees() {
         [Use::new(add, 0), Use::new(add, 1)]
     );
     assert!(!context.is_used(c) && !context.is_used(d));
-    context.verify_use_lists().expect("base lists agree");
 }
 
 #[test]
@@ -236,7 +196,6 @@ fn a_use_recorded_after_rauw_names_the_old_value() {
         context.get_op(late.id()).operands().as_slice(),
         [e.result(); 2]
     );
-    context.verify_use_lists().expect("base lists agree");
 }
 
 #[test]
@@ -264,7 +223,6 @@ fn replacing_a_pending_replacement_redirects_the_base_slots() {
 
     context.commit();
     assert_eq!(context.get_op(add).operands().as_slice(), [d; 2]);
-    context.verify_use_lists().expect("base lists agree");
 }
 
 #[test]
@@ -367,7 +325,6 @@ fn a_grown_port_is_aligned_before_and_after_commit() {
     let result = context.grow_port(loop_op, i32_ty, Some(init), |_, port| port);
     let before = text(&context, function);
     tir::verify_op_tree(&context, function).expect("aligned before commit");
-    assert!(context.is_pending_value(result));
 
     context.commit();
     let after = text(&context, function);
@@ -409,20 +366,6 @@ fn an_analysis_sees_an_edit_before_commit_and_survives_it() {
 }
 
 #[test]
-fn a_discarded_overlay_leaves_no_cached_result_behind() {
-    let context = Context::with_default_dialects();
-    let (func, body) = committed_function(&context);
-    let analyses = AnalysisManager::new();
-    body.append(func::ops::r#return(&context, Operand::none()).build().id());
-    assert_eq!(analyses.get::<Count>(&context, func).0, 1);
-
-    context.discard();
-
-    assert!(analyses.get_cached::<Count>(&context, func).is_none());
-    assert_eq!(analyses.get::<Count>(&context, func).0, 0);
-}
-
-#[test]
 fn a_no_op_edit_keeps_the_revision() {
     let context = Context::with_default_dialects();
     let (c, _, add) = add_fixture(&context);
@@ -431,18 +374,4 @@ fn a_no_op_edit_keeps_the_revision() {
     context.set_op_operand(add, 0, c);
 
     assert_eq!(context.op_version(add), before);
-}
-
-#[test]
-fn commit_refuses_a_live_reader_of_the_base() {
-    let context = Context::with_default_dialects();
-    let (_, body) = committed_function(&context);
-    body.append(func::ops::r#return(&context, Operand::none()).build().id());
-    let reader = context.frozen();
-
-    let held = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| context.commit()));
-
-    assert!(held.is_err(), "a frozen reader blocks the commit");
-    drop(reader);
-    context.commit();
 }

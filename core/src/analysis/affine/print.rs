@@ -187,6 +187,6 @@ fn render_recurrence(port: &Port) -> String {
 fn number(context: &Context, op: OpId) -> String {
     match context.get_op(op).results().first() {
         Some(value) => value.number().to_string(),
-        None => format!("op{}", op.index()),
+        None => format!("op{}", op.number()),
     }
 }

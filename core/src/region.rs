@@ -2,35 +2,6 @@ use crate::{BlockId, Context, ContextIterator, GetFromContext, OpId, Terminator,
 
 id_newtype!(RegionId);
 
-/// What a region holds, and how what it holds is ordered.
-///
-/// An ordered region is a control-flow graph: its blocks run one after another
-/// and hand control on through terminators. An unordered region is a dependence
-/// graph: nothing but the def-use edges between its operations says what runs
-/// before what, so `ops` is insertion order and is never read as meaning.
-#[derive(Debug, Clone)]
-pub enum RegionBody {
-    Blocks(Vec<BlockId>),
-    Nodes {
-        /// The region's own arguments. An ordered region has these too — they
-        /// are its entry block's arguments; see [`RegionHandle::ports`].
-        ports: Vec<Value>,
-        ops: Vec<OpId>,
-        /// The values the region produces, in the order the enclosing operation
-        /// binds them.
-        results: Vec<ValueId>,
-    },
-}
-
-/// A region's storage record, living densely in the context's region slab and
-/// edited in place through [`Context`] under its write lock. Reads go through
-/// [`RegionHandle`].
-#[derive(Debug, Clone)]
-pub struct Region {
-    body: RegionBody,
-    parent_op: OpId,
-}
-
 /// Which kind of body an operation declares for a region, as spelled in
 /// `operation!`. `Any` accepts either, so the parser reads the kind off the
 /// text and a walker has to ask.
@@ -41,106 +12,11 @@ pub enum RegionKind {
     Any,
 }
 
-impl Region {
-    pub(crate) fn new() -> Region {
-        Region {
-            body: RegionBody::Blocks(vec![]),
-            parent_op: OpId::invalid(),
-        }
-    }
-
-    pub(crate) fn new_nodes(ports: Vec<Value>, ops: Vec<OpId>, results: Vec<ValueId>) -> Region {
-        Region {
-            body: RegionBody::Nodes {
-                ports,
-                ops,
-                results,
-            },
-            parent_op: OpId::invalid(),
-        }
-    }
-
-    pub(crate) fn heap_bytes(&self) -> usize {
-        match &self.body {
-            RegionBody::Blocks(blocks) => blocks.capacity() * std::mem::size_of::<BlockId>(),
-            RegionBody::Nodes {
-                ports,
-                ops,
-                results,
-                ..
-            } => {
-                ports.capacity() * std::mem::size_of::<Value>()
-                    + ops.capacity() * std::mem::size_of::<OpId>()
-                    + results.capacity() * std::mem::size_of::<ValueId>()
-            }
-        }
-    }
-
-    /// Move every id the region holds by `shift`.
-    pub(crate) fn shift(&mut self, shift: &crate::overlay::Shift) {
-        self.parent_op = shift.op(self.parent_op);
-        match &mut self.body {
-            RegionBody::Blocks(blocks) => {
-                for block in blocks {
-                    *block = shift.block(*block);
-                }
-            }
-            RegionBody::Nodes {
-                ports,
-                ops,
-                results,
-            } => {
-                for port in ports {
-                    port.shift(shift);
-                }
-                for op in ops {
-                    *op = shift.op(*op);
-                }
-                for result in results {
-                    *result = shift.value(*result);
-                }
-            }
-        }
-    }
-
-    pub(crate) fn set_parent_op(&mut self, op: OpId) {
-        self.parent_op = op;
-    }
-
-    /// The operation owning this region, if it has been attached to one.
-    pub(crate) fn parent_op(&self) -> Option<OpId> {
-        (self.parent_op != OpId::invalid()).then_some(self.parent_op)
-    }
-
-    pub(crate) fn body(&self) -> &RegionBody {
-        &self.body
-    }
-
-    pub(crate) fn body_mut(&mut self) -> &mut RegionBody {
-        &mut self.body
-    }
-
-    pub(crate) fn blocks(&self) -> &[BlockId] {
-        match &self.body {
-            RegionBody::Blocks(blocks) => blocks,
-            RegionBody::Nodes { .. } => &[],
-        }
-    }
-
-    pub(crate) fn blocks_mut(&mut self) -> &mut Vec<BlockId> {
-        match &mut self.body {
-            RegionBody::Blocks(blocks) => blocks,
-            RegionBody::Nodes { .. } => panic!("an unordered region holds no blocks"),
-        }
-    }
-}
-
 /// A reference to a region: the context that owns it, and its id. Reads answer
 /// with the region as it stands now; see [`crate::OpHandle`].
 #[derive(Clone)]
 pub struct RegionHandle {
     pub context: Context,
-    pub(crate) generation: u32,
     pub id: RegionId,
 }
 
@@ -154,9 +30,8 @@ impl RegionHandle {
     /// The owning context, after checking this handle still names its own region.
     fn context(&self) -> Context {
         let context = self.context.clone();
-        debug_assert_eq!(
-            context.region_generation(self.id),
-            self.generation,
+        debug_assert!(
+            context.has_region(self.id),
             "handle to erased region {:?}",
             self.id
         );
@@ -166,7 +41,7 @@ impl RegionHandle {
     /// Whether this handle still names the region it was minted for; see
     /// [`crate::OpHandle::is_live`].
     pub fn is_live(&self) -> bool {
-        self.context.region_generation(self.id) == self.generation
+        self.context.has_region(self.id)
     }
 
     pub fn id(&self) -> RegionId {
@@ -175,14 +50,12 @@ impl RegionHandle {
 
     /// The operation owning this region, if it has been attached to one.
     pub fn parent_op(&self) -> Option<OpId> {
-        self.context().with_region(self.id, Region::parent_op)
+        self.context().region_parent_op(self.id)
     }
 
     /// Whether this region holds an unordered graph rather than blocks.
     pub fn is_nodes(&self) -> bool {
-        self.context().with_region(self.id, |region| {
-            matches!(region.body(), RegionBody::Nodes { .. })
-        })
+        self.context().region_is_nodes(self.id)
     }
 
     pub fn add_block(&self, id: BlockId) {
@@ -194,8 +67,7 @@ impl RegionHandle {
     }
 
     pub fn block_ids(&self) -> Vec<BlockId> {
-        self.context()
-            .with_region(self.id, |region| region.blocks().to_vec())
+        self.context().region_blocks(self.id)
     }
 
     /// The entry block of an ordered region: where control enters and where its
@@ -209,16 +81,12 @@ impl RegionHandle {
     /// the region's contents iterates, whichever kind it is.
     pub fn op_ids(&self) -> Vec<OpId> {
         let context = self.context();
-        let (ops, blocks) = context.with_region(self.id, |region| match region.body() {
-            RegionBody::Nodes { ops, .. } => (ops.clone(), Vec::new()),
-            RegionBody::Blocks(blocks) => (Vec::new(), blocks.clone()),
-        });
-        if blocks.is_empty() {
-            return ops;
+        if context.region_is_nodes(self.id) {
+            return context.region_ops(self.id);
         }
-        blocks
+        self.block_ids()
             .into_iter()
-            .flat_map(|block| context.get_block(block).op_ids())
+            .flat_map(|block| context.block_ops(block))
             .collect()
     }
 
@@ -227,13 +95,12 @@ impl RegionHandle {
     /// need not know which kind it holds.
     pub fn ports(&self) -> Vec<Value> {
         let context = self.context();
-        let (ports, entry) = context.with_region(self.id, |region| match region.body() {
-            RegionBody::Nodes { ports, .. } => (ports.clone(), None),
-            RegionBody::Blocks(blocks) => (Vec::new(), blocks.first().copied()),
-        });
-        match entry {
-            Some(entry) => context.get_block(entry).arguments(),
-            None => ports,
+        if context.region_is_nodes(self.id) {
+            return context.region_ports(self.id);
+        }
+        match self.block_ids().first() {
+            Some(entry) => context.block_arguments(*entry),
+            None => Vec::new(),
         }
     }
 
@@ -258,11 +125,7 @@ impl RegionHandle {
     /// The values an unordered region produces; empty for an ordered one,
     /// which binds its results through its terminator instead.
     pub fn results(&self) -> Vec<ValueId> {
-        self.context()
-            .with_region(self.id, |region| match region.body() {
-                RegionBody::Nodes { results, .. } => results.clone(),
-                RegionBody::Blocks(_) => Vec::new(),
-            })
+        self.context().region_results(self.id)
     }
 
     /// The results that are not memory states.

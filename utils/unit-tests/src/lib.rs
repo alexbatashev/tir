@@ -124,6 +124,7 @@ mod core {
     mod dialects;
     mod edits;
     mod encodings;
+    mod epochs;
     mod fixtures;
     mod float;
     mod float_refinement;
@@ -135,7 +136,6 @@ mod core {
     mod liveness;
     mod machine_ir;
     mod objects;
-    mod overlay;
     mod pass;
     mod regalloc;
     mod region;

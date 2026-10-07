@@ -71,7 +71,7 @@ module {
 // CHECK-NOT: ptr.alloca
 // CHECK: %[[ZERO:[0-9]+]] = constant {value = 0} : !i32
 // CHECK: scf.loop (%[[ACC:[0-9]+]] = %[[ZERO]], %{{[0-9]+}} = %{{[0-9]+}}) {
-// CHECK-NEXT: %{{[0-9]+}}, %[[POST:[0-9]+]], %{{[0-9]+}} = scf.switch %1 args(%{{[0-9]+}}) (%{{[0-9]+}}) {
+// CHECK-NEXT: %{{[0-9]+}}, %[[POST:[0-9]+]], %{{[0-9]+}} = scf.switch %4096 args(%{{[0-9]+}}) (%{{[0-9]+}}) {
 // CHECK: -> %{{[0-9]+}}, %[[ACC]], %{{[0-9]+}}
 // CHECK: %[[GUARDED:[0-9]+]] = scf.switch %{{[0-9]+}} {
 // CHECK-NEXT: -> %[[ACC]]

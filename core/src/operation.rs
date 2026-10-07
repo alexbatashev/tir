@@ -1,4 +1,3 @@
-use crate::run::{AttrRunId, RunId};
 use crate::{
     BlockId, Context, ContextIterator, Error, GetFromContext,
     ir_formatter::IRFormatter,
@@ -721,49 +720,16 @@ impl NewOp {
 pub type ValueIds = smallvec::SmallVec<[ValueId; 4]>;
 pub type RegionIds = smallvec::SmallVec<[RegionId; 2]>;
 
-/// An operation's stored state: its identity, the cell holding its ports, and
-/// the cell holding its attributes.
-///
-/// Everything an op holds beyond these thirty-two bytes lives in the context's
-/// pools, so storing an operation allocates nothing; reading a port is one
-/// index into its run.
-#[derive(Debug, Clone)]
-pub struct OpInstance {
-    pub id: OpId,
-    pub(crate) name: OpNameId,
-    pub(crate) run: RunId,
-    pub(crate) operand_count: u16,
-    pub(crate) result_count: u16,
-    pub(crate) region_count: u16,
-    pub(crate) _pad: u16,
-    pub(crate) attrs: AttrRunId,
-    pub(crate) attr_count: u16,
-}
-
-impl OpInstance {
-    pub(crate) fn name_id(&self) -> OpNameId {
-        self.name
-    }
-
-    /// How many entries of its run the op is using.
-    pub(crate) fn port_count(&self) -> usize {
-        (self.operand_count + self.result_count + self.region_count) as usize
-    }
-}
-
 /// A reference to an operation: the context that owns it, and its id.
 ///
 /// Reads go to the context's storage as they are asked for, so a handle always
-/// answers with the operation as it stands now. Ids *are* reused once the
-/// context is told to [`recycle`](crate::Context::recycle), so a handle also
-/// records the generation its id carried when it was minted:
-/// [`OpHandle::is_live`] answers whether it still names its own op, and debug
-/// builds additionally panic on any read through a handle that does not.
+/// answers with the operation as it stands now. Ids are never reused, so
+/// [`OpHandle::is_live`] answers whether the op was erased, and debug builds
+/// additionally panic on any read through a handle to an erased op.
 #[derive(Clone)]
 pub struct OpHandle {
     pub context: Context,
     pub id: OpId,
-    pub(crate) generation: u32,
 }
 
 impl std::fmt::Debug for OpHandle {
@@ -776,19 +742,17 @@ impl OpHandle {
     /// The owning context, after checking this handle still names its own op.
     fn context(&self) -> crate::Context {
         let context = self.context.clone();
-        debug_assert_eq!(
-            context.op_generation(self.id),
-            self.generation,
+        debug_assert!(
+            context.has_operation(self.id),
             "handle to erased operation {:?}",
             self.id
         );
         context
     }
 
-    /// Whether this handle still names the operation it was minted for. False
-    /// once the op is erased, including when another op has taken its id.
+    /// Whether the operation this handle names still exists.
     pub fn is_live(&self) -> bool {
-        self.context.op_generation(self.id) == self.generation
+        self.context.has_operation(self.id)
     }
 
     pub fn operands(&self) -> ValueIds {

@@ -663,7 +663,7 @@ fn tasks_commit_in_callable_order_whatever_order_they_finish_in() {
     };
     let sequential = run(1);
     assert!(
-        sequential.contains("%5 = constant {value = 7}"),
+        sequential.contains("%2 = constant {value = 7}"),
         "{sequential}"
     );
     assert_eq!(run(2), sequential);

@@ -15,12 +15,12 @@ void pass_array(void) {
 // CHECK: module {data_layout = #data_layout, target_env = #target_env} {
 // CHECK-NEXT:   %0 = global @text size 2 align 1
 // CHECK-NEXT:   %1 = func.declare @consume(!i32, !cir.varargs) -> !unit
-// CHECK-NEXT:   %2 = func.func @pass_array() {
-// CHECK-NEXT:     %3 = constant {value = 0} : !i32
-// CHECK-NEXT:     %13 = state.entry_state : !state<memory>
-// CHECK-NEXT:     %14 = state.entry_state : !state<fp.env>
-// CHECK-NEXT:     %9, %10 = func.call %1(%3, %0 : !i32, !ptr.p) state(%13, %14)
-// CHECK-NEXT:     -> %9, %10
+// CHECK-NEXT:   %4096 = func.func @pass_array() {
+// CHECK-NEXT:     %4097 = constant {value = 0} : !i32
+// CHECK-NEXT:     %4107 = state.entry_state : !state<memory>
+// CHECK-NEXT:     %4108 = state.entry_state : !state<fp.env>
+// CHECK-NEXT:     %4103, %4104 = func.call %1(%4097, %0 : !i32, !ptr.p) state(%4107, %4108)
+// CHECK-NEXT:     -> %4103, %4104
 // CHECK-NEXT:   }
 // CHECK-NEXT:   module_end
 // CHECK-NEXT: }

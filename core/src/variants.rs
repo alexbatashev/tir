@@ -1,6 +1,6 @@
-//! Choosing among candidate edits of one overlay.
+//! Choosing among candidate edits of one context.
 //!
-//! Each candidate is built in a fork of the overlay and scored there; the
+//! Each candidate is built in a fork of the context and scored there; the
 //! cheapest fork is adopted, the others are dropped. Nothing is committed and
 //! the base is never touched, so a rejected candidate leaves no id behind and
 //! moves no arena count. A tie goes to the lower index, so the choice depends
@@ -10,7 +10,7 @@ use crate::{Context, PassError};
 
 /// Build every candidate of `candidates` in its own fork of `context`, score
 /// each fork with `score` (lower is better), and adopt the cheapest one that
-/// beats the overlay as it stands. `build` answers `false` for a candidate
+/// beats the context as it stands. `build` answers `false` for a candidate
 /// that does not apply, which is then skipped. Returns the index adopted.
 pub fn choose<C>(
     context: &Context,

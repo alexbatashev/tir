@@ -150,9 +150,9 @@ fn building_a_view_allocates_nothing() {
 }"#,
     );
 
-    let before = context.slab_census();
+    let before = context.census();
     let views = tir::analysis::affine::nests_under(&context, module.id());
-    let after = context.slab_census();
+    let after = context.census();
 
     assert_eq!(views.len(), 1);
     assert_eq!(views[0].depth(), 1);

@@ -29,6 +29,8 @@ impl Analysis for Dependent {
 }
 
 fn test_op(context: &Context) -> OpId {
+    // A partition of its own, so an edit to another op leaves its version.
+    let _scope = context.function_scope();
     ops::module(context, None).build().id()
 }
 

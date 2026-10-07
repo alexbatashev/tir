@@ -274,7 +274,11 @@ fn add_auto_pins_an_op_to_its_state() {
     let chain = context.grow_port(
         loop_op,
         tir::builtin::StateType::memory(&context),
-        Some(context.create_state(tir::builtin::StateResource::Memory)),
+        Some(
+            context
+                .create_value(tir::builtin::StateType::memory(&context), None)
+                .id(),
+        ),
         |_, port| port,
     );
     let inner = context.get_op(loop_op).regions()[0];

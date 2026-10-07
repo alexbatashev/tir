@@ -5,7 +5,7 @@ pub use tir_symbolic::sem::ValueId;
 
 /// An SSA value: its identity, its type, and where it is defined.
 ///
-/// Twelve bytes, so a hive chunk holds several thousand. The def site is an
+/// A copy of the value's row, read when it was asked for. The def site is an
 /// [`OpId`] rather than an `Option<OpId>`: a value no operation defines is a
 /// block or region argument, which [`OpId::ARGUMENT`] says in the same four
 /// bytes the id would need anyway.
@@ -37,27 +37,6 @@ impl Value {
     /// argument.
     pub fn defining_op(&self) -> Option<OpId> {
         (self.defining_op != OpId::ARGUMENT).then_some(self.defining_op)
-    }
-
-    /// Move the value's ids by `shift`.
-    pub(crate) fn shift(&mut self, shift: &crate::overlay::Shift) {
-        self.id = shift.value(self.id);
-        if self.defining_op != OpId::ARGUMENT {
-            self.defining_op = shift.op(self.defining_op);
-        }
-    }
-
-    pub(crate) fn set_defining_op(&mut self, op: OpId) {
-        self.defining_op = op;
-    }
-
-    /// Drop the def-site: the value becomes a block or region argument.
-    pub(crate) fn clear_defining_op(&mut self) {
-        self.defining_op = OpId::ARGUMENT;
-    }
-
-    pub(crate) fn set_ty(&mut self, ty: TypeId) {
-        self.ty = ty;
     }
 }
 

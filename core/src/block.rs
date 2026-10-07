@@ -5,73 +5,10 @@ use crate::{
 
 id_newtype!(BlockId);
 
-/// A basic block's storage record, living densely in the context's block slab
-/// and edited in place through [`Context`] under its write lock. Reads go
-/// through [`BlockHandle`]; nothing outside the context lock holds one of these.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Block {
-    arguments: Vec<Value>,
-    operations: Vec<OpId>,
-    /// Discardable metadata scoped to this block, printed in the
-    /// block label.
-    attributes: Vec<NamedAttribute>,
-}
-
 impl BlockId {
     /// A block no context holds: what a branch is bound to before the block it
     /// will reach exists.
     pub const PLACEHOLDER: BlockId = BlockId(u32::MAX);
-}
-
-impl Block {
-    pub(crate) fn new(arguments: Vec<Value>) -> Self {
-        Self {
-            arguments,
-            operations: vec![],
-            attributes: vec![],
-        }
-    }
-
-    pub(crate) fn heap_bytes(&self) -> usize {
-        self.arguments.capacity() * std::mem::size_of::<Value>()
-            + self.operations.capacity() * std::mem::size_of::<OpId>()
-            + self.attributes.capacity() * std::mem::size_of::<NamedAttribute>()
-    }
-
-    /// Move every id the block holds by `shift`.
-    pub(crate) fn shift(&mut self, shift: &crate::overlay::Shift) {
-        for argument in &mut self.arguments {
-            argument.shift(shift);
-        }
-        for op in &mut self.operations {
-            *op = shift.op(*op);
-        }
-        shift.attrs(&mut self.attributes);
-    }
-
-    pub(crate) fn operations(&self) -> &[OpId] {
-        &self.operations
-    }
-
-    pub(crate) fn arguments(&self) -> &[Value] {
-        &self.arguments
-    }
-
-    pub(crate) fn attributes(&self) -> &[NamedAttribute] {
-        &self.attributes
-    }
-
-    pub(crate) fn operations_mut(&mut self) -> &mut Vec<OpId> {
-        &mut self.operations
-    }
-
-    pub(crate) fn arguments_mut(&mut self) -> &mut Vec<Value> {
-        &mut self.arguments
-    }
-
-    pub(crate) fn attributes_mut(&mut self) -> &mut Vec<NamedAttribute> {
-        &mut self.attributes
-    }
 }
 
 /// A reference to a basic block: the context that owns it, and its id.
@@ -83,7 +20,6 @@ impl Block {
 #[derive(Clone)]
 pub struct BlockHandle {
     pub context: Context,
-    pub(crate) generation: u32,
     pub id: BlockId,
 }
 
@@ -97,9 +33,8 @@ impl BlockHandle {
     /// The owning context, after checking this handle still names its own block.
     fn context(&self) -> Context {
         let context = self.context.clone();
-        debug_assert_eq!(
-            context.block_generation(self.id),
-            self.generation,
+        debug_assert!(
+            context.has_block(self.id),
             "handle to erased block {:?}",
             self.id
         );
@@ -109,7 +44,7 @@ impl BlockHandle {
     /// Whether this handle still names the block it was minted for; see
     /// [`crate::OpHandle::is_live`].
     pub fn is_live(&self) -> bool {
-        self.context.block_generation(self.id) == self.generation
+        self.context.has_block(self.id)
     }
 
     pub fn id(&self) -> BlockId {
@@ -117,8 +52,7 @@ impl BlockHandle {
     }
 
     pub fn arguments(&self) -> Vec<Value> {
-        self.context()
-            .with_block(self.id, |block| block.arguments().to_vec())
+        self.context().block_arguments(self.id)
     }
 
     /// The arguments that are not resource states.
@@ -140,8 +74,7 @@ impl BlockHandle {
     }
 
     pub fn attributes(&self) -> Vec<NamedAttribute> {
-        self.context()
-            .with_block(self.id, |block| block.attributes().to_vec())
+        self.context().block_attributes(self.id)
     }
 
     /// The value of the attribute called `name`, resolving the name through the
@@ -156,8 +89,7 @@ impl BlockHandle {
     }
 
     pub fn len(&self) -> usize {
-        self.context()
-            .with_block(self.id, |block| block.operations().len())
+        self.op_ids().len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -165,8 +97,7 @@ impl BlockHandle {
     }
 
     pub fn op_ids(&self) -> Vec<OpId> {
-        self.context()
-            .with_block(self.id, |block| block.operations().to_vec())
+        self.context().block_ops(self.id)
     }
 
     pub fn insert(&self, index: usize, id: OpId) {
@@ -193,14 +124,7 @@ impl BlockHandle {
     /// block is a linearization of its dependence graph, and this is how one is
     /// installed.
     pub fn set_ops(&self, ops: Vec<OpId>) {
-        self.context().with_block_mut(self.id, |block| {
-            debug_assert_eq!(
-                block.operations().len(),
-                ops.len(),
-                "a reordering holds the block's own operations",
-            );
-            *block.operations_mut() = ops;
-        });
+        self.context().set_block_ops(self.id, ops);
     }
 
     pub fn remove_op(&self, id: OpId) -> bool {
