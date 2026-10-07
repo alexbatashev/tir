@@ -1,6 +1,7 @@
 //! Compilation of rule semantic expressions into matchable patterns.
 
 use super::cover::BoundaryDemand;
+use std::cell::LazyCell;
 use std::collections::{HashMap, HashSet};
 
 use smallvec::SmallVec;
@@ -13,7 +14,7 @@ use tir::{
     },
 };
 use tir_egraph::ClassId as Id;
-use tir_egraph::{Atom, ColumnId, Guard, Match, NoExterns, Plan, Query, Source};
+use tir_egraph::{Atom, ColumnId, Guard, Label, Match, NoExterns, Plan, Query, Source};
 use tir_relational::{Cmp, Expr};
 
 use super::node::{class_register_type, is_memory_kind};
@@ -46,7 +47,11 @@ pub(crate) struct CompiledIselPattern {
     /// One entry per pattern node; a match binds one class variable per entry.
     pub(crate) nodes: Vec<PatternNode>,
     root: u32,
-    plan: Plan<SemNode>,
+    /// Planned at the first search: a function that holds no class with the
+    /// root operator never searches the pattern.
+    plan: LazyCell<Plan<SemNode>, Box<dyn FnOnce() -> Plan<SemNode> + Send>>,
+    /// The operator the query's root atom binds, if it binds a row.
+    root_op: Option<u64>,
     /// The capture nodes in the order a match reaches them.
     pub(crate) captures: Vec<u32>,
     /// Matching metadata for each pattern node (indexed by pattern node id).
@@ -254,7 +259,10 @@ impl CompiledIselPattern {
     /// The classes the pattern can root at: those holding its root operator, or
     /// every class where it roots on a bare symbol or a low-bit view.
     pub(crate) fn roots(&self, egraph: &SemEGraph) -> Vec<Id> {
-        self.plan.roots(egraph)
+        match self.root_op {
+            Some(op) => egraph.classes_with_op(op),
+            None => egraph.class_ids().collect(),
+        }
     }
 
     pub(crate) fn search_roots_with_legality(
@@ -266,6 +274,10 @@ impl CompiledIselPattern {
         allowed: &dyn Fn(Id, Id) -> bool,
     ) -> Vec<Match> {
         let allowed = |var: u32, class: Id| allowed(Id::from_raw(var), class);
+        let mut roots = roots.into_iter().peekable();
+        if roots.peek().is_none() {
+            return Vec::new();
+        }
         self.plan
             .search(egraph, roots, &allowed, false, &NoExterns)
             .into_iter()
@@ -372,10 +384,14 @@ pub(crate) fn compile_isel_pattern(
         .iter()
         .filter(|node| matches!(node, PatternNode::Template(node) if node.ty.is_some()))
         .count();
-    let (plan, captures) = if copy {
+    let (query, captures) = if copy {
         lower_copy(pattern_root, result_register?)?
     } else {
         lower(&nodes, pattern_root)
+    };
+    let root_op = match query.atoms.iter().find(|atom| atom.class() == query.root) {
+        Some(Atom::Node { template, .. }) => Some(template.op_key()),
+        _ => None,
     };
 
     Some(CompiledIselPattern {
@@ -383,7 +399,8 @@ pub(crate) fn compile_isel_pattern(
         port,
         nodes,
         root: pattern_root.0,
-        plan,
+        plan: LazyCell::new(Box::new(move || Plan::compile(query))),
+        root_op,
         captures,
         node_meta,
         specificity,
@@ -441,7 +458,7 @@ fn assign_demands(nodes: &[PatternNode], node_meta: &mut [PatternNodeMeta]) {
 /// `Extract(source, hi, lo)` with `lo = 0` is the view, and `hi + 1` is the width
 /// it presents; the rule matches only where that is the width its result register
 /// writes. A rule whose result is not an integer register writes no view at all.
-fn lower_copy(source: Id, result: RegisterRequirement) -> Option<(Plan<SemNode>, Vec<u32>)> {
+fn lower_copy(source: Id, result: RegisterRequirement) -> Option<(Query<SemNode>, Vec<u32>)> {
     if !result.capability.integer {
         return None;
     }
@@ -491,7 +508,7 @@ fn lower_copy(source: Id, result: RegisterRequirement) -> Option<(Plan<SemNode>,
         ],
         nots: Vec::new(),
     };
-    Some((Plan::compile(query), vec![source.0]))
+    Some((query, vec![source.0]))
 }
 
 /// Append a pattern node, returning the class variable it binds.
@@ -504,7 +521,7 @@ fn push(nodes: &mut Vec<PatternNode>, node: PatternNode) -> Id {
 /// Atoms go in the order a depth-first walk from the root meets them, which is
 /// the order the matcher used to pop its goals in and so the order matches come
 /// out in.
-fn lower(nodes: &[PatternNode], root: Id) -> (Plan<SemNode>, Vec<u32>) {
+fn lower(nodes: &[PatternNode], root: Id) -> (Query<SemNode>, Vec<u32>) {
     let mut atoms = Vec::new();
     let mut captures = Vec::new();
     let mut seen = vec![false; nodes.len()];
@@ -523,10 +540,7 @@ fn lower(nodes: &[PatternNode], root: Id) -> (Plan<SemNode>, Vec<u32>) {
         },
         "an operand is one capture"
     );
-    (
-        Plan::compile(Query::tree(nodes.len() as u32, root.0, atoms)),
-        captures,
-    )
+    (Query::tree(nodes.len() as u32, root.0, atoms), captures)
 }
 
 fn visit(

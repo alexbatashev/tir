@@ -20,7 +20,7 @@ pub type Param = u32;
 pub type ExternId = u32;
 
 /// An integer expression over bound scalars.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Expr {
     Lit(i64),
     Scalar(Scalar),
@@ -67,7 +67,7 @@ impl Expr {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Cmp {
     Lt,
     Le,
@@ -78,7 +78,7 @@ pub enum Cmp {
 /// A conjunctive query. Every atom's key variable is reachable from
 /// [`Self::root`] through the variables earlier atoms bind, which is what
 /// lets a plan bind them in one pass.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Query {
     /// The id space every variable ranges over.
     pub space: SpaceId,
@@ -93,7 +93,7 @@ pub struct Query {
     pub nots: Vec<Nested>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Atom {
     Rows(Rows),
     Lattice(Lattice),
@@ -127,7 +127,7 @@ impl Atom {
 
 /// Rows of the tables `select.param` names. In each table, column
 /// `select.column` must hold one of the cells listed for that table.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Rows {
     pub select: Select,
     /// One per column, the value column last, which must be a variable.
@@ -138,13 +138,13 @@ pub struct Rows {
     pub swap: Option<Swap>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Select {
     pub column: u8,
     pub param: Param,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Term {
     Any,
     Var(Var),
@@ -153,7 +153,7 @@ pub enum Term {
 /// The atom also matches a row with columns `columns[0]` and `columns[1]`
 /// exchanged, if the row's selected cell is among `when`'s cells for its
 /// table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Swap {
     pub columns: [u8; 2],
     pub when: Param,
@@ -195,7 +195,7 @@ impl Rows {
 }
 
 /// `key`'s value in a lattice column.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Lattice {
     pub column: LatticeId,
     pub key: Var,
@@ -203,7 +203,7 @@ pub struct Lattice {
     pub out: SmallVec<[Out; 2]>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Out {
     /// The word is an id of the query's space, bound to the variable.
     Var(Var),
@@ -214,7 +214,7 @@ pub enum Out {
 }
 
 /// A predicate over bound scalars.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Guard {
     Cmp(Cmp, Expr, Expr),
     /// Bind `out` to what `value` evaluates to.
@@ -278,7 +278,7 @@ impl Guard {
 /// values only accumulate and ids only merge, so the conjunction can only go
 /// from unsatisfied to satisfied over epochs: a match blocked once stays
 /// blocked and needs no re-check, and a match that fired cannot be un-fired.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Nested {
     pub atoms: Vec<Atom>,
     pub guards: Vec<Guard>,

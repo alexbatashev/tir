@@ -28,7 +28,7 @@ use crate::{Csr, FxHashMap};
 
 /// An id space: the ids one union-find partitions. A database has a fixed
 /// number of them, numbered from zero, so a client names them as constants.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SpaceId(u32);
 
 impl SpaceId {
@@ -41,7 +41,7 @@ impl SpaceId {
 /// A lattice column over the ids of one space. Lattice columns are numbered
 /// from zero in the order they are declared, so a client that declares its
 /// schema up front can name them as constants.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LatticeId(u32);
 
 impl LatticeId {

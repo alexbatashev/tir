@@ -16,18 +16,17 @@ use super::{
 };
 use crate::sem::{SymKind, op_kind};
 
-/// Every rule in a PDL source the prover reads: the `smt` and `trusted` ones.
-/// `definitional` rules are laws of an algebra it has no model for, and are
-/// skipped.
-pub(crate) fn axioms_from_pdl(source: &str) -> Result<Vec<Axiom>, String> {
-    let file = tir_pdl::compile(source).map_err(|diagnostics| {
-        diagnostics
-            .iter()
-            .map(|d| d.message.clone())
-            .collect::<Vec<_>>()
-            .join("; ")
-    })?;
-    file.items
+/// `core/defs/isel.pdl` as the build script parsed it.
+mod isel {
+    include!(concat!(env!("OUT_DIR"), "/isel_axioms.rs"));
+}
+
+/// Every rule of the shared rule set the prover reads: the `smt` and
+/// `trusted` ones. `definitional` rules are laws of an algebra it has no model
+/// for, and are skipped.
+pub(crate) fn isel_axioms() -> Result<Vec<Axiom>, String> {
+    isel::file()
+        .items
         .iter()
         .filter_map(|item| match item {
             tir_pdl::Item::Rule(rule)

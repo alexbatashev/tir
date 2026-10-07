@@ -1,8 +1,9 @@
 //! Evaluation orders: a query's atoms and guards placed once, from the root
 //! and from each atom a semi-naive round can start at.
 
-use std::sync::OnceLock;
+use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use smallvec::SmallVec;
 
@@ -36,8 +37,21 @@ type Ordered = (Vec<Step>, usize, Vec<Plan>);
 /// A query with its atoms ordered for evaluation: each step's key variable is
 /// bound by the root or by an earlier step, so evaluation is a loop nest with
 /// no search over orders. Guards run as soon as their inputs are bound.
+///
+/// A rule set asks for the same query many times over, under different
+/// parameters, so what planning works out is shared by every plan of one
+/// query.
 #[derive(Clone, Debug)]
 pub struct Plan {
+    planned: Arc<Planned>,
+    /// Names the plan to a client's caches. Zero for a plan that is part of
+    /// another.
+    id: u64,
+}
+
+/// What planning works out of a query.
+#[derive(Debug)]
+pub struct Planned {
     pub(super) query: Query,
     pub(super) steps: Vec<Step>,
     /// The steps as evaluated: [`Self::steps`] with each run worth joining
@@ -58,9 +72,14 @@ pub struct Plan {
     /// round uses to search from the values the round before raised. Empty for
     /// a plan that cannot be searched that way.
     fact_anchors: OnceLock<Vec<FactAnchor>>,
-    /// Names the plan to a client's caches. Zero for a plan that is part of
-    /// another.
-    id: u64,
+}
+
+impl Deref for Plan {
+    type Target = Planned;
+
+    fn deref(&self) -> &Planned {
+        &self.planned
+    }
 }
 
 /// An atom as the evaluator reads it, worked out once rather than per row: a
@@ -147,15 +166,29 @@ impl Plan {
     /// Panics if an atom's key is unreachable from the root, or a guard reads
     /// a scalar nothing binds.
     pub fn compile(query: Query) -> Self {
+        static PLANNED: Mutex<Option<crate::FxHashMap<Query, Arc<Planned>>>> = Mutex::new(None);
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let known = |query: &Query| {
+            let planned = PLANNED.lock().unwrap();
+            planned
+                .as_ref()
+                .and_then(|planned| planned.get(query).cloned())
+        };
+        if let Some(planned) = known(&query) {
+            return Self { planned, id };
+        }
         let mut bound = vec![false; query.vars as usize];
         bound[query.root as usize] = true;
         let known = vec![false; query.scalars as usize];
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        let mut plan = Self::compile_from(query, bound.clone(), known, None)
+        let mut planned = Self::plan(query.clone(), bound.clone(), known, None)
             .expect("every atom is reached and every guard read");
-        (plan.run, plan.joins) = joined(&plan.query, &plan.shapes, &plan.steps, bound, 0);
-        plan.id = NEXT.fetch_add(1, Ordering::Relaxed);
-        plan
+        (planned.run, planned.joins) =
+            joined(&planned.query, &planned.shapes, &planned.steps, bound, 0);
+        let planned = Arc::new(planned);
+        let mut all = PLANNED.lock().unwrap();
+        all.get_or_insert_default().insert(query, planned.clone());
+        Self { planned, id }
     }
 
     pub fn id(&self) -> u64 {
@@ -307,9 +340,19 @@ impl Plan {
         known: Vec<bool>,
         skip: Option<usize>,
     ) -> Option<Self> {
+        let planned = Arc::new(Self::plan(query, bound, known, skip)?);
+        Some(Self { planned, id: 0 })
+    }
+
+    fn plan(
+        query: Query,
+        bound: Vec<bool>,
+        known: Vec<bool>,
+        skip: Option<usize>,
+    ) -> Option<Planned> {
         let (steps, height, nots) = Self::order(&query, bound, known, skip)?;
         let shapes = query.atoms.iter().map(Shape::of).collect();
-        Some(Self {
+        Some(Planned {
             query,
             run: steps.clone(),
             joins: Vec::new(),
@@ -319,7 +362,6 @@ impl Plan {
             shapes,
             anchors: OnceLock::new(),
             fact_anchors: OnceLock::new(),
-            id: 0,
         })
     }
 

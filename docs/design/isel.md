@@ -185,6 +185,17 @@ patterns decide which forms selection can cover. The only target fact a rule
 reads is whether one of the target's instructions materializes a constant
 alone, which the patterns derived from its machine description answer.
 
+A target has thousands of patterns and a function uses a fraction of them. A
+pattern's query is planned the first time a function holds a class with the
+operator the pattern roots on, so a compile pays for the patterns it can match
+and no others. Patterns and axioms repeat a small number of query shapes under
+different operators and types, and the matcher plans each shape once per
+process and shares the result.
+
+The shared axioms are written in PDL. Core's build parses and checks that file
+and writes it out as the Rust that builds the parsed rules, so the compiler
+carries the rules and parses no PDL when it starts.
+
 Repeated application of these rules is called saturation. Selection bounds the
 search to control compilation time and memory use. The graph therefore contains
 the alternatives discovered within those bounds, not every equivalent program.

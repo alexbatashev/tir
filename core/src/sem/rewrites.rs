@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 use tir_egraph::Rule;
 
 use super::SymKind;
-use super::axioms::pdl::axioms_from_pdl;
+use super::axioms::pdl::isel_axioms;
 use super::axioms::{Axiom, Folding, Interpretation, Materializable};
 use super::egraph::SemEGraph;
 use super::node::SemNode;
@@ -195,13 +195,11 @@ pub fn saturate(ctx: &Context, eg: &mut SemEGraph, theory: &Theory, limits: Satu
 
 /// The target-independent semantic invariants every rule set gets.
 pub fn discover_rewrites() -> Theory {
-    // The rule file is one per process; parsing it again for every pass built
+    // The rule set is one per process; reading it again for every pass built
     // would be the only work here that does not depend on the graph.
     static AXIOMS: OnceLock<Vec<Axiom>> = OnceLock::new();
-    let axioms = AXIOMS.get_or_init(|| {
-        axioms_from_pdl(include_str!("../../defs/isel.pdl"))
-            .expect("core/defs/isel.pdl must be a valid rule set")
-    });
+    let axioms =
+        AXIOMS.get_or_init(|| isel_axioms().expect("core/defs/isel.pdl must be a valid rule set"));
     let mut theory = Theory::default();
     for axiom in axioms.iter().cloned() {
         theory.push(axiom);
