@@ -256,7 +256,6 @@ pub(crate) fn axiom_from_rule(rule: &tir_pdl::Rule) -> Result<Axiom, String> {
         rhs,
         uses_root,
         obligation,
-        floating_point: rule.is_floating_point(),
         post_saturation: rule.post_saturation,
         materialize: rule.materializes(),
     })

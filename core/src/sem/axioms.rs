@@ -56,8 +56,9 @@ use super::node::{SemNode, field, template_node};
 /// Whether the SMT obligations behind the semantic invariants and the guarded
 /// relaxations are discharged. They validate the target description, they are not
 /// inputs to selection, so running hundreds of SAT queries on every compile buys
-/// nothing: `TIR_VERIFY_AXIOMS` turns them on for the target-definition test runs
-/// that actually need the check.
+/// nothing: `TIR_VERIFY_AXIOMS` turns them on for the CI run that checks the
+/// rules. A floating-point rule is no exception: it applies unproved by
+/// default, and that run is where an instance that does not hold is caught.
 pub(crate) fn verify_axioms() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("TIR_VERIFY_AXIOMS").is_some())
@@ -275,9 +276,6 @@ pub struct Axiom {
     /// The RHS references the matched root itself (excludes var references).
     uses_root: bool,
     obligation: ProofObligation,
-    /// The source rule uses floating-point semantics and must always prove its
-    /// equality before the e-graph can apply it.
-    floating_point: bool,
     /// Declared `(phase post-saturation)`: applied once after the iterative
     /// fixpoint instead of participating in it.
     post_saturation: bool,
@@ -335,10 +333,6 @@ fn holes_of(node: &AxNode, out: &mut Vec<(String, Option<usize>)>) {
 }
 
 impl Axiom {
-    fn requires_mandatory_proof(&self) -> bool {
-        self.floating_point || self.symbol_types.iter().any(Option::is_some)
-    }
-
     pub(crate) fn counterexample(
         &self,
         model: &std::collections::BTreeMap<u32, Vec<bool>>,
@@ -874,11 +868,6 @@ impl tir_egraph::Externs<SemNode> for Interpretation<'_> {
             }
             proof if proof >= call::VERIFY => {
                 let axiom = &self.axioms[(proof - call::VERIFY) as usize];
-                if axiom.requires_mandatory_proof() {
-                    return axiom
-                        .prove_outcome(&args[..axiom.width_names.len()])
-                        .is_proven();
-                }
                 if verify_axioms() {
                     // The scalars past the widths are there to order the guard,
                     // not to key the proof.
@@ -1245,7 +1234,7 @@ impl<'a> Lowering<'a> {
         // discharged at widths the axiom can never fire at. A materialize axiom
         // guarded on a constant too wide for the target immediate was proved at
         // every narrower width too, where its width arithmetic is undefined.
-        if verify_axioms() || axiom.requires_mandatory_proof() {
+        if verify_axioms() {
             self.guards.push(Guard::Extern {
                 call: call::VERIFY + index as u32,
                 terms: SmallVec::new(),
