@@ -13,6 +13,10 @@
 //! by a column, ids to the rows naming them) built once per change, and
 //! assumption scopes that snapshot all of it along with the client's own state.
 //!
+//! [`chunk`] is the other physical layout: relations keyed by a row id, as
+//! positional columns and clustered tables cut into chunks a partition owns,
+//! with [`grouping`] for the access paths by any other cell.
+//!
 //! [`query`] is conjunctive queries over a database, with an evaluator that
 //! answers by loops over the tables, or by a worst-case optimal join over
 //! sorted tries where several atoms share a variable; [`rule`] is what a match
@@ -23,10 +27,12 @@
 //!
 //! The e-graph is one such client and lives in its own crate, `tir-egraph`.
 
+pub mod chunk;
 mod column;
 mod csr;
 mod db;
 pub mod extract;
+pub mod grouping;
 pub mod query;
 pub mod rule;
 pub mod saturate;
