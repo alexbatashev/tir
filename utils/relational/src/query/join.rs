@@ -177,7 +177,7 @@ impl Plan {
             Step::Parents { atom, slot } => self.rows(atom).args[slot as usize].var,
             _ => self.rows(first.atom()).key,
         };
-        let key = eval.bound[key as usize].expect("a step's key is bound");
+        let key = eval.bound[key as usize].id;
         let count = |group: &Group| group.rows(key).len();
         self.reach(eval.db, eval.groups, eval.resolutions, first, count) >= eval.join_min_rows
     }
@@ -224,10 +224,12 @@ impl Plan {
                 }
                 fresh += usize::from(table.stamps()[row as usize] + 1 == db.epoch());
                 held = held
-                    && eval.bind_one(shape.key, table.values()[row as usize])
+                    && eval.bind_value(shape.key, table, row)
                     && eval.bind_row(&shape.args, table, row, swapped);
             }
-            debug_assert!(held, "a joined row agrees with the rest");
+            // The tries are over ids, so the rows of a tuple agree on the id
+            // of every variable; binding them is what holds their weights to
+            // one reference per variable, as it does in the loop nest.
             if held {
                 eval.fresh += fresh;
                 self.step(eval, root, index + 1 + join.len);
@@ -291,7 +293,7 @@ impl Plan {
                                 trie.child(root, cell),
                                 |node, level| match level {
                                     Level::Known(var) => {
-                                        let cell = eval.bound[*var as usize].expect("bound before");
+                                        let cell = eval.bound[*var as usize].id;
                                         Ok(node.and_then(|node| trie.child(node, cell)))
                                     }
                                     Level::Attr(_) => Err(node),
@@ -915,13 +917,21 @@ mod tests {
 
     /// A bag and a keyed table of binary rows and a bag of unary ones, each
     /// row `(kind, args..) -> value` with a few kinds and few argument cells,
-    /// filled over two epochs, with `between` run on the first.
-    fn database(rows: &[(u32, u32, u32, u32, u32)], split: usize, between: impl Fn(&Db)) -> Db {
+    /// filled over two epochs, with `between` run on the first. Every cell
+    /// that names an id carries one of `spread` weights, so with more than
+    /// one two rows can name an id and disagree on the reference.
+    fn database(
+        rows: &[(u32, u32, u32, u32, u32)],
+        spread: u64,
+        split: usize,
+        between: impl Fn(&Db),
+    ) -> Db {
         let space = SpaceId::nth(0);
         let mut db = Db::new();
         for _ in 0..IDS {
-            db.mint(space);
+            db.mint(space, 0xff, false);
         }
+        let weight = |cell: u32, salt: usize| (u64::from(cell) + salt as u64 / 7) % spread;
         db.add_table(Table::bag(3).plain(1), space);
         db.add_table(Table::new(3).plain(1), space);
         db.add_table(Table::bag(2).plain(1), space);
@@ -931,10 +941,12 @@ mod tests {
                 db.advance();
             }
             let tag = at as u32;
+            let weights = [0, weight(x, at), weight(y, at + 3)];
+            let value = (value, weight(value, at + 5));
             match table % 3 {
-                2 => db.insert(2, &[kind, x], value, tag),
-                1 if db.table(1).unwrap().get(&[kind, x, y]).is_some() => continue,
-                table => db.insert(table, &[kind, x, y], value, tag),
+                2 => db.insert(2, &[kind, x], &weights[..2], value, tag),
+                1 if db.table(1).unwrap().get(&[kind, x, y], &weights).is_some() => continue,
+                table => db.insert(table, &[kind, x, y], &weights, value, tag),
             };
         }
         db.advance();
@@ -1010,7 +1022,7 @@ mod tests {
         }
     }
 
-    fn listed(matches: &Matches) -> Vec<(u32, Vec<Option<u32>>, Vec<u64>)> {
+    fn listed(matches: &Matches) -> Vec<(u32, Vec<crate::Ref>, Vec<u64>)> {
         (0..matches.len())
             .map(|at| {
                 let (root, bindings, scalars) = matches.get(at);
@@ -1044,10 +1056,12 @@ mod tests {
     proptest! {
         /// The join emits exactly the loop nest's matches in the loop nest's
         /// order, from the root, from every row and from the new rows, under
-        /// a pruning callback and with old rows required below an atom.
+        /// a pruning callback and with old rows required below an atom,
+        /// whether or not the cells carry weights.
         #[test]
         fn a_join_matches_the_loop_nest_in_order(
             rows in prop::collection::vec((0u32..3, 0u32..3, 0u32..8, 0u32..8, 0u32..IDS), 100..400),
+            spread in 1u64..3,
             split in 0usize..400,
             shape in 0usize..5,
             swap in any::<bool>(),
@@ -1057,7 +1071,7 @@ mod tests {
         ) {
             let plan = Plan::compile(query(shape, swap, guard));
             // Indexes built over the first epoch's rows merge the second's.
-            let db = database(&rows, split.min(rows.len() - 20), |db| {
+            let db = database(&rows, spread, split.min(rows.len() - 20), |db| {
                 let mut cache = PlanCache::default();
                 cache.join_min_rows = 0;
                 plan.search_all(db, &Selections, &mut cache);

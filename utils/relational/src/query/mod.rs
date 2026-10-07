@@ -1,7 +1,7 @@
 //! Conjunctive queries over a [`Database`](crate::Database): atoms over its
-//! tables and lattice columns, guards over the words a match binds, and an
-//! evaluator that answers with loops over the tables rather than a walk over a
-//! goal stack.
+//! tables, lattice columns and id spaces, guards over the words a match
+//! binds, and an evaluator that answers with loops over the tables rather than
+//! a walk over a goal stack.
 //!
 //! A [`Query`] is the IR; a [`Plan`] is that query with an evaluation order
 //! chosen once. The order a plan produces matches in is part of the contract:
@@ -26,9 +26,9 @@ mod set;
 pub(crate) mod trie;
 
 pub(crate) use eval::Unchecked;
-pub use eval::{Allow, Matches, PlanCache};
+pub use eval::{Allow, Matches, PlanCache, UNBOUND, bound};
 pub use ir::{
-    Atom, Cmp, Expr, ExternId, Guard, Host, Lattice, Nested, Out, Param, Query, Resolution, Rows,
-    Scalar, Select, Swap, Term, Var,
+    Atom, Cmp, Expr, ExternId, Guard, Host, Lattice, Nested, Out, Param, Place, Query, Read,
+    Resolution, Rows, Scalar, Select, Swap, Term, Var,
 };
 pub use plan::{Plan, Step};

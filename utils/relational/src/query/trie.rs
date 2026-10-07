@@ -316,8 +316,8 @@ mod tests {
             let mut inserted = 0;
             for (cut, moved) in cuts {
                 for &(a, b, c, value) in &rows[inserted..cut] {
-                    if !keyed || table.get(&[a, b, c]).is_none() {
-                        table.insert(&[a, b, c], value, 0, 1);
+                    if !keyed || table.get(&[a, b, c], &[]).is_none() {
+                        table.insert(&[a, b, c], &[], (value, 0), 0, 1);
                     }
                 }
                 inserted = cut;
@@ -325,7 +325,7 @@ mod tests {
                 // moves many rows, a high one few.
                 if let Some(moved) = moved {
                     let map: Vec<u32> = (0..200).map(|cell| if cell == moved { moved - 1 } else { cell }).collect();
-                    table.repair(&map, 2, &mut Default::default());
+                    table.repair(&map, None, None, 2, &mut Default::default());
                 }
                 trie.refresh(&table);
                 let mut want: Vec<(Vec<u32>, u32)> = (0..table.len() as u32)

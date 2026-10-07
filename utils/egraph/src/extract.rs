@@ -1,6 +1,6 @@
 use tir_relational::extract::fold;
 
-use crate::{ClassId as Id, Engine, FxHashMap, Label as ENode, RowId};
+use crate::{ClassId as Id, Engine, FxHashMap, Label as ENode, Ref, RowId};
 
 /// Cheapest representative e-node per e-class, chosen by [`Engine::extract_best`].
 ///
@@ -20,6 +20,7 @@ pub struct Extraction<'a, L: ENode> {
 #[derive(Clone)]
 struct Chosen<L> {
     node: L,
+    row: RowId,
     cost: u64,
 }
 
@@ -28,6 +29,13 @@ impl<'a, L: ENode> Extraction<'a, L> {
     /// be canonical ([`Engine::find`]).
     pub fn node(&self, id: Id) -> Option<&L> {
         self.chosen(id).map(|chosen| &chosen.node)
+    }
+
+    /// The e-node chosen for `id`'s class: [`Engine::children`] reads its
+    /// operands as references, and [`Engine::value`] the offset it sits at
+    /// from the class, which a spelling of the class subtracts.
+    pub fn row(&self, id: Id) -> Option<RowId> {
+        self.chosen(id).map(|chosen| chosen.row)
     }
 
     /// This extraction with the classes in `dirty`, and only those, recomputed
@@ -45,7 +53,7 @@ impl<'a, L: ENode> Extraction<'a, L> {
         &'b self,
         eg: &Engine<L>,
         dirty: &[Id],
-        cost_of: impl Fn(Id, &L) -> u64,
+        cost_of: impl Fn(Id, &L, &[Ref], u64) -> u64,
     ) -> Extraction<'b, L> {
         let dirty: Vec<u32> = dirty.iter().map(|id| id.0).collect();
         eg.extraction(&dirty, Some(self), cost_of)
@@ -67,13 +75,20 @@ impl<'a, L: ENode> Extraction<'a, L> {
 
 impl<L: ENode> Engine<L> {
     /// Greedy bottom-up extraction: per class, the node minimizing
-    /// `cost_of(class, node)` plus each child's chosen cost. The class is the
-    /// canonical id the node would represent, so a cost model may reject a form
-    /// the class cannot be spelled in. Cycle-tolerant — a node with un-costed
+    /// `cost_of(class, node, operands, offset)` plus each operand class's
+    /// chosen cost. The class is the canonical id the node would represent,
+    /// so a cost model may reject a form the class cannot be spelled in. The
+    /// operands are the node's canonical references, and `offset` is where the
+    /// node sits from the class: a model charges an add-of-constant for each
+    /// non-zero one it has to spell, and nothing for an operand
+    /// [`Engine::int_const`] reads as a constant. Cycle-tolerant — a node with un-costed
     /// children is skipped and revisited to a fixpoint, so a cycle is costed
     /// through its non-cyclic input. Scope-aware via
     /// [`Engine::classes`]/[`Engine::find`].
-    pub fn extract_best(&self, cost_of: impl Fn(Id, &L) -> u64) -> Extraction<'static, L> {
+    pub fn extract_best(
+        &self,
+        cost_of: impl Fn(Id, &L, &[Ref], u64) -> u64,
+    ) -> Extraction<'static, L> {
         let classes: Vec<u32> = self.class_ids().map(|id| id.0).collect();
         self.extraction(&classes, None, cost_of)
     }
@@ -84,22 +99,24 @@ impl<L: ENode> Engine<L> {
         &self,
         classes: &[u32],
         base: Option<&'b Extraction<'b, L>>,
-        cost_of: impl Fn(Id, &L) -> u64,
+        cost_of: impl Fn(Id, &L, &[Ref], u64) -> u64,
     ) -> Extraction<'b, L> {
         let outside = |child| base.and_then(|base| base.cost(Id(child)));
         let chosen = fold(self.class_count(), classes, &outside, |class, out| {
             for row in self.rows(Id(class)) {
                 let node = self.node(row);
-                let children = node.children().iter().map(|&child| self.find(child).0);
-                out.push(row.0, cost_of(Id(class), node), children);
+                let operands = self.children(row);
+                let price = cost_of(Id(class), node, &operands, self.value(row).offset);
+                out.push(row.0, price, operands.iter().map(|operand| operand.class.0));
             }
         });
         let mut best = FxHashMap::default();
         for (&class, chosen) in classes.iter().zip(chosen) {
             match chosen {
                 Some((row, cost)) => {
-                    let node = self.node(RowId(row)).clone();
-                    best.insert(Id(class), Some(Chosen { node, cost }));
+                    let row = RowId(row);
+                    let node = self.node(row).clone();
+                    best.insert(Id(class), Some(Chosen { node, row, cost }));
                 }
                 // Only a layer has a base to shadow; the bottom one says nothing
                 // about a class it could not cost.
@@ -110,5 +127,52 @@ impl<L: ENode> Engine<L> {
             }
         }
         Extraction { base, best }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::testing::Term;
+    use crate::{ClassId, Engine, Label, Ref};
+
+    /// Charges one per node, a hundred for a leaf named `r`, and ten for each
+    /// add-of-constant a spelling needs: a non-zero operand offset that is not
+    /// a constant, and a node that sits at an offset from its class.
+    fn cost(eg: &Engine<Term>) -> impl Fn(ClassId, &Term, &[Ref], u64) -> u64 + '_ {
+        move |_, node, operands, offset| {
+            let adds = operands
+                .iter()
+                .filter(|operand| operand.offset != 0 && eg.int_const(**operand).is_none())
+                .count() as u64
+                + u64::from(offset != 0);
+            1 + 99 * u64::from(node.op == "r") + 10 * adds
+        }
+    }
+
+    #[test]
+    fn a_spelling_pays_for_the_offsets_it_has_to_add() {
+        let mut eg = Engine::new();
+        let r = eg.add(Term::typed("r", 8, &[]));
+        let s = eg.add(Term::typed("s", 8, &[]));
+        let p = eg.add(Term::typed("p", 8, &[]));
+        // r == s + 7, and one class holds h(p + 4) and k(p).
+        eg.union(r, Ref::new(s.class, 7)).unwrap();
+        let shifted = eg.insert(Term::typed("h", 8, &[ClassId(0)]), &[Ref::new(p.class, 4)]);
+        let plain = eg.insert(Term::typed("k", 8, &[ClassId(0)]), &[p]);
+        eg.union(shifted, plain).unwrap();
+        eg.rebuild();
+        let extraction = eg.extract_best(cost(&eg));
+
+        let class = eg.root(plain.class);
+        assert_eq!(
+            extraction.node(class).map(|node| node.op.as_str()),
+            Some("k")
+        );
+        // `r` names the class, but `s - 7` is the cheaper spelling of it.
+        let class = eg.root(r.class);
+        let row = extraction.row(class).expect("a costed class");
+        assert_eq!(eg.node(row).op, "s");
+        assert_eq!(eg.value(row), Ref::new(class, 249));
+        assert_eq!(eg.node(row).children().len(), 0);
     }
 }

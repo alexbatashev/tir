@@ -27,7 +27,9 @@ pub use nodes::InstCombineNodesPass;
 use crate::IdMap;
 use seed::{LoopPorts, Port};
 
-use tir_egraph::{ClassId as Id, Engine};
+use std::collections::HashMap;
+
+use tir_egraph::{Engine, Ref};
 
 use crate::{
     Context, OpId, ValueId,
@@ -48,11 +50,19 @@ const NODE_LIMIT: usize = 100_000;
 struct Driver<'a> {
     context: &'a Context,
     eg: Engine<Node>,
-    value_class: IdMap<ValueId, Id>,
+    value_class: IdMap<ValueId, Ref>,
     ruleset: Ruleset,
     /// The value whose readers are being rewired. It answers for its own class
     /// and would answer every rewrite with itself, so no spelling may pick it.
     replacing: std::cell::Cell<Option<ValueId>>,
+    /// The IR values each class of the final base graph is, at their offsets
+    /// from it, in value order.
+    named: HashMap<tir_egraph::ClassId, Vec<(u64, ValueId)>>,
+    /// For each operation of a region whose nested regions are being
+    /// committed, the most operations with regions any dependence path ending
+    /// at it passes through, itself included. It never falls along a
+    /// dependence, so what depends on an operation counts at least as many.
+    carriers: HashMap<crate::OpId, usize>,
 }
 
 impl Driver<'_> {
@@ -101,7 +111,7 @@ impl Driver<'_> {
             while !hypotheses.is_empty() {
                 self.eg.push_context();
                 for port in &hypotheses {
-                    self.eg.union(port.head, port.init);
+                    let _ = self.eg.union(port.head, port.init);
                 }
                 self.eg.rebuild();
                 self.eg.saturate_rules(
@@ -116,7 +126,7 @@ impl Driver<'_> {
                     .map(|port| {
                         port.edges
                             .iter()
-                            .any(|&edge| self.eg.find(edge) != self.eg.find(port.init))
+                            .any(|&edge| !self.eg.connected(edge, port.init))
                     })
                     .collect();
                 self.eg.pop_context();
@@ -128,7 +138,7 @@ impl Driver<'_> {
             }
             let promoted = !hypotheses.is_empty();
             for port in &hypotheses {
-                self.eg.union(port.head, port.init);
+                let _ = self.eg.union(port.head, port.init);
             }
             self.eg.rebuild();
             // Back to a fixpoint before the next loop opens its scope, from the
@@ -142,7 +152,7 @@ impl Driver<'_> {
                     // Substitution can make the exit constant. A value that
                     // still depends on another changing port stays in the loop.
                     if self.is_constant(port.published) {
-                        self.eg.union(port.result, port.published);
+                        let _ = self.eg.union(port.result, port.published);
                         published = true;
                     }
                 }
@@ -167,8 +177,8 @@ impl Driver<'_> {
         None
     }
 
-    fn is_constant(&self, class: Id) -> bool {
-        self.eg.nodes(class).any(|node| node.int().is_some())
+    fn is_constant(&self, value: Ref) -> bool {
+        self.eg.int_const(value).is_some()
     }
 
     /// How deep in the region tree `op` sits, so the loops are read outermost first.
@@ -183,7 +193,7 @@ impl Driver<'_> {
     }
 
     /// Assume the `width`-bit `value` is `bits` in the current context by unioning
-    /// its class with that constant. An equality a boolean assumption settles says
+    /// it with that constant, its carrier's zero at `bits`. An equality a boolean assumption settles says
     /// more than the truth of the condition: the two operands name one value
     /// there, so their classes are merged as well and every term over either is a
     /// term over the cheapest form of both — the literal, where one side is one.
@@ -192,18 +202,18 @@ impl Driver<'_> {
         let constant = self
             .eg
             .add(Node::constant(APInt::new(width, bits), Prov::None));
-        self.eg.union(class, constant);
+        let _ = self.eg.union(class, constant);
         if width == 1
             && let Some((lhs, rhs)) = self.settled_equality(value, bits == 1)
         {
-            self.eg.union(lhs, rhs);
+            let _ = self.eg.union(lhs, rhs);
         }
         self.eg.rebuild();
     }
 
     /// The operand classes a guard proves congruent: an `eq` that holds, or a
     /// `ne` that does not.
-    fn settled_equality(&mut self, value: ValueId, holds: bool) -> Option<(Id, Id)> {
+    fn settled_equality(&mut self, value: ValueId, holds: bool) -> Option<(Ref, Ref)> {
         let op = self.context.get_value(value).defining_op()?;
         let instance = self.context.get_op(op);
         if !instance.is::<ops::CmpIOp>() {
@@ -223,9 +233,9 @@ impl Driver<'_> {
         equal.then(|| (self.class_of(lhs), self.class_of(rhs)))
     }
 
-    /// The class standing for `value`, anchoring it as an opaque leaf if the
-    /// seeding named none.
-    fn class_of(&mut self, value: ValueId) -> Id {
+    /// The reference standing for `value`, anchoring it as an opaque leaf if
+    /// the seeding named none.
+    fn class_of(&mut self, value: ValueId) -> Ref {
         self.value_class
             .get(&value)
             .copied()

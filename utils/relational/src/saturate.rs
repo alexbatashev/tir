@@ -439,7 +439,7 @@ pub fn saturate<C, const S: usize, X: Saturate<C, S>>(
             for index in 0..matches.len() {
                 let (root, bindings, scalars) = matches.get(index);
                 if tracing {
-                    eprintln!("M {} {}", rule.name, client.db().find(space, root));
+                    eprintln!("M {} {}", rule.name, client.db().root(space, root));
                 }
                 let vars = rule.head_vars;
                 if !counting {
@@ -451,6 +451,9 @@ pub fn saturate<C, const S: usize, X: Saturate<C, S>>(
                         apply(client, space, at, head, vars, bindings, scalars, &mut bound)
                     })
                 });
+            }
+            if let Some(cache) = caches.plans.get_mut(&rule.plan.id()) {
+                cache.recycle(matches);
             }
         }
         client.rebuild();
@@ -511,7 +514,7 @@ fn post_saturate<C, const S: usize, X: Saturate<C, S>>(
 ) {
     let mut touched: Option<Delta<X::Frontier>> = touched.map(|mut all| {
         for id in &mut all {
-            *id = client.db().find(space, *id);
+            *id = client.db().root(space, *id);
         }
         all.sort_unstable();
         all.dedup();

@@ -8,12 +8,13 @@ use tir_relational::saturate::{Delta, Saturate, saturate};
 use crate::engine::{CLASSES, Lists};
 use crate::query::{Externs, Lookup, Plan};
 use crate::rule::{Rule, Run, compile};
-use crate::{ClassId, Engine, FxHashMap, Label};
+use crate::{ClassId, Engine, Label};
 
-/// Δ_h grouped by operator: for each, the classes holding it paired with the
-/// row each one enters that operator's bucket at, which is what orders the
-/// group. One map per height, grown with the frontier.
-type OpGroups = Vec<FxHashMap<u64, Vec<(u32, u32)>>>;
+/// Δ_h grouped by operator, as `(op, row, class)` sorted: for each operator,
+/// the classes holding it paired with the row each one enters that
+/// operator's bucket at, which is what orders the group. One list per height,
+/// grown with the frontier.
+type OpGroups = Vec<Vec<(u64, u32, u32)>>;
 
 /// The classes of Δ_height holding `op`, in the order the operator's row
 /// bucket holds them: where a rule of that height rooted on that operator can
@@ -31,32 +32,29 @@ fn op_roots<'d, L: Label>(
     delta: &'d mut Delta<OpGroups>,
     height: usize,
     op: u64,
-) -> &'d [(u32, u32)] {
+) -> &'d [(u64, u32, u32)] {
     delta.at(&eg.db, CLASSES, height);
     let mut by_op = std::mem::take(&mut delta.client);
-    let mut ops: Vec<(u64, u32)> = Vec::new();
     while by_op.len() <= height {
-        let mut groups: FxHashMap<u64, Vec<(u32, u32)>> = FxHashMap::default();
+        let mut groups: Vec<(u64, u32, u32)> = Vec::new();
         for &class in delta.level(by_op.len()) {
-            ops.clear();
+            let first = groups.len();
             for row in eg.rows(ClassId(class)) {
-                let op = eg.node(row).op_key();
-                match ops.iter_mut().find(|(seen, _)| *seen == op) {
-                    Some((_, first)) => *first = (*first).min(row.0),
-                    None => ops.push((op, row.0)),
+                let op = eg.row_op(row);
+                match groups[first..].iter_mut().find(|(seen, _, _)| *seen == op) {
+                    Some((_, at, _)) => *at = (*at).min(row.0),
+                    None => groups.push((op, row.0, class)),
                 }
             }
-            for &(op, row) in &ops {
-                groups.entry(op).or_default().push((row, class));
-            }
         }
-        for group in groups.values_mut() {
-            group.sort_unstable();
-        }
+        groups.sort_unstable();
         by_op.push(groups);
     }
     delta.client = by_op;
-    delta.client[height].get(&op).map_or(&[], Vec::as_slice)
+    let groups = &delta.client[height];
+    let from = groups.partition_point(|&(other, _, _)| other < op);
+    let to = groups.partition_point(|&(other, _, _)| other <= op);
+    &groups[from..to]
 }
 
 /// The classes a semi-naive round searches `plan` at: the change frontier at the
@@ -65,7 +63,7 @@ fn round_roots<L: Label>(eg: &Engine<L>, plan: &Plan<L>, delta: &mut Delta<OpGro
     match plan.root_op() {
         Some(op) => op_roots(eg, delta, plan.generic().height(), op)
             .iter()
-            .map(|&(_, class)| class)
+            .map(|&(_, _, class)| class)
             .collect(),
         None => delta.at(&eg.db, CLASSES, plan.generic().height()).to_vec(),
     }

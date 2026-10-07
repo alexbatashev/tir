@@ -4,9 +4,12 @@
 
 use smallvec::SmallVec;
 
+use crate::Ref;
 use crate::db::{LatticeId, SpaceId};
 
-/// An id variable of a [`Query`], numbered from zero.
+/// A variable of a [`Query`], numbered from zero. It binds a reference: an id
+/// and an offset. A variable bound twice must bind the same reference both
+/// times.
 pub type Var = u32;
 
 /// A scalar variable: one word, read off a row or computed by a guard.
@@ -54,15 +57,13 @@ impl Expr {
         })
     }
 
-    fn reads(&self, out: &mut Vec<Scalar>) {
+    /// Whether every scalar the expression reads is `known`.
+    fn ready(&self, known: &[bool]) -> bool {
         match self {
-            Expr::Lit(_) => {}
-            Expr::Scalar(slot) => out.push(*slot),
-            Expr::Sub(a, b) | Expr::Add(a, b) | Expr::And(a, b) => {
-                a.reads(out);
-                b.reads(out);
-            }
-            Expr::Ones(e) | Expr::IsZero(e) => e.reads(out),
+            Expr::Lit(_) => true,
+            Expr::Scalar(slot) => known[*slot as usize],
+            Expr::Sub(a, b) | Expr::Add(a, b) | Expr::And(a, b) => a.ready(known) && b.ready(known),
+            Expr::Ones(e) | Expr::IsZero(e) => e.ready(known),
         }
     }
 }
@@ -97,36 +98,44 @@ pub struct Query {
 pub enum Atom {
     Rows(Rows),
     Lattice(Lattice),
+    Place(Place),
 }
 
 impl Atom {
     /// The variable this atom is looked up under: a row atom's value, a
-    /// lattice atom's key.
+    /// lattice or place atom's key.
     pub fn key(&self) -> Var {
         match self {
             Atom::Rows(rows) => rows.value(),
             Atom::Lattice(lattice) => lattice.key,
+            Atom::Place(place) => place.key,
         }
     }
 
-    /// The scalars this atom binds.
-    pub(crate) fn writes(&self) -> SmallVec<[Scalar; 2]> {
+    /// The scalar this atom binds.
+    pub(crate) fn writes(&self) -> Option<Scalar> {
         match self {
-            Atom::Rows(rows) => rows.tag.iter().copied().collect(),
-            Atom::Lattice(lattice) => lattice
-                .out
-                .iter()
-                .filter_map(|out| match out {
-                    Out::Word(slot) => Some(*slot),
-                    _ => None,
-                })
-                .collect(),
+            Atom::Rows(rows) => rows.tag,
+            Atom::Lattice(lattice) => match lattice.out {
+                Out::Word(slot) => Some(slot),
+                Out::In(_) | Out::Host(_) => None,
+            },
+            Atom::Place(place) => match place.read {
+                Read::Offset { offset, .. } | Read::Pinned { offset } => Some(offset),
+                Read::Width { width } => Some(width),
+                Read::Conflicted => None,
+            },
         }
     }
 }
 
 /// Rows of the tables `select.param` names. In each table, column
-/// `select.column` must hold one of the cells listed for that table.
+/// `select.column` must hold one of the cells listed for that table. A cell
+/// binds its variable to the reference it and its weight are.
+///
+/// The variable a search starts at, before an atom fixes its offset, stands
+/// for its id at whatever offset the row it meets is at, so a search from an
+/// id meets every row whose value is in its set.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Rows {
     pub select: Select,
@@ -194,23 +203,45 @@ impl Rows {
     }
 }
 
-/// `key`'s value in a lattice column.
+/// The value of `key`'s id in a lattice column.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Lattice {
     pub column: LatticeId,
     pub key: Var,
-    /// One per word the column reads back as.
-    pub out: SmallVec<[Out; 2]>,
+    pub out: Out,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Out {
-    /// The word is an id of the query's space, bound to the variable.
-    Var(Var),
-    /// The word is written to the scalar.
+    /// The value is written to the scalar.
     Word(Scalar),
-    /// The word must be one of the parameter's cells.
+    /// The value must be one of the parameter's cells.
     In(Param),
+    /// The value is not read, and need not exist: [`Host::accepts`] decides
+    /// from `key`'s reference. The column still says which epoch the atom is
+    /// from.
+    Host(ExternId),
+}
+
+/// What the id space knows of `key`'s reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Place {
+    pub key: Var,
+    pub read: Read,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Read {
+    /// `key` is `base`, its id at offset zero, plus the scalar `offset`.
+    Offset { base: Var, offset: Scalar },
+    /// `key`'s id is pinned: bind the offset `key` sits at from it, which is
+    /// the constant `key` is.
+    Pinned { offset: Scalar },
+    /// `key`'s id has a carrier: bind its width in bits.
+    Width { width: Scalar },
+    /// An equate tried to put `key`'s id at a non-zero offset from itself: it
+    /// is placed two ways at once, so nowhere.
+    Conflicted,
 }
 
 /// A predicate over bound scalars.
@@ -222,7 +253,7 @@ pub enum Guard {
         out: Scalar,
         value: Expr,
     },
-    /// The pairs are not all bound to the same id. One pair is plain
+    /// The pairs are not all bound to the same reference. One pair is plain
     /// disequality; several say "these two terms are not the same term".
     Distinct(SmallVec<[(Var, Var); 4]>),
     /// A host function over the words `args` evaluate to; it binds `out`, and
@@ -235,38 +266,25 @@ pub enum Guard {
 }
 
 impl Guard {
-    pub(crate) fn reads(&self) -> Vec<Scalar> {
-        let mut out = Vec::new();
+    /// Whether every scalar the guard reads is `known` and every variable it
+    /// reads (only a disequality has any) is `bound`.
+    pub(crate) fn ready(&self, known: &[bool], bound: &[bool]) -> bool {
         match self {
-            Guard::Cmp(_, a, b) => {
-                a.reads(&mut out);
-                b.reads(&mut out);
-            }
-            Guard::Let { value, .. } => value.reads(&mut out),
-            Guard::Distinct(..) => {}
-            Guard::Extern { args, .. } => {
-                for arg in args {
-                    arg.reads(&mut out);
-                }
-            }
-        }
-        out
-    }
-
-    /// The id variables the guard reads. Only a disequality has any: the rest
-    /// work on words.
-    pub(crate) fn vars(&self) -> SmallVec<[Var; 8]> {
-        match self {
-            Guard::Distinct(pairs) => pairs.iter().flat_map(|&(a, b)| [a, b]).collect(),
-            _ => SmallVec::new(),
+            Guard::Cmp(_, a, b) => a.ready(known) && b.ready(known),
+            Guard::Let { value, .. } => value.ready(known),
+            Guard::Distinct(pairs) => pairs
+                .iter()
+                .all(|&(a, b)| bound[a as usize] && bound[b as usize]),
+            Guard::Extern { args, .. } => args.iter().all(|arg| arg.ready(known)),
         }
     }
 
-    pub(crate) fn writes(&self) -> SmallVec<[Scalar; 2]> {
+    #[inline]
+    pub(crate) fn writes(&self) -> &[Scalar] {
         match self {
-            Guard::Cmp(..) | Guard::Distinct(..) => SmallVec::new(),
-            Guard::Let { out, .. } => SmallVec::from_slice(&[*out]),
-            Guard::Extern { out, .. } => out.clone(),
+            Guard::Cmp(..) | Guard::Distinct(..) => &[],
+            Guard::Let { out, .. } => std::slice::from_ref(out),
+            Guard::Extern { out, .. } => out,
         }
     }
 }
@@ -278,6 +296,8 @@ impl Guard {
 /// values only accumulate and ids only merge, so the conjunction can only go
 /// from unsatisfied to satisfied over epochs: a match blocked once stays
 /// blocked and needs no re-check, and a match that fired cannot be un-fired.
+/// An id placed consistently in one epoch can be [`Read::Conflicted`] in the
+/// next without anything in the match moving at all.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Nested {
     pub atoms: Vec<Atom>,
@@ -311,6 +331,10 @@ pub trait Host {
     fn resolve(&self, param: Param, since: Option<u64>, out: &mut Resolution);
     /// A guard's host function over words. Failing fails the match.
     fn call(&self, id: ExternId, args: &[u64], out: &mut [u64]) -> bool;
+    /// Whether an [`Out::Host`] atom holds of `reference`, which is canonical.
+    fn accepts(&self, _id: ExternId, _reference: Ref) -> bool {
+        false
+    }
     /// Whether `param` resolves to nothing, when the host can tell without
     /// resolving it: a plan reading no table is settled before it gets a
     /// cache.

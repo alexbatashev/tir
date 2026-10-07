@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn Error>> {
     // The semantic rule set is parsed here and written out as the Rust that
-    // builds it: a typo in it is a build error with a span, and no process
-    // parses it again.
+    // builds it: a typo in it, or a pattern the e-graph can never match, is a
+    // build error with a span, and no process parses it again.
     let axioms = check("defs/isel.pdl")?;
     let out = PathBuf::from(std::env::var("OUT_DIR")?);
     fs::write(out.join("isel_axioms.rs"), tir_pdl::file_to_rust(&axioms))?;
@@ -51,7 +51,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn check(input: &str) -> Result<tir_pdl::File, Box<dyn Error>> {
     println!("cargo:rerun-if-changed={input}");
     let source = fs::read_to_string(input)?;
-    tir_pdl::compile(&source).or_else(|diagnostics| {
+    tir_pdl::compile_patterns(&source).or_else(|diagnostics| {
         let mut stderr = io::stderr().lock();
         for diagnostic in diagnostics {
             diagnostic.write(input, &source, &mut stderr)?;

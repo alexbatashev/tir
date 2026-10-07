@@ -84,14 +84,6 @@ impl<V: Copy + Eq + Hash> Column<V> {
         self.write(key, Fact::Known(value), epoch)
     }
 
-    /// Replace `key`'s entry with `fact`, no join. For a column whose values
-    /// name ids: what is stored may be stale — an id that has since been
-    /// equated away, or one whose own entry deepened — so only the caller that
-    /// can read it back to what it means may combine two of them.
-    pub fn put(&mut self, key: u32, fact: Fact<V>, epoch: u32) -> bool {
-        self.set(key, fact, epoch)
-    }
-
     /// Join `fact` onto what `key` is known to be.
     pub fn write(&mut self, key: u32, fact: Fact<V>, epoch: u32) -> bool {
         let joined = match self.fact.get(&key) {

@@ -143,3 +143,10 @@ mod core {
     mod sem;
     mod variants;
 }
+
+#[cfg(test)]
+fn fixture_root() -> std::path::PathBuf {
+    std::env::var_os("CARGO_MANIFEST_DIR")
+        .expect("Cargo test manifest directory")
+        .into()
+}

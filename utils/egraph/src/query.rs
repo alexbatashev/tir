@@ -16,8 +16,8 @@ use tir_relational::query::{
     self as rel, Cmp, Expr, ExternId, Host, Out, Param, Resolution, Scalar, Var,
 };
 
-use crate::engine::{CLASSES, OBJECTS, lattice};
-use crate::{ClassId, Engine, Label, LabelId, RowId};
+use crate::engine::{CLASSES, lattice, leaf_constant};
+use crate::{ClassId, Engine, Label, LabelId, Ref, RowId};
 
 /// A field of a label the language lets a rule read or fill.
 pub type Field = u32;
@@ -29,8 +29,6 @@ pub enum ColumnId {
     Const,
     /// The type its terms carry.
     Type,
-    /// The class it is derived from and the distance to it.
-    Object,
 }
 
 /// The host's primitive functions over what a match bound: labels an atom
@@ -85,7 +83,7 @@ pub enum Guard {
         out: Scalar,
         value: Expr,
     },
-    /// The pairs are not all bound to the same class. One pair is plain
+    /// The pairs are not all bound to the same reference. One pair is plain
     /// disequality; several say "these two terms are not the same term".
     Distinct(SmallVec<[(Var, Var); 4]>),
     /// Read `field` off the label a fact column bound, so a constant's value and
@@ -106,18 +104,25 @@ pub enum Guard {
     },
 }
 
+/// One conjunct of a [`Query`]. Variables bind references: a class and an
+/// offset. A variable bound twice must bind the same reference both times.
 #[derive(Clone, Debug)]
 pub enum Atom<L> {
-    /// A row of `class` whose label matches `template` and whose children bind
-    /// `args`, one per operand. `row` binds the matched row, whose e-node a
-    /// guard reads fields off or hands to a host function.
+    /// A row whose label matches `template`, whose value is `class` and whose
+    /// operands bind `args`, one per operand. `row` binds the matched row,
+    /// whose e-node a guard reads fields off or hands to a host function.
+    ///
+    /// The root variable, before an atom fixes its offset, stands for its
+    /// class at whatever offset the row it meets is at, so a search from a
+    /// class meets every e-node of it.
     Node {
         template: L,
         args: SmallVec<[Var; 4]>,
         class: Var,
         row: Option<Scalar>,
     },
-    /// `class` holds `value` as a childless row, or is assumed to evaluate to it.
+    /// `class` is the constant `value`: its carrier's zero at that offset,
+    /// or, outside a carrier, a class the constant column holds it for.
     Literal { value: L, class: Var },
     /// `key` has a value in `column`; bind it to `value`.
     Fact {
@@ -125,11 +130,16 @@ pub enum Atom<L> {
         key: Var,
         value: Scalar,
     },
-    /// What `key` is derived from: `base` and the distance `offset`. A class
-    /// nothing derived is its own base at zero — the reading that makes two
-    /// unrelated addresses overlap rather than not — and a class whose
-    /// derivations disagree satisfies nothing.
-    Object { key: Var, base: Var, offset: Scalar },
+    /// `key` is `base`, its class at offset zero, plus the scalar `offset`.
+    Offset { key: Var, base: Var, offset: Scalar },
+    /// `key` is an integer constant of a carrier: bind its value to `value`.
+    Const { key: Var, value: Scalar },
+    /// `key`'s class has a carrier: bind its width to `width`.
+    Width { key: Var, width: Scalar },
+    /// A union tried to put `key`'s class at a non-zero offset from itself:
+    /// it is placed two ways at once, so nowhere. A law that refuses what it
+    /// cannot place matches this, in a negated conjunction as well.
+    Conflicted { key: Var },
 }
 
 /// A negated sub-conjunction: no solution of it exists, given what the outer
@@ -146,7 +156,11 @@ impl<L> Atom<L> {
     pub fn class(&self) -> Var {
         match self {
             Atom::Node { class, .. } | Atom::Literal { class, .. } => *class,
-            Atom::Fact { key, .. } | Atom::Object { key, .. } => *key,
+            Atom::Fact { key, .. }
+            | Atom::Offset { key, .. }
+            | Atom::Const { key, .. }
+            | Atom::Width { key, .. }
+            | Atom::Conflicted { key } => *key,
         }
     }
 }
@@ -180,13 +194,22 @@ impl<L> Query<L> {
     }
 }
 
-/// One match: the class the root variable bound to, and the class every
-/// variable bound to. `None` for a variable no atom reached.
+/// One match: the class the root variable bound to, and the reference every
+/// variable bound to, read through [`Match::binding`].
 #[derive(Clone, Debug)]
 pub struct Match {
     pub root: ClassId,
-    pub bindings: SmallVec<[Option<ClassId>; 8]>,
+    /// Per variable, its reference, or a class no graph has for a variable
+    /// no atom reached.
+    pub bindings: SmallVec<[Ref; 8]>,
     pub scalars: SmallVec<[u64; 8]>,
+}
+
+impl Match {
+    /// What `var` bound to; `None` for a variable no atom reached.
+    pub fn binding(&self, var: Var) -> Option<Ref> {
+        rel::bound(self.bindings[var as usize].into()).map(Ref::from)
+    }
 }
 
 /// A query compiled onto the database's query IR, with what its parameters
@@ -197,6 +220,8 @@ pub struct Plan<L> {
     plan: rel::Plan,
     params: Vec<ParamSpec<L>>,
     calls: Vec<Call>,
+    /// The carrier constants its literal atoms test a reference against.
+    literals: Vec<L>,
     /// The operator the root atom binds, or `None` when the root binds no row.
     root_op: Option<u64>,
 }
@@ -236,6 +261,7 @@ enum Kind {
 struct Lower<L> {
     params: Vec<ParamSpec<L>>,
     calls: Vec<Call>,
+    literals: Vec<L>,
 }
 
 impl<L: Label> Lower<L> {
@@ -280,22 +306,30 @@ impl<L: Label> Lower<L> {
                     swap,
                 })
             }
+            // A carrier's constant is a reference, which the host tests; any
+            // other is what the constant column holds.
+            Atom::Literal { value, class } if leaf_constant(value).is_some() => {
+                self.literals.push(value.clone());
+                let call = self.literals.len() as ExternId - 1;
+                lattice_atom(ColumnId::Const, *class, Out::Host(call))
+            }
             Atom::Literal { value, class } => {
                 let op = value.op_key();
                 let value = value.clone();
                 let param = self.param(ParamSpec::Equal { value, op });
-                lattice_atom(ColumnId::Const, *class, [Out::In(param)])
+                lattice_atom(ColumnId::Const, *class, Out::In(param))
             }
-            Atom::Fact {
-                column: ColumnId::Object,
-                ..
-            } => panic!("a derivation is not one word: read it with Atom::Object"),
-            Atom::Fact { column, key, value } => lattice_atom(*column, *key, [Out::Word(*value)]),
-            Atom::Object { key, base, offset } => rel::Atom::Lattice(rel::Lattice {
-                column: OBJECTS,
-                key: *key,
-                out: SmallVec::from_slice(&[Out::Var(*base), Out::Word(*offset)]),
-            }),
+            Atom::Fact { column, key, value } => lattice_atom(*column, *key, Out::Word(*value)),
+            Atom::Offset { key, base, offset } => place(
+                *key,
+                rel::Read::Offset {
+                    base: *base,
+                    offset: *offset,
+                },
+            ),
+            Atom::Const { key, value } => place(*key, rel::Read::Pinned { offset: *value }),
+            Atom::Width { key, width } => place(*key, rel::Read::Width { width: *width }),
+            Atom::Conflicted { key } => place(*key, rel::Read::Conflicted),
         }
     }
 
@@ -340,12 +374,16 @@ impl<L: Label> Lower<L> {
     }
 }
 
-fn lattice_atom<const N: usize>(column: ColumnId, key: Var, out: [Out; N]) -> rel::Atom {
+fn lattice_atom(column: ColumnId, key: Var, out: Out) -> rel::Atom {
     rel::Atom::Lattice(rel::Lattice {
         column: lattice(column),
         key,
-        out: SmallVec::from_slice(&out),
+        out,
     })
+}
+
+fn place(key: Var, read: rel::Read) -> rel::Atom {
+    rel::Atom::Place(rel::Place { key, read })
 }
 
 impl<L: Label> Plan<L> {
@@ -359,6 +397,7 @@ impl<L: Label> Plan<L> {
         let mut lower = Lower {
             params: Vec::new(),
             calls: Vec::new(),
+            literals: Vec::new(),
         };
         let atoms = query.atoms.iter().map(|atom| lower.atom(atom)).collect();
         let guards = query
@@ -397,6 +436,7 @@ impl<L: Label> Plan<L> {
             plan,
             params: lower.params,
             calls: lower.calls,
+            literals: lower.literals,
             root_op,
         }
     }
@@ -466,23 +506,18 @@ impl<L: Label> Plan<L> {
         let found = self
             .plan
             .search_roots(&eg.db, &host, roots, Some(&allowed), fresh, cache);
-        drop(caches);
-        // The classes of every match in one pass, then each match's copied
-        // out whole: a match spelled id by id is read back before the narrow
-        // writes retire.
-        let width = self.query.vars as usize;
-        let classes: Vec<Option<ClassId>> =
-            found.bindings().iter().map(|id| id.map(ClassId)).collect();
-        (0..found.len())
+        let matches = (0..found.len())
             .map(|index| {
-                let (root, _, scalars) = found.get(index);
+                let (root, bindings, scalars) = found.get(index);
                 Match {
                     root: ClassId(root),
-                    bindings: SmallVec::from_slice(&classes[index * width..(index + 1) * width]),
+                    bindings: bindings.iter().map(|&binding| binding.into()).collect(),
                     scalars: SmallVec::from_slice(scalars),
                 }
             })
-            .collect()
+            .collect();
+        cache.recycle(found);
+        matches
     }
 
     /// Extend `out` by what parameter `param` resolves to in `eg`, among the
@@ -574,6 +609,11 @@ impl<L: Label> Host for Lookup<'_, L> {
         self.plan.call(self.eg, self.externs, id, args, out)
     }
 
+    fn accepts(&self, id: ExternId, reference: tir_relational::Ref) -> bool {
+        let value = &self.plan.literals[id as usize];
+        self.eg.is_literal(reference.into(), value) == Some(true)
+    }
+
     /// A template whose operator the graph has never met matches nothing.
     fn empty(&self, param: Param) -> bool {
         match &self.plan.params[param as usize] {
@@ -628,16 +668,13 @@ mod tests {
     #[test]
     fn search_binds_every_variable_of_the_pattern() {
         let mut eg = Engine::new();
-        let x = eg.add(Term::leaf("x"));
-        let y = eg.add(Term::leaf("y"));
-        let g = eg.add(Term::op("g", &[x]));
-        let f = eg.add(Term::op("f", &[g, y]));
+        let x = eg.add(Term::leaf("x")).class;
+        let y = eg.add(Term::leaf("y")).class;
+        let g = eg.add(Term::op("g", &[x])).class;
+        let f = eg.add(Term::op("f", &[g, y])).class;
         let found = Plan::compile(f_of_g()).search(&eg, [f], &|_, _| true, false, &NoExterns);
         assert_eq!(found.len(), 1);
-        assert_eq!(
-            found[0].bindings.as_slice(),
-            &[Some(f), Some(g), Some(y), Some(x)]
-        );
+        assert_eq!(found[0].bindings.as_slice(), &[f, g, y, x].map(Ref::from));
     }
 
     /// Every assignment of `query`'s variables to classes that satisfies every
@@ -662,17 +699,16 @@ mod tests {
     fn holds(eg: &Engine<Term>, atom: &Atom<Term>, assignment: &[ClassId]) -> bool {
         let class = assignment[atom.class() as usize];
         match atom {
-            Atom::Literal { value, .. } => {
-                eg.const_of(class).is_some_and(|known| value.matches(known))
-            }
+            Atom::Literal { value, .. } => eg
+                .const_of(class)
+                .is_some_and(|known| value.matches(&known)),
             Atom::Fact { column, .. } => eg.fact(*column, class).is_some(),
-            // The offset lands in a scalar the naive oracle cannot see, so only
-            // the object is checked here.
-            Atom::Object { base, .. } => {
-                eg.object_of(class).map(|(from, _)| from) == Some(assignment[*base as usize])
-            }
+            Atom::Offset { base, .. } => assignment[*base as usize] == class,
+            Atom::Const { .. } => eg.int_const(class).is_some(),
+            Atom::Width { .. } => eg.width(class).is_some(),
+            Atom::Conflicted { .. } => eg.conflicted(class),
             Atom::Node { template, args, .. } => eg.rows(class).any(|row| {
-                let children: Vec<ClassId> = eg.children(row).iter().map(|&c| eg.find(c)).collect();
+                let children: Vec<ClassId> = eg.children(row).iter().map(|c| c.class).collect();
                 if children.len() != args.len() || !template.matches_template(eg.node(row)) {
                     return false;
                 }
@@ -690,10 +726,10 @@ mod tests {
     #[test]
     fn a_negated_atom_blocks_a_match_whatever_round_made_it() {
         let mut eg = Engine::new();
-        let a = eg.add(Term::leaf("a"));
-        let b = eg.add(Term::leaf("b"));
-        let blocked = eg.add(Term::op("f", &[a, b]));
-        let free = eg.add(Term::op("f", &[b, a]));
+        let a = eg.add(Term::leaf("a")).class;
+        let b = eg.add(Term::leaf("b")).class;
+        let blocked = eg.add(Term::op("f", &[a, b])).class;
+        let free = eg.add(Term::op("f", &[b, a])).class;
         eg.add(Term::op("g", &[a]));
         eg.rebuild();
 
@@ -719,11 +755,11 @@ mod tests {
     #[test]
     fn a_sideways_atom_is_reached_through_a_bound_operand() {
         let mut eg = Engine::new();
-        let a = eg.add(Term::leaf("a"));
-        let b = eg.add(Term::leaf("b"));
-        let c = eg.add(Term::leaf("c"));
-        let f = eg.add(Term::op("f", &[a, b]));
-        let g = eg.add(Term::op("g", &[a, b]));
+        let a = eg.add(Term::leaf("a")).class;
+        let b = eg.add(Term::leaf("b")).class;
+        let c = eg.add(Term::leaf("c")).class;
+        let f = eg.add(Term::op("f", &[a, b])).class;
+        let g = eg.add(Term::op("g", &[a, b])).class;
         eg.add(Term::op("g", &[a, c]));
         eg.rebuild();
 
@@ -741,18 +777,18 @@ mod tests {
         );
         let found = plan.search(&eg, [f], &|_, _| true, false, &NoExterns);
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].bindings[3], Some(g));
+        assert_eq!(found[0].binding(3), Some(g.into()));
     }
 
     /// `f(?1, ?2)` where `?1` is a literal below ten.
     #[test]
     fn a_guard_runs_as_soon_as_its_scalars_are_bound() {
         let mut eg = Engine::new();
-        let small = eg.add(Term::int(3));
-        let big = eg.add(Term::int(30));
-        let y = eg.add(Term::leaf("y"));
-        let hit = eg.add(Term::op("f", &[small, y]));
-        let miss = eg.add(Term::op("f", &[big, y]));
+        let small = eg.add(Term::int(3)).class;
+        let big = eg.add(Term::int(30)).class;
+        let y = eg.add(Term::leaf("y")).class;
+        let hit = eg.add(Term::op("f", &[small, y])).class;
+        let miss = eg.add(Term::op("f", &[big, y])).class;
         eg.rebuild();
 
         let query = Query {
@@ -786,6 +822,188 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].root, hit);
         assert_eq!(found[0].scalars[1], 3);
+    }
+
+    /// `g(?a)` at a 32-bit carrier, with `?a` read as a base and an offset.
+    fn g_at_offset(
+        extra: Vec<Atom<Term>>,
+        guards: Vec<Guard>,
+        nots: Vec<Nested<Term>>,
+    ) -> Plan<Term> {
+        let mut atoms = vec![
+            node(Term::typed("g", 32, &[ClassId(0)]), &[1], 0),
+            Atom::Offset {
+                key: 1,
+                base: 2,
+                offset: 0,
+            },
+        ];
+        atoms.extend(extra);
+        Plan::compile(Query {
+            vars: 3,
+            scalars: 2,
+            root: 0,
+            atoms,
+            guards,
+            nots,
+        })
+    }
+
+    fn typed_graph() -> (Engine<Term>, Ref, Ref) {
+        let mut eg = Engine::new();
+        let x = eg.add(Term::typed("x", 32, &[]));
+        let y = eg.add(Term::typed("y", 32, &[]));
+        (eg, x, y)
+    }
+
+    fn g_of(eg: &mut Engine<Term>, operand: Ref) -> Ref {
+        eg.insert(Term::typed("g", 32, &[ClassId(0)]), &[operand])
+    }
+
+    #[test]
+    fn a_guard_filters_on_the_offset_an_operand_sits_at() {
+        let (mut eg, x, y) = typed_graph();
+        let near = g_of(&mut eg, Ref::new(x.class, 2));
+        let far = g_of(&mut eg, Ref::new(x.class, 9));
+        let plain = g_of(&mut eg, y);
+        eg.rebuild();
+        let plan = g_at_offset(
+            Vec::new(),
+            vec![Guard::Cmp(Cmp::Lt, Expr::Scalar(0), Expr::Lit(4))],
+            Vec::new(),
+        );
+        let found = plan.search(
+            &eg,
+            [near.class, far.class, plain.class],
+            &|_, _| true,
+            false,
+            &NoExterns,
+        );
+        let got: Vec<(ClassId, Option<Ref>, u64)> = found
+            .iter()
+            .map(|m| (m.root, m.binding(2), m.scalars[0]))
+            .collect();
+        assert_eq!(
+            got,
+            vec![(near.class, Some(x), 2), (plain.class, Some(y), 0)]
+        );
+    }
+
+    #[test]
+    fn a_constant_operand_binds_its_value_without_a_row() {
+        let (mut eg, x, _) = typed_graph();
+        let seven = eg.add(Term::num(32, 7));
+        let constant = g_of(&mut eg, seven);
+        let variable = g_of(&mut eg, x);
+        eg.rebuild();
+        let plan = g_at_offset(
+            vec![Atom::Const { key: 1, value: 1 }],
+            Vec::new(),
+            Vec::new(),
+        );
+        let found = plan.search(
+            &eg,
+            [constant.class, variable.class],
+            &|_, _| true,
+            false,
+            &NoExterns,
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].root, found[0].scalars[1]), (constant.class, 7));
+    }
+
+    #[test]
+    fn a_width_atom_binds_the_carrier_of_any_class_that_has_one() {
+        let (mut eg, x, _) = typed_graph();
+        let seven = eg.add(Term::num(8, 7));
+        let wide = g_of(&mut eg, x);
+        let narrow = g_of(&mut eg, seven);
+        let plain = eg.add(Term::leaf("p"));
+        let untyped = g_of(&mut eg, plain);
+        eg.rebuild();
+        let plan = g_at_offset(
+            vec![Atom::Width { key: 1, width: 1 }],
+            Vec::new(),
+            Vec::new(),
+        );
+        let found = plan.search(
+            &eg,
+            [wide.class, narrow.class, untyped.class],
+            &|_, _| true,
+            false,
+            &NoExterns,
+        );
+        let got: Vec<(ClassId, u64)> = found.iter().map(|m| (m.root, m.scalars[1])).collect();
+        assert_eq!(got, vec![(wide.class, 32), (narrow.class, 8)]);
+    }
+
+    #[test]
+    fn a_conflicted_operand_matches_and_blocks() {
+        let (mut eg, x, y) = typed_graph();
+        let placed = g_of(&mut eg, x);
+        let unplaced = g_of(&mut eg, y);
+        eg.union(y, Ref::new(y.class, 1)).unwrap_err();
+        eg.rebuild();
+        let roots = [placed.class, unplaced.class];
+        let conflicted = || Atom::Conflicted { key: 1 };
+        let positive = g_at_offset(vec![conflicted()], Vec::new(), Vec::new());
+        let found = positive.search(&eg, roots, &|_, _| true, false, &NoExterns);
+        assert_eq!(
+            found.iter().map(|m| m.root).collect::<Vec<_>>(),
+            vec![unplaced.class]
+        );
+        let nots = vec![Nested {
+            atoms: vec![conflicted()],
+            guards: Vec::new(),
+        }];
+        let negative = g_at_offset(Vec::new(), Vec::new(), nots);
+        let found = negative.search(&eg, roots, &|_, _| true, false, &NoExterns);
+        assert_eq!(
+            found.iter().map(|m| m.root).collect::<Vec<_>>(),
+            vec![placed.class]
+        );
+    }
+
+    /// A class whose e-node sits at an offset from it is matched at that
+    /// offset, and a nested atom matches only the reference its parent names.
+    #[test]
+    fn the_root_binds_each_row_at_its_own_offset() {
+        let (mut eg, x, y) = typed_graph();
+        let g_y = g_of(&mut eg, y);
+        // g(y) == x + 3.
+        eg.union(g_y, Ref::new(x.class, 3)).unwrap();
+        let h = Term::typed("h", 32, &[ClassId(0)]);
+        let on_node = eg.insert(h.clone(), &[Ref::new(x.class, 3)]);
+        let off_node = eg.insert(h, &[x]);
+        eg.rebuild();
+        let root = eg.root(x.class);
+        let found = Plan::compile(Query::tree(
+            2,
+            0,
+            vec![node(Term::typed("g", 32, &[ClassId(0)]), &[1], 0)],
+        ))
+        .search(&eg, [root], &|_, _| true, false, &NoExterns);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].binding(0), Some(eg.find(g_y)));
+        let nested = Plan::compile(Query::tree(
+            3,
+            0,
+            vec![
+                node(Term::typed("h", 32, &[ClassId(0)]), &[1], 0),
+                node(Term::typed("g", 32, &[ClassId(0)]), &[2], 1),
+            ],
+        ));
+        let found = nested.search(
+            &eg,
+            [on_node.class, off_node.class],
+            &|_, _| true,
+            false,
+            &NoExterns,
+        );
+        assert_eq!(
+            found.iter().map(|m| m.root).collect::<Vec<_>>(),
+            vec![on_node.class]
+        );
     }
 
     /// A term over three leaves and three operators, one of them commutative.
@@ -831,7 +1049,7 @@ mod tests {
             } else {
                 Term::op(op, &children)
             };
-            made.push(eg.add(term));
+            made.push(eg.add(term).class);
         }
         eg.rebuild();
         (eg, made)
@@ -861,7 +1079,7 @@ mod tests {
             let found = Plan::compile(query.clone()).search(&eg, roots, &|_, _| true, false, &NoExterns);
             let mut got: Vec<Vec<ClassId>> = found
                 .iter()
-                .map(|m| m.bindings.iter().map(|b| b.expect("bound")).collect())
+                .map(|m| m.bindings.iter().map(|b| b.class).collect())
                 .collect();
             got.sort();
             got.dedup();

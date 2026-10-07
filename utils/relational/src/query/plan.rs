@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use smallvec::SmallVec;
 
 use super::ghd::{Bag, decompose};
-use super::ir::{Atom, Lattice, Out, Param, Query, Scalar, Select, Var};
+use super::ir::{Atom, Lattice, Param, Place, Query, Read, Scalar, Select, Var};
 use crate::db::LatticeId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,6 +89,7 @@ impl Deref for Plan {
 pub(super) enum Shape {
     Rows(RowShape),
     Lattice(Lattice),
+    Place(Place),
 }
 
 #[derive(Clone, Debug)]
@@ -126,6 +127,7 @@ impl Shape {
                     .collect(),
             }),
             Atom::Lattice(lattice) => Shape::Lattice(lattice.clone()),
+            Atom::Place(place) => Shape::Place(*place),
         }
     }
 }
@@ -256,7 +258,7 @@ impl Plan {
         })
     }
 
-    /// Whether the plan reads no row at all: every atom is a lattice atom.
+    /// Whether the plan reads no row at all.
     pub fn rowless(&self) -> bool {
         !self
             .query
@@ -289,7 +291,7 @@ impl Plan {
             .enumerate()
             .filter_map(|(index, atom)| match atom {
                 Atom::Lattice(lattice) => Some((index, lattice.column, lattice.key)),
-                Atom::Rows(_) => None,
+                Atom::Rows(_) | Atom::Place(_) => None,
             })
             .collect();
         if facts.iter().any(|&(index, _, _)| index >= 64) {
@@ -330,7 +332,7 @@ impl Plan {
     pub fn fact_columns(&self) -> u64 {
         self.query.atoms.iter().fold(0, |mask, atom| match atom {
             Atom::Lattice(lattice) => mask | 1 << lattice.column.index(),
-            Atom::Rows(_) => mask,
+            Atom::Rows(_) | Atom::Place(_) => mask,
         })
     }
 
@@ -399,14 +401,11 @@ impl Plan {
                 let held_back = skip.is_some()
                     && !all_taken
                     && matches!(&query.guards[i], super::Guard::Extern { out, .. } if out.is_empty());
-                !checked[i]
-                    && !held_back
-                    && query.guards[i].reads().iter().all(|&s| known[s as usize])
-                    && query.guards[i].vars().iter().all(|&v| bound[v as usize])
+                !checked[i] && !held_back && query.guards[i].ready(&known, &bound)
             });
             if let Some(guard) = guard {
                 checked[guard] = true;
-                for out in query.guards[guard].writes() {
+                for &out in query.guards[guard].writes() {
                     known[out as usize] = true;
                 }
                 steps.push(Step::Guard(guard));
@@ -455,7 +454,7 @@ impl Plan {
                                     .args()
                                     .position(|(_, arg)| bound[arg as usize])
                                     .map(|slot| (i, slot as u8)),
-                                Atom::Lattice(_) => None,
+                                Atom::Lattice(_) | Atom::Place(_) => None,
                             })?;
                     (next, Step::Parents { atom: next, slot })
                 }
@@ -474,15 +473,13 @@ impl Plan {
                         }
                     }
                 }
-                Atom::Lattice(lattice) => {
-                    for out in &lattice.out {
-                        if let Out::Var(var) = out {
-                            bound[*var as usize] = true;
-                        }
-                    }
-                }
+                Atom::Place(Place {
+                    read: Read::Offset { base, .. },
+                    ..
+                }) => bound[*base as usize] = true,
+                Atom::Lattice(_) | Atom::Place(_) => {}
             }
-            for slot in query.atoms[next].writes() {
+            if let Some(slot) = query.atoms[next].writes() {
                 known[slot as usize] = true;
             }
         }
@@ -514,7 +511,8 @@ impl Plan {
     /// Two shapes do this. A sideways atom sits under a sibling sharing an
     /// argument, which no upward closure of the change log reaches from the
     /// root. And a negated conjunction is read against the whole database: what
-    /// satisfies it can change without anything in the match moving at all.
+    /// satisfies it can change (an id placed consistently in one epoch is
+    /// conflicted in the next) without anything in the match moving at all.
     pub fn unbounded(&self) -> bool {
         self.steps
             .iter()
@@ -612,13 +610,11 @@ fn joined(
                         bound[arg.var as usize] = true;
                     }
                 }
-                Shape::Lattice(lattice) => {
-                    for out in &lattice.out {
-                        if let Out::Var(var) = out {
-                            bound[*var as usize] = true;
-                        }
-                    }
-                }
+                Shape::Place(Place {
+                    read: Read::Offset { base, .. },
+                    ..
+                }) => bound[*base as usize] = true,
+                Shape::Lattice(_) | Shape::Place(_) => {}
             }
         }
         at = end;
@@ -633,7 +629,7 @@ impl JoinPlan {
         let shape = |step: &Step| match *step {
             Step::Atom(atom) | Step::Parents { atom, .. } => match &shapes[atom] {
                 Shape::Rows(rows) => (atom, rows),
-                Shape::Lattice(_) => unreachable!("a run holds row atoms"),
+                _ => unreachable!("a run holds row atoms"),
             },
             _ => unreachable!("a run holds row atoms"),
         };

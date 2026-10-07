@@ -154,10 +154,6 @@ fn term(term: &Term) -> TokenStream {
             quote!(tir_pdl::TermKind::Constant { width: #width, value: #value })
         }
         TermKind::Root => quote!(tir_pdl::TermKind::Root),
-        TermKind::Keep(kept) => {
-            let kept = self::term(kept);
-            quote!(tir_pdl::TermKind::Keep(Box::new(#kept)))
-        }
     };
     let (ty, span) = (option(&term.ty, ty), span());
     quote!(tir_pdl::Term { kind: #kind, ty: #ty, span: #span })

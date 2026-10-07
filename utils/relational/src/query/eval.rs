@@ -3,9 +3,10 @@
 
 use smallvec::SmallVec;
 
-use super::ir::{Atom, Cmp, Guard, Host, Lattice, Out, Resolution, Scalar, Var};
+use super::ir::{Atom, Cmp, Guard, Host, Lattice, Out, Place, Read, Resolution, Scalar, Var};
 use super::join::{JOIN_MIN_ROWS, JoinScratch};
 use super::plan::{Arg, FactAnchor, JoinPlan, Plan, RowShape, Shape, Step};
+use crate::Ref;
 use crate::db::{Database, Groups};
 use crate::store::Table;
 
@@ -25,6 +26,14 @@ pub struct PlanCache {
     join: Option<Box<JoinScratch>>,
 }
 
+impl PlanCache {
+    /// Hand back the matches of a search once they are spent, so the next
+    /// search fills their arrays rather than growing new ones.
+    pub fn recycle(&mut self, matches: Matches) {
+        self.scratch.out = matches;
+    }
+}
+
 impl Default for PlanCache {
     fn default() -> Self {
         Self {
@@ -40,11 +49,27 @@ impl Default for PlanCache {
 
 #[derive(Default)]
 struct Scratch {
-    bound: Vec<Option<u32>>,
+    bound: Vec<Ref>,
     scalars: Vec<u64>,
     trail: Vec<Var>,
     pool: Vec<Vec<u32>>,
+    out: Matches,
 }
+
+/// What a variable no atom has reached holds.
+pub const UNBOUND: Ref = Ref {
+    id: u32::MAX,
+    offset: 0,
+};
+
+/// `binding` unless it is [`UNBOUND`].
+#[inline]
+pub fn bound(binding: Ref) -> Option<Ref> {
+    (binding.id != UNBOUND.id).then_some(binding)
+}
+
+/// Marks a trail entry that put the loose variable back.
+const LOOSE: Var = 1 << 31;
 
 /// What prunes a binding: `allowed(var, id)` rejects binding `var` to `id`.
 pub trait Allow: Fn(Var, u32) -> bool {}
@@ -75,13 +100,13 @@ macro_rules! lookup {
 }
 
 /// The matches of one search, stored flat: a search that finds thousands builds
-/// no vector per match. A match is the id the root bound, the id every
-/// variable bound (`None` for one no atom reached) and the scalars.
+/// no vector per match. A match is the id the root bound, the reference every
+/// variable bound ([`UNBOUND`] for one no atom reached) and the scalars.
 #[derive(Default)]
 pub struct Matches {
     roots: Vec<u32>,
     /// `roots.len()` rows of bindings back to back, and the same of scalars.
-    bindings: Vec<Option<u32>>,
+    bindings: Vec<Ref>,
     scalars: Vec<u64>,
     /// The length of a row of each.
     widths: (usize, usize),
@@ -96,7 +121,7 @@ impl Matches {
         self.roots.is_empty()
     }
 
-    fn push(&mut self, root: u32, bindings: &[Option<u32>], scalars: &[u64]) {
+    fn push(&mut self, root: u32, bindings: &[Ref], scalars: &[u64]) {
         self.widths = (bindings.len(), scalars.len());
         self.roots.push(root);
         self.bindings.extend_from_slice(bindings);
@@ -104,7 +129,8 @@ impl Matches {
     }
 
     /// The root, bindings and scalars of match `index`.
-    pub fn get(&self, index: usize) -> (u32, &[Option<u32>], &[u64]) {
+    #[inline]
+    pub fn get(&self, index: usize) -> (u32, &[Ref], &[u64]) {
         let (vars, scalars) = self.widths;
         (
             self.roots[index],
@@ -113,9 +139,10 @@ impl Matches {
         )
     }
 
-    /// Every match's bindings, back to back in match order.
-    pub fn bindings(&self) -> &[Option<u32>] {
-        &self.bindings
+    fn clear(&mut self) {
+        self.roots.clear();
+        self.bindings.clear();
+        self.scalars.clear();
     }
 
     /// Append the matches of another search of the same plan.
@@ -182,7 +209,7 @@ impl Plan {
         }
         let space = self.query.space;
         let mut roots: SmallVec<[u32; 16]> =
-            roots.into_iter().map(|root| db.find(space, root)).collect();
+            roots.into_iter().map(|root| db.root(space, root)).collect();
         let mut marks = db.marks(space);
         roots.retain(|root| marks.insert(*root as usize));
         drop(marks);
@@ -209,9 +236,10 @@ impl Plan {
             if allowed.is_some_and(|allowed| !allowed(self.query.root, root)) {
                 continue;
             }
-            eval.bound[self.query.root as usize] = Some(root);
+            eval.loosen(self.query.root, root);
             self.step(&mut eval, root, 0);
-            eval.bound[self.query.root as usize] = None;
+            eval.bound[self.query.root as usize] = UNBOUND;
+            eval.loose = None;
         }
         let (out, scratch) = eval.finish();
         cache.scratch = scratch;
@@ -391,9 +419,10 @@ impl Plan {
             eval.facts_old = anchor.earlier;
             for &minted in lists(anchor.first_on_key) {
                 for &key in db.risen(anchor.column, minted) {
-                    eval.bound[anchor.key as usize] = Some(key);
+                    eval.loosen(anchor.key, key);
                     self.step(&mut eval, key, 0);
-                    eval.bound[anchor.key as usize] = None;
+                    eval.bound[anchor.key as usize] = UNBOUND;
+                    eval.loose = None;
                 }
             }
         }
@@ -418,10 +447,12 @@ impl Plan {
             "search needs a canonical database"
         );
         scratch.bound.clear();
-        scratch.bound.resize(self.query.vars as usize, None);
+        scratch.bound.resize(self.query.vars as usize, UNBOUND);
         scratch.scalars.clear();
         scratch.scalars.resize(self.query.scalars as usize, 0);
         scratch.trail.clear();
+        let mut out = std::mem::take(&mut scratch.out);
+        out.clear();
         Eval {
             db,
             host,
@@ -445,7 +476,8 @@ impl Plan {
             join_min_rows: cache.join_min_rows,
             ready: 0,
             join: &mut cache.join,
-            out: Matches::default(),
+            loose: None,
+            out,
         }
     }
 
@@ -453,7 +485,7 @@ impl Plan {
     pub(super) fn rows(&self, atom: usize) -> &RowShape {
         match &self.shapes[atom] {
             Shape::Rows(rows) => rows,
-            Shape::Lattice(_) => unreachable!("an anchor is a row atom"),
+            _ => unreachable!("an anchor is a row atom"),
         }
     }
 
@@ -483,7 +515,7 @@ impl Plan {
         eval.anchor = Some(anchor);
         eval.old_below = if new { atom } else { 0 };
         let column = rows.select.column as usize;
-        let bind = (rows.tag, Some(rows.key));
+        let bind = (rows.tag, rows.key);
         for (slot, cells) in &resolutions[rows.select.param as usize].tables {
             let Some(table) = db.table(*slot) else {
                 continue;
@@ -573,7 +605,8 @@ impl Plan {
                     return;
                 }
                 if !eval.only_new || eval.fresh > 0 {
-                    let root = eval.bound[self.query.root as usize].unwrap_or(root);
+                    let root =
+                        bound(eval.bound[self.query.root as usize]).map_or(root, |root| root.id);
                     eval.out.push(root, &eval.bound, &eval.scalars);
                 }
                 return;
@@ -600,8 +633,9 @@ impl Plan {
         let index_of_atom = match step {
             Step::Parents { atom, slot } => {
                 let arg = self.rows(atom).args[slot as usize];
-                let child = eval.bound[arg.var as usize].expect("bound argument");
-                self.parents(eval, root, index, atom, arg, child);
+                let child = eval.bound[arg.var as usize];
+                debug_assert_ne!(child, UNBOUND, "bound argument");
+                self.parents(eval, root, index, atom, arg, child.id);
                 return;
             }
             Step::Not(not) => {
@@ -621,36 +655,106 @@ impl Plan {
                 return;
             }
             Step::Guard(guard) => {
-                // A rule may write a guard's result into the slot an earlier
-                // scalar lives in. From the root that is harmless: every match
-                // recomputes the earlier one first. An order that starts
-                // elsewhere can put a loop over rows between the two, so what
-                // the guard overwrote is put back for the next row.
-                let guard = &self.query.guards[guard];
-                let written = guard.writes();
-                let before: SmallVec<[u64; 2]> = written
-                    .iter()
-                    .map(|&slot| eval.scalars[slot as usize])
-                    .collect();
-                if eval.holds(guard) {
-                    self.step(eval, root, index + 1);
-                }
-                for (&slot, value) in written.iter().zip(before) {
-                    eval.scalars[slot as usize] = value;
-                }
+                self.guard(eval, root, index, &self.query.guards[guard]);
                 return;
             }
             Step::Join(_) => unreachable!("a join is run or skipped above"),
             Step::Atom(atom) => atom,
         };
+        let reference = eval.bound[self.query.atoms[index_of_atom].key() as usize];
+        debug_assert_ne!(reference, UNBOUND, "key bound by an earlier step");
         match &self.shapes[index_of_atom] {
-            Shape::Rows(rows) => {
-                let key = eval.bound[rows.key as usize].expect("key bound by an earlier step");
-                self.value(eval, root, index, index_of_atom, rows, key)
-            }
+            Shape::Rows(rows) => self.value(eval, root, index, index_of_atom, rows, reference.id),
             Shape::Lattice(lattice) => {
-                let key = eval.bound[lattice.key as usize].expect("key bound by an earlier step");
-                self.lattice(eval, root, index, index_of_atom, lattice, key)
+                self.lattice(eval, root, index, index_of_atom, lattice, reference)
+            }
+            Shape::Place(place) => self.place(eval, root, index, place, reference),
+        }
+    }
+
+    /// Run `guard`, and the steps after it if it holds.
+    ///
+    /// A rule may write a guard's result into the slot an earlier scalar lives
+    /// in. From the root that is harmless: every match recomputes the earlier
+    /// one first. An order that starts elsewhere can put a loop over rows
+    /// between the two, so what the guard overwrote is put back for the next
+    /// row.
+    fn guard<C, const S: usize, A: Allow + ?Sized>(
+        &self,
+        eval: &mut Eval<'_, C, S, A>,
+        root: u32,
+        index: usize,
+        guard: &Guard,
+    ) {
+        let written = guard.writes();
+        // Most guards write one scalar or none, which needs no list.
+        let before: SmallVec<[u64; 2]> = match written {
+            [] | [_] => SmallVec::new(),
+            _ => written
+                .iter()
+                .map(|&slot| eval.scalars[slot as usize])
+                .collect(),
+        };
+        let one = written.first().map(|&slot| eval.scalars[slot as usize]);
+        if eval.holds(guard) {
+            self.step(eval, root, index + 1);
+        }
+        match (written, one) {
+            ([slot], Some(value)) => eval.scalars[*slot as usize] = value,
+            _ => {
+                for (&slot, value) in written.iter().zip(before) {
+                    eval.scalars[slot as usize] = value;
+                }
+            }
+        }
+    }
+
+    /// A place atom reads what the id space knows of the reference.
+    fn place<C, const S: usize, A: Allow + ?Sized>(
+        &self,
+        eval: &mut Eval<'_, C, S, A>,
+        root: u32,
+        index: usize,
+        place: &Place,
+        reference: Ref,
+    ) {
+        let uf = eval.db.partition(self.query.space);
+        match place.read {
+            Read::Offset { base, offset } => {
+                // The offset is read, so it is fixed from here on.
+                let mark = eval.trail.len();
+                eval.tighten(place.key);
+                eval.scalars[offset as usize] = reference.offset;
+                if eval.bind_one(base, reference.id.into()) {
+                    self.step(eval, root, index + 1);
+                }
+                eval.unbind(mark);
+            }
+            Read::Pinned { offset } => {
+                let found = uf.find(reference);
+                if uf.is_zero(found.id) {
+                    let mark = eval.trail.len();
+                    eval.tighten(place.key);
+                    eval.scalars[offset as usize] = found.offset;
+                    self.step(eval, root, index + 1);
+                    eval.unbind(mark);
+                }
+            }
+            // An id's carrier never changes, so there is no freshness to
+            // track.
+            Read::Width { width } => {
+                let mask = uf.mask(reference.id);
+                if mask != 0 {
+                    eval.scalars[width as usize] = u64::from(mask.count_ones());
+                    self.step(eval, root, index + 1);
+                }
+            }
+            // An id stops being placed once and for all, so there is no
+            // freshness to track either.
+            Read::Conflicted => {
+                if uf.is_conflicted(reference.id) {
+                    self.step(eval, root, index + 1);
+                }
             }
         }
     }
@@ -674,7 +778,7 @@ impl Plan {
             let when = Self::when(rows, resolutions, *slot);
             lookup!(eval, groups, *slot, table.arity(), table, value, |row| {
                 if reads(cells, table.column(select)[row as usize]) {
-                    let bind = (rows.tag, None);
+                    let bind = (rows.tag, rows.key);
                     self.row(eval, root, index, atom, rows, table, row, bind, None, when);
                 }
             });
@@ -682,8 +786,8 @@ impl Plan {
     }
 
     /// Try one row of an atom's table. `bind` names the scalar that takes the
-    /// row's tag and, when the atom was not reached through its value, the
-    /// variable that takes the value. `swapped` picks the reading to try: as
+    /// row's tag and the variable that takes the row's value, or is checked
+    /// against it when bound. `swapped` picks the reading to try: as
     /// written or swapped alone, or with `None` both where `when` holds the
     /// row's selected cell.
     #[allow(clippy::too_many_arguments)]
@@ -697,7 +801,7 @@ impl Plan {
         rows: &RowShape,
         table: &Table,
         row: u32,
-        bind: (Option<Scalar>, Option<Var>),
+        bind: (Option<Scalar>, Var),
         swapped: Option<bool>,
         when: &[u32],
     ) {
@@ -723,8 +827,7 @@ impl Plan {
         eval.fresh += fresh;
         for reading in readings {
             let mark = eval.trail.len();
-            let value = table.values()[row as usize];
-            if bind.1.is_none_or(|var| eval.bind_one(var, value))
+            if eval.bind_value(bind.1, table, row)
                 && eval.bind_row(&rows.args, table, row, reading == 1)
             {
                 self.step(eval, root, index + 1);
@@ -749,7 +852,7 @@ impl Plan {
         let (db, groups, resolutions) = (eval.db, eval.groups, eval.resolutions);
         let rows = self.rows(atom);
         let select = rows.select.column as usize;
-        let bind = (rows.tag, Some(rows.key));
+        let bind = (rows.tag, rows.key);
         for (slot, cells) in &resolutions[rows.select.param as usize].tables {
             let Some(table) = db.table(*slot) else {
                 continue;
@@ -777,8 +880,8 @@ impl Plan {
         }
     }
 
-    /// A lattice atom reads `key`'s value: the column's stamp says which epoch
-    /// proved it.
+    /// A lattice atom reads the value of `key`'s id: the column's stamp says
+    /// which epoch proved it.
     fn lattice<C, const S: usize, A: Allow + ?Sized>(
         &self,
         eval: &mut Eval<'_, C, S, A>,
@@ -786,33 +889,36 @@ impl Plan {
         index: usize,
         atom: usize,
         lattice: &Lattice,
-        key: u32,
+        key: Ref,
     ) {
         let db = eval.db;
-        if eval.facts_old >> atom.min(63) & 1 == 1 && db.is_new(lattice.column, key) {
+        if eval.facts_old >> atom.min(63) & 1 == 1 && db.is_new(lattice.column, key.id) {
             return;
         }
-        let Some(words) = db.read(lattice.column, key) else {
-            return;
-        };
         let mark = eval.trail.len();
-        for (out, &word) in lattice.out.iter().zip(&words) {
-            let held = match *out {
-                Out::Var(var) => eval.bind_one(var, db.find(self.query.space, word as u32)),
-                Out::Word(slot) => {
-                    eval.scalars[slot as usize] = word;
-                    true
+        let held = match lattice.out {
+            // The host read the offset, so it is fixed from here on.
+            Out::Host(call) => {
+                let held = eval.host.accepts(call, key);
+                if held {
+                    eval.tighten(lattice.key);
                 }
-                Out::In(param) => eval.resolutions[param as usize]
-                    .cells
-                    .contains(&(word as u32)),
-            };
-            if !held {
-                eval.unbind(mark);
-                return;
+                held
             }
+            Out::Word(slot) => db
+                .read(lattice.column, key.id)
+                .map(|word| eval.scalars[slot as usize] = word)
+                .is_some(),
+            Out::In(param) => db.read(lattice.column, key.id).is_some_and(|word| {
+                eval.resolutions[param as usize]
+                    .cells
+                    .contains(&(word as u32))
+            }),
+        };
+        if !held {
+            return;
         }
-        let fresh = usize::from(db.is_new(lattice.column, key));
+        let fresh = usize::from(db.is_new(lattice.column, key.id));
         eval.fresh += fresh;
         self.step(eval, root, index + 1);
         eval.fresh -= fresh;
@@ -856,10 +962,16 @@ pub(super) struct Eval<'a, C, const S: usize, A: ?Sized> {
     /// rather than emit them.
     counting: bool,
     hits: usize,
-    pub(super) bound: Vec<Option<u32>>,
+    /// Per variable, its reference or [`UNBOUND`].
+    pub(super) bound: Vec<Ref>,
     pub(super) scalars: Vec<u64>,
-    /// Variables this branch bound, to undo on the way out.
+    /// Variables this branch bound, to undo on the way out. One with
+    /// [`LOOSE`] set was the loose variable and had its offset fixed.
     pub(super) trail: Vec<Var>,
+    /// The variable the search started at, bound to its id at offset zero
+    /// until an atom fixes its offset: a row atom to the row's value, or one
+    /// that reads the offset to the offset it read.
+    loose: Option<Var>,
     /// Whether rows are looked up by scanning, with no grouping built.
     pub(super) scan: bool,
     /// Vectors a scan's hits go in, reused.
@@ -883,6 +995,7 @@ impl<C, const S: usize, A: Allow + ?Sized> Eval<'_, C, S, A> {
             scalars: self.scalars,
             trail: self.trail,
             pool: self.pool,
+            out: Matches::default(),
         };
         (self.out, scratch)
     }
@@ -896,10 +1009,39 @@ impl<C, const S: usize, A: Allow + ?Sized> Eval<'_, C, S, A> {
         rows
     }
 
+    /// Start a search at `id`, with `var` bound to it and loose.
+    fn loosen(&mut self, var: Var, id: u32) {
+        self.bound[var as usize] = id.into();
+        self.loose = Some(var);
+    }
+
+    /// Fix the offset of `var` where it is, if it is the loose variable.
+    fn tighten(&mut self, var: Var) {
+        if self.loose == Some(var) {
+            self.loose = None;
+            self.trail.push(var | LOOSE);
+        }
+    }
+
+    /// Bind `var` to the value of a table row, or check it against the value
+    /// when bound.
+    #[inline(always)]
+    pub(super) fn bind_value(&mut self, var: Var, table: &Table, row: u32) -> bool {
+        let id = table.values()[row as usize];
+        if !table.weighted() {
+            // A row looked up by its value, in a table without weights, has
+            // the value the variable already holds at offset zero.
+            let prior = self.bound[var as usize];
+            let settled = prior.id == id && prior.offset == 0 && self.loose != Some(var);
+            return settled || self.bind_one(var, id.into());
+        }
+        self.bind_one(var, Ref::new(id, table.weight(table.arity(), row)))
+    }
+
     /// Bind a row atom's arguments to the cells of a table row, read swapped
     /// or not, or report the row inconsistent with what is already bound.
     /// Whatever it bound before failing is on the trail.
-    #[inline]
+    #[inline(always)]
     pub(super) fn bind_row(
         &mut self,
         args: &[Arg],
@@ -907,27 +1049,47 @@ impl<C, const S: usize, A: Allow + ?Sized> Eval<'_, C, S, A> {
         row: u32,
         swapped: bool,
     ) -> bool {
-        args.iter().all(|arg| {
-            let column = if swapped { arg.swapped } else { arg.column };
+        let weighted = table.weighted();
+        for arg in args {
+            let column = if swapped { arg.swapped } else { arg.column } as usize;
             // A canonical table names every id by its representative.
-            self.bind_one(arg.var, table.column(column as usize)[row as usize])
-        })
-    }
-
-    #[inline]
-    pub(super) fn bind_one(&mut self, var: Var, id: u32) -> bool {
-        match self.bound[var as usize] {
-            // A variable shared by two atoms must bind the same id.
-            Some(prior) => prior == id,
-            None => {
-                if self.allowed.is_some_and(|allowed| !allowed(var, id)) {
-                    return false;
-                }
-                self.bound[var as usize] = Some(id);
-                self.trail.push(var);
-                true
+            let id = table.column(column)[row as usize];
+            let cell = match weighted {
+                true => Ref::new(id, table.weight(column, row)),
+                false => id.into(),
+            };
+            if !self.bind_one(arg.var, cell) {
+                return false;
             }
         }
+        true
+    }
+
+    #[inline(always)]
+    pub(super) fn bind_one(&mut self, var: Var, reference: Ref) -> bool {
+        let prior = self.bound[var as usize];
+        // A variable shared by two atoms must bind the same reference.
+        if prior == reference {
+            return true;
+        }
+        if prior.id != UNBOUND.id {
+            if self.loose != Some(var) || prior.id != reference.id {
+                return false;
+            }
+            self.bound[var as usize] = reference;
+            self.loose = None;
+            self.trail.push(var | LOOSE);
+            return true;
+        }
+        if self
+            .allowed
+            .is_some_and(|allowed| !allowed(var, reference.id))
+        {
+            return false;
+        }
+        self.bound[var as usize] = reference;
+        self.trail.push(var);
+        true
     }
 
     /// Whether `guard` holds of the scalars bound so far, binding its own
@@ -956,15 +1118,15 @@ impl<C, const S: usize, A: Allow + ?Sized> Eval<'_, C, S, A> {
                 true
             }
             Guard::Extern { call, args, out } => {
-                let Some(args): Option<SmallVec<[u64; 4]>> = args
-                    .iter()
-                    .map(|arg| arg.eval(&self.scalars).map(|value| value as u64))
-                    .collect()
-                else {
-                    return false;
-                };
+                let mut words: SmallVec<[u64; 4]> = SmallVec::new();
+                for arg in args {
+                    let Some(value) = arg.eval(&self.scalars) else {
+                        return false;
+                    };
+                    words.push(value as u64);
+                }
                 let mut values: SmallVec<[u64; 2]> = SmallVec::from_elem(0, out.len());
-                if !self.host.call(*call, &args, &mut values) {
+                if !self.host.call(*call, &words, &mut values) {
                     return false;
                 }
                 for (&slot, value) in out.iter().zip(values) {
@@ -976,8 +1138,15 @@ impl<C, const S: usize, A: Allow + ?Sized> Eval<'_, C, S, A> {
     }
 
     pub(super) fn unbind(&mut self, mark: usize) {
-        for var in self.trail.drain(mark..) {
-            self.bound[var as usize] = None;
+        while self.trail.len() > mark {
+            let var = self.trail.pop().expect("above the mark");
+            if var & LOOSE == 0 {
+                self.bound[var as usize] = UNBOUND;
+                continue;
+            }
+            let var = var & !LOOSE;
+            self.bound[var as usize] = self.bound[var as usize].id.into();
+            self.loose = Some(var);
         }
     }
 }
