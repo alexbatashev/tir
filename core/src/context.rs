@@ -145,6 +145,9 @@ struct Inner {
     /// Shared by every context over one module: a worker interns into the
     /// same tables the module was built with.
     registry: Arc<RwLock<Registry>>,
+    /// Type metadata never changes. Cache the append-only registry's state
+    /// classification locally so operand and e-graph reads take no lock.
+    state_types: RefCell<Vec<Option<crate::builtin::StateResource>>>,
     db: RefCell<Db>,
     /// Advances at every commit.
     epoch: AtomicU32,
@@ -205,6 +208,7 @@ impl Context {
                 segment_sizes,
             })),
             db: RefCell::new(Db::new()),
+            state_types: RefCell::default(),
             epoch: AtomicU32::new(0),
         }));
         crate::builtin::StateType::memory(&context);
@@ -361,6 +365,7 @@ impl Context {
         let part = snapshot.db.partition_of(target);
         Context(std::rc::Rc::new(Inner {
             registry: snapshot.registry.clone(),
+            state_types: RefCell::default(),
             db: RefCell::new(
                 snapshot
                     .db
@@ -376,6 +381,7 @@ impl Context {
     pub(crate) fn fork(&self) -> Self {
         Context(std::rc::Rc::new(Inner {
             registry: self.0.registry.clone(),
+            state_types: RefCell::default(),
             db: RefCell::new(self.db().clone()),
             epoch: AtomicU32::new(self.epoch()),
         }))
@@ -587,7 +593,16 @@ impl Context {
     }
 
     pub fn state_resource(&self, ty: TypeId) -> Option<crate::builtin::StateResource> {
-        self.registry().state_types[ty.as_index()]
+        let states = self.0.state_types.borrow();
+        if let Some(&state) = states.get(ty.as_index()) {
+            return state;
+        }
+        drop(states);
+        let registry = self.registry();
+        let mut states = self.0.state_types.borrow_mut();
+        let from = states.len();
+        states.extend_from_slice(&registry.state_types[from..]);
+        states[ty.as_index()]
     }
 
     pub fn is_state_type(&self, ty: TypeId) -> bool {

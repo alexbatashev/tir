@@ -329,6 +329,11 @@ to a chunk that another context still reads copies that chunk first. A fork is
 therefore an independent trial that its origin can adopt or drop. Each context
 belongs to one thread.
 
+Interned types and their state classifications never change. Each context caches
+the state classifications it has read, extending that cache when the shared type
+registry grows. Operand and e-graph queries can then classify existing types
+without locking the registry.
+
 Parallel passes run each function in a context of its own over the committed
 chunks. A task mints IDs from chunk indices reserved for its place in the epoch,
 so two tasks never mint the same ID and the result does not depend on how many

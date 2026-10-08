@@ -8,6 +8,29 @@ use tir::{
 use super::fixtures;
 
 #[test]
+fn classifies_types_interned_after_earlier_queries() {
+    let context = Context::new();
+    let memory = builtin::StateType::memory(&context);
+    assert_eq!(
+        context.state_resource(memory),
+        Some(builtin::StateResource::Memory)
+    );
+
+    let shared = context.clone();
+    let integer = builtin::IntegerType::new(&shared, 32);
+    assert_eq!(context.state_resource(integer), None);
+    let environment = builtin::StateType::fp_env(&shared);
+    assert_eq!(
+        context.state_resource(environment),
+        Some(builtin::StateResource::FpEnv)
+    );
+    assert_eq!(
+        context.state_resource(memory),
+        Some(builtin::StateResource::Memory)
+    );
+}
+
+#[test]
 fn symbol_errors_follow_definition_order() {
     for _ in 0..16 {
         let (context, module) = fixtures::parse(
