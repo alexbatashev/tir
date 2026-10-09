@@ -2,8 +2,8 @@
 
 // The shape that used to make instruction selection quadratic: an `||` chain and
 // a dense switch, one guarded arm per test. Every arm still arrives at selection
-// folded to its literal, and the chain pins its first two comparisons to the
-// registers holding 0 and 1. The return value lives in a stack slot whose first
+// folded to its literal; the chain tests its value against zero in place and
+// compares it with the register holding 1. The return value lives in a stack slot whose first
 // write sits inside an arm; each arm leaves it holding a value of its own, so
 // the probe answers every port the growth reads and the slot becomes the gate's
 // own port — one `mov eax, N` per arm, and no stack frame at all.
@@ -28,7 +28,7 @@ int classify(int value, int flag)
 }
 
 // CHECK:     classify:
-// CHECK:     cmp e{{[a-z0-9]+}}, edi
+// CHECK:     test edi, edi
 // CHECK:     cmp e{{[a-z0-9]+}}, edi
 // CHECK:     cmp edi, 2
 // CHECK:     cmp edi, 3

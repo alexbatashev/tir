@@ -14,7 +14,7 @@
 //! incumbent: it says nothing about whether the problem is feasible.
 
 use crate::IdMap;
-use std::collections::{HashMap, HashSet};
+use crate::utils::fx::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use tir::{
@@ -323,7 +323,7 @@ impl<'a> RegionEncoder<'a> {
         held: &'a dyn Fn(Ref, RegionId) -> Result<bool, NodeId>,
     ) -> Self {
         let tiles: Vec<(NodeId, u32)> = problem.matches.iter().map(|_| f.variable(1)).collect();
-        let mut at: HashMap<Ref, Vec<usize>> = HashMap::new();
+        let mut at: HashMap<Ref, Vec<usize>> = HashMap::default();
         for (match_id, matched) in problem.matches.iter().enumerate() {
             at.entry(matched.root).or_default().push(match_id);
         }
@@ -344,11 +344,11 @@ impl<'a> RegionEncoder<'a> {
             tiles,
             at,
             selected,
-            overlay: HashMap::new(),
-            waived: HashMap::new(),
-            demanded: HashMap::new(),
-            materialized: HashMap::new(),
-            available: HashMap::new(),
+            overlay: HashMap::default(),
+            waived: HashMap::default(),
+            demanded: HashMap::default(),
+            materialized: HashMap::default(),
+            available: HashMap::default(),
         }
     }
 
@@ -543,13 +543,13 @@ impl<'a> RegionEncoder<'a> {
     /// instance performing it, or to its views.
     fn classes_resolve(&mut self) {
         let problem = self.problem;
-        let mut coverers: HashMap<Ref, Vec<usize>> = HashMap::new();
+        let mut coverers: HashMap<Ref, Vec<usize>> = HashMap::default();
         for (match_id, matched) in problem.matches.iter().enumerate() {
             for &class in &matched.covers {
                 coverers.entry(class).or_default().push(match_id);
             }
         }
-        let mut views: HashMap<Ref, Vec<Ref>> = HashMap::new();
+        let mut views: HashMap<Ref, Vec<Ref>> = HashMap::default();
         for &class in &problem.classes {
             let source = problem.facts(class).source;
             if source != class && !problem.facts(source).has_values {
@@ -630,7 +630,7 @@ impl<'a> RegionEncoder<'a> {
 
     fn one_performer_per_effect(&mut self) {
         let problem = self.problem;
-        let mut performers: HashMap<Ref, Vec<NodeId>> = HashMap::new();
+        let mut performers: HashMap<Ref, Vec<NodeId>> = HashMap::default();
         for (match_id, matched) in problem.matches.iter().enumerate() {
             for &class in &matched.effects {
                 let performing = performers.entry(class).or_default();

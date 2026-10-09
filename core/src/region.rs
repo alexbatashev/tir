@@ -297,12 +297,13 @@ fn topological_order_picking(
     region: RegionId,
     mut pick: impl FnMut(&mut std::collections::BTreeSet<OpId>) -> Option<OpId>,
 ) -> Result<Vec<OpId>, crate::Error> {
-    use std::collections::{BTreeSet, HashMap, HashSet};
+    use crate::utils::fx::{HashMap, HashSet};
+    use std::collections::BTreeSet;
 
     let ops: HashSet<OpId> = context.get_region(region).op_ids().into_iter().collect();
-    let mut inputs: HashMap<OpId, Vec<OpId>> = HashMap::new();
-    let mut readers: HashMap<OpId, Vec<OpId>> = HashMap::new();
-    let mut pending: HashMap<OpId, usize> = HashMap::new();
+    let mut inputs: HashMap<OpId, Vec<OpId>> = HashMap::default();
+    let mut readers: HashMap<OpId, Vec<OpId>> = HashMap::default();
+    let mut pending: HashMap<OpId, usize> = HashMap::default();
     for &op in &ops {
         let read: Vec<OpId> = values_read(context, op)
             .into_iter()
@@ -354,18 +355,37 @@ fn topological_order_picking(
 pub(crate) fn values_read(context: &Context, op: OpId) -> Vec<ValueId> {
     let instance = context.get_op(op);
     let mut values = instance.operands().to_vec();
+    if instance.regions().is_empty() {
+        return values;
+    }
+    // A pass asks this of an operation once per analysis it runs, and each
+    // answer walks everything the operation holds.
+    let version = context.op_version(op);
+    if let Some((read_at, read)) = context.reads().borrow().get(&op)
+        && *read_at == version
+    {
+        return read.to_vec();
+    }
     // The operands above stand as they are: an operation naming its own result
     // is the shortest dependency cycle there is, and subtracting what this
     // operation defines would hide it from the order that reports one.
     let mut nested = Vec::new();
-    let mut defined = std::collections::HashSet::new();
+    let mut defined = std::collections::HashSet::default();
     for region in instance.regions() {
         collect_region_reads(context, region, &mut nested, &mut defined);
     }
     nested.retain(|value| !defined.contains(value));
     values.extend(nested);
+    context
+        .reads()
+        .borrow_mut()
+        .insert(op, (version, values.as_slice().into()));
     values
 }
+
+/// The memo behind [`values_read`]: an operation, the version it was read at
+/// and what it read.
+pub(crate) type Reads = crate::utils::fx::HashMap<OpId, (u32, std::rc::Rc<[ValueId]>)>;
 
 /// What `region` and everything under it reads, and what the same span defines.
 fn collect_region_reads(
@@ -391,8 +411,8 @@ fn collect_region_reads(
 /// walk back through the operations Kahn left pending until the walk repeats
 /// itself, and answer with the smallest id it went round.
 fn cycle_member(
-    inputs: &std::collections::HashMap<OpId, Vec<OpId>>,
-    pending: &std::collections::HashMap<OpId, usize>,
+    inputs: &crate::utils::fx::HashMap<OpId, Vec<OpId>>,
+    pending: &crate::utils::fx::HashMap<OpId, usize>,
 ) -> OpId {
     let blocked = |op: &OpId| pending.get(op).is_some_and(|count| *count > 0);
     let start = pending

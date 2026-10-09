@@ -1,28 +1,33 @@
 //! Match bindings, their pruning, and the PBQP cover that constructs the
 //! incumbent assignment of a region's frozen problem.
 
-use std::collections::{HashMap, HashSet};
+use crate::utils::fx::{HashMap, HashSet};
 
+use smallvec::SmallVec;
 use tir::sem::SymKind;
 use tir_egraph::{ClassId as Id, Ref};
 use tir_pbqp::{self as pbqp, INF_COST, PbqpMatrix, PbqpProblem};
 
 use super::problem::{Policy, RegionProblem};
 
+/// What makes two matches results of one instance: the rule and the operands
+/// it binds, sorted.
+pub(crate) type InstanceKey = (usize, SmallVec<[(u32, Ref); 4]>);
+
 #[derive(Clone, Debug)]
 pub(crate) struct CaptureBindings {
-    pub(crate) entries: Vec<(u32, Ref)>,
+    pub(crate) entries: SmallVec<[(u32, Ref); 4]>,
     /// The operands read as structural integers (an extension's width): the
     /// emitter reads their constant unsigned, where an immediate reads two's
     /// complement at its width.
-    pub(crate) structural: Vec<u32>,
+    pub(crate) structural: SmallVec<[u32; 2]>,
 }
 
 impl CaptureBindings {
     pub(crate) fn new() -> Self {
         Self {
-            entries: Vec::new(),
-            structural: Vec::new(),
+            entries: SmallVec::new(),
+            structural: SmallVec::new(),
         }
     }
 
@@ -74,7 +79,7 @@ pub(crate) enum BoundaryDemand {
 #[derive(Clone, Debug)]
 pub(crate) struct FullMatchBindings {
     pub(crate) captures: CaptureBindings,
-    pub(crate) pattern_nodes: Vec<PatternNodeBinding>,
+    pub(crate) pattern_nodes: SmallVec<[PatternNodeBinding; 6]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,8 +103,8 @@ pub(crate) enum ChildDemand {
     /// A register read at these view offsets, whole at these widths (paired
     /// with whether the read goes through a low-extract view).
     Register {
-        offsets: Vec<u32>,
-        widths: Vec<(u32, bool)>,
+        offsets: SmallVec<[u32; 2]>,
+        widths: SmallVec<[(u32, bool); 2]>,
     },
     /// Encoded inline: the class must be a constant.
     Immediate,
@@ -130,15 +135,15 @@ pub(crate) struct PbqpIselMatch {
     pub(crate) result_width: Option<u32>,
     /// What the match demands of each class it binds besides its root, in the
     /// order it binds them.
-    pub(crate) uses: Vec<(Ref, ChildDemand)>,
+    pub(crate) uses: SmallVec<[(Ref, ChildDemand); 4]>,
     /// The effect classes the match can stand for instead of an instance of
     /// their own.
-    pub(crate) covers: Vec<Ref>,
+    pub(crate) covers: SmallVec<[Ref; 2]>,
     /// The effects the match performs inside its own instruction — the interior
     /// classes it recomputes, in binding order. The chain a memory access reads
     /// is not one of them: every access on a chain names it, and two reads of
     /// one state are not two effects, so a state binding stays out.
-    pub(crate) effects: Vec<Ref>,
+    pub(crate) effects: SmallVec<[Ref; 2]>,
 }
 
 impl PbqpIselMatch {
@@ -175,8 +180,8 @@ impl PbqpIselMatch {
         let mut register = false;
         let mut immediate = false;
         let mut effect = false;
-        let mut offsets: Vec<u32> = Vec::new();
-        let mut widths: Vec<(u32, bool)> = Vec::new();
+        let mut offsets: SmallVec<[u32; 2]> = SmallVec::new();
+        let mut widths: SmallVec<[(u32, bool); 2]> = SmallVec::new();
         for binding in &self.bindings.pattern_nodes {
             if binding.class != child {
                 continue;
@@ -314,7 +319,7 @@ pub(crate) fn solve_cover(
     let effect_footprints: Vec<Vec<Ref>> = matches
         .iter()
         .map(|matched| {
-            let mut footprint = matched.effects.clone();
+            let mut footprint = matched.effects.to_vec();
             footprint.sort();
             footprint.dedup();
             footprint
@@ -322,7 +327,7 @@ pub(crate) fn solve_cover(
         .collect();
     // Only matches sharing an effect class can conflict, so index by class
     // instead of comparing every pair of matches.
-    let mut matches_by_effect: HashMap<Ref, Vec<usize>> = HashMap::new();
+    let mut matches_by_effect: HashMap<Ref, Vec<usize>> = HashMap::default();
     for (index, footprint) in effect_footprints.iter().enumerate() {
         for &class in footprint {
             matches_by_effect.entry(class).or_default().push(index);
@@ -473,6 +478,9 @@ pub(crate) fn prune_dominated_matches(
     width: Option<u32>,
     matches: &mut Vec<PbqpIselMatch>,
 ) {
+    if matches.len() < 2 {
+        return;
+    }
     // The width a match defines where that restricts who reads it.
     let defined = |m: &PbqpIselMatch| m.result_width.filter(|defined| Some(*defined) != width);
     let footprint = |m: &PbqpIselMatch| {
@@ -504,7 +512,7 @@ pub(crate) fn prune_dominated_matches(
     // Matches reading or writing a different register view are not
     // interchangeable — a value at one bit offset is not the value at another —
     // so the view offsets join the grouping key rather than the comparison.
-    let mut groups: HashMap<_, Vec<usize>> = HashMap::new();
+    let mut groups: HashMap<_, Vec<usize>> = HashMap::default();
     for (index, (result, classes, _, internals)) in footprints.iter().enumerate() {
         groups
             .entry((result, classes, internals))
@@ -590,7 +598,7 @@ pub(crate) fn prune_dominated_matches(
         )
     };
     let result = |m: &PbqpIselMatch, defined| (m.root, m.result_view_offset, defined);
-    let mut best_free: HashMap<_, usize> = HashMap::new();
+    let mut best_free: HashMap<_, usize> = HashMap::default();
     for (index, m) in matches.iter().enumerate() {
         if !keep[index] || !is_free(m) {
             continue;

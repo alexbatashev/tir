@@ -33,6 +33,7 @@
 //! nests a `theta` under a `theta` unrolls the loop and never saturates, which
 //! PDL's sema rejects.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex, OnceLock};
 
@@ -705,6 +706,12 @@ pub struct Interpretation<'a> {
     context: &'a Context,
     axioms: &'a [Axiom],
     folds: &'a [SymKind],
+    /// What the type registry answered, by type number and by integer width:
+    /// a guard asks the same few types once per candidate match, and each
+    /// answer takes the registry's lock.
+    widths: RefCell<Vec<Option<Option<u32>>>>,
+    carriers: RefCell<Vec<Option<u64>>>,
+    int_types: RefCell<[Option<u32>; 65]>,
 }
 
 impl<'a> Interpretation<'a> {
@@ -713,14 +720,34 @@ impl<'a> Interpretation<'a> {
             context,
             axioms,
             folds,
+            widths: RefCell::default(),
+            carriers: RefCell::default(),
+            int_types: RefCell::new([None; 65]),
         }
+    }
+
+    fn width_of(&self, ty: u32) -> Option<u32> {
+        let mut widths = self.widths.borrow_mut();
+        if widths.len() <= ty as usize {
+            widths.resize(ty as usize + 1, None);
+        }
+        *widths[ty as usize]
+            .get_or_insert_with(|| type_width(self.context, TypeId::from_number(ty)))
+    }
+
+    fn int_type(&self, width: u32) -> u64 {
+        let mut types = self.int_types.borrow_mut();
+        u64::from(
+            *types[width as usize]
+                .get_or_insert_with(|| IntegerType::new(self.context, width).number()),
+        )
     }
 }
 
 impl tir_egraph::Externs<SemNode> for Interpretation<'_> {
     fn call(&self, id: u32, _terms: &[&SemNode], args: &[u64], out: &mut [u64]) -> bool {
         match id {
-            call::WIDTH_OF => match type_width(self.context, TypeId::from_number(args[0] as u32)) {
+            call::WIDTH_OF => match self.width_of(args[0] as u32) {
                 Some(width) => {
                     out[0] = width as u64;
                     true
@@ -732,7 +759,7 @@ impl tir_egraph::Externs<SemNode> for Interpretation<'_> {
                 if !(1..=64).contains(&width) {
                     return false;
                 }
-                out[0] = IntegerType::new(self.context, width).number() as u64;
+                out[0] = self.int_type(width);
                 true
             }
             call::FLOAT_TYPE => {
@@ -751,7 +778,7 @@ impl tir_egraph::Externs<SemNode> for Interpretation<'_> {
                 if !(1..=64).contains(&width) {
                     return false;
                 }
-                out[0] = IntegerType::new(self.context, width).number() as u64;
+                out[0] = self.int_type(width);
                 true
             }
             call::MAX => {
@@ -760,11 +787,18 @@ impl tir_egraph::Externs<SemNode> for Interpretation<'_> {
             }
             // A head builds integers and floats; no pointer reaches one.
             call::CARRIER_OF => {
-                out[0] = crate::sem::node::carrier_word(crate::sem::egraph::carrier_of(
-                    self.context,
-                    None,
-                    TypeId::from_number(args[0] as u32),
-                ));
+                let ty = args[0] as usize;
+                let mut carriers = self.carriers.borrow_mut();
+                if carriers.len() <= ty {
+                    carriers.resize(ty + 1, None);
+                }
+                out[0] = *carriers[ty].get_or_insert_with(|| {
+                    crate::sem::node::carrier_word(crate::sem::egraph::carrier_of(
+                        self.context,
+                        None,
+                        TypeId::from_number(ty as u32),
+                    ))
+                });
                 true
             }
             proof if proof >= call::VERIFY => {

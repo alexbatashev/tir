@@ -337,6 +337,21 @@ pub struct Paged<T> {
     len: usize,
 }
 
+/// [`Arc::make_mut`], which pays two atomic exchanges to learn the value is
+/// not shared. Every write to the IR comes through here and almost none of
+/// them finds a second holder, so the counts are read first.
+#[inline(always)]
+fn owned<T: Clone>(shared: &mut Arc<T>) -> &mut T {
+    if Arc::strong_count(shared) == 1 && Arc::weak_count(shared) == 0 {
+        // SAFETY: the one strong reference is the one borrowed mutably here
+        // and no weak reference exists, so nothing else can read the value or
+        // make another reference to it while the borrow lives.
+        unsafe { &mut *Arc::as_ptr(shared).cast_mut() }
+    } else {
+        Arc::make_mut(shared)
+    }
+}
+
 impl<T> Clone for Paged<T> {
     fn clone(&self) -> Self {
         Paged {
@@ -380,8 +395,8 @@ impl<T: Clone> Paged<T> {
     /// it.
     #[inline(always)]
     pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
-        let page = Arc::make_mut(self.pages.get_mut(index >> PAGE_BITS)?);
-        page.0[index & (PAGE_SLOTS - 1)].as_mut().map(Arc::make_mut)
+        let page = owned(self.pages.get_mut(index >> PAGE_BITS)?);
+        page.0[index & (PAGE_SLOTS - 1)].as_mut().map(owned)
     }
 
     /// Fill slot `index`, leaving the slots skipped on the way empty.
@@ -390,8 +405,7 @@ impl<T: Clone> Paged<T> {
             self.pages
                 .push(Arc::new(Page(std::array::from_fn(|_| None))));
         }
-        Arc::make_mut(&mut self.pages[index >> PAGE_BITS]).0[index & (PAGE_SLOTS - 1)] =
-            Some(value);
+        owned(&mut self.pages[index >> PAGE_BITS]).0[index & (PAGE_SLOTS - 1)] = Some(value);
         self.len = self.len.max(index + 1);
     }
 

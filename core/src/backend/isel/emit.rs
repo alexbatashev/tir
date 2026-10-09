@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use crate::utils::fx::{HashMap, HashSet};
 
 use tir::{Context, OpId, TypeId, ValueId};
 use tir_egraph::Ref;
@@ -74,7 +74,7 @@ pub(crate) fn order_tiles(
     selected: &HashMap<Ref, usize>,
     rank: impl Fn(Ref) -> Option<usize>,
 ) -> Option<Vec<(Ref, usize)>> {
-    let mut dependencies: HashMap<Ref, HashSet<Ref>> = HashMap::new();
+    let mut dependencies: HashMap<Ref, HashSet<Ref>> = HashMap::default();
     for (&class, &match_id) in selected {
         for binding in &matches[match_id].bindings.pattern_nodes {
             let child = binding.class;
@@ -87,7 +87,7 @@ pub(crate) fn order_tiles(
             }
         }
     }
-    let mut emitted = HashSet::new();
+    let mut emitted = HashSet::default();
     let mut order = Vec::with_capacity(selected.len());
     while order.len() < selected.len() {
         let class = selected

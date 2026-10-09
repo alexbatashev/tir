@@ -161,8 +161,9 @@ contain a solution.
 
 ### Searching for cheaper instruction covers
 
-Instruction selection keeps the cover its PBQP heuristic finds unless
-`TIR_ISEL_SEARCH` is set. With it, a bounded SAT search looks for a strictly
+Instruction selection keeps the cover its cost fold finds unless
+`TIR_ISEL_SEARCH` is set. With it, every region is recorded in full and
+covered by the PBQP heuristic, and a bounded SAT search looks for a strictly
 cheaper assignment of each function's recorded problem and uses the one it
 finds. The search is slow, so use it to check a cover and leave it off
 otherwise. `TIR_MEM_STATS` reports what it found:

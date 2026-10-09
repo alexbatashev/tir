@@ -5,8 +5,8 @@
 //! outcome arrives as the [`AuxEmit`] selected where its predicate is defined.
 //! Edge values arrive through the map of selection results.
 
+use crate::utils::fx::HashMap;
 use crate::{IdMap, IdSet};
-use std::collections::HashMap;
 
 use tir::{BlockId, Context, OpHandle, OpId, PassError, ValueId};
 

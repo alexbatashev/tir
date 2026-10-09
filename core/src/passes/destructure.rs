@@ -23,7 +23,7 @@
 
 mod recovery;
 
-use std::collections::{HashMap, HashSet};
+use crate::utils::fx::{HashMap, HashSet};
 
 pub(crate) use recovery::RecoveryError;
 pub use recovery::{
@@ -568,7 +568,7 @@ pub(super) fn cone(
     roots: &[ValueId],
     mut inputs: impl FnMut(OpId) -> Vec<OpId>,
 ) -> HashSet<OpId> {
-    let mut cone = HashSet::new();
+    let mut cone = HashSet::default();
     let mut pending: Vec<OpId> = roots
         .iter()
         .filter_map(|&value| context.get_value(value).defining_op())
@@ -595,7 +595,7 @@ pub(super) fn stable_order(
         .map(|(index, &op)| (op, index))
         .collect();
     let mut pending = vec![0; ops.len()];
-    let mut readers = vec![HashSet::new(); ops.len()];
+    let mut readers = vec![HashSet::default(); ops.len()];
     for (index, &op) in ops.iter().enumerate() {
         for input in inputs(op) {
             if let Some(&dependency) = positions.get(&input)
@@ -892,7 +892,7 @@ impl Lowering<'_> {
 
         // An arm that computes nothing is not a block: what it produces rides
         // the edge into it, straight to the merge block.
-        let mut arms: HashMap<usize, Edge> = HashMap::new();
+        let mut arms: HashMap<usize, Edge> = HashMap::default();
         for &index in &reachable {
             let arm = regions[index];
             let handle = self.context.get_region(arm);

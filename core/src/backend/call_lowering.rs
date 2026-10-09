@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use crate::utils::fx::{HashMap, HashSet};
 
 use tir::Symbol;
 use tir::attributes::AttributeValue;
@@ -68,8 +68,8 @@ impl CallLowering {
         Self {
             abi,
             emitter,
-            prepared_functions: HashSet::new(),
-            tuple_argument_elements: HashMap::new(),
+            prepared_functions: HashSet::default(),
+            tuple_argument_elements: HashMap::default(),
         }
     }
 
@@ -85,7 +85,7 @@ impl CallLowering {
     /// operands: the extractions of a tuple argument, which the lowering reads
     /// off to the side.
     pub fn implicit_inputs(&self, context: &Context) -> HashMap<OpId, Vec<OpId>> {
-        let mut inputs: HashMap<OpId, Vec<OpId>> = HashMap::new();
+        let mut inputs: HashMap<OpId, Vec<OpId>> = HashMap::default();
         for (&(call, _), elements) in &self.tuple_argument_elements {
             inputs.entry(call).or_default().extend(
                 elements
@@ -303,7 +303,7 @@ impl CallLowering {
         let mut fresh_args = Vec::with_capacity(argument_values.len());
         // Repeated arguments read one snapshot; separate copies would all stay
         // live until placement and create interference between equal values.
-        let mut snapshots = HashMap::new();
+        let mut snapshots = HashMap::default();
         for (&arg, location) in argument_values.iter().zip(&argument_locations) {
             let key = (arg, location.class());
             let fresh = match snapshots.get(&key) {
@@ -474,8 +474,11 @@ impl CallLowering {
         }
 
         let kind = value_kind(context, self.abi, result);
-        let return_reg = next_return_register(self.abi, kind, &mut HashMap::new())
-            .ok_or_else(|| PassError::InvalidRuleSet("ABI has no return register".to_string()))?;
+        let return_reg =
+            next_return_register(self.abi, kind, &mut std::collections::HashMap::new())
+                .ok_or_else(|| {
+                    PassError::InvalidRuleSet("ABI has no return register".to_string())
+                })?;
         // The call op is erased below and takes its result with it, so the copy
         // defines a register value of its own. The rewiring is explicit: the
         // call publishes a state as well as a value, so the shapes of the two
@@ -700,7 +703,7 @@ fn tuple_return_registers(
     abi: &AbiInfo,
     tuple: &TupleType,
 ) -> Result<Vec<PhysReg>, PassError> {
-    let mut next_slot = HashMap::new();
+    let mut next_slot = std::collections::HashMap::new();
     tuple
         .elements(context)
         .into_iter()

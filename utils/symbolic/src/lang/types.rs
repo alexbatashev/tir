@@ -90,8 +90,8 @@ impl std::error::Error for TypeError {}
 pub struct TypeUnifier {
     next_type: u32,
     next_width: u32,
-    types: HashMap<TypeVar, SemType>,
-    widths: HashMap<WidthVar, Width>,
+    types: HashMap<TypeVar, SemType, tir_adt::FxBuildHasher>,
+    widths: HashMap<WidthVar, Width, tir_adt::FxBuildHasher>,
 }
 
 impl TypeUnifier {
@@ -119,6 +119,18 @@ impl TypeUnifier {
     }
 
     pub fn unify(&mut self, lhs: &SemType, rhs: &SemType) -> Result<(), TypeError> {
+        // Two known widths meet far more often than anything a variable is in.
+        if let (
+            SemType::Bits(Width::Const(a)) | SemType::RawBits(Width::Const(a)),
+            SemType::Bits(Width::Const(b)) | SemType::RawBits(Width::Const(b)),
+        ) = (lhs, rhs)
+        {
+            return if a == b {
+                Ok(())
+            } else {
+                Err(TypeError::WidthMismatch(Width::Const(*a), Width::Const(*b)))
+            };
+        }
         let lhs = self.resolve(lhs);
         let rhs = self.resolve(rhs);
         match (&lhs, &rhs) {

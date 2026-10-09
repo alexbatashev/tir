@@ -9,7 +9,7 @@
 //! representative, a key inside its own region's record and meaningless
 //! outside it; what crosses regions is the base member a register is named by.
 
-use std::collections::{HashMap, HashSet};
+use crate::utils::fx::{HashMap, HashSet};
 
 use tir::{OpId, RegionId, sem::SymKind};
 use tir_adt::APInt;
@@ -227,9 +227,9 @@ impl RegionProblem {
     /// The demand the chosen control realizations place on the region's
     /// classes, given the registers enclosing regions produced.
     pub(crate) fn policy(&self, choices: &[ControlChoice], has_register: HasRegister) -> Policy {
-        let mut overlay = HashSet::new();
+        let mut overlay = HashSet::default();
         // A direct control fused into its branch needs no separate value.
-        let mut waived = HashSet::new();
+        let mut waived = HashSet::default();
         for (control, choice) in self.controls.iter().zip(choices) {
             match *choice {
                 ControlChoice::Decided(_) => {}
@@ -266,7 +266,7 @@ impl RegionProblem {
                     || (source != class && demanded.contains(&source))
             })
             .collect();
-        let mut views: HashMap<Ref, Vec<Ref>> = HashMap::new();
+        let mut views: HashMap<Ref, Vec<Ref>> = HashMap::default();
         for &class in &self.classes {
             let source = self.facts(class).source;
             if source != class && demanded.contains(&source) && !self.facts(source).has_values {
@@ -288,7 +288,7 @@ impl RegionProblem {
         assignment: &RegionAssignment,
         policy: &Policy,
     ) -> Result<HashMap<Ref, PbqpIselAlternative>, String> {
-        let mut states = HashMap::new();
+        let mut states = HashMap::default();
         for &class in &self.classes {
             let state = if let Some(&match_id) = assignment.tiles.get(&class) {
                 PbqpIselAlternative::Tile { match_id }
@@ -373,7 +373,7 @@ impl RegionProblem {
 
         // One instance performs each effect, and a deferred source leaves every
         // view to an instance of its own.
-        let mut owner: HashMap<Ref, usize> = HashMap::new();
+        let mut owner: HashMap<Ref, usize> = HashMap::default();
         for &match_id in assignment.tiles.values() {
             for &effect in &self.matches[match_id].effects {
                 if owner.insert(effect, match_id).is_some_and(|other| {
@@ -409,7 +409,7 @@ impl RegionProblem {
         has_register: HasRegister,
     ) {
         let policy = self.policy(&assignment.controls, has_register);
-        let mut reached: HashSet<Ref> = HashSet::new();
+        let mut reached: HashSet<Ref> = HashSet::default();
         let mut pending: Vec<Ref> = self
             .classes
             .iter()
@@ -455,7 +455,7 @@ impl RegionProblem {
     /// realization once.
     pub(crate) fn cost(&self, assignment: &RegionAssignment) -> u64 {
         // The results of one instance are emitted, and paid for, once.
-        let mut instances = HashSet::new();
+        let mut instances = HashSet::default();
         let tiles: u64 = assignment
             .tiles
             .values()

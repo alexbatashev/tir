@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::utils::fx::HashMap;
 
 use tir::{
     Context, HasResourceSemantics, NodeId, OpId,
@@ -56,7 +56,7 @@ pub(super) fn accepts(
     let class_of = |symbol: u32| symbols.borrow()[symbol as usize].class;
     let normalize = |graph: &SemGraph, root| {
         let mut normalized = SemGraph::new();
-        let root = normalize_node(graph, root, &mut normalized, &mut HashMap::new(), &bind)?;
+        let root = normalize_node(graph, root, &mut normalized, &mut HashMap::default(), &bind)?;
         for node in normalized.preorder(root) {
             if let Some(SymPayload::SymbolId(class)) = normalized.get_leaf_data(node)
                 && let Some(declared) = normalized
