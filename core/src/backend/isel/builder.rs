@@ -1,7 +1,7 @@
 //! Lowering of a function's IR operations into the semantic e-graph.
 
 use crate::IdMap;
-use crate::utils::fx::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use tir::{
     Context, Gamma, MemoryRead, MemoryWrite, NodeId, OpHandle, OpId, RegionId, Theta, TypeId,
@@ -576,6 +576,48 @@ impl<'a> SemDagBuilder<'a> {
                 .downcast_ref::<tir::ptr::PtrType>()
                 .and(self.pointer_width)
         })
+    }
+
+    /// The canonical comparison the (possibly cross-block) definer of `value`
+    /// computes, lowered into this graph: `(class, kind, lhs class, rhs class)`.
+    /// `None` when the definer is unknown, effectful, or not a comparison. Used
+    /// by dominating-edge assumptions to relate a guard condition to the values
+    /// it compares.
+    pub(crate) fn build_defining_compare(
+        &mut self,
+        value: ValueId,
+    ) -> Option<(Ref, SymKind, Ref, Ref)> {
+        let def_id = self.context.get_value(value).defining_op()?;
+        if !self.context.has_operation(def_id) {
+            return None;
+        }
+        let def = self.context.get_op(def_id);
+        if def.results().len() != 1
+            || def.clone().as_interface::<dyn MemoryRead>().is_some()
+            || def.clone().as_interface::<dyn MemoryWrite>().is_some()
+        {
+            return None;
+        }
+        let mut graph = SemGraph::new();
+        let root = def.clone().as_dyn_op().semantic_expr(&mut graph)?;
+        let operands = self.build_operands(&def.operands());
+        let class = self.lower_typed(&graph, root, &operands);
+        let comparison = rows_at(self.egraph, class).find(|&row| {
+            self.egraph
+                .node(row)
+                .sym()
+                .is_some_and(tir::sem::egraph::is_comparison)
+        })?;
+        let children = self.egraph.children(comparison);
+        Some((
+            class,
+            self.egraph
+                .node(comparison)
+                .sym()
+                .expect("a comparison node is a semantic operator"),
+            children[0],
+            children[1],
+        ))
     }
 
     pub(crate) fn build_from_value(&mut self, value: ValueId) -> Ref {

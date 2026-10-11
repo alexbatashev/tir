@@ -76,10 +76,9 @@ def capture(fcc, source):
         result = compile_source(fcc, source, root / "output.s", dump_dir)
         assert result.returncode == 0, result.stderr.decode()
         dumps = sorted(dump_dir.glob("*.json"))
-        assert dumps
+        assert len(dumps) > 1
         assert all(re.fullmatch(r"(isel|regalloc)-\d+-\d+\.json", path.name) for path in dumps)
-        # Selection only builds a PBQP problem for a region its cost fold cannot cover.
-        assert "regalloc" in {validate_dump(path) for path in dumps}
+        assert {validate_dump(path) for path in dumps} == {"isel", "regalloc"}
 
 
 def disabled(fcc, source):
@@ -166,9 +165,9 @@ def concurrent(fcc, source):
             assert process.returncode == 0, stderr.decode()
 
         dumps = list(dump_dir.glob("*.json"))
-        assert len(dumps) >= 2
+        assert len(dumps) >= 4
         assert len({path.name for path in dumps}) == len(dumps)
-        assert "regalloc" in {validate_dump(path) for path in dumps}
+        assert {validate_dump(path) for path in dumps} == {"isel", "regalloc"}
 
 
 def main():

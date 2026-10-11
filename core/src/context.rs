@@ -148,10 +148,6 @@ struct Inner {
     /// Type metadata never changes. Cache the append-only registry's state
     /// classification locally so operand and e-graph reads take no lock.
     state_types: RefCell<Vec<Option<crate::builtin::StateResource>>>,
-    /// What each region-carrying operation reads from outside itself, with
-    /// the version of the operation it was read at; see
-    /// [`crate::region::values_read`].
-    reads: RefCell<crate::region::Reads>,
     db: RefCell<Db>,
     /// Advances at every commit.
     epoch: AtomicU32,
@@ -213,7 +209,6 @@ impl Context {
             })),
             db: RefCell::new(Db::new()),
             state_types: RefCell::default(),
-            reads: RefCell::default(),
             epoch: AtomicU32::new(0),
         }));
         crate::builtin::StateType::memory(&context);
@@ -371,7 +366,6 @@ impl Context {
         Context(std::rc::Rc::new(Inner {
             registry: snapshot.registry.clone(),
             state_types: RefCell::default(),
-            reads: RefCell::default(),
             db: RefCell::new(
                 snapshot
                     .db
@@ -388,7 +382,6 @@ impl Context {
         Context(std::rc::Rc::new(Inner {
             registry: self.0.registry.clone(),
             state_types: RefCell::default(),
-            reads: RefCell::default(),
             db: RefCell::new(self.db().clone()),
             epoch: AtomicU32::new(self.epoch()),
         }))
@@ -401,11 +394,6 @@ impl Context {
         let db = fork.db().clone();
         drop(fork);
         *self.db_mut() = db;
-        self.0.reads.borrow_mut().clear();
-    }
-
-    pub(crate) fn reads(&self) -> &RefCell<crate::region::Reads> {
-        &self.0.reads
     }
 
     /// Mint what is created until the scope drops into a partition of its

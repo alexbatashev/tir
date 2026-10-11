@@ -3,7 +3,7 @@
 //! of a register) and the purity a fused match needs.
 
 use tir::{
-    Context, TypeId,
+    Context,
     sem::{
         SemNode, SemType, SymKind,
         egraph::{SemEGraph, class_int_binding, class_semantic_type},
@@ -72,7 +72,7 @@ pub(crate) fn is_low_extract_view(egraph: &SemEGraph, value: Ref) -> bool {
 /// An operation identity ([`tir::sem::Kind::Ir`]) is pure: it is seeded only for
 /// an op with no memory effect. A gated-SSA merge is not — it is the schedule,
 /// not a value expression.
-fn class_is_pure(egraph: &SemEGraph, class: Id) -> bool {
+pub(crate) fn class_is_pure(egraph: &SemEGraph, class: Id) -> bool {
     egraph.nodes(class).all(|n| match &n.kind {
         tir::sem::Kind::Sym(kind) => kind_is_pure(*kind),
         tir::sem::Kind::Ir(_) => true,
@@ -129,95 +129,11 @@ pub(crate) fn kind_is_pure(kind: SymKind) -> bool {
     )
 }
 
-/// What the types of a frozen graph say of each class, read once: matching
-/// asks for every class a pattern binds.
-pub(crate) struct ClassTypes {
-    semantic: Vec<Option<SemType>>,
-    register: Vec<Option<SemType>>,
-    pure: Vec<bool>,
-    /// The classes a pattern may bind inside itself: pure ones, and the
-    /// ones an operation of the function roots.
-    interior: Vec<bool>,
-    declared: Vec<(TypeId, Option<SemType>)>,
-}
-
-impl ClassTypes {
-    /// `declared` are the types the target's patterns annotate operands with.
-    pub(crate) fn new(
-        ctx: &Context,
-        egraph: &SemEGraph,
-        pointer_width: Option<u32>,
-        declared: &[TypeId],
-        rooted: impl Iterator<Item = Id>,
-    ) -> Self {
-        let classes = egraph.class_count();
-        let mut types = Self {
-            semantic: vec![None; classes],
-            register: vec![None; classes],
-            pure: vec![true; classes],
-            interior: vec![false; classes],
-            declared: declared
-                .iter()
-                .map(|&ty| (ty, tir::sem::egraph::semantic_type(ctx, ty)))
-                .collect(),
-        };
-        for class in egraph.class_ids() {
-            types.semantic[class.index()] = class_semantic_type(ctx, egraph, class);
-            types.register[class.index()] = class_register_type(ctx, egraph, class, pointer_width);
-            types.pure[class.index()] = class_is_pure(egraph, class);
-            types.interior[class.index()] = types.pure[class.index()];
-        }
-        for class in rooted {
-            if let Some(interior) = types.interior.get_mut(egraph.root(class).index()) {
-                *interior = true;
-            }
-        }
-        types
-    }
-
-    /// The type the nodes of `class` name, if any does.
-    pub(crate) fn semantic(&self, class: Id) -> Option<&SemType> {
-        self.semantic.get(class.index())?.as_ref()
-    }
-
-    /// The semantic type a register must hold for `class`. Pointers preserve
-    /// their IR type in the graph, but use the target data layout's pointer
-    /// width at an instruction's register boundary; a class no type names
-    /// occupies a register of its carrier's width.
-    pub(crate) fn register(&self, class: Id) -> Option<&SemType> {
-        self.register.get(class.index())?.as_ref()
-    }
-
-    /// Whether a pattern may bind `class`, a representative, at a node it
-    /// computes inside its own instruction.
-    pub(crate) fn interior(&self, class: Id) -> bool {
-        self.interior.get(class.index()).copied().unwrap_or(true)
-    }
-
-    pub(crate) fn declared(&self, ty: TypeId) -> Option<&SemType> {
-        self.declared
-            .iter()
-            .find(|(declared, _)| *declared == ty)
-            .and_then(|(_, semantic)| semantic.as_ref())
-    }
-
-    /// The width of the register `class` occupies, when its type fixes one.
-    pub(crate) fn register_width(&self, class: Id) -> Option<u32> {
-        use tir::sem::Width;
-        match self.register(class)? {
-            SemType::Bits(Width::Const(width)) | SemType::RawBits(Width::Const(width)) => {
-                Some(*width)
-            }
-            SemType::Float(format) => match (&format.exponent, &format.mantissa) {
-                (Width::Const(exponent), Width::Const(mantissa)) => Some(1 + exponent + mantissa),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-}
-
-fn class_register_type(
+/// The semantic type a register must hold for an e-class. Pointers preserve
+/// their IR type in the graph, but use the target data layout's pointer width at
+/// an instruction's register boundary; a class no type names occupies a
+/// register of its carrier's width.
+pub(crate) fn class_register_type(
     ctx: &Context,
     egraph: &SemEGraph,
     class: Id,
@@ -243,4 +159,22 @@ fn class_register_type(
         // A carrier's zero holds the constants of every type of its width, and
         // what it occupies is a register of that width.
         .or_else(|| egraph.width(class).map(SemType::bits))
+}
+
+/// The width of the register an e-class occupies, when its type fixes one.
+pub(crate) fn class_register_width(
+    ctx: &Context,
+    egraph: &SemEGraph,
+    class: Id,
+    pointer_width: Option<u32>,
+) -> Option<u32> {
+    use tir::sem::Width;
+    match class_register_type(ctx, egraph, class, pointer_width)? {
+        SemType::Bits(Width::Const(width)) | SemType::RawBits(Width::Const(width)) => Some(width),
+        SemType::Float(format) => match (format.exponent, format.mantissa) {
+            (Width::Const(exponent), Width::Const(mantissa)) => Some(1 + exponent + mantissa),
+            _ => None,
+        },
+        _ => None,
+    }
 }

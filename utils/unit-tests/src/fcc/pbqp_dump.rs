@@ -33,7 +33,7 @@ fn run_validator(scenario: &str) {
 }
 
 #[test]
-fn writes_valid_dumps() {
+fn writes_valid_isel_and_regalloc_dumps() {
     run_validator("capture");
 }
 

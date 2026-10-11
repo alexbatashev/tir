@@ -1,5 +1,4 @@
-use crate::utils::fx::{HashMap, HashSet};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::builtin::IntegerType;
 use crate::region::values_read;
@@ -171,10 +170,6 @@ struct Prepare<'a> {
     context: &'a Context,
     edges: &'a dyn Edges,
     recovery: &'a RecoveryPlan,
-    /// What each operation reads, found once: ordering, abutting and every
-    /// cone ask it of the same operations, and an operation holding regions
-    /// answers by walking all of them.
-    inputs: std::cell::RefCell<HashMap<OpId, std::rc::Rc<[OpId]>>>,
     prepared: Prepared,
     placement_conflicts: BTreeSet<ControlId>,
 }
@@ -198,18 +193,17 @@ impl Prepared {
             context,
             edges,
             recovery,
-            inputs: Default::default(),
             placement_conflicts: BTreeSet::new(),
             prepared: Self {
                 root: SequenceId(0),
                 sequences: Vec::new(),
-                gammas: HashMap::default(),
-                thetas: HashMap::default(),
+                gammas: HashMap::new(),
+                thetas: HashMap::new(),
                 fragments: Vec::new(),
-                fragment_at: HashMap::default(),
-                control_at: HashMap::default(),
+                fragment_at: HashMap::new(),
+                control_at: HashMap::new(),
                 structured: Vec::new(),
-                entry_facts: HashMap::default(),
+                entry_facts: HashMap::new(),
             },
         };
         let root = prepare.normal_region(region, root_domain, end)?;
@@ -274,17 +268,6 @@ impl Prepare<'_> {
     }
 
     fn inputs(&self, op: OpId) -> Vec<OpId> {
-        if let Some(inputs) = self.inputs.borrow().get(&op) {
-            return inputs.to_vec();
-        }
-        let inputs = self.read_inputs(op);
-        self.inputs
-            .borrow_mut()
-            .insert(op, inputs.as_slice().into());
-        inputs
-    }
-
-    fn read_inputs(&self, op: OpId) -> Vec<OpId> {
         let mut read = values_read(self.context, op);
         self.test_reads_under(op, &mut read);
         let mut inputs: Vec<OpId> = read
@@ -359,7 +342,7 @@ impl Prepare<'_> {
         let mut constraints = Vec::new();
         let mut terminals = Vec::new();
         let mut anchors = Vec::new();
-        let mut moved = HashSet::default();
+        let mut moved = HashSet::new();
         for control in self
             .recovery
             .requirements()
@@ -431,7 +414,7 @@ impl Prepare<'_> {
             return Ok(());
         }
 
-        let mut root_to_component = HashMap::default();
+        let mut root_to_component = HashMap::new();
         let mut components: Vec<Vec<usize>> = Vec::new();
         let mut component_of = Vec::with_capacity(original.len());
         for index in 0..original.len() {
@@ -454,7 +437,7 @@ impl Prepare<'_> {
             let component = component_of[anchor];
             component_controls[component].insert(control);
         }
-        let mut outgoing = vec![HashSet::default(); components.len()];
+        let mut outgoing = vec![HashSet::new(); components.len()];
         let mut pending = vec![0; components.len()];
         for (to, &op) in original.iter().enumerate() {
             for input in self.inputs(op) {
@@ -506,7 +489,7 @@ impl Prepare<'_> {
                 .enumerate()
                 .map(|(local, &global)| (global, local))
                 .collect();
-            let mut local_outgoing = vec![HashSet::default(); members.len()];
+            let mut local_outgoing = vec![HashSet::new(); members.len()];
             let mut local_pending = vec![0; members.len()];
             for (to, &global) in members.iter().enumerate() {
                 for input in self.inputs(original[global]) {
@@ -561,9 +544,9 @@ impl Prepare<'_> {
         domain: DemandDomainId,
     ) -> HashSet<OpId> {
         if !self.context.has_operation(producer) {
-            return HashSet::default();
+            return HashSet::new();
         }
-        let mut group = HashSet::from_iter([producer]);
+        let mut group = HashSet::from([producer]);
         let mut values: HashSet<ValueId> = self
             .context
             .get_op(producer)
@@ -1230,18 +1213,15 @@ impl RecoveryPlan {
                     .into(),
             ));
         }
-        let mut local_values = HashSet::default();
+        let mut local_values = HashSet::new();
         let mut reads = Vec::new();
         for region in std::iter::once(root).chain(context.nested_regions(root)) {
             let handle = context.get_region(region);
             local_values.extend(handle.ports().iter().map(crate::Value::id));
             reads.extend(handle.results());
-            // Every region under the root is visited, so an operation's own
-            // operands are all it adds: what its regions read is met there.
             for op in handle.op_ids() {
-                let op = context.get_op(op);
-                local_values.extend(op.results());
-                reads.extend(op.operands());
+                local_values.extend(context.get_op(op).results());
+                reads.extend(values_read(context, op));
             }
         }
         let external_values = reads
@@ -1260,15 +1240,15 @@ impl RecoveryPlan {
                 root,
                 external_values,
                 controls: Vec::new(),
-                active_controls: HashSet::default(),
-                control_by_test: HashMap::default(),
-                repeated_controls: HashMap::default(),
+                active_controls: HashSet::new(),
+                control_by_test: HashMap::new(),
+                repeated_controls: HashMap::new(),
                 domains: Vec::new(),
-                op_domains: HashMap::default(),
-                region_domains: HashMap::default(),
-                theta_domains: HashMap::default(),
-                constants: HashMap::default(),
-                boundaries: HashMap::default(),
+                op_domains: HashMap::new(),
+                region_domains: HashMap::new(),
+                theta_domains: HashMap::new(),
+                constants: HashMap::new(),
+                boundaries: HashMap::new(),
                 control_only_values: roles.control_only,
                 control_roots: roles.roots,
                 control_types,
@@ -1317,8 +1297,8 @@ impl RecoveryPlan {
         if control.kind != ControlKind::Direct || !self.active_controls.remove(&id) {
             return false;
         }
-        let mut group = HashSet::from_iter([id]);
-        let mut locals = HashSet::default();
+        let mut group = HashSet::from([id]);
+        let mut locals = HashSet::new();
         loop {
             let before = group.len();
             for routing in self.control_by_test.values() {
@@ -1535,7 +1515,7 @@ struct ControlRoles {
 
 fn discover_control_roles(context: &Context, root: RegionId) -> ControlRoles {
     let mut seeds = Vec::new();
-    let mut predecessors: HashMap<ValueId, Vec<ValueId>> = HashMap::default();
+    let mut predecessors: HashMap<ValueId, Vec<ValueId>> = HashMap::new();
     let mut aliases = Vec::new();
     for region in context.nested_regions(root) {
         for op_id in context.get_region(region).op_ids() {
@@ -1585,7 +1565,7 @@ fn discover_control_roles(context: &Context, root: RegionId) -> ControlRoles {
             }
         }
     }
-    let mut roles = HashSet::default();
+    let mut roles = HashSet::new();
     let mut pending = seeds;
     while let Some(value) = pending.pop() {
         if !roles.insert(value) {
@@ -1617,7 +1597,7 @@ fn discover_control_roles(context: &Context, root: RegionId) -> ControlRoles {
         .copied()
         .map(|value| {
             let mut found = Vec::new();
-            roots(value, &predecessors, &mut HashSet::default(), &mut found);
+            roots(value, &predecessors, &mut HashSet::new(), &mut found);
             found.sort();
             found.dedup();
             (value, found)
@@ -1684,53 +1664,55 @@ fn control_value_has_no_data_use(
         return false;
     }
 
-    for (region, index) in context.result_uses(value) {
-        if region == root || !context.region_under(region, root) {
-            continue;
-        }
+    for region in context.nested_regions(root) {
         let handle = context.get_region(region);
-        let Some(owner) = handle.parent_op() else {
-            return false;
-        };
-        let owner = context.get_op(owner);
-        if let Some(gamma) = owner.clone().as_interface::<dyn Gamma>()
-            && gamma.arms().contains(&region)
-            && owner
-                .results()
-                .get(index)
-                .is_some_and(|value| roles.contains(value))
-        {
-            continue;
-        }
-        if let Some(theta) = owner.clone().as_interface::<dyn Theta>() {
-            let binding = theta.binding();
-            if theta.body() == region {
-                if index < binding.continue_.start && theta.predicate() == value {
-                    continue;
-                }
-                if binding.continue_.contains(&index) {
-                    let lane = index - binding.continue_.start;
-                    let ports = handle.ports();
-                    if ports
-                        .get(binding.ports.start + lane)
-                        .is_some_and(|port| roles.contains(&port.id()))
-                    {
+        for (index, result) in handle.results().iter().copied().enumerate() {
+            if result != value {
+                continue;
+            }
+            let Some(owner) = handle.parent_op() else {
+                return false;
+            };
+            let owner = context.get_op(owner);
+            if let Some(gamma) = owner.clone().as_interface::<dyn Gamma>()
+                && gamma.arms().contains(&region)
+                && owner
+                    .results()
+                    .get(index)
+                    .is_some_and(|value| roles.contains(value))
+            {
+                continue;
+            }
+            if let Some(theta) = owner.clone().as_interface::<dyn Theta>() {
+                let binding = theta.binding();
+                if theta.body() == region {
+                    if index < binding.continue_.start && theta.predicate() == value {
                         continue;
                     }
-                }
-                if binding.exit.contains(&index) {
-                    let lane = index - binding.exit.start;
-                    if owner
-                        .results()
-                        .get(binding.results.start + lane)
-                        .is_some_and(|value| roles.contains(value))
-                    {
-                        continue;
+                    if binding.continue_.contains(&index) {
+                        let lane = index - binding.continue_.start;
+                        let ports = handle.ports();
+                        if ports
+                            .get(binding.ports.start + lane)
+                            .is_some_and(|port| roles.contains(&port.id()))
+                        {
+                            continue;
+                        }
+                    }
+                    if binding.exit.contains(&index) {
+                        let lane = index - binding.exit.start;
+                        if owner
+                            .results()
+                            .get(binding.results.start + lane)
+                            .is_some_and(|value| roles.contains(value))
+                        {
+                            continue;
+                        }
                     }
                 }
             }
+            return false;
         }
-        return false;
     }
     true
 }
@@ -2236,13 +2218,19 @@ impl PlanBuilder<'_> {
     }
 
     fn control_socket_count(&self, value: ValueId) -> usize {
-        let boundaries = self
-            .context
-            .result_uses(value)
-            .into_iter()
-            .filter(|&(region, _)| self.context.region_under(region, self.plan.root))
-            .count();
-        self.context.uses_of(value).len() + boundaries
+        let uses = self.context.uses_of(value).len();
+        let boundaries = std::iter::once(self.plan.root)
+            .chain(self.context.nested_regions(self.plan.root))
+            .map(|region| {
+                self.context
+                    .get_region(region)
+                    .results()
+                    .iter()
+                    .filter(|&&result| result == value)
+                    .count()
+            })
+            .sum::<usize>();
+        uses + boundaries
     }
 
     fn assign_theta_domains(

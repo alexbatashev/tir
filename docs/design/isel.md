@@ -182,17 +182,12 @@ identities, constant computations, and alternative forms of operations. A rule
 never names a target: the graph keeps every form, and the target's instruction
 patterns decide which forms selection can cover.
 
-A target has thousands of patterns and a function uses a fraction of them.
-Nothing merges once saturation ends, so selection copies the graph into
-columns, rows grouped by class with their operands canonical, and matches
-against the copy. Patterns that ask the same thing of a row share a shape: an
-operator, a type where the pattern names one, and for each operand either
-nothing or the shape of a row at it. The x86-64 patterns share about 230
-shapes. One pass per shape over the rows of its operator answers it for every
-row, an operand's shape before the shape that reads it, so a row is searched by
-the patterns whose root shape it has and by no others. A pattern rooted at a
-bare operand or at a low-bit view goes through the e-graph's own query, planned
-the first time a function can match it.
+A target has thousands of patterns and a function uses a fraction of them. A
+pattern's query is planned the first time a function holds a class with the
+operator the pattern roots on, so a compile pays for the patterns it can match
+and no others. Patterns and axioms repeat a small number of query shapes under
+different operators and types, and the matcher plans each shape once per
+process and shares the result.
 
 The shared axioms are written in PDL. Core's build parses and checks that file
 and writes it out as the Rust that builds the parsed rules, so the compiler
@@ -265,13 +260,15 @@ itself. The cover rejects such a match, while an addition at `(X, k)` reading
 The cheapest match for one result may make another result impossible to
 produce. Choosing each instruction independently would miss that conflict.
 
-TIR keeps a record of every region. It holds candidate instructions, called
-instances, and what each one demands of the values it binds: a register at a
-given width and view, a constant to encode, or an effect it performs itself.
-It also holds the registers that exist without an instance, the effects that
-must run, and every way each branch test can be realized. Nothing in the
-record names a solver. Regions are decided ahead of the ones they enclose, so
-an enclosed region reads the registers its enclosing regions leave.
+TIR records the choices of a whole function before it makes any of them. For
+every region the record holds the candidate instructions, called instances,
+and what each one demands of the values it binds: a register at a given width
+and view, a constant to encode, or an effect it performs itself. It also holds
+the registers that exist without an instance, the effects that must run, and
+every way each branch test can be realized. Matching runs under the facts of
+the region it visits, so each region is recorded before its facts are dropped.
+Nothing in the record changes once the last region is written, and nothing in
+it names a solver.
 
 ```mermaid
 flowchart TD
@@ -283,38 +280,15 @@ flowchart TD
 	K --> P["Select instructions that produce 5"]
 ```
 
-A cost fold decides a region. A class takes the instance that adds the least
-to the region: the instance's own cost plus that of every instance its register
-inputs would need and nothing else pays for, each counted once however many
-paths reach it. A register that already holds a value, an instance already
-chosen, and a pure value the region computes for another reader cost a reader
-nothing. Classes are decided from the readers down, so an instruction that
-performs a memory access inside itself is chosen before the access would take
-an instruction of its own. Of instances at equal cost the more specific wins,
-then one that constrains no operand, then the one reading fewer registers. A
-source no operation computes may be left uncomputed for its low-bit views to
-compute themselves when that costs no more.
+Two solvers read the record. A Partitioned Boolean Quadratic Programming
+heuristic, or PBQP, builds the first assignment. Each relevant e-class is a
+node whose alternatives produce its value, emit nothing, or leave the value to
+an instruction that performs it; incompatible pairs receive a prohibitive
+cost. The heuristic is exact on sparse problems and takes the first feasible
+choice on dense ones. It backs out of a bounded number of failed choices and
+then gives up.
 
-The fold meets a class only when an instance that could win reads it, and tries
-the matches at a class cheapest rule first. An instance costs at least what its
-rule does, so the first rule costing more than the best instance so far ends
-the search at that class. The checks that depend on the region, such as which
-effects an instruction may perform inside itself, run for the instances tried
-and no others, and only the chosen instances are written to the record.
-
-The fold decides each class once, so it can miss a cover that exists. Where it
-finds none, or its answer fails the check below, the region is recorded in
-full, with every instance of every class its matches reach, and a Partitioned
-Boolean Quadratic Programming heuristic, or PBQP, solves it. Each relevant
-e-class is a node whose alternatives produce its value, emit nothing, or leave
-the value to an instruction that performs it; incompatible pairs receive a
-prohibitive cost. The heuristic is exact on sparse problems and takes the
-first feasible choice on dense ones. It backs out of a bounded number of
-failed choices and then gives up. A region with no cover is reported from the
-full record, which names the kind of value no rule produces.
-
-A bounded search can follow. With `TIR_ISEL_SEARCH` set every region is
-recorded in full and solved by PBQP, and the record becomes one Boolean and
+The second solver is a bounded search. The record becomes one Boolean and
 bit-vector formula: a variable per instance and per branch realization, the
 legality of every input, one owner per effect, a strictly increasing rank
 along every selected register dependency, and the summed cost. The in-tree
@@ -322,10 +296,9 @@ bit-blaster and SAT solver answer whether an assignment cheaper than the best
 known one exists. The rank is what rejects instances that read each other's
 registers in a cycle, however long the cycle.
 
-An answer is a proposal, whichever of these made it. Each assignment is
-checked against the record by code that knows nothing of how it was found, and
-one the search proposed that fails is excluded from its next query. The
-assignment of the fold or of PBQP is the incumbent. The search replaces
+A solver's answer is a proposal. Each assignment is checked against the record
+by code that knows nothing of how it was found, and one that fails is excluded
+from the next query. The PBQP assignment is the incumbent. The search replaces
 it only with a strictly cheaper assignment that passed the check, and it
 constructs an assignment where PBQP found none or gave up. Instances no
 obligation reaches are dropped from a search answer before it is used.
@@ -422,27 +395,29 @@ instructions must preserve the program's effects as well as its values.
 
 TIR shares the semantic graph across a function, but chooses covers for
 individual regions. The shared graph exposes computations across region
-boundaries. Region-specific checks determine which values are available at
-each use.
+boundaries. Region-specific checks determine which values and assumptions are
+valid at each use.
 
-A branch arm is entered on the truth of its condition. A test inside the arm
-of the same value, or of the comparison that is its complement, is decided
-there: selection emits no compare and no branch for it, and recovery takes the
-edge the decision picks.
+A branch arm provides a useful example. Inside the true arm of a condition,
+the selector can use the fact that the condition is true. It applies that fact
+while selecting the arm and its nested regions, then removes the assumption
+before considering code outside that scope.
 
 ```mermaid
 flowchart TD
 	G["Shared function graph"] --> Q["Condition c"]
-	Q --> T["True arm: a test of c is decided true"]
-	Q --> F["False arm: a test of c is decided false"]
-	T --> J["Outside the arms: c is tested as written"]
-	F --> J
+	Q --> T["True arm: assume c is true"]
+	Q --> F["False arm: assume c is false"]
+	T --> TS["Select with the true-arm facts"]
+	F --> FS["Select with the false-arm facts"]
+	TS --> J["Outside the arms: neither assumption applies"]
+	FS --> J
 ```
 
-Selection derives nothing else from the condition. That the operands of an
-equality are one value inside its arm, or that the condition read as data is a
-constant there, is for the mid-end to fold before selection runs. The graph
-selection matches is the same in every region.
+A repeated test inside an arm can become a known constant. The selector can
+then avoid instructions that would compute or branch on that test again.
+The assumption must stay within its scope. Treating it as a fact about the
+whole function would change the program.
 
 Conditional branches also have their own selection step. A control-recovery
 plan identifies their predicates before source operations are replaced. When

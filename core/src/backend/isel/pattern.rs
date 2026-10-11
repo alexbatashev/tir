@@ -1,15 +1,15 @@
 //! Compilation of rule semantic expressions into matchable patterns.
 
 use super::cover::BoundaryDemand;
-use crate::utils::fx::{HashMap, HashSet};
 use std::cell::LazyCell;
+use std::collections::{HashMap, HashSet};
 
 use smallvec::SmallVec;
 use tir::{
-    NodeId, TypeId,
+    Context, NodeId,
     sem::{
         Prov, SemGraph, SemNode, SemType, SymKind, SymPayload, TypeUnifier, Width,
-        egraph::{SemEGraph, class_int_binding},
+        egraph::{SemEGraph, class_int_binding, class_semantic_type},
         infer_types, template_node,
     },
 };
@@ -18,8 +18,7 @@ use tir_egraph::ClassId as Id;
 use tir_egraph::{Atom, ColumnId, Guard, Label, Match, NoExterns, Plan, Query, Ref, Source};
 use tir_relational::{Cmp, Expr, Scalar};
 
-use super::frozen::{Frozen, Operand, Shape, Shapes};
-use super::node::{ClassTypes, is_memory_kind};
+use super::node::{class_register_type, is_memory_kind};
 use super::{ImmRange, OperandConstraint, RegisterRequirement};
 
 /// One node of a rule's pattern: a template operator, or an operand the rule
@@ -98,88 +97,6 @@ struct Constant {
     register: Option<u32>,
 }
 
-/// The most variables, scalars and operands of one row a pattern searched
-/// over [`Frozen`] has: its search keeps them in place, with no allocation.
-const VARS: usize = 16;
-const SCALARS: usize = 8;
-const ARGS: usize = 8;
-
-/// One atom of a row-rooted pattern's query, in the form [`Frozen`] answers.
-#[derive(Clone)]
-enum Step {
-    /// A row of `kind` (and `ty`, when the template names one) at the value
-    /// `class` is bound to, its operands binding `args`.
-    Node {
-        class: u32,
-        kind: SymKind,
-        ty: Option<TypeId>,
-        args: SmallVec<[u32; 4]>,
-        /// Whether the operator's two operands may be read in either order.
-        commutes: bool,
-        /// The rows this step and the ones under it can bind at all.
-        shape: u32,
-    },
-    /// `class` is the constant its pattern node spells.
-    Literal {
-        class: u32,
-    },
-    Offset {
-        key: u32,
-        base: u32,
-        scalar: u32,
-    },
-}
-
-/// The steps of `query`, when it roots at a row and every atom is one a
-/// [`Step`] expresses.
-fn steps(query: &Query<SemNode>) -> Option<Vec<Step>> {
-    if !query.guards.is_empty() || !query.nots.is_empty() {
-        return None;
-    }
-    let steps: Vec<Step> = query
-        .atoms
-        .iter()
-        .map(|atom| match atom {
-            Atom::Node {
-                template,
-                args,
-                class,
-                row: None,
-            } if template.payload.is_none() => Some(Step::Node {
-                class: *class,
-                kind: template.sym()?,
-                ty: template.ty,
-                args: args.clone(),
-                commutes: args.len() == 2 && template.sym()?.is_commutative(),
-                shape: 0,
-            }),
-            Atom::Literal { value, class }
-                if Label::carrier(value).is_some() && value.int_value().is_some() =>
-            {
-                Some(Step::Literal { class: *class })
-            }
-            Atom::Offset { key, base, offset } => Some(Step::Offset {
-                key: *key,
-                base: *base,
-                scalar: *offset,
-            }),
-            _ => None,
-        })
-        .collect::<Option<_>>()?;
-    let fits = query.vars as usize <= VARS
-        && query.scalars as usize <= SCALARS
-        && steps.iter().all(|step| match step {
-            Step::Node { args, .. } => args.len() <= ARGS,
-            _ => true,
-        });
-    (fits
-        && matches!(
-            steps.first(),
-            Some(Step::Node { class, .. } | Step::Offset { key: class, .. }) if *class == query.root
-        ))
-    .then_some(steps)
-}
-
 /// A rule's pattern compiled for matching: the query it is, the nodes it was
 /// written as, and the per-node metadata the cover consults.
 pub(crate) struct CompiledIselPattern {
@@ -196,11 +113,6 @@ pub(crate) struct CompiledIselPattern {
     /// binds a row.
     query_root: u32,
     root_op: Option<u64>,
-    /// The pattern nodes whose binding has to be a constant its field holds.
-    immediates: Vec<u32>,
-    /// The query as steps over [`Frozen`], with its variable and scalar
-    /// counts: what a row-rooted pattern is searched by.
-    steps: Option<(Vec<Step>, u32, u32)>,
     rooting: Rooting,
     offsets: Vec<OffsetSite>,
     absorbs: Vec<Absorb>,
@@ -248,7 +160,7 @@ pub(crate) struct PatternNodeMeta {
     pub(crate) imm_range: Option<ImmRange>,
     /// The symbolic value type inferred from the semantic operator signatures.
     pub(crate) semantic_type: Option<SemType>,
-    pub(crate) declared_type: Option<tir::TypeId>,
+    declared_type: Option<tir::TypeId>,
     /// What a match demands of the class bound here; meaningful for boundary
     /// and constant nodes.
     pub(crate) demand: BoundaryDemand,
@@ -371,7 +283,13 @@ impl CompiledIselPattern {
         self.register_offset.is_some()
     }
 
-    fn match_types(&self, types: &ClassTypes, found: &Found) -> bool {
+    fn match_types(
+        &self,
+        egraph: &SemEGraph,
+        ctx: &Context,
+        found: &Found,
+        pointer_width: Option<u32>,
+    ) -> bool {
         let mut unifier = TypeUnifier::default();
         let nodes_match = self.node_meta.iter().enumerate().all(|(index, meta)| {
             if meta.is_boundary {
@@ -380,9 +298,8 @@ impl CompiledIselPattern {
             let Some(expected) = &meta.semantic_type else {
                 return true;
             };
-            types
-                .semantic(found.bindings[index].class)
-                .is_none_or(|actual| unifier.unify(expected, actual).is_ok())
+            class_semantic_type(ctx, egraph, found.bindings[index].class)
+                .is_none_or(|actual| unifier.unify(expected, &actual).is_ok())
         });
         // The root check must see pointer-typed classes at the data layout's
         // pointer width: `class_semantic_type` has no answer for them, and
@@ -390,9 +307,8 @@ impl CompiledIselPattern {
         // pointer constant.
         nodes_match
             && self.result_register.is_none_or(|register| {
-                types
-                    .register(found.root.class)
-                    .is_none_or(|actual| register.accepts(actual))
+                class_register_type(ctx, egraph, found.root.class, pointer_width)
+                    .is_none_or(|actual| register.accepts(&actual))
             })
     }
 
@@ -427,7 +343,14 @@ impl CompiledIselPattern {
     /// known to reject here. What pins it is the cover, which lets an operand
     /// read whole meet only a tile defining exactly the bits it reads
     /// ([`super::cover::alternatives_compatible`]).
-    pub(crate) fn boundary_ok(&self, types: &ClassTypes, pattern_node: Id, class: Id) -> bool {
+    pub(crate) fn boundary_ok(
+        &self,
+        egraph: &SemEGraph,
+        ctx: &Context,
+        pattern_node: Id,
+        class: Id,
+        pointer_width: Option<u32>,
+    ) -> bool {
         // A copy rule's query binds variables past the pattern's own nodes: the
         // view it roots on, and the literals fixing that view's bounds. The
         // pattern names none of them, so none of them carries an operand
@@ -441,15 +364,17 @@ impl CompiledIselPattern {
         let Some(meta) = self.node_meta.get(pattern_node.index()) else {
             return true;
         };
-        if let Some(expected) = meta.declared_type.and_then(|ty| types.declared(ty))
-            && let Some(actual) = types.semantic(class)
-            && TypeUnifier::default().unify(expected, actual).is_err()
+        if let Some(expected) = meta
+            .declared_type
+            .and_then(|ty| tir::sem::egraph::semantic_type(ctx, ty))
+            && let Some(actual) = class_semantic_type(ctx, egraph, class)
+            && TypeUnifier::default().unify(&expected, &actual).is_err()
         {
             return false;
         }
         if let Some(required) = meta.register
-            && let Some(actual) = types.register(class)
-            && !required.accepts(actual)
+            && let Some(actual) = class_register_type(ctx, egraph, class, pointer_width)
+            && !required.accepts(&actual)
         {
             return false;
         }
@@ -486,8 +411,9 @@ impl CompiledIselPattern {
     pub(crate) fn search_rows(
         &self,
         egraph: &SemEGraph,
-        types: &ClassTypes,
+        ctx: &Context,
         roots: impl IntoIterator<Item = Id>,
+        pointer_width: Option<u32>,
         allowed: &dyn Fn(Id, Id) -> bool,
     ) -> Vec<Found> {
         if self.rooting != Rooting::Row {
@@ -501,114 +427,18 @@ impl CompiledIselPattern {
         self.plan
             .search(egraph, roots, &allowed, false, &NoExterns)
             .into_iter()
-            .flat_map(|matched| self.complete(egraph, types, &matched, None))
+            .flat_map(|matched| self.complete(egraph, ctx, &matched, None, pointer_width))
             .collect()
-    }
-
-    /// The shape of the rows a pattern searched by [`Self::match_row`] roots
-    /// at.
-    pub(crate) fn row_shape(&self) -> Option<u32> {
-        if self.rooting != Rooting::Row {
-            return None;
-        }
-        match self.steps.as_ref()?.0.first()? {
-            Step::Node { shape, .. } => Some(*shape),
-            _ => None,
-        }
-    }
-
-    /// Name the shape of every row step in `shapes`, so patterns that ask
-    /// the same thing of a row share the answer.
-    pub(crate) fn intern_shapes(&mut self, shapes: &mut Shapes) {
-        let Some((steps, ..)) = &mut self.steps else {
-            return;
-        };
-        // A step's operands are bound by later steps, so those are named
-        // first.
-        for at in (0..steps.len()).rev() {
-            let Step::Node { kind, ty, args, .. } = &steps[at] else {
-                continue;
-            };
-            let operands = args
-                .iter()
-                .map(|&arg| {
-                    let row_at = |class: u32| {
-                        steps.iter().find_map(|step| match step {
-                            Step::Node {
-                                class: at, shape, ..
-                            } if *at == class => Some(*shape),
-                            _ => None,
-                        })
-                    };
-                    if let Some(shape) = row_at(arg) {
-                        return Operand::Row(shape);
-                    }
-                    steps
-                        .iter()
-                        .find_map(|step| match step {
-                            Step::Offset { key, base, .. } if *key == arg => row_at(*base),
-                            _ => None,
-                        })
-                        .map_or(Operand::Any, Operand::RowAtZero)
-                })
-                .collect();
-            let named = shapes.intern(Shape {
-                kind: *kind as u16,
-                ty: *ty,
-                commutes: args.len() == 2 && kind.is_commutative(),
-                operands,
-            });
-            if let Step::Node { shape, .. } = &mut steps[at] {
-                *shape = named;
-            }
-        }
-    }
-
-    /// The matches rooted at `row` of `class`, at the value the row is: what
-    /// [`Self::search_rows`] finds there, read off the frozen graph.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn match_row(
-        &self,
-        frozen: &Frozen,
-        egraph: &SemEGraph,
-        types: &ClassTypes,
-        class: Id,
-        row: usize,
-        allowed: &dyn Fn(Id, Id) -> bool,
-        found: &mut Vec<Found>,
-    ) {
-        let Some((steps, vars, _)) = &self.steps else {
-            return;
-        };
-        if !allowed(Id::from_raw(self.query_root), class) {
-            return;
-        }
-        let mut nest = Nest {
-            pattern: self,
-            steps,
-            vars: *vars as usize,
-            frozen,
-            egraph,
-            types,
-            allowed,
-            bindings: [UNSET; VARS],
-            scalars: [0; SCALARS],
-            found,
-            root: row,
-            at: None,
-        };
-        nest.bindings[self.query_root as usize] = Ref::new(class, 0);
-        nest.step(0);
     }
 
     /// The matches at `value` no row roots: an offset split of it, a constant
     /// a bare immediate holds, or a constant the pattern evaluates to.
     pub(crate) fn search_value(
         &self,
-        frozen: &Frozen,
         egraph: &SemEGraph,
-        types: &ClassTypes,
+        ctx: &Context,
         value: Ref,
+        pointer_width: Option<u32>,
         allowed: &dyn Fn(Id, Id) -> bool,
     ) -> Vec<Found> {
         let value = egraph.find(value);
@@ -623,43 +453,22 @@ impl CompiledIselPattern {
                     bindings,
                 };
                 if self.immediate_ok(egraph, self.root as usize, value)
-                    && self.match_types(types, &candidate)
+                    && self.match_types(egraph, ctx, &candidate, pointer_width)
                 {
                     found.push(candidate);
                 }
             }
             // A value at offset zero is its rows; a constant is matched by
             // evaluation below.
-            Rooting::Offset if value.offset != 0 && !constant && self.steps.is_some() => {
-                let (steps, vars, _) = self.steps.as_ref().expect("steps");
-                if allowed(Id::from_raw(self.query_root), value.class) {
-                    let mut at_value = Vec::new();
-                    let mut nest = Nest {
-                        pattern: self,
-                        steps,
-                        vars: *vars as usize,
-                        frozen,
-                        egraph,
-                        types,
-                        allowed,
-                        bindings: [UNSET; VARS],
-                        scalars: [0; SCALARS],
-                        found: &mut at_value,
-                        root: usize::MAX,
-                        at: Some(value),
-                    };
-                    nest.bindings[self.query_root as usize] = Ref::new(value.class, 0);
-                    nest.step(0);
-                    found.append(&mut at_value);
-                }
-            }
             Rooting::Offset if value.offset != 0 && !constant => {
                 let allowed = |var: u32, class: Id| allowed(Id::from_raw(var), class);
                 found.extend(
                     self.plan
                         .search(egraph, [value.class], &allowed, false, &NoExterns)
                         .into_iter()
-                        .flat_map(|matched| self.complete(egraph, types, &matched, Some(value))),
+                        .flat_map(|matched| {
+                            self.complete(egraph, ctx, &matched, Some(value), pointer_width)
+                        }),
                 );
             }
             _ => {}
@@ -678,7 +487,7 @@ impl CompiledIselPattern {
                 root: value,
                 bindings,
             };
-            if self.match_types(types, &candidate) {
+            if self.match_types(egraph, ctx, &candidate, pointer_width) {
                 found.push(candidate);
             }
         }
@@ -692,46 +501,19 @@ impl CompiledIselPattern {
     fn complete(
         &self,
         egraph: &SemEGraph,
-        types: &ClassTypes,
+        ctx: &Context,
         matched: &Match,
         root: Option<Ref>,
+        pointer_width: Option<u32>,
     ) -> SmallVec<[Found; 2]> {
-        let bindings: SmallVec<[Ref; 8]> = (0..matched.bindings.len() as u32)
+        let mut bindings: SmallVec<[Ref; 8]> = (0..matched.bindings.len() as u32)
             .map(|var| {
                 matched
                     .binding(var)
                     .map_or(UNSET, |value| egraph.find(value))
             })
             .collect();
-        self.complete_bound(egraph, types, bindings, matched.scalars.clone(), root)
-    }
-
-    fn complete_bound(
-        &self,
-        egraph: &SemEGraph,
-        types: &ClassTypes,
-        mut bindings: SmallVec<[Ref; 8]>,
-        mut scalars: SmallVec<[u64; 8]>,
-        root: Option<Ref>,
-    ) -> SmallVec<[Found; 2]> {
-        // Most patterns split no offset: the bindings the search made are
-        // the match, once its immediates and types are checked.
-        if root.is_none() && self.offsets.is_empty() && self.absorbs.is_empty() {
-            let whole = !bindings.contains(&UNSET)
-                && self.immediates.iter().all(|&index| {
-                    self.immediate_ok(egraph, index as usize, bindings[index as usize])
-                });
-            let found = Found {
-                root: bindings[self.query_root as usize],
-                bindings,
-            };
-            let typed = whole
-                && match self.copy {
-                    true => self.reads_the_source(types, &found),
-                    false => self.match_types(types, &found),
-                };
-            return typed.then_some(found).into_iter().collect();
-        }
+        let mut scalars = matched.scalars.clone();
         if let Some(root) = root {
             bindings[self.root as usize] = root;
             if let Some(site) = self.offsets.iter().find(|site| site.key == self.root) {
@@ -800,9 +582,9 @@ impl CompiledIselPattern {
             })
             .filter(|found| {
                 if self.copy {
-                    self.reads_the_source(types, found)
+                    self.reads_the_source(egraph, ctx, found)
                 } else {
-                    self.match_types(types, found)
+                    self.match_types(egraph, ctx, found, pointer_width)
                 }
             })
             .collect()
@@ -860,8 +642,9 @@ impl CompiledIselPattern {
     pub(crate) fn solve_constant(
         &self,
         egraph: &SemEGraph,
-        types: &ClassTypes,
+        ctx: &Context,
         value: Ref,
+        pointer_width: Option<u32>,
     ) -> SmallVec<[Found; 2]> {
         let mut found = SmallVec::new();
         let Some(shape) = self.constant else {
@@ -952,7 +735,7 @@ impl CompiledIselPattern {
                 egraph,
                 shape.immediate as usize,
                 candidate.bindings[shape.immediate as usize],
-            ) && self.match_types(types, &candidate)
+            ) && self.match_types(egraph, ctx, &candidate, pointer_width)
             {
                 found.push(candidate);
             }
@@ -1052,14 +835,14 @@ impl CompiledIselPattern {
     /// query has already found the view and matched the width; what is left is
     /// the operand's own storage requirement, which is where every other
     /// pattern's type checking also lives.
-    fn reads_the_source(&self, types: &ClassTypes, found: &Found) -> bool {
+    fn reads_the_source(&self, egraph: &SemEGraph, ctx: &Context, found: &Found) -> bool {
         let source = found.bindings[self.root as usize].class;
-        let Some(source_ty) = types.semantic(source) else {
+        let Some(source_ty) = class_semantic_type(ctx, egraph, source) else {
             return false;
         };
         self.node_meta[self.root as usize]
             .register
-            .is_none_or(|register| register.accepts_low_view_source(source_ty))
+            .is_none_or(|register| register.accepts_low_view_source(&source_ty))
     }
 }
 
@@ -1104,7 +887,7 @@ pub(crate) fn compile_isel_pattern(
     .ok()?;
     let mut nodes: Vec<PatternNode> = Vec::new();
     let mut node_meta = Vec::new();
-    let mut memo = HashMap::default();
+    let mut memo = HashMap::new();
     let pattern_root = compile_isel_pattern_node(
         expr,
         root,
@@ -1194,24 +977,11 @@ pub(crate) fn compile_isel_pattern(
         _ => SmallVec::new(),
     };
 
-    let steps = (rooting != Rooting::Immediate && !copy)
-        .then(|| Some((steps(&query)?, query.vars, query.scalars)))
-        .flatten();
-
-    let immediates = (0..nodes.len() as u32)
-        .filter(|&index| {
-            let meta = &node_meta[index as usize];
-            meta.constraint == Some(OperandConstraint::Immediate) || meta.imm_range.is_some()
-        })
-        .collect();
-
     Some(CompiledIselPattern {
         rule_index,
         port,
         nodes,
         root: pattern_root.0,
-        immediates,
-        steps,
         plan: LazyCell::new(Box::new(move || Plan::compile(query))),
         query_root,
         root_op,
@@ -1227,114 +997,6 @@ pub(crate) fn compile_isel_pattern(
         result_register,
         copy,
     })
-}
-
-/// One search of a pattern's steps from a class, binding depth first.
-struct Nest<'a> {
-    pattern: &'a CompiledIselPattern,
-    steps: &'a [Step],
-    vars: usize,
-    frozen: &'a Frozen,
-    egraph: &'a SemEGraph,
-    types: &'a ClassTypes,
-    allowed: &'a dyn Fn(Id, Id) -> bool,
-    bindings: [Ref; VARS],
-    scalars: [u64; SCALARS],
-    found: &'a mut Vec<Found>,
-    /// The row the first step binds.
-    root: usize,
-    /// The value an offset-rooted pattern is completed at.
-    at: Option<Ref>,
-}
-
-impl Nest<'_> {
-    /// Bind `var` to `value`: a variable bound twice binds one value, and a
-    /// first binding is the caller's to refuse.
-    #[inline]
-    fn bind(&mut self, var: u32, value: Ref) -> bool {
-        let bound = self.bindings[var as usize];
-        if bound != UNSET {
-            return bound == value;
-        }
-        if !(self.allowed)(Id::from_raw(var), value.class) {
-            return false;
-        }
-        self.bindings[var as usize] = value;
-        true
-    }
-
-    fn step(&mut self, at: usize) {
-        let Some(step) = self.steps.get(at) else {
-            self.found.extend(self.pattern.complete_bound(
-                self.egraph,
-                self.types,
-                SmallVec::from_slice(&self.bindings[..self.vars]),
-                SmallVec::from_slice(&self.scalars),
-                self.at,
-            ));
-            return;
-        };
-        match step {
-            Step::Node {
-                class,
-                args,
-                commutes,
-                shape,
-                ..
-            } => {
-                let value = self.bindings[*class as usize];
-                // The root stands for its class at the offset its row is at.
-                let rows = match at {
-                    0 => self.root..self.root + 1,
-                    _ => self.frozen.rows(value.class),
-                };
-                for row in rows {
-                    if (at != 0 && self.frozen.offset[row] != value.offset)
-                        || !self.frozen.has_shape(row, *shape)
-                    {
-                        continue;
-                    }
-                    let children = self.frozen.children(row);
-                    let mut saved = [UNSET; ARGS];
-                    for (slot, &arg) in saved.iter_mut().zip(args) {
-                        *slot = self.bindings[arg as usize];
-                    }
-                    self.bindings[*class as usize] = Ref::new(value.class, self.frozen.offset[row]);
-                    let orders = 1 + usize::from(*commutes && children[0] != children[1]);
-                    for order in 0..orders {
-                        let bound = (0..args.len()).all(|operand| {
-                            let child = children[if order == 1 { 1 - operand } else { operand }];
-                            self.bind(args[operand], child)
-                        });
-                        if bound {
-                            self.step(at + 1);
-                        }
-                        for (&before, &arg) in saved.iter().zip(args) {
-                            self.bindings[arg as usize] = before;
-                        }
-                    }
-                    self.bindings[*class as usize] = value;
-                }
-            }
-            Step::Literal { class } => {
-                let PatternNode::Template(constant) = &self.pattern.nodes[*class as usize] else {
-                    return;
-                };
-                if self.egraph.const_class(constant) == Some(self.bindings[*class as usize]) {
-                    self.step(at + 1);
-                }
-            }
-            Step::Offset { key, base, scalar } => {
-                let value = self.bindings[*key as usize];
-                let saved = self.bindings[*base as usize];
-                if self.bind(*base, Ref::new(value.class, 0)) {
-                    self.scalars[*scalar as usize] = value.offset;
-                    self.step(at + 1);
-                }
-                self.bindings[*base as usize] = saved;
-            }
-        }
-    }
 }
 
 /// The shape [`CompiledIselPattern::solve_constant`] evaluates: exactly one
@@ -1375,8 +1037,8 @@ fn constant_shape(nodes: &[PatternNode], node_meta: &[PatternNodeMeta]) -> Optio
 /// operand also appears in a value position; an operand with no register or
 /// immediate constraint is read from a register.
 fn assign_demands(nodes: &[PatternNode], node_meta: &mut [PatternNodeMeta]) {
-    let mut structural = HashSet::default();
-    let mut value = HashSet::default();
+    let mut structural = HashSet::new();
+    let mut value = HashSet::new();
     for node in nodes {
         let PatternNode::Template(node) = node else {
             continue;
@@ -1753,12 +1415,6 @@ fn zero(egraph: &SemEGraph, width: u32) -> Option<Id> {
 /// complement at its carrier's width, which [`ImmRange::contains`] turns into
 /// whichever representative the field encodes.
 pub(crate) fn immediate(egraph: &SemEGraph, value: Ref) -> Option<APInt> {
-    // A constant of a carrier is its zero's offset, read without spelling it.
-    if let Some(constant) = egraph.int_const(value)
-        && let Some(width) = egraph.width(value.class)
-    {
-        return Some(signed(width, constant));
-    }
     let constant = class_int_binding(egraph, value)?;
     Some(signed(constant.width(), constant.to_u64()))
 }

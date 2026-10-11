@@ -36,4 +36,3 @@ impl Rng {
         (self.next_u64() % bound as u64) as usize
     }
 }
-pub mod fx;

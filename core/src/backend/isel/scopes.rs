@@ -81,11 +81,6 @@ impl Scopes {
         self.dependencies.reaches(node, dependency_node)
     }
 
-    /// The region holding the operation that carries `region`.
-    pub(crate) fn enclosing(&self, region: RegionId) -> Option<RegionId> {
-        self.parent.get(&region).map(|&(parent, _)| parent)
-    }
-
     /// Whether `outer` is `inner` or a region enclosing it.
     pub(crate) fn encloses(&self, outer: RegionId, inner: RegionId) -> bool {
         self.distance(inner, outer) != usize::MAX

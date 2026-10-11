@@ -26,7 +26,7 @@
 //! That is the rule [`verify_block_order`] checks, and the one selection's
 //! cover order satisfies by construction.
 
-use crate::utils::fx::HashMap;
+use std::collections::HashMap;
 
 use tir::{BlockHandle, Context, Error, OpHandle, OpId, Terminator, ValueId, utils::Rng};
 
@@ -85,8 +85,8 @@ impl Dependences {
     /// last write, and a write follows both the last write and every read since
     /// it.
     fn add_register_edges(&mut self, context: &Context, assignment: &RegAssignment) {
-        let mut written: HashMap<Resource, usize> = HashMap::default();
-        let mut read: HashMap<Resource, Vec<usize>> = HashMap::default();
+        let mut written: HashMap<Resource, usize> = HashMap::new();
+        let mut read: HashMap<Resource, Vec<usize>> = HashMap::new();
         for index in 0..self.ops.len() {
             let op = context.get_op(self.ops[index]);
             let regs = execution_regs(&op);
@@ -286,8 +286,8 @@ pub fn verify_block_order(context: &Context, block: &BlockHandle) -> Result<(), 
 /// follows the write; and one write follows the last.
 fn parameter_edges(context: &Context, ops: &[OpId]) -> Vec<Vec<usize>> {
     let mut predecessors = vec![Vec::new(); ops.len()];
-    let mut written: HashMap<ValueId, usize> = HashMap::default();
-    let mut read: HashMap<ValueId, Vec<usize>> = HashMap::default();
+    let mut written: HashMap<ValueId, usize> = HashMap::new();
+    let mut read: HashMap<ValueId, Vec<usize>> = HashMap::new();
     for (index, &op_id) in ops.iter().enumerate() {
         let op = context.get_op(op_id);
         for value in subtree_operands(context, &op) {

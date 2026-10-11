@@ -786,7 +786,6 @@ dependencies = [
  "ariadne",
  "chumsky",
  "clap",
- "libc",
  "logos",
  "tir",
  "tir-adt",

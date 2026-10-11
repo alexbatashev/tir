@@ -1,5 +1,4 @@
-use crate::utils::fx::{HashMap, HashSet};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use super::{
     BlockId, Context, ControlDefinition, ControlId, ControlOutcome, ControlPortId, Edge, Edges,
@@ -110,9 +109,9 @@ pub(crate) fn emit_recovery(
     recovery: &RecoveryPlan,
 ) -> Result<(), RecoveryError> {
     let mut prepared = Prepared::analyze(context, region, edges, recovery)?;
-    let mut constants = HashMap::default();
-    let mut ambiguous_facts = HashSet::default();
-    let mut projected_types = HashMap::default();
+    let mut constants = HashMap::new();
+    let mut ambiguous_facts = HashSet::new();
+    let mut projected_types = HashMap::new();
     for (&value, &ty) in &recovery.control_types {
         let mapped = edges.value(value);
         if projected_types
@@ -179,15 +178,15 @@ pub(crate) fn emit_recovery(
         recovery,
         prepared,
         fragments: Vec::new(),
-        computations: HashMap::default(),
-        controls: HashMap::default(),
-        definitions: HashMap::default(),
-        cycles: HashMap::default(),
+        computations: HashMap::new(),
+        controls: HashMap::new(),
+        definitions: HashMap::new(),
+        cycles: HashMap::new(),
         constants,
         ambiguous_facts,
         literals: hoisted.iter().copied().collect(),
         theta_regions,
-        lost_direct: HashSet::default(),
+        lost_direct: HashSet::new(),
     };
     let entry = finish.new_fragment(hoisted);
     let point = Point {
@@ -248,7 +247,7 @@ impl Finish<'_> {
     }
 
     fn canonical(&self, point: Point) -> Route {
-        let mut facts = HashMap::default();
+        let mut facts = HashMap::new();
         for entry in self
             .prepared
             .entry_facts
@@ -267,7 +266,7 @@ impl Finish<'_> {
             point,
             bindings: Vec::new(),
             facts,
-            control_facts: HashMap::default(),
+            control_facts: HashMap::new(),
             skip_control: None,
             // A new fragment starts a new transfer, regardless of its entries.
             loops_back: false,
@@ -295,7 +294,7 @@ impl Finish<'_> {
     }
 
     fn fact(&self, route: &Route, value: ValueId) -> Option<ControlOutcome> {
-        self.fact_with(route, value, &mut HashSet::default())
+        self.fact_with(route, value, &mut HashSet::new())
     }
 
     fn fact_with(
@@ -521,7 +520,7 @@ impl Finish<'_> {
     }
 
     fn advance(&self, route: &mut Route) -> Result<Destination, PassError> {
-        let mut seen = HashSet::default();
+        let mut seen = HashSet::new();
         loop {
             if let Some(&control) = self.prepared.control_at.get(&route.point) {
                 if route.skip_control == Some(control) {
@@ -1049,7 +1048,7 @@ impl Finish<'_> {
             let mut defined: HashSet<ValueId> = if index == root.0 {
                 ports.iter().copied().collect()
             } else {
-                HashSet::default()
+                HashSet::new()
             };
             let mut read = BTreeSet::new();
             for &op in &fragment.ops {
@@ -1166,8 +1165,8 @@ impl Finish<'_> {
             demands,
             defs,
             incoming,
-            aliases: HashMap::default(),
-            parameters: HashMap::default(),
+            aliases: HashMap::new(),
+            parameters: HashMap::new(),
             blocks: Vec::new(),
             available,
         })
@@ -1213,7 +1212,7 @@ impl Finish<'_> {
     }
 
     fn discard_unused_literals(&mut self, ssa: &Ssa, root: Node) -> Result<(), PassError> {
-        let mut used = HashSet::default();
+        let mut used = HashSet::new();
         for fragment in &self.fragments {
             for &op in &fragment.ops {
                 if !self.literals.contains(&op) {
@@ -1393,7 +1392,7 @@ impl Finish<'_> {
             }
         }
         let mut groups = Vec::new();
-        let mut seen = HashSet::default();
+        let mut seen = HashSet::new();
         for (index, predecessor) in previous.iter().enumerate() {
             if predecessor.is_some() {
                 continue;
