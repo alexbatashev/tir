@@ -365,6 +365,36 @@ impl Census {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct OpRow<'a> {
+    chunk: &'a Chunk<3, 3, Attrs>,
+    row: usize,
+}
+
+impl<'a> OpRow<'a> {
+    pub(crate) fn name(self) -> OpNameId {
+        OpNameId::new(self.chunk.cell(op::NAME, self.row))
+    }
+
+    pub(crate) fn operands(self) -> impl ExactSizeIterator<Item = ValueId> + 'a {
+        let cells = self.chunk.seg(op::OPERAND).of(self.row);
+        cells.iter().map(|raw| ValueId::from_number(*raw))
+    }
+
+    pub(crate) fn results(self) -> impl ExactSizeIterator<Item = ValueId> + 'a {
+        let cells = self.chunk.seg(op::RESULT).of(self.row);
+        cells.iter().map(|raw| ValueId::from_number(*raw))
+    }
+
+    pub(crate) fn owns_regions(self) -> bool {
+        !self.chunk.seg(op::REGION).of(self.row).is_empty()
+    }
+
+    pub(crate) fn attrs(self) -> &'a [NamedAttribute] {
+        self.chunk.extra.get(self.row)
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Db {
     ops: Ops,
@@ -739,8 +769,23 @@ impl Db {
     // Reads.
 
     pub(crate) fn op_name(&self, id: OpId) -> OpNameId {
+        self.op_cells(id).name()
+    }
+
+    pub(crate) fn op_cells(&self, id: OpId) -> OpRow<'_> {
         let (chunk, row) = self.op(id).expect("live operation");
-        OpNameId::new(chunk.cell(op::NAME, row))
+        OpRow { chunk, row }
+    }
+
+    pub(crate) fn value_type(&self, id: ValueId) -> TypeId {
+        let chunk = self.values.chunk(chunk_of(id.number()));
+        TypeId::from_number(chunk.cell(value::TYPE, row_of(id.number())))
+    }
+
+    pub(crate) fn value_def(&self, id: ValueId) -> Option<OpId> {
+        let chunk = self.values.chunk(chunk_of(id.number()));
+        let def = OpId::new(chunk.cell(value::DEF, row_of(id.number())));
+        (def != OpId::ARGUMENT).then_some(def)
     }
 
     pub(crate) fn operands(&self, id: OpId) -> ValueIds {
@@ -1232,6 +1277,57 @@ impl Db {
             regions.extend(self.regions_raw(op).iter().map(|raw| RegionId::new(*raw)));
         }
         regions
+    }
+
+    fn region_of_op(&self, op: OpId) -> Option<RegionId> {
+        match self.op_parent(op)? {
+            Parent::Region(region) => Some(region),
+            Parent::Block(block) => self.block_parent(block),
+        }
+    }
+
+    pub(crate) fn sibling_read(
+        &self,
+        reader: OpId,
+        value: ValueId,
+        within: Option<RegionId>,
+    ) -> Option<(OpId, OpId)> {
+        let producer = self.value(value)?.defining_op()?;
+        let home = self.region_of_op(producer)?;
+        if within.is_some_and(|region| region != home) {
+            return None;
+        }
+        let mut reader = reader;
+        loop {
+            let region = self.region_of_op(reader)?;
+            if region == home {
+                return Some((reader, producer));
+            }
+            reader = self.region_parent_if_live(region)?;
+        }
+    }
+
+    pub(crate) fn sibling_reads(&mut self, root: RegionId, nested: bool) -> Vec<(OpId, OpId)> {
+        let within = (!nested).then_some(root);
+        let mut ops = Vec::new();
+        self.region_op_ids(root, &mut ops);
+        let ops = self.subtree(ops);
+        let mut pairs = Vec::with_capacity(2 * ops.len());
+        for op in ops {
+            let reader = OpId::new(op);
+            let Some((chunk, row)) = self.op(reader) else {
+                continue;
+            };
+            let operands = chunk.seg(op::OPERAND).of(row).iter();
+            let results = chunk.seg(op::REGION).of(row).iter().flat_map(|region| {
+                let (chunk, row) = self.region(RegionId::new(*region));
+                chunk.seg(region::RESULT).of(row).iter()
+            });
+            pairs.extend(operands.chain(results).filter_map(|value| {
+                self.sibling_read(reader, ValueId::from_number(*value), within)
+            }));
+        }
+        pairs
     }
 
     // Edits.

@@ -1,10 +1,12 @@
+use std::sync::Arc;
+
 use smallvec::{SmallVec, smallvec};
 use tir_egraph::{Atom, ColumnId, Externs, Guard, HeadOp, LabelFill, Plan, Query, Source};
 use tir_egraph::{ClassId as Id, Engine, Label as ENode};
 use tir_relational::{Cmp, Expr};
 
-use super::seed::Seeded;
 use super::state;
+use crate::rewrite::{RuleSet, Seeded};
 use crate::utils::APInt;
 use crate::{
     ConstantFold, Context, Operation, TypeId, ValueId,
@@ -49,7 +51,7 @@ pub struct Interpretation {
 impl Externs<Node> for Interpretation {
     fn call(&self, id: u32, terms: &[&Node], args: &[u64], out: &mut [u64]) -> bool {
         match id {
-            call::FOLD => self.fold(terms, args, out),
+            call::FOLD => fold_constant(&self.context, terms, args, out),
             call::DECIDED_ARM => self.decided_arm(terms, args, out),
             call::INT_WIDTH_OF => match class_int_width_of(&self.context, args[0] as u32) {
                 Some(width) => {
@@ -87,46 +89,49 @@ impl Externs<Node> for Interpretation {
     }
 }
 
-impl Interpretation {
-    /// The value the op `terms[0]` computes from the constants `args`, each
-    /// read at its operand's width, as value, width and result type.
-    fn fold(&self, terms: &[&Node], args: &[u64], out: &mut [u64]) -> bool {
-        let [folded] = terms else {
-            return false;
-        };
-        let (Prov::Op(op), Some(ty)) = (folded.prov, folded.op_type()) else {
-            return false;
-        };
-        // A folded class materializes as `builtin.constant`, which only holds an
-        // integer, so an op computing anything else (an address, say) must keep
-        // its own form however constant its operands are.
-        if !self.context.has_operation(op) || !produces_integer(&self.context, op) {
-            return false;
-        }
-        let instance = self.context.get_op(op);
-        let Some(values): Option<Vec<Value>> = instance
-            .operands()
-            .iter()
-            .zip(args)
-            .map(|(&operand, &value)| {
-                let ty = self.context.get_value(operand).ty();
-                crate::sem::egraph::type_width(&self.context, ty)
-                    .map(|width| Value::Int(APInt::new(width, value)))
-            })
-            .collect()
-        else {
-            return false;
-        };
-        let Some(Value::Int(value)) = instance
-            .as_interface::<dyn ConstantFold>()
-            .and_then(|folder| folder.fold(&values))
-        else {
-            return false;
-        };
-        out.copy_from_slice(&[value.to_u64(), value.width() as u64, ty.number() as u64]);
-        true
+pub(crate) fn fold_constant(
+    context: &Context,
+    terms: &[&Node],
+    args: &[u64],
+    out: &mut [u64],
+) -> bool {
+    let [folded] = terms else {
+        return false;
+    };
+    let (Prov::Op(op), Some(ty)) = (folded.prov, folded.op_type()) else {
+        return false;
+    };
+    // A folded class materializes as `builtin.constant`, which only holds an
+    // integer, so an op computing anything else (an address, say) must keep
+    // its own form however constant its operands are.
+    if !context.has_operation(op) || !produces_integer(context, op) {
+        return false;
     }
+    let instance = context.get_op(op);
+    let Some(values): Option<Vec<Value>> = instance
+        .operands()
+        .iter()
+        .zip(args)
+        .map(|(&operand, &value)| {
+            let ty = context.get_value(operand).ty();
+            crate::sem::egraph::type_width(context, ty)
+                .map(|width| Value::Int(APInt::new(width, value)))
+        })
+        .collect()
+    else {
+        return false;
+    };
+    let Some(Value::Int(value)) = instance
+        .as_interface::<dyn ConstantFold>()
+        .and_then(|folder| folder.fold(&values))
+    else {
+        return false;
+    };
+    out.copy_from_slice(&[value.to_u64(), value.width() as u64, ty.number() as u64]);
+    true
+}
 
+impl Interpretation {
     /// Which arm of the gate `terms[0]` the decision `args[0]` selects: the arm
     /// whose case value it equals at the decision's width, or the default when
     /// none does. `args[1]` is how many arms the rule's shape has.
@@ -162,45 +167,100 @@ impl Interpretation {
 pub type EmitFn =
     Box<dyn Fn(&Context, &[ValueId], TypeId) -> (Box<dyn crate::Operation>, ValueId) + Send + Sync>;
 
+/// The generated rules and their emitters, compiled once per pass and
+/// shared by every function the pass runs on.
 pub struct Ruleset {
-    pub rewrites: Vec<tir_egraph::Rule<Node>>,
-    pub emits: Vec<Option<EmitFn>>,
-    /// What the rules' guards ask the IR.
-    pub interpretation: Interpretation,
+    rewrites: Vec<Arc<tir_egraph::Rule<Node>>>,
+    emits: Vec<Option<EmitFn>>,
 }
 
 impl Ruleset {
-    fn new(context: &Context, pointer_width: Option<u32>) -> Self {
+    fn new() -> Self {
         Self {
             rewrites: Vec::new(),
             emits: Vec::new(),
-            interpretation: Interpretation {
-                context: context.clone(),
-                pointer_width,
-            },
         }
     }
 
     fn push_query(&mut self, rule: tir_egraph::Rule<Node>, emit: Option<EmitFn>) {
-        self.rewrites.push(rule);
+        self.rewrites.push(Arc::new(rule));
         self.emits.push(emit);
     }
 }
 
-pub fn builtin_ruleset(context: &Context, seeded: &Seeded) -> Ruleset {
+/// What the pass compiles once and every function saturates with: the
+/// generated rules, and each rule a function's graph called for, so a rule
+/// keeps one plan, and the engine's cache of it, for the life of the pass.
+#[derive(Clone, Default)]
+pub struct Shared {
+    generated: Option<Arc<Ruleset>>,
+    folds: Vec<(Node, Arc<tir_egraph::Rule<Node>>)>,
+    gammas: Vec<(usize, Arc<tir_egraph::Rule<Node>>)>,
+    fixed: Vec<Arc<tir_egraph::Rule<Node>>>,
+}
+
+/// The rules one function saturates with: the shared generated ones first,
+/// then the ones its own graph calls for.
+pub struct Rules {
+    generated: Arc<Ruleset>,
+    /// Every rule, in the order their heads apply, and what the rules'
+    /// guards ask the IR.
+    pub set: RuleSet,
+}
+
+impl Rules {
+    /// The emitter of the `index`-th rule, which only a generated rule has.
+    pub fn emit(&self, index: usize) -> Option<&EmitFn> {
+        self.generated.emits.get(index)?.as_ref()
+    }
+}
+
+pub fn builtin_ruleset(context: &Context, seeded: &Seeded, shared: &mut Shared) -> Rules {
     let eg = &seeded.eg;
-    let mut ruleset = generated_ruleset(context, seeded.pointer_width);
+    let generated = shared
+        .generated
+        .get_or_insert_with(|| Arc::new(generated_ruleset(context)))
+        .clone();
+    let mut rules = generated.rewrites.clone();
     for template in fold_templates(eg) {
-        ruleset.push_query(const_fold(&template), None);
+        let known = shared.folds.iter().position(|(seen, _)| {
+            seen.matches(&template) && seen.children().len() == template.children().len()
+        });
+        let known = known.unwrap_or_else(|| {
+            let rule = Arc::new(const_fold(&template));
+            shared.folds.push((template, rule));
+            shared.folds.len() - 1
+        });
+        rules.push(shared.folds[known].1.clone());
     }
     for arity in gamma_arities(eg) {
-        ruleset.push_query(decided_gamma(arity), None);
+        let known = shared.gammas.iter().position(|&(seen, _)| seen == arity);
+        let known = known.unwrap_or_else(|| {
+            shared.gammas.push((arity, Arc::new(decided_gamma(arity))));
+            shared.gammas.len() - 1
+        });
+        rules.push(shared.gammas[known].1.clone());
     }
-    for (predicate, complement) in COMPLEMENTS {
-        ruleset.push_query(cmp_complement(context, predicate, complement), None);
+    if shared.fixed.is_empty() {
+        for (predicate, complement) in COMPLEMENTS {
+            let rule = cmp_complement(context, predicate, complement);
+            shared.fixed.push(Arc::new(rule));
+        }
+        shared.fixed.push(Arc::new(state::forward_load()));
     }
-    ruleset.push_query(state::forward_load(), None);
-    ruleset
+    rules.extend(shared.fixed.iter().cloned());
+    let interpretation = Interpretation {
+        context: context.clone(),
+        pointer_width: seeded.pointer_width,
+    };
+    Rules {
+        generated,
+        set: RuleSet {
+            rules,
+            tables: Vec::new(),
+            externs: Box::new(interpretation),
+        },
+    }
 }
 
 fn emit_sub() -> EmitFn {
@@ -316,7 +376,7 @@ fn fold_templates(eg: &Engine<Node>) -> Vec<Node> {
 /// An op every operand of which is a known constant is that constant. What the
 /// value is comes from the op's own [`ConstantFold`]; what the rule reads is the
 /// matched row and the constants its operands are, and nothing else.
-fn const_fold(template: &Node) -> tir_egraph::Rule<Node> {
+pub(crate) fn const_fold(template: &Node) -> tir_egraph::Rule<Node> {
     let arity = template.children().len() as u32;
     // Variables: 0 the root, 1..=arity its operands, then the folded class.
     let operands: SmallVec<[u32; 4]> = (1..=arity).collect();
@@ -473,7 +533,7 @@ fn gate_cases(context: &Context, node: &Node) -> Option<(Vec<Option<i64>>, u32)>
 
 /// Each comparison predicate paired with its negation at the same operand order:
 /// `!(a < b)` is `a >= b`. Both directions, so knowing either settles the other.
-const COMPLEMENTS: [(Predicate, Predicate); 10] = [
+pub(crate) const COMPLEMENTS: [(Predicate, Predicate); 10] = [
     (Predicate::Eq, Predicate::Ne),
     (Predicate::Ne, Predicate::Eq),
     (Predicate::Slt, Predicate::Sge),

@@ -8,7 +8,7 @@
 ; CHECK-NEXT: ret
 ; CHECK-LABEL: load_before_store:
 ; CHECK-NEXT: movzx eax, word ptr [rdi + 2*rsi]
-; CHECK-NEXT: mov [rdi + 2*rsi], dx
+; CHECK-NEXT: mov [rdi + 2*rsi + 0], dx
 ; CHECK-NEXT: ret
 ; CHECK-LABEL: shared_load:
 ; CHECK: movzx eax, word ptr [rdi]

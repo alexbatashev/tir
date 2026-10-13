@@ -1,11 +1,8 @@
-// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
+// RUN: tir opt --pass restructure-nodes,instcombine-nodes %s | tir mc --march=x86_64 --stage=isel | filecheck %s
 
-// The class both gates test carries no IR type — a rewrite introduced it — so
-// the width a tile reads it at is the only thing that pins it. `mov r8, imm8`
-// writes one byte and leaves the rest of the register whatever the last writer
-// put there, so a reader of the whole 32-bit register (`movzxd`, `cmp r64,
-// imm32`) may not read what it defines: the materializer and every whole read
-// of what it materialized have to name one width.
+// Both gates test constants. The compares fold, so each gate is decided and
+// only the arm it takes is selected: no constant is materialized, at any
+// width, and nothing is compared.
 
 module {
   %fn_clip = func.func @clip(%v: !i32) -> !i32 {
@@ -40,8 +37,8 @@ module {
   module_end
 }
 
-// CHECK: x86_64.mov_imm {dst = %[[Z:[0-9]+]]:GPR, imm = 0}
-// CHECK-NEXT: x86_64.cmp {dst = %[[Z]]:GPR, src = %[[Z]]:GPR}
-// CHECK: x86_64.cmp_imm {dst = %[[Z]]:GPR, imm = 1}
-// CHECK-NOT: x86_64.mov_imm8
-// CHECK-NOT: x86_64.movzxd
+// CHECK-NOT: x86_64.mov_imm
+// CHECK-NOT: x86_64.cmp
+// CHECK: x86_64.and_imm32 {dst = %[[LOW:[0-9]+]]:GPR32, dst_tied = %{{[0-9]+}}:GPR, imm = 65535}
+// CHECK-NEXT: x86_64.and_imm32 {dst = %[[BYTE:[0-9]+]]:GPR32, dst_tied = %[[LOW]]:GPR32, imm = 255}
+// CHECK-NEXT: asm.vret %[[BYTE]]

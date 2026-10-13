@@ -41,11 +41,11 @@ define i32 @choose(i32 %a, i32 %b, i32 %if_true, i32 %if_false) {
 ; RV64-NEXT: riscv.divuw {rd = %{{[0-9]+}}:GPR, rs1 = %[[PX]]:GPR, rs2 = %[[QX]]:GPR}
 
 ; ARM64-LABEL: asm.symbol {name = "eq8", arg_regs = [%[[A:[0-9]+]]:GPR, %[[B:[0-9]+]]:GPR]}
-; ARM64: arm64.movz {rd = %[[M:[0-9]+]]:GPR, imm = 255}
-; ARM64-NEXT: arm64.and {rd = %[[AX:[0-9]+]]:GPR, rn = %[[A]]:GPR, rm = %[[M]]:GPR}
-; ARM64-NEXT: arm64.and {rd = %[[BX:[0-9]+]]:GPR, rn = %[[B]]:GPR, rm = %[[M]]:GPR}
-; ARM64-NEXT: arm64.eor {rd = %[[D:[0-9]+]]:GPR, rn = %[[AX]]:GPR, rm = %[[BX]]:GPR}
-; ARM64-NEXT: arm64.cmp_imm {rn = %[[D]]:GPR, imm = 1}
+; ARM64: arm64.movz {rd = %[[AM:[0-9]+]]:GPR, imm = 255}
+; ARM64-NEXT: arm64.and {rd = %[[AX:[0-9]+]]:GPR, rn = %[[A]]:GPR, rm = %[[AM]]:GPR}
+; ARM64-NEXT: arm64.movz {rd = %[[BM:[0-9]+]]:GPR, imm = 255}
+; ARM64-NEXT: arm64.and {rd = %[[BX:[0-9]+]]:GPR, rn = %[[B]]:GPR, rm = %[[BM]]:GPR}
+; ARM64-NEXT: arm64.cmp {rn = %[[AX]]:GPR, rm = %[[BX]]:GPR}
 ; ARM64-LABEL: asm.symbol {name = "shr8"
 ; ARM64: arm64.lsrv_w
 ; ARM64-LABEL: asm.symbol {name = "udiv8"

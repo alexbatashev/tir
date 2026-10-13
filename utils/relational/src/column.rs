@@ -34,13 +34,27 @@ pub enum Join {
     /// the id rather than a claim about it, which the client already forces
     /// every equated id to agree on.
     First,
+    /// The greater value wins: a bound that only rises, as a rule's head
+    /// raises it. A guard that compares it holds of the value a round read,
+    /// so the rules that raise such a column are saturated before any rule
+    /// that compares it.
+    Max,
+    /// The lesser value wins; see [`Join::Max`].
+    Min,
+    /// The values add up: a count of what a client says once each of the
+    /// ids that end up one. Saying a value twice counts it twice, so no
+    /// rule raises such a column.
+    Sum,
 }
 
-impl<V: Eq> Fact<V> {
+impl<V: Ord + std::ops::Add<Output = V>> Fact<V> {
     pub fn join(self, other: Self, how: Join) -> Self {
         match (self, other, how) {
             (Fact::Known(a), _, Join::First) => Fact::Known(a),
             (Fact::Known(a), Fact::Known(b), Join::Agree) if a == b => Fact::Known(a),
+            (Fact::Known(a), Fact::Known(b), Join::Max) => Fact::Known(a.max(b)),
+            (Fact::Known(a), Fact::Known(b), Join::Min) => Fact::Known(a.min(b)),
+            (Fact::Known(a), Fact::Known(b), Join::Sum) => Fact::Known(a + b),
             _ => Fact::Conflict,
         }
     }
@@ -77,7 +91,7 @@ impl<V> Column<V> {
     }
 }
 
-impl<V: Copy + Eq + Hash> Column<V> {
+impl<V: Copy + Ord + Hash + std::ops::Add<Output = V>> Column<V> {
     /// Join `value` onto what `key` is known to be, stamping the entry with
     /// `epoch`. Reports whether the column moved.
     pub fn raise(&mut self, key: u32, value: V, epoch: u32) -> bool {

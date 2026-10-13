@@ -68,6 +68,13 @@ impl Term {
 }
 
 impl Label for Term {
+    type Names = ();
+    type SortKey = (String, usize, u8, Option<u64>);
+
+    fn sort_key(&self, _: &()) -> Self::SortKey {
+        (self.op.clone(), self.children.len(), self.width, self.value)
+    }
+
     fn children(&self) -> &[ClassId] {
         &self.children
     }

@@ -1,4 +1,5 @@
-//! The query IR: atoms over a database's tables and lattice columns, guards
+//! The query IR: atoms over a database's tables, lattice columns and client
+//! tables, guards
 //! over the words a match binds, and the host a search asks for what only the
 //! client knows.
 
@@ -57,8 +58,15 @@ impl Expr {
         })
     }
 
+    pub(super) fn lone(&self) -> Option<Scalar> {
+        match self {
+            Expr::Scalar(slot) => Some(*slot),
+            _ => None,
+        }
+    }
+
     /// Whether every scalar the expression reads is `known`.
-    fn ready(&self, known: &[bool]) -> bool {
+    pub(super) fn ready(&self, known: &[bool]) -> bool {
         match self {
             Expr::Lit(_) => true,
             Expr::Scalar(slot) => known[*slot as usize],
@@ -99,33 +107,64 @@ pub enum Atom {
     Rows(Rows),
     Lattice(Lattice),
     Place(Place),
+    Words(Tuples),
 }
 
 impl Atom {
     /// The variable this atom is looked up under: a row atom's value, a
-    /// lattice or place atom's key.
-    pub fn key(&self) -> Var {
+    /// lattice or place atom's key. A client table has rows of words alone.
+    pub fn key(&self) -> Option<Var> {
         match self {
-            Atom::Rows(rows) => rows.value(),
-            Atom::Lattice(lattice) => lattice.key,
-            Atom::Place(place) => place.key,
+            Atom::Rows(rows) => Some(rows.value()),
+            Atom::Lattice(lattice) => Some(lattice.key),
+            Atom::Place(place) => Some(place.key),
+            Atom::Words(_) => None,
         }
     }
 
-    /// The scalar this atom binds.
-    pub(crate) fn writes(&self) -> Option<Scalar> {
+    /// The scalars this atom binds.
+    pub(crate) fn writes(&self) -> SmallVec<[Scalar; 4]> {
         match self {
-            Atom::Rows(rows) => rows.tag,
+            Atom::Rows(rows) => rows.tag.into_iter().chain(rows.cell).collect(),
             Atom::Lattice(lattice) => match lattice.out {
-                Out::Word(slot) => Some(slot),
-                Out::In(_) | Out::Host(_) => None,
+                Out::Word(slot) => SmallVec::from_slice(&[slot]),
+                Out::In(_) | Out::Host(_) => SmallVec::new(),
             },
             Atom::Place(place) => match place.read {
-                Read::Offset { offset, .. } | Read::Pinned { offset } => Some(offset),
-                Read::Width { width } => Some(width),
-                Read::Conflicted => None,
+                Read::Offset { offset, .. } | Read::Pinned { offset } => {
+                    SmallVec::from_slice(&[offset])
+                }
+                Read::Width { width } => SmallVec::from_slice(&[width]),
+                Read::Conflicted => SmallVec::new(),
             },
+            Atom::Words(tuples) => tuples.terms.iter().filter_map(Expr::lone).collect(),
         }
+    }
+}
+
+/// Rows of the client tables `table` resolves to (see
+/// [`Database::add_words`](crate::Database::add_words)), one term per
+/// column, at most 32. A term that is a lone scalar nothing has bound when
+/// the atom is reached is bound to the row's cell. Any other term is
+/// evaluated, and the row must hold its value in that column: a value no
+/// cell is wide enough for is in no row. So an atom
+/// ranges over the rows that agree with what the match has bound, tables in
+/// the order resolved and rows in the order the client added them.
+///
+/// Placed once its other terms can be evaluated and no guard or atom but
+/// another of these is left to bind a lone scalar it reads.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Tuples {
+    pub table: Param,
+    pub terms: Vec<Expr>,
+}
+
+impl Tuples {
+    pub(super) fn keys(&self, known: &[bool]) -> u32 {
+        let ready = |column: &usize| self.terms[*column].ready(known);
+        (0..self.terms.len())
+            .filter(ready)
+            .fold(0, |keys, column| keys | 1 << column)
     }
 }
 
@@ -144,6 +183,9 @@ pub struct Rows {
     pub terms: SmallVec<[Term; 6]>,
     /// Binds the row's tag.
     pub tag: Option<Scalar>,
+    /// Binds the row's selected cell, written like the tag: whatever the
+    /// scalar held before is not compared with it.
+    pub cell: Option<Scalar>,
     pub swap: Option<Swap>,
 }
 
@@ -305,15 +347,27 @@ pub struct Nested {
 }
 
 /// What a parameter resolves to: for a row atom's selection, tables in the
-/// order first met and each table's cells ascending; for a lattice atom's
-/// [`Out::In`], cells ascending. Resolutions only grow.
+/// client's order and each table's cells ascending; for a client table
+/// atom, the client tables' slots, with no cells; for a lattice atom's
+/// [`Out::In`], cells in any order. Resolutions only grow: a table's cells
+/// at the end, a table anywhere.
 #[derive(Clone, Debug, Default)]
 pub struct Resolution {
     pub tables: SmallVec<[(u32, SmallVec<[u32; 4]>); 2]>,
+    /// Per table of `tables`, its cells in the order a scan reads them.
+    /// Empty when no table's is anything but ascending.
+    pub scans: SmallVec<[SmallVec<[u32; 4]>; 2]>,
     pub cells: SmallVec<[u32; 4]>,
 }
 
 impl Resolution {
+    pub(crate) fn scan(&self, position: usize) -> &[u32] {
+        match self.scans.get(position) {
+            Some(scan) => scan,
+            None => &self.tables[position].1,
+        }
+    }
+
     /// The cells listed for `table`.
     pub(crate) fn cells_of(&self, table: u32) -> &[u32] {
         let found = self.tables.iter().find(|(known, _)| *known == table);
@@ -321,20 +375,25 @@ impl Resolution {
     }
 }
 
-/// What a search asks its client.
-pub trait Host {
-    /// Grows whenever some parameter's resolution may have grown.
-    fn version(&self) -> u64;
-    /// Extend `out` by what `param` resolves to among what appeared since
-    /// version `since` (`None`: from scratch, into an empty `out`). Appending
-    /// must keep the order a from-scratch resolution would give.
-    fn resolve(&self, param: Param, since: Option<u64>, out: &mut Resolution);
+/// What a search asks its client while it runs over rows: the client's
+/// functions, with what the plan's parameters resolve to already read.
+pub trait Calls {
     /// A guard's host function over words. Failing fails the match.
     fn call(&self, id: ExternId, args: &[u64], out: &mut [u64]) -> bool;
     /// Whether an [`Out::Host`] atom holds of `reference`, which is canonical.
     fn accepts(&self, _id: ExternId, _reference: Ref) -> bool {
         false
     }
+}
+
+/// What a search asks its client.
+pub trait Host: Calls {
+    /// Grows whenever some parameter's resolution may have grown.
+    fn version(&self) -> u64;
+    /// Extend `out` by what `param` resolves to among what appeared since
+    /// version `since` (`None`: from scratch, into an empty `out`), leaving
+    /// the order a from-scratch resolution would give.
+    fn resolve(&self, param: Param, since: Option<u64>, out: &mut Resolution);
     /// Whether `param` resolves to nothing, when the host can tell without
     /// resolving it: a plan reading no table is settled before it gets a
     /// cache.

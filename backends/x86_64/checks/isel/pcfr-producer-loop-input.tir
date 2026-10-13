@@ -22,5 +22,5 @@ module {
 // CHECK: x86_64.mov_imm {dst = %[[TEN:[0-9]+]]:GPR, imm = 10}
 // CHECK: asm.vbr %{{[0-9]+}} ^[[HEAD:bb[0-9]+]]
 // CHECK: ^[[HEAD]](%[[X:[0-9]+]]: !x86_64.GPR):
-// CHECK: x86_64.cmp {dst = %[[X]]:GPR, src = %[[TEN]]:GPR}
+// CHECK: x86_64.cmp_imm {dst = %[[X]]:GPR, imm = 10}
 // CHECK: asm.vbr %[[TEN]] ^[[HEAD]]

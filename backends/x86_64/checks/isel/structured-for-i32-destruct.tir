@@ -30,5 +30,5 @@ module {data_layout = #data_layout} {
 // The body advances it 32 bits wide; the accumulator's tile sits beside it, as
 // no dependence orders the two.
 // CHECK: x86_64.lea_base_disp
-// CHECK-NEXT: x86_64.add32 {dst = %{{[0-9]+}}:GPR32, dst_tied = %[[IV]]:GPR32, src = %{{[0-9]+}}:GPR}
+// CHECK-NEXT: x86_64.add32 {dst = %{{[0-9]+}}:GPR32, dst_tied = %{{[0-9]+}}:GPR, src = %[[IV]]:GPR32}
 // CHECK-NOT: scf.

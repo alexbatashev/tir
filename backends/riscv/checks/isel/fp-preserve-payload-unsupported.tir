@@ -9,4 +9,4 @@ module {
   module_end
 }
 
-// CHECK: missing atomic materializer rule for semantic kind FPEffect
+// CHECK: invalid rule set: fp.add has no instruction: %{{[0-9]+}}, %{{[0-9]+}} = fp.add %{{[0-9]+}}, %{{[0-9]+}} state(%{{[0-9]+}}) {semantics = {exceptions = \"flags\", nan = \"preserve_payload\"}} : !f64

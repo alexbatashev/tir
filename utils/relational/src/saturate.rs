@@ -3,14 +3,15 @@
 //! round narrows itself by.
 
 use std::collections::hash_map::Entry;
+use std::sync::{Mutex, OnceLock};
 
 use smallvec::SmallVec;
 
 use crate::FxHashMap;
-use crate::db::SpaceId;
-use crate::query::{Atom, Host, Matches, Param, Plan, PlanCache, Unchecked};
-use crate::rule::{Client, Head, Rule, apply};
-use crate::telemetry::{RoundStats, Timer, apply_rule, counting, register_rules};
+use crate::db::{Core, Groups, SpaceId};
+use crate::query::{Atom, Calls, Host, Matches, Param, Plan, PlanCache, Prepared, Unchecked};
+use crate::rule::{Batch, Client, Head, Rule, apply};
+use crate::telemetry::{RoundStats, Timer, count_rule, register_rules};
 use crate::trace_enabled;
 
 /// What a driver asks its client on top of a head's [`Client`].
@@ -21,6 +22,15 @@ pub trait Saturate<C, const S: usize>: Client<C, S> {
     fn version(&self) -> u64;
     /// The host of rule `rule`'s plan.
     fn host(&self, rule: usize) -> impl Host + '_;
+    /// What a search calls of [`Self::host`] while it runs, as several
+    /// threads may at once.
+    type Shared<'a>: Calls + Send + Sync
+    where
+        Self: 'a;
+    /// The host of rule `rule`'s plan for a search another thread runs.
+    /// `None`, for a host that reads what is bound to one thread, keeps the
+    /// rule's searches on the driver's.
+    fn shared(&self, rule: usize) -> Option<Self::Shared<'_>>;
     /// Rule `rule`'s head. Asked for once per saturation, at the rule's first
     /// match: most rules of a set never match.
     fn head(&self, rule: usize) -> Vec<Head>;
@@ -34,12 +44,14 @@ pub trait Saturate<C, const S: usize>: Client<C, S> {
     fn size(&self) -> usize;
 }
 
+const RULE_SETS: usize = 4;
+
 /// What a client keeps for its saturations: per plan, its search cache, and
-/// which rules a round visits for the rule set last saturated with.
+/// which rules a round visits for the rule sets last saturated with.
 #[derive(Default)]
 pub struct Caches {
     plans: FxHashMap<u64, PlanCache>,
-    index: Option<RuleIndex>,
+    indexes: Vec<RuleIndex>,
 }
 
 impl Caches {
@@ -47,9 +59,10 @@ impl Caches {
     /// plan has no match. A plan the host can tell has none gets no cache;
     /// `blocked` remembers the selection that told, to ask about first next
     /// time.
-    fn refreshed<H: Host + ?Sized>(
+    fn refreshed<C, const S: usize, H: Host + ?Sized>(
         &mut self,
         plan: &Plan,
+        db: &Core<C, S>,
         host: &H,
         blocked: &mut Option<Param>,
     ) -> Option<&mut PlanCache> {
@@ -67,13 +80,18 @@ impl Caches {
                 None => cache.insert(PlanCache::default()),
             },
         };
-        plan.refresh(host, cache).then_some(cache)
+        plan.refresh(db, host, cache).then_some(cache)
     }
 
     /// The cache of `plan`, brought up to `host`'s version, or `None` when the
     /// plan has no match.
-    pub fn plan<H: Host + ?Sized>(&mut self, plan: &Plan, host: &H) -> Option<&mut PlanCache> {
-        self.refreshed(plan, host, &mut None)
+    pub fn plan<C, const S: usize, H: Host + ?Sized>(
+        &mut self,
+        plan: &Plan,
+        db: &Core<C, S>,
+        host: &H,
+    ) -> Option<&mut PlanCache> {
+        self.refreshed(plan, db, host, &mut None)
     }
 }
 
@@ -104,14 +122,13 @@ struct RuleIndex {
     all: Vec<usize>,
 }
 
-/// A row atom's selection, and how many of its cells per table `by_cell`
-/// holds: resolutions only grow, by cells appended to a table or by tables
-/// appended to the list.
+/// A row atom's selection, and per table how many of its cells `by_cell`
+/// holds: resolutions only grow, a table's cells at the end.
 struct Selection {
     rule: u32,
     param: Param,
     column: u8,
-    seen: SmallVec<[usize; 2]>,
+    seen: SmallVec<[(u32, usize); 2]>,
 }
 
 /// The plan ids of `rules`, folded into one word. A plan id is never reused,
@@ -185,6 +202,13 @@ impl RuleIndex {
     ) {
         visit.clear();
         if !narrowed {
+            // A plan cached for another database is asked afresh of this one.
+            for &at in &self.all {
+                let blocked = &mut self.blocked[at];
+                if blocked.is_none() {
+                    *blocked = rules[at].plan.blocked(&client.host(at));
+                }
+            }
             visit.extend_from_slice(&self.all);
             return;
         }
@@ -198,25 +222,27 @@ impl RuleIndex {
                 let plan = rules[rule as usize].plan;
                 let host = client.host(rule as usize);
                 let blocked = &mut self.blocked[rule as usize];
-                let Some(cache) = caches.refreshed(plan, &host, blocked) else {
+                let Some(cache) = caches.refreshed(plan, client.db(), &host, blocked) else {
                     continue;
                 };
                 for select in selects {
                     let tables = &cache.resolution(select.param).tables;
-                    for (at, (table, cells)) in tables.iter().enumerate() {
-                        if at == select.seen.len() {
-                            select.seen.push(0);
+                    for (table, cells) in tables {
+                        let known = select.seen.iter().position(|(seen, _)| seen == table);
+                        let at = known.unwrap_or_else(|| {
+                            select.seen.push((*table, 0));
                             if !keyed.contains(&(*table, select.column)) {
                                 keyed.push((*table, select.column));
                             }
-                        }
-                        for &cell in &cells[select.seen[at]..] {
+                            select.seen.len() - 1
+                        });
+                        for &cell in &cells[select.seen[at].1..] {
                             let rules = by_cell.entry((*table, cell)).or_default();
                             if rules.last() != Some(&rule) {
                                 rules.push(rule);
                             }
                         }
-                        select.seen[at] = cells.len();
+                        select.seen[at].1 = cells.len();
                     }
                 }
             }
@@ -224,19 +250,18 @@ impl RuleIndex {
         }
         let db = client.db();
         for &(table, column) in &self.keyed {
-            db.prepare_new_rows(table, column as usize);
-        }
-        let groups = db.groups();
-        for &(table, column) in &self.keyed {
+            if !db.wrote(table) {
+                continue;
+            }
             let mut last = None;
             // The rows are sorted by cell, so each cell shows up as a run.
-            for &(cell, _) in groups.new_rows(table, column as usize) {
+            db.each_new_cell(table, column as usize, |cell| {
                 if last.replace(cell) != Some(cell)
                     && let Some(rules) = self.by_cell.get(&(table, cell))
                 {
                     visit.extend(rules.iter().map(|&rule| rule as usize));
                 }
-            }
+            });
         }
         let rose = db.rose(false);
         if rose != 0 {
@@ -317,9 +342,77 @@ impl<G> Delta<G> {
     }
 }
 
+const MAX_THREADS: usize = 8;
+
+// Below that, starting the thread costs more than its share of the searches.
+const ROWS_PER_THREAD: usize = 2048;
+
+// One thread is left to whatever runs beside the saturation.
+fn threads() -> usize {
+    static THREADS: OnceLock<usize> = OnceLock::new();
+    *THREADS.get_or_init(|| {
+        let asked = std::env::var("TIR_SATURATE_THREADS").ok();
+        let asked = asked.and_then(|threads| threads.parse::<usize>().ok());
+        let found = || std::thread::available_parallelism().map_or(1, usize::from);
+        asked
+            .unwrap_or_else(|| (found() - 1).min(MAX_THREADS))
+            .max(1)
+    })
+}
+
+// A search reads the database's core and its own plan's cache, so which thread
+// ran it shows nowhere.
+fn search_shared<C: Sync, const S: usize, X: Saturate<C, S>>(
+    client: &X,
+    caches: &mut Caches,
+    rules: &[Rule<'_>],
+    jobs: Vec<(usize, Prepared)>,
+    found: &mut [(usize, Matches)],
+) {
+    let rows: usize = jobs.iter().map(|(_, prepared)| prepared.starts()).sum();
+    let workers = threads().min(rows / ROWS_PER_THREAD).max(1);
+    let groups = client.db().groups();
+    let (core, groups): (&Core<C, S>, &Groups) = (client.db(), &groups);
+    let work: Vec<_> = jobs
+        .into_iter()
+        .filter_map(|(slot, prepared)| {
+            let rule = found[slot].0;
+            let cache = caches.plans.remove(&rules[rule].plan.id())?;
+            Some((slot, rule, prepared, cache, client.shared(rule)?))
+        })
+        .collect();
+    let queue = Mutex::new(work.into_iter());
+    let search = || {
+        let mut done = Vec::new();
+        loop {
+            let next = queue.lock().expect("a queue of searches").next();
+            let Some((slot, rule, prepared, mut cache, host)) = next else {
+                return done;
+            };
+            let plan = rules[rule].plan;
+            let matches = plan.run(core, groups, &host, &prepared, &mut cache);
+            done.push((slot, rule, matches, cache));
+        }
+    };
+    let done = std::thread::scope(|scope| {
+        let others: Vec<_> = (1..workers).map(|_| scope.spawn(search)).collect();
+        let mut done = search();
+        for other in others {
+            done.extend(other.join().expect("a search thread"));
+        }
+        done
+    });
+    for (slot, rule, matches, cache) in done {
+        let later = std::mem::replace(&mut found[slot].1, matches);
+        found[slot].1.extend(later);
+        caches.plans.insert(rules[rule].plan.id(), cache);
+    }
+}
+
 /// Saturate `rules` over `space` in place. Each round searches every rule
-/// against one snapshot, then applies and rebuilds — a row born this round is
-/// visible only to the next. Stops at a fixpoint (nothing the live ids, the
+/// against one snapshot, then applies the matches a rule at a time, rebuilding
+/// after each — a row born this round is visible only to the next round's
+/// searches. Stops at a fixpoint (nothing the live ids, the
 /// client's size or the raised values count changed, or an empty change log)
 /// or at a limit.
 ///
@@ -332,7 +425,7 @@ impl<G> Delta<G> {
 /// assertion rather than this fixpoint's tail. A stop on a limit is not a
 /// fixpoint: it marks everything changed instead, since the matches it never
 /// reached are not named by the log.
-pub fn saturate<C, const S: usize, X: Saturate<C, S>>(
+pub fn saturate<C: Sync, const S: usize, X: Saturate<C, S>>(
     client: &mut X,
     caches: &mut Caches,
     space: SpaceId,
@@ -347,13 +440,15 @@ pub fn saturate<C, const S: usize, X: Saturate<C, S>>(
     let mut log = take_changed(client, space);
     let mut touched = log.clone();
     let mut delta: Option<Delta<X::Frontier>> = log.take().map(Delta::new);
-    let mut index = match caches.index.take() {
-        Some(index) if index.rules == fingerprint(rules) => index,
-        _ => RuleIndex::new(rules),
+    let known = fingerprint(rules);
+    let known = caches.indexes.iter().position(|index| index.rules == known);
+    let mut index = match known {
+        Some(at) => caches.indexes.swap_remove(at),
+        None => RuleIndex::new(rules),
     };
     let mut visit: Vec<usize> = Vec::with_capacity(rules.len());
     let mut heads: Vec<Option<Vec<Head>>> = vec![None; rules.len()];
-    let mut bound = Vec::new();
+    let mut batch = Batch::default();
     let mut iters = 0;
     let mut on_a_limit = true;
     loop {
@@ -369,6 +464,7 @@ pub fn saturate<C, const S: usize, X: Saturate<C, S>>(
 
         let mut stats = RoundStats::start(client.db().stats(), delta.as_ref());
         let mut found: Vec<(usize, Matches)> = Vec::with_capacity(rules.len());
+        let mut shared: Vec<(usize, Prepared)> = Vec::new();
         // Most rounds write a handful of rows, and most rules select none of
         // their cells: those rules are not visited at all.
         index.round(client, caches, rules, delta.is_some(), &mut visit);
@@ -377,7 +473,7 @@ pub fn saturate<C, const S: usize, X: Saturate<C, S>>(
             // A rule one of whose row atoms reads no table has no match, and is
             // settled before any root is worked out.
             let blocked = &mut index.blocked[at];
-            let Some(cache) = caches.refreshed(plan, &client.host(at), blocked) else {
+            let Some(cache) = caches.refreshed(plan, client.db(), &client.host(at), blocked) else {
                 continue;
             };
             if plan.anchorable() {
@@ -385,10 +481,24 @@ pub fn saturate<C, const S: usize, X: Saturate<C, S>>(
                 // before wrote, found from those rows, plus the ones a value
                 // alone made new, found the way the change log names them: at
                 // the roots near a change, among old rows.
+                // A host other threads may read has the search from rows
+                // prepared here and run with the round's other such.
+                let (db, host) = (client.db(), client.host(at));
+                let rows = match (delta.is_some(), client.shared(at).is_some()) {
+                    (false, false) => Ok(plan.search_all(db, &host, cache)),
+                    (true, false) => Ok(plan.search_new(db, &host, cache)),
+                    (false, true) => Err(plan.prepare_all(db, &host, cache)),
+                    (true, true) => Err(plan.prepare_new(db, &host, cache)),
+                };
+                drop(host);
+                let (mut matches, prepared) = match rows {
+                    Ok(matches) => (matches, None),
+                    Err(prepared) => (Matches::default(), prepared),
+                };
+                shared.extend(prepared.map(|prepared| (found.len(), prepared)));
                 let matches = match delta.as_mut() {
-                    None => plan.search_all(client.db(), &client.host(at), cache),
+                    None => matches,
                     Some(delta) => {
-                        let mut matches = plan.search_new(client.db(), &client.host(at), cache);
                         if plan.fact_columns() & client.db().rose(false) != 0 {
                             if plan.fact_anchorable() {
                                 let host = client.host(at);
@@ -428,30 +538,36 @@ pub fn saturate<C, const S: usize, X: Saturate<C, S>>(
                 plan.search_roots(client.db(), &host, roots, None::<&Unchecked>, fresh, cache);
             found.push((at, matches));
         }
+        if !shared.is_empty() {
+            search_shared(client, caches, rules, shared, &mut found);
+        }
         let tracing = trace_enabled();
-        let counting = counting();
         for (at, matches) in found {
             if matches.is_empty() {
                 continue;
             }
             let rule = &rules[at];
             let head = heads[at].get_or_insert_with(|| client.head(at));
-            for index in 0..matches.len() {
-                let (root, bindings, scalars) = matches.get(index);
-                if tracing {
-                    eprintln!("M {} {}", rule.name, client.db().root(space, root));
+            if tracing {
+                for index in 0..matches.len() {
+                    let root = client.db().root(space, matches.get(index).0);
+                    eprintln!("M {} {root}", rule.name);
                 }
-                let vars = rule.head_vars;
-                if !counting {
-                    apply(client, space, at, head, vars, bindings, scalars, &mut bound);
-                    continue;
-                }
-                stats.apply(client, |client| {
-                    apply_rule(rule.name, client, |client| {
-                        apply(client, space, at, head, vars, bindings, scalars, &mut bound)
-                    })
-                });
             }
+            apply(
+                client,
+                space,
+                at,
+                head,
+                rule.head_vars,
+                &matches,
+                &mut batch,
+            );
+            stats.applied(matches.len(), batch.idle());
+            count_rule(rule.name, matches.len(), batch.idle());
+            // The next rule's inserts are looked up in tables that name what
+            // this one equated.
+            client.rebuild();
             if let Some(cache) = caches.plans.get_mut(&rule.plan.id()) {
                 cache.recycle(matches);
             }
@@ -478,7 +594,8 @@ pub fn saturate<C, const S: usize, X: Saturate<C, S>>(
             break;
         }
     }
-    caches.index = Some(index);
+    caches.indexes.truncate(RULE_SETS - 1);
+    caches.indexes.insert(0, index);
     if on_a_limit {
         client.db_mut().mark_all_changed(space);
         touched = None;
@@ -530,7 +647,7 @@ fn post_saturate<C, const S: usize, X: Saturate<C, S>>(
             continue;
         }
         let host = client.host(at);
-        let Some(cache) = caches.plan(rule.plan, &host) else {
+        let Some(cache) = caches.plan(rule.plan, client.db(), &host) else {
             continue;
         };
         let matches = rule.plan.search_roots(
@@ -543,22 +660,23 @@ fn post_saturate<C, const S: usize, X: Saturate<C, S>>(
         );
         found.push((at, matches));
     }
-    let mut bound = Vec::new();
+    let mut batch = Batch::default();
     for (at, matches) in &found {
         if matches.is_empty() {
             continue;
         }
         let rule = &rules[*at];
         let head = heads[*at].get_or_insert_with(|| client.head(*at));
-        for index in 0..matches.len() {
-            let (_, bindings, scalars) = matches.get(index);
-            apply_rule(rule.name, client, |client| {
-                let vars = rule.head_vars;
-                apply(
-                    client, space, *at, head, vars, bindings, scalars, &mut bound,
-                )
-            });
-        }
+        apply(
+            client,
+            space,
+            *at,
+            head,
+            rule.head_vars,
+            matches,
+            &mut batch,
+        );
+        count_rule(rule.name, matches.len(), batch.idle());
+        client.rebuild();
     }
-    client.rebuild();
 }

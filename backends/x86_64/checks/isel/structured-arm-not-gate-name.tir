@@ -5,7 +5,7 @@
 // class. That name is published by the gate's own join, which the arms feeding
 // it run before: an arm must be spelled the zero it can read, never the join
 // parameter the gate publishes, or the edge into the join carries the join's
-// own parameter.
+// own parameter. The inner gate computes nothing, so its test goes with it.
 
 module {
   %fn_f = func.func @f(%0: !i64, %1: !i64) -> !i64 {
@@ -28,10 +28,12 @@ module {
   module_end
 }
 
-// Both inner outcomes carry the zero register directly to the outer
-// continuation. Neither may name that continuation's parameter on its edge.
-// CHECK: x86_64.mov_imm {dst = %[[Z:[0-9]+]]:GPR, imm = 0}
-// CHECK: x86_64.je {imm = ^[[ARM:bb[0-9]+]]}
-// CHECK-NEXT: asm.vbr %[[Z]] ^[[OUTER:bb[0-9]+]]
-// CHECK-NEXT: ^[[ARM]]:
+// The enclosing arm carries the zero register directly to the outer
+// continuation. It may not name that continuation's parameter on its edge.
+// CHECK: x86_64.add {dst = %[[SUM:[0-9]+]]:GPR, dst_tied = %{{[0-9]+}}:GPR, src = %{{[0-9]+}}:GPR}
+// CHECK-NEXT: x86_64.mov_imm {dst = %[[Z:[0-9]+]]:GPR, imm = 0}
+// CHECK: x86_64.jl {imm = ^[[ARM:bb[0-9]+]]}
+// CHECK-NEXT: asm.vbr %[[SUM]] ^[[OUTER:bb[0-9]+]]
+// CHECK: ^[[ARM]]:
 // CHECK-NEXT: asm.vbr %[[Z]] ^[[OUTER]]
+// CHECK-NOT: x86_64.je

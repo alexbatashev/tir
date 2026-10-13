@@ -151,6 +151,7 @@ pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
                 target.as_ref(),
                 &context,
                 &module,
+                target.isel_pass(&context),
                 oracles,
                 |context, op| {
                     printer
@@ -183,6 +184,7 @@ pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
                     target.as_ref(),
                     &context,
                     &module,
+                    target.isel_pass(&context),
                     oracles,
                     |context, op| {
                         writer

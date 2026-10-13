@@ -1,0 +1,32 @@
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
+
+// A read whose only reader is a compare that selects as its branch is read
+// by the branch recovery emits, not by an instruction selection left in the
+// function. Its instruction keeps its place in the memory chain: the store
+// after it observes the state it publishes, never the one it observed.
+
+module {
+  %abort = func.declare @abort() -> !unit
+  %fn_f = func.func @f(%p: !ptr.p) {
+    %zero = constant {value = 0} : !i32
+    %m0 = state.entry_state : !state<memory>
+    %x, %m1 = ptr.load %p state(%m0) : !i32
+    %m2 = ptr.store %zero, %p state(%m1)
+    %c = cmpi %x, %zero {predicate = "ne"} : !i1
+    %e0 = state.entry_state : !state<fp.env>
+    %m5, %e3 = scf.switch %c args(%m2, %e0) (%m3, %e1) {
+      %m4, %e2 = func.call %abort() state(%m3, %e1)
+      -> %m4, %e2
+    }
+    (%m6, %e4) {
+      -> %m6, %e4
+    }
+    -> %m5, %e3
+  }
+  module_end
+}
+
+// CHECK-LABEL: name = "f"
+// CHECK: %[[ENTRY:[0-9]+]] = state.entry_state : !state<memory>
+// CHECK: %[[READ:[0-9]+]] = x86_64.mov_load32 {{.*}} state(%[[ENTRY]])
+// CHECK: x86_64.mov_store32 {{.*}} state(%[[READ]])

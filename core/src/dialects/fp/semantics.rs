@@ -230,7 +230,7 @@ impl Semantics {
         *self == self.defaults()
     }
 
-    fn defaults(self) -> Self {
+    pub(crate) fn defaults(self) -> Self {
         let operation = match self {
             Self::Arithmetic(_) => "add",
             Self::Comparison(_) => "cmp",

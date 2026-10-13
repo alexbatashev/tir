@@ -296,7 +296,11 @@ grouped the same way. The operations of a block or unordered region are operatio
 rows grouped by holder and ordered by position, and the blocks of a region
 likewise. Positions leave gaps, so an insert between two neighbours writes one
 row. The groupings are built per partition when first read and brought up to date
-from the rows written since.
+from the rows written since. A use list merges the operand rows of the operations
+written since into a sorted tail beside its base. A holder's list takes a written
+operation out of the list it sat in and puts it where its position says in the
+list it sits in now, so an append costs a search of that list and not a pass over
+it.
 
 A pass that derives a fact per operation, value, block, or region of one
 function keeps it in an `IdMap` or `IdSet`. These are columns indexed by row

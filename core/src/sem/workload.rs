@@ -48,6 +48,17 @@ fn symbol(node: &SemNode) -> String {
         Kind::Sym(kind) => format!("{kind:?}"),
         Kind::Ir(op) if op.attrs.is_empty() => format!("{}.{}", op.dialect, op.name),
         Kind::Ir(op) => format!("{}.{}#{:x}", op.dialect, op.name, node.op_key() as u32),
+        Kind::State(state) => format!("state{state}"),
+        Kind::Form(pattern) => format!("form{pattern}"),
+        Kind::Result {
+            index,
+            changes: false,
+        } => format!("result{index}"),
+        Kind::Result {
+            index,
+            changes: true,
+        } => format!("written{index}"),
+        Kind::Operands => "operands".to_string(),
     };
     match &node.payload {
         None => {}
@@ -59,6 +70,11 @@ fn symbol(node: &SemNode) -> String {
         }
         Some(SemPayload::Expr(other)) => write!(out, ":{other:?}").unwrap(),
         Some(SemPayload::Opaque(serial)) => write!(out, ":o{serial}").unwrap(),
+        Some(SemPayload::Input) => {
+            if let Some(value) = node.value() {
+                write!(out, ":v{}", value.number()).unwrap();
+            }
+        }
     }
     out.chars()
         .map(|c| {
@@ -190,7 +206,10 @@ fn export(eg: &SemEGraph, rule: &Rule<SemNode>) -> Result<String, &'static str> 
             }
             _ => return Err("fact atom"),
         }
-        if atoms.insert(atom.class(), atom).is_some() {
+        let Some(class) = atom.class() else {
+            return Err("fact atom");
+        };
+        if atoms.insert(class, atom).is_some() {
             return Err("two atoms on one class");
         }
     }
@@ -277,7 +296,7 @@ fn export(eg: &SemEGraph, rule: &Rule<SemNode>) -> Result<String, &'static str> 
 }
 
 /// Write `eg` and the neutral subset of `rules` to the dump directory.
-pub(crate) fn dump(pass: &str, eg: &SemEGraph, rules: &[Rule<SemNode>]) {
+pub(crate) fn dump<R: std::borrow::Borrow<Rule<SemNode>>>(pass: &str, eg: &SemEGraph, rules: &[R]) {
     let Some(directory) = directory() else {
         return;
     };
@@ -310,6 +329,7 @@ pub(crate) fn dump(pass: &str, eg: &SemEGraph, rules: &[Rule<SemNode>]) {
     }
     let mut exported = 0;
     let mut skipped: BTreeMap<&str, usize> = BTreeMap::new();
+    let rules: Vec<&Rule<SemNode>> = rules.iter().map(std::borrow::Borrow::borrow).collect();
     for rule in rules.iter().filter(|rule| !rule.post_saturation) {
         match export(eg, rule) {
             Ok(text) => {

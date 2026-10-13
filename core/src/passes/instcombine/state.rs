@@ -12,16 +12,11 @@ use tir_egraph::ClassId as Id;
 use tir_egraph::{Atom, ColumnId, Guard, HeadOp, Plan, Query, Source};
 use tir_relational::{Cmp, Expr};
 
+use crate::rewrite::{ADDRESS, BYTES, LOAD_ARITY, STORE_ARITY};
 use crate::sem::{SemNode as Node, SymKind, node::field};
 
-/// `Load(address, bytes, metadata, state)`.
-pub(super) const LOAD_ARITY: usize = 4;
 const LOAD_STATE: usize = 3;
-/// `Store(address, bytes, value, address_space, state)`.
-pub(super) const STORE_ARITY: usize = 5;
 const STORE_VALUE: usize = 2;
-pub(super) const ADDRESS: usize = 0;
-pub(super) const BYTES: usize = 1;
 
 /// S1: a load whose state a matching store left reads that store's value. The
 /// store is a node of the state class the load names, and the two extents are

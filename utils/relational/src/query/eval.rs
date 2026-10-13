@@ -3,23 +3,29 @@
 
 use smallvec::SmallVec;
 
-use super::ir::{Atom, Cmp, Guard, Host, Lattice, Out, Place, Read, Resolution, Scalar, Var};
+use super::ir::{
+    Atom, Calls, Cmp, Expr, Guard, Host, Lattice, Out, Place, Read, Resolution, Scalar, Tuples, Var,
+};
 use super::join::{JOIN_MIN_ROWS, JoinScratch};
-use super::plan::{Arg, FactAnchor, JoinPlan, Plan, RowShape, Shape, Step};
-use crate::Ref;
-use crate::db::{Database, Groups};
+use super::plan::{Arg, Below, FactAnchor, JoinPlan, Plan, RowShape, Shape, Step};
+use super::trie::Trie;
+use crate::db::{Core, Database, Groups, holder};
 use crate::store::Table;
+use crate::{Ref, Words};
 
 /// What a client keeps between searches for one plan: what its parameters
 /// resolved to, which only changes when the host's version moves.
 pub struct PlanCache {
     version: Option<u64>,
     resolutions: Vec<Resolution>,
+    holders: Vec<u64>,
+    reduced: Vec<SmallVec<[(u32, usize); 4]>>,
     /// Whether some row atom of the plan reads no table, so the plan has no
     /// match until a resolution grows.
     dead: bool,
     /// [`JOIN_MIN_ROWS`] unless a test forces a join or the loop nest.
     pub(crate) join_min_rows: usize,
+    pub(crate) reduce_min_rows: usize,
     /// The evaluator's working arrays, kept so a search allocates nothing.
     scratch: Scratch,
     /// A join's working arrays, made by the first join a search runs.
@@ -39,8 +45,11 @@ impl Default for PlanCache {
         Self {
             version: None,
             resolutions: Vec::new(),
+            holders: Vec::new(),
+            reduced: Vec::new(),
             dead: false,
             join_min_rows: JOIN_MIN_ROWS,
+            reduce_min_rows: REDUCE_MIN_ROWS,
             scratch: Scratch::default(),
             join: None,
         }
@@ -53,6 +62,7 @@ struct Scratch {
     scalars: Vec<u64>,
     trail: Vec<Var>,
     pool: Vec<Vec<u32>>,
+    sets: Vec<Vec<u64>>,
     out: Matches,
 }
 
@@ -83,6 +93,59 @@ pub(crate) type Unchecked = dyn Fn(Var, u32) -> bool;
 /// scanning the column instead of through a grouping: the scans cost less than
 /// building one.
 const SCAN_LIMIT: usize = 16;
+
+// A search from fewer rows than this tries each of them: reducing them by the
+// atoms below costs a pass over those atoms' rows.
+const REDUCE_MIN_ROWS: usize = 64;
+
+// An atom with more rows than this many times the rows it would reduce is not
+// worth the pass.
+const REDUCE_MAX_RATIO: usize = 16;
+
+struct Reduced {
+    column: u8,
+    swapped: u8,
+    ids: Vec<u64>,
+}
+
+// Not under a layer, since a grouping holds the base's rows alone.
+fn reduces<C, const S: usize>(
+    core: &Core<C, S>,
+    below: &[Below],
+    starts: usize,
+    min: usize,
+) -> bool {
+    !below.is_empty() && starts >= min && !core.layered()
+}
+
+/// What a search works out before it reads a row.
+pub struct Prepared {
+    from: SmallVec<[(usize, usize, u64); 1]>,
+    new: bool,
+    scan: bool,
+}
+
+impl Prepared {
+    /// How many rows the search starts from.
+    pub fn starts(&self) -> usize {
+        self.from.iter().map(|&(_, starts, _)| starts).sum()
+    }
+}
+
+#[inline(always)]
+fn reduced(below: &[Reduced], table: &Table, row: u32, swaps: bool) -> bool {
+    let holds = |swapped: bool| {
+        below.iter().all(|under| {
+            let column = if swapped { under.swapped } else { under.column };
+            let id = table.column(column as usize)[row as usize] as usize;
+            under
+                .ids
+                .get(id / 64)
+                .is_some_and(|word| word >> (id % 64) & 1 == 1)
+        })
+    };
+    holds(false) || swaps && holds(true)
+}
 
 /// Run `$body` for each row of `$table` holding `$cell` in `$column`: read off
 /// the grouping, or found by a scan when the search is too small to pay for
@@ -121,7 +184,9 @@ impl Matches {
         self.roots.is_empty()
     }
 
-    fn push(&mut self, root: u32, bindings: &[Ref], scalars: &[u64]) {
+    /// Append a match. Every match of one search binds as many variables
+    /// and scalars as the others.
+    pub fn push(&mut self, root: u32, bindings: &[Ref], scalars: &[u64]) {
         self.widths = (bindings.len(), scalars.len());
         self.roots.push(root);
         self.bindings.extend_from_slice(bindings);
@@ -166,8 +231,15 @@ impl PlanCache {
 impl Plan {
     /// Bring `cache` up to the host's version: what each parameter resolves
     /// to, from scratch the first time and from what appeared since after
-    /// that. Reports whether the plan can match at all.
-    pub fn refresh<H: Host + ?Sized>(&self, host: &H, cache: &mut PlanCache) -> bool {
+    /// that, a row atom's cells less the ones no row of a client table of
+    /// `db` that the atom is held to has (see [`Reduction`]). Reports
+    /// whether the plan can match at all.
+    pub fn refresh<C, const S: usize, H: Host + ?Sized>(
+        &self,
+        db: &Core<C, S>,
+        host: &H,
+        cache: &mut PlanCache,
+    ) -> bool {
         let version = host.version();
         if cache.version == Some(version) {
             return !cache.dead;
@@ -178,13 +250,149 @@ impl Plan {
         for (param, out) in cache.resolutions.iter_mut().enumerate() {
             host.resolve(param as u32, since, out);
         }
+        // What a reduced selection held at the last refresh is reduced
+        // already.
+        let reductions = self.reductions();
+        cache.reduced.resize_with(reductions.len(), SmallVec::new);
+        for (by, held) in reductions.iter().zip(&cache.reduced) {
+            let selected = &cache.resolutions[by.rows as usize].tables;
+            let known =
+                |(table, cells): &(u32, SmallVec<[u32; 4]>)| held.contains(&(*table, cells.len()));
+            if selected.iter().all(known) {
+                continue;
+            }
+            let tuples = self.tuples(by.atom);
+            let [selected, read] = cache
+                .resolutions
+                .get_disjoint_mut([by.rows as usize, tuples.table as usize])
+                .expect("a selection and a client table");
+            self.reduce_by(db, tuples, by.column, read, held, selected);
+        }
+        for (by, held) in reductions.iter().zip(&mut cache.reduced) {
+            let selected = cache.resolutions[by.rows as usize].tables.iter();
+            held.clear();
+            held.extend(selected.map(|(table, cells)| (*table, cells.len())));
+        }
         cache.version = Some(version);
         let resolutions = &cache.resolutions;
+        cache.holders.clear();
+        cache.holders.extend(resolutions.iter().map(|resolved| {
+            let tables = resolved.tables.iter();
+            tables.fold(0, |held, (table, _)| held | holder(*table))
+        }));
         cache.dead = self.query.atoms.iter().any(|atom| {
-            matches!(atom, Atom::Rows(rows)
-                if resolutions[rows.select.param as usize].tables.is_empty())
+            let param = match atom {
+                Atom::Rows(rows) => rows.select.param,
+                Atom::Words(tuples) => tuples.table,
+                Atom::Lattice(_) | Atom::Place(_) => return false,
+            };
+            resolutions[param as usize].tables.is_empty()
         });
         !cache.dead
+    }
+
+    // Drop from `selected`, past the cells `held` counts per table, each
+    // cell no row of the client tables `read` names holds in `column`
+    // beside the literals of `tuples`; and the tables left with none.
+    fn reduce_by<C, const S: usize>(
+        &self,
+        db: &Core<C, S>,
+        tuples: &Tuples,
+        column: u8,
+        read: &Resolution,
+        held: &[(u32, usize)],
+        selected: &mut Resolution,
+    ) {
+        let literal = |(at, term): (usize, &Expr)| match term {
+            Expr::Lit(value) => Some((at as u8, u32::try_from(*value).ok())),
+            _ => None,
+        };
+        let literals: SmallVec<[(u8, Option<u32>); 4]> = tuples
+            .terms
+            .iter()
+            .enumerate()
+            .filter_map(literal)
+            .collect();
+        let columns: SmallVec<[u8; 8]> = literals.iter().map(|literal| literal.0).collect();
+        let columns: SmallVec<[u8; 8]> = columns.into_iter().chain([column]).collect();
+        let tries: SmallVec<[&Trie; 1]> = read
+            .tables
+            .iter()
+            .map(|(table, _)| db.words(*table).trie(&columns))
+            .collect();
+        let allows = |cell: u32| {
+            tries.iter().any(|trie| {
+                let node = literals
+                    .iter()
+                    .try_fold(trie.root(), |node, literal| trie.child(node, literal.1?));
+                node.is_some_and(|node| trie.set(node).contains(cell))
+            })
+        };
+        for at in (0..selected.tables.len()).rev() {
+            let (table, cells) = &mut selected.tables[at];
+            let known = held.iter().find(|(known, _)| known == table);
+            let old = known.map_or(0, |known| known.1).min(cells.len());
+            let grown = cells.len();
+            let mut kept = old;
+            for new in old..grown {
+                if allows(cells[new]) {
+                    cells[kept] = cells[new];
+                    kept += 1;
+                }
+            }
+            cells.truncate(kept);
+            if kept == grown {
+                continue;
+            }
+            if cells.is_empty() {
+                selected.tables.remove(at);
+                if at < selected.scans.len() {
+                    selected.scans.remove(at);
+                }
+            } else if let Some(scan) = selected.scans.get_mut(at) {
+                let cells = &selected.tables[at].1;
+                scan.retain(|cell| cells.binary_search(cell).is_ok());
+            }
+        }
+    }
+
+    /// Build what a search of this plan builds on first use and no row of
+    /// `db` decides: the orders it is searched in, what its parameters
+    /// resolve to, and the tries of the client tables every one of those
+    /// orders looks rows up in or joins. A client calls it where it can
+    /// best wait; `cache` and the tables keep what is built.
+    pub fn prepare<C, const S: usize>(
+        &self,
+        db: &Database<C, S>,
+        host: &dyn Host,
+        cache: &mut PlanCache,
+    ) {
+        if !self.refresh(db, host, cache) {
+            return;
+        }
+        let rooted = std::iter::once((&self.run, &self.joins));
+        let anchored = self.anchors().iter();
+        let anchored = anchored.map(|anchor| (&anchor.steps, &anchor.joins));
+        let risen = self.fact_anchors().iter();
+        let risen = risen.map(|anchor| (&anchor.steps, &anchor.joins));
+        let trie = |atom: usize, columns: &[u8]| {
+            let tables = &cache.resolutions[self.tuples(atom).table as usize].tables;
+            for (table, _) in tables.iter().filter(|_| !columns.is_empty()) {
+                db.words(*table).trie(columns);
+            }
+        };
+        for (steps, joins) in rooted.chain(anchored).chain(risen) {
+            for step in steps {
+                if let Step::Table { atom, keys } = *step {
+                    trie(atom, &key_columns(keys));
+                }
+            }
+            for joined in joins.iter().flat_map(|join| &join.atoms) {
+                if let Step::Table { atom, .. } = joined.step {
+                    trie(atom, &joined.columns[0]);
+                }
+            }
+        }
     }
 
     /// Every match at `roots`, each root canonicalized and visited once in the
@@ -204,7 +412,7 @@ impl Plan {
         fresh: (bool, usize),
         cache: &mut PlanCache,
     ) -> Matches {
-        if !self.refresh(host, cache) {
+        if !self.refresh(db, host, cache) {
             return Matches::default();
         }
         let space = self.query.space;
@@ -213,6 +421,19 @@ impl Plan {
         let mut marks = db.marks(space);
         roots.retain(|root| marks.insert(*root as usize));
         drop(marks);
+        // A row atom at the root matches a row naming it, which a table
+        // that never named the root has none of.
+        let rooted = self.shapes.iter().find_map(|shape| match shape {
+            Shape::Rows(rows) if rows.key == self.query.root => Some(rows.select.param),
+            _ => None,
+        });
+        if let Some(param) = rooted {
+            let held = cache.holders[param as usize];
+            roots.retain(|root| db.naming(space, *root) & held != 0);
+        }
+        if roots.is_empty() {
+            return Matches::default();
+        }
         let scan = roots.len() <= SCAN_LIMIT;
         let mut ready = 0;
         if !scan {
@@ -254,29 +475,53 @@ impl Plan {
         host: &dyn Host,
         cache: &mut PlanCache,
     ) -> Matches {
-        if !self.refresh(host, cache) {
-            return Matches::default();
+        match self.prepare_all(db, host, cache) {
+            Some(prepared) => self.run(db, &db.groups(), host, &prepared, cache),
+            None => Matches::default(),
+        }
+    }
+
+    /// What [`Self::search_all`] works out before it reads a row, with every
+    /// grouping it reads built: [`Self::run`] then finds its matches from the
+    /// database's core alone. `None` when the plan has no match.
+    pub fn prepare_all<C, const S: usize>(
+        &self,
+        db: &Database<C, S>,
+        host: &dyn Host,
+        cache: &mut PlanCache,
+    ) -> Option<Prepared> {
+        if !self.refresh(db, host, cache) {
+            return None;
         }
         let root = self
             .anchors()
             .iter()
-            .position(|anchor| self.query.atoms[anchor.atom].key() == self.query.root)
+            .position(|anchor| self.query.atoms[anchor.atom].key() == Some(self.query.root))
             .expect("an anchorable plan has a row at its root");
         let anchor = &self.anchors()[root];
         let rows = self.rows(anchor.atom);
         // The scan reads the root's rows by selected cell; the rest are
         // looked up.
-        for (table, _) in &cache.resolutions[rows.select.param as usize].tables {
-            db.prepare_group(*table, rows.select.column as usize);
+        let tables = &cache.resolutions[rows.select.param as usize].tables;
+        let column = rows.select.column as usize;
+        for (table, _) in tables {
+            db.prepare_group(*table, column);
         }
         let ready = self.group(db, cache, &anchor.steps[1..], &anchor.joins);
-        let groups = db.groups();
-        let mut eval = self.eval::<C, S, Unchecked>(db, host, &groups, cache, None);
-        eval.ready = ready;
-        self.scan(&mut eval, root, false);
-        let (out, scratch) = eval.finish();
-        cache.scratch = scratch;
-        out
+        let starts = {
+            let groups = db.groups();
+            let rows = tables.iter();
+            rows.map(|(table, cells)| groups.count(*table, column, cells))
+                .sum()
+        };
+        if reduces(db, &anchor.below, starts, cache.reduce_min_rows) {
+            self.group_below(db, &cache.resolutions, &anchor.below);
+        }
+        Some(Prepared {
+            from: SmallVec::from_elem((root, starts, ready), 1),
+            new: false,
+            scan: false,
+        })
     }
 
     /// Every match with a row the previous epoch wrote, each once, found from
@@ -292,58 +537,105 @@ impl Plan {
         host: &dyn Host,
         cache: &mut PlanCache,
     ) -> Matches {
-        if !self.refresh(host, cache) {
-            return Matches::default();
+        match self.prepare_new(db, host, cache) {
+            Some(prepared) => self.run(db, &db.groups(), host, &prepared, cache),
+            None => Matches::default(),
+        }
+    }
+
+    /// [`Self::prepare_all`] for [`Self::search_new`].
+    pub fn prepare_new<C, const S: usize>(
+        &self,
+        db: &Database<C, S>,
+        host: &dyn Host,
+        cache: &mut PlanCache,
+    ) -> Option<Prepared> {
+        if !self.refresh(db, host, cache) {
+            return None;
         }
         // Most epochs give most plans nothing to start from, so that is
         // settled before any grouping is built.
         for anchor in self.anchors() {
             let rows = self.rows(anchor.atom);
-            for (table, _) in &cache.resolutions[rows.select.param as usize].tables {
+            let tables = cache.resolutions[rows.select.param as usize].tables.iter();
+            for (table, _) in tables.filter(|(table, _)| db.wrote(*table)) {
                 db.prepare_new_rows(*table, rows.select.column as usize);
             }
         }
         let mut starts = 0;
-        let live: SmallVec<[usize; 4]> = {
+        let mut from: SmallVec<[(usize, usize, u64); 1]> = {
             let groups = db.groups();
             (0..self.anchors().len())
-                .filter(|&anchor| {
+                .filter_map(|anchor| {
                     let rows = self.rows(self.anchors()[anchor].atom);
                     let column = rows.select.column as usize;
                     let found: usize = cache.resolutions[rows.select.param as usize]
                         .tables
                         .iter()
+                        .filter(|(table, _)| db.wrote(*table))
                         .flat_map(|(table, cells)| {
                             cells
                                 .iter()
                                 .map(|&cell| groups.new_rows_with(*table, column, cell).len())
+                                .chain(std::iter::once(layered_new(db, *table, column, cells)))
                         })
                         .sum();
                     starts += found;
-                    found != 0
+                    (found != 0).then_some((anchor, found, 0))
                 })
                 .collect()
         };
-        if live.is_empty() {
-            return Matches::default();
+        if from.is_empty() {
+            return None;
         }
         let scan = starts <= SCAN_LIMIT;
-        let ready: SmallVec<[u64; 4]> = live
+        for (anchor, found, ready) in &mut from {
+            let anchor = &self.anchors()[*anchor];
+            if !scan {
+                *ready = self.group(db, cache, &anchor.steps[1..], &anchor.joins);
+            }
+            if reduces(db, &anchor.below, *found, cache.reduce_min_rows) {
+                self.group_below(db, &cache.resolutions, &anchor.below);
+            }
+        }
+        Some(Prepared {
+            from,
+            new: true,
+            scan,
+        })
+    }
+
+    /// The matches of the search `prepared` was made for by this plan, over
+    /// the database `core` is of and its `groups`. It reads nothing of the
+    /// database but those two, so the searches of several plans may run at
+    /// once, each with its own cache.
+    pub fn run<C, const S: usize>(
+        &self,
+        core: &Core<C, S>,
+        groups: &Groups,
+        host: &dyn Calls,
+        prepared: &Prepared,
+        cache: &mut PlanCache,
+    ) -> Matches {
+        let min = cache.reduce_min_rows;
+        let (resolutions, sets) = (&cache.resolutions, &mut cache.scratch.sets);
+        let mut below: SmallVec<[SmallVec<[Reduced; 2]>; 1]> = prepared
+            .from
             .iter()
-            .map(|&anchor| {
-                let anchor = &self.anchors()[anchor];
-                match scan {
-                    true => 0,
-                    false => self.group(db, cache, &anchor.steps[1..], &anchor.joins),
+            .map(|&(anchor, starts, _)| {
+                let below = &self.anchors()[anchor].below;
+                match reduces(core, below, starts, min) {
+                    true => self.ids_below(core, groups, resolutions, below, starts, sets),
+                    false => SmallVec::new(),
                 }
             })
             .collect();
-        let groups = db.groups();
-        let mut eval = self.eval::<C, S, Unchecked>(db, host, &groups, cache, None);
-        eval.scan = scan;
-        for (anchor, ready) in live.into_iter().zip(ready) {
+        let mut eval = self.eval::<C, S, Unchecked>(core, host, groups, cache, None);
+        eval.scan = prepared.scan;
+        for (&(anchor, _, ready), below) in prepared.from.iter().zip(below.drain(..)) {
             eval.ready = ready;
-            self.scan(&mut eval, anchor, true);
+            eval.below = below;
+            self.scan(&mut eval, anchor, prepared.new);
         }
         let (out, scratch) = eval.finish();
         cache.scratch = scratch;
@@ -382,7 +674,7 @@ impl Plan {
         minted: bool,
         cache: &mut PlanCache,
     ) -> Matches {
-        if !self.refresh(host, cache) {
+        if !self.refresh(db, host, cache) {
             return Matches::default();
         }
         let lists = |first_on_key: bool| match minted && first_on_key {
@@ -408,6 +700,25 @@ impl Plan {
                 false => self.group(db, cache, &anchor.steps, &anchor.joins),
             })
             .collect();
+        // A row atom naming an anchor's key matches a row naming the id,
+        // which a table that never named the id has none of.
+        let names = |shape: &Shape, key: Var| match shape {
+            Shape::Rows(rows) if rows.key == key || rows.args.iter().any(|arg| arg.var == key) => {
+                Some(cache.holders[rows.select.param as usize])
+            }
+            _ => None,
+        };
+        let held: SmallVec<[u64; 4]> = self
+            .fact_anchors()
+            .iter()
+            .map(|anchor| {
+                self.shapes
+                    .iter()
+                    .find_map(|shape| names(shape, anchor.key))
+            })
+            .map(|held| held.unwrap_or(u64::MAX))
+            .collect();
+        let space = self.query.space;
         let groups = db.groups();
         let mut eval = self.eval::<C, S, Unchecked>(db, host, &groups, cache, None);
         eval.scan = scan;
@@ -419,6 +730,9 @@ impl Plan {
             eval.facts_old = anchor.earlier;
             for &minted in lists(anchor.first_on_key) {
                 for &key in db.risen(anchor.column, minted) {
+                    if db.naming(space, key) & held[index] == 0 {
+                        continue;
+                    }
                     eval.loosen(anchor.key, key);
                     self.step(&mut eval, key, 0);
                     eval.bound[anchor.key as usize] = UNBOUND;
@@ -433,8 +747,8 @@ impl Plan {
 
     fn eval<'a, C, const S: usize, A: Allow + ?Sized>(
         &self,
-        db: &'a Database<C, S>,
-        host: &'a dyn Host,
+        db: &'a Core<C, S>,
+        host: &'a dyn Calls,
         groups: &'a Groups,
         cache: &'a mut PlanCache,
         allowed: Option<&'a A>,
@@ -458,6 +772,7 @@ impl Plan {
             host,
             groups,
             resolutions: &cache.resolutions,
+            holders: &cache.holders,
             nested: false,
             anchor: None,
             fact_anchor: None,
@@ -477,8 +792,77 @@ impl Plan {
             ready: 0,
             join: &mut cache.join,
             loose: None,
+            below: SmallVec::new(),
+            sets: scratch.sets,
+            probes: Vec::new(),
             out,
         }
+    }
+
+    fn group_below<C, const S: usize>(
+        &self,
+        db: &Database<C, S>,
+        resolutions: &[Resolution],
+        below: &[Below],
+    ) {
+        for under in below {
+            let rows = self.rows(under.atom);
+            for (table, _) in &resolutions[rows.select.param as usize].tables {
+                db.prepare_group(*table, rows.select.column as usize);
+            }
+            self.group_below(db, resolutions, &under.below);
+        }
+    }
+
+    fn ids_below<C, const S: usize>(
+        &self,
+        db: &Core<C, S>,
+        groups: &Groups,
+        resolutions: &[Resolution],
+        below: &[Below],
+        above: usize,
+        sets: &mut Vec<Vec<u64>>,
+    ) -> SmallVec<[Reduced; 2]> {
+        let mut reduced_by = SmallVec::new();
+        for under in below {
+            let rows = self.rows(under.atom);
+            let column = rows.select.column as usize;
+            let tables = &resolutions[rows.select.param as usize].tables;
+            let count = tables.iter();
+            let count: usize = count
+                .map(|(table, cells)| groups.count(*table, column, cells))
+                .sum();
+            if count > above.saturating_mul(REDUCE_MAX_RATIO) {
+                continue;
+            }
+            let inner = self.ids_below(db, groups, resolutions, &under.below, count, sets);
+            let mut ids = sets.pop().unwrap_or_default();
+            ids.clear();
+            ids.resize(db.ids(self.query.space).div_ceil(64), 0);
+            for (slot, cells) in tables {
+                let Some(table) = db.table(*slot) else {
+                    continue;
+                };
+                let when = Self::when(rows, resolutions, *slot);
+                let values = table.values();
+                for &cell in cells {
+                    let swaps = !when.is_empty() && reads(when, cell);
+                    for &row in groups.get(*slot, column).rows(cell) {
+                        if reduced(&inner, table, row, swaps) {
+                            let id = values[row as usize] as usize;
+                            ids[id / 64] |= 1 << (id % 64);
+                        }
+                    }
+                }
+            }
+            sets.extend(inner.into_iter().map(|inner| inner.ids));
+            reduced_by.push(Reduced {
+                column: under.column,
+                swapped: under.swapped,
+                ids,
+            });
+        }
+        reduced_by
     }
 
     /// The row atom at `atom`.
@@ -486,6 +870,13 @@ impl Plan {
         match &self.shapes[atom] {
             Shape::Rows(rows) => rows,
             _ => unreachable!("an anchor is a row atom"),
+        }
+    }
+
+    pub(super) fn tuples(&self, atom: usize) -> &Tuples {
+        match &self.shapes[atom] {
+            Shape::Words(tuples) => tuples,
+            _ => unreachable!("a table step is a client table atom"),
         }
     }
 
@@ -516,23 +907,63 @@ impl Plan {
         eval.old_below = if new { atom } else { 0 };
         let column = rows.select.column as usize;
         let bind = (rows.tag, rows.key);
-        for (slot, cells) in &resolutions[rows.select.param as usize].tables {
-            let Some(table) = db.table(*slot) else {
+        let below = std::mem::take(&mut eval.below);
+        let selected = &resolutions[rows.select.param as usize];
+        for (position, (slot, cells)) in selected.tables.iter().enumerate() {
+            // The rows listed as new for a table no epoch wrote since are
+            // an earlier epoch's.
+            if new && !db.wrote(*slot) {
                 continue;
-            };
+            }
+            let scan = selected.scan(position);
             let when = Self::when(rows, resolutions, *slot);
-            for &cell in cells {
-                if new {
-                    for &(_, found) in groups.new_rows_with(*slot, column, cell) {
-                        self.row(eval, 0, 0, atom, rows, table, found, bind, None, when);
+            for (side, table) in db.sides(*slot) {
+                let at = (*slot, side);
+                if side != 0 {
+                    // A layer's own rows are few: one pass over them, then the
+                    // order a grouping would give, by selected cell and row.
+                    if new && !db.side_new(side) {
+                        continue;
+                    }
+                    let epoch = db.epoch() - 1;
+                    let stamps = table.stamps();
+                    let mut found: SmallVec<[(usize, u32); 16]> = table
+                        .column(column)
+                        .iter()
+                        .enumerate()
+                        .filter(|&(row, _)| !new || stamps[row] == epoch)
+                        .filter(|&(_, &c)| reads(cells, c))
+                        .filter_map(|(row, &c)| {
+                            Some((scan.iter().position(|&cell| cell == c)?, row as u32))
+                        })
+                        .collect();
+                    found.sort_unstable();
+                    for (_, found) in found {
+                        self.row(eval, 0, 0, atom, rows, at, table, found, bind, None, when);
                     }
                     continue;
                 }
-                for &found in groups.get(*slot, column).rows(cell) {
-                    self.row(eval, 0, 0, atom, rows, table, found, bind, None, when);
+                for &cell in scan {
+                    let swaps = !when.is_empty() && reads(when, cell);
+                    if new {
+                        for &(_, found) in groups.new_rows_with(*slot, column, cell) {
+                            if reduced(&below, table, found, swaps) {
+                                self.row(
+                                    eval, 0, 0, atom, rows, at, table, found, bind, None, when,
+                                );
+                            }
+                        }
+                        continue;
+                    }
+                    for &found in groups.get(*slot, column).rows(cell) {
+                        if reduced(&below, table, found, swaps) {
+                            self.row(eval, 0, 0, atom, rows, at, table, found, bind, None, when);
+                        }
+                    }
                 }
             }
         }
+        eval.sets.extend(below.into_iter().map(|under| under.ids));
         eval.anchor = None;
     }
 
@@ -552,6 +983,15 @@ impl Plan {
             let (atom, slot) = match *step {
                 Step::Atom(atom) => (atom, None),
                 Step::Parents { atom, slot } => (atom, Some(slot)),
+                Step::Table { atom, keys } => {
+                    let columns = key_columns(keys);
+                    for (table, _) in &resolutions[self.tuples(atom).table as usize].tables {
+                        if !columns.is_empty() {
+                            db.words(*table).trie(&columns);
+                        }
+                    }
+                    continue;
+                }
                 _ => continue,
             };
             let Shape::Rows(rows) = &self.shapes[atom] else {
@@ -575,7 +1015,9 @@ impl Plan {
         }
         let mut ready = 0;
         for step in steps {
+            // A trie holds the base's rows alone, so a layer runs the loop nest.
             if let Step::Join(join) = *step
+                && !db.layered()
                 && join < 64
                 && self.prepare_join(db, resolutions, &joins[join], cache.join_min_rows)
             {
@@ -596,6 +1038,12 @@ impl Plan {
             (None, Some(anchor)) => &self.fact_anchors()[anchor].steps,
             (None, None) => &self.run,
         };
+        // A match of old rows and values alone is dropped at the end, and
+        // nothing read from here on is new.
+        let rooted = eval.anchor.is_none() && eval.fact_anchor.is_none();
+        if index >= self.settled && eval.only_new && eval.fresh == 0 && rooted {
+            return;
+        }
         let mut index = index;
         let step = loop {
             let Some(&step) = steps.get(index) else {
@@ -659,9 +1107,16 @@ impl Plan {
                 return;
             }
             Step::Join(_) => unreachable!("a join is run or skipped above"),
+            Step::Table { atom, keys } => return self.table(eval, root, index, atom, keys),
             Step::Atom(atom) => atom,
         };
-        let reference = eval.bound[self.query.atoms[index_of_atom].key() as usize];
+        let key = match &self.shapes[index_of_atom] {
+            Shape::Words(_) => unreachable!("a client table atom has a step of its own"),
+            Shape::Rows(rows) => rows.key,
+            Shape::Lattice(lattice) => lattice.key,
+            Shape::Place(place) => place.key,
+        };
+        let reference = eval.bound[key as usize];
         debug_assert_ne!(reference, UNBOUND, "key bound by an earlier step");
         match &self.shapes[index_of_atom] {
             Shape::Rows(rows) => self.value(eval, root, index, index_of_atom, rows, reference.id),
@@ -669,6 +1124,62 @@ impl Plan {
                 self.lattice(eval, root, index, index_of_atom, lattice, reference)
             }
             Shape::Place(place) => self.place(eval, root, index, place, reference),
+            Shape::Words(_) => unreachable!("a client table atom has a step of its own"),
+        }
+    }
+
+    // Out of line, so the loop nest's step stays as small as it was.
+    #[inline(never)]
+    fn table<C, const S: usize, A: Allow + ?Sized>(
+        &self,
+        eval: &mut Eval<'_, C, S, A>,
+        root: u32,
+        index: usize,
+        atom: usize,
+        keys: u32,
+    ) {
+        let tuples = self.tuples(atom);
+        let (db, resolutions) = (eval.db, eval.resolutions);
+        if eval.probes.len() <= atom {
+            eval.probes.resize_with(atom + 1, Probe::default);
+        }
+        // The orders one search steps may reach the atom under different
+        // columns.
+        if eval.probes[atom].tables.is_empty() || eval.probes[atom].keys != keys {
+            let columns = key_columns(keys);
+            let tables = resolutions[tuples.table as usize].tables.iter();
+            let tables = tables.map(|(table, _)| {
+                let words = db.words(*table);
+                (words, (!columns.is_empty()).then(|| words.trie(&columns)))
+            });
+            eval.probes[atom] = Probe {
+                keys,
+                tables: tables.collect(),
+                columns,
+            };
+        }
+        for table in 0..eval.probes[atom].tables.len() {
+            let probe = &eval.probes[atom];
+            let (words, trie) = probe.tables[table];
+            let rows = match trie {
+                None => words.rows(),
+                Some(trie) => {
+                    let scalars = &eval.scalars;
+                    let leaf = probe.columns.iter().try_fold(trie.root(), |node, &column| {
+                        let cell = match &tuples.terms[column as usize] {
+                            Expr::Scalar(slot) => scalars[*slot as usize] as i64,
+                            term => term.eval(scalars)?,
+                        };
+                        trie.child(node, u32::try_from(cell as u64).ok()?)
+                    });
+                    leaf.map_or(&[][..], |leaf| trie.rows(leaf))
+                }
+            };
+            for &row in rows {
+                if eval.bind_words(tuples, keys, words, row) {
+                    self.step(eval, root, index + 1);
+                }
+            }
         }
     }
 
@@ -718,7 +1229,7 @@ impl Plan {
         place: &Place,
         reference: Ref,
     ) {
-        let uf = eval.db.partition(self.query.space);
+        let (db, space) = (eval.db, self.query.space);
         match place.read {
             Read::Offset { base, offset } => {
                 // The offset is read, so it is fixed from here on.
@@ -731,8 +1242,8 @@ impl Plan {
                 eval.unbind(mark);
             }
             Read::Pinned { offset } => {
-                let found = uf.find(reference);
-                if uf.is_zero(found.id) {
+                let found = db.find(space, reference);
+                if db.is_zero(space, found.id) {
                     let mark = eval.trail.len();
                     eval.tighten(place.key);
                     eval.scalars[offset as usize] = found.offset;
@@ -743,7 +1254,7 @@ impl Plan {
             // An id's carrier never changes, so there is no freshness to
             // track.
             Read::Width { width } => {
-                let mask = uf.mask(reference.id);
+                let mask = db.mask(space, reference.id);
                 if mask != 0 {
                     eval.scalars[width as usize] = u64::from(mask.count_ones());
                     self.step(eval, root, index + 1);
@@ -752,7 +1263,7 @@ impl Plan {
             // An id stops being placed once and for all, so there is no
             // freshness to track either.
             Read::Conflicted => {
-                if uf.is_conflicted(reference.id) {
+                if db.is_conflicted(space, reference.id) {
                     self.step(eval, root, index + 1);
                 }
             }
@@ -771,23 +1282,46 @@ impl Plan {
     ) {
         let (db, groups, resolutions) = (eval.db, eval.groups, eval.resolutions);
         let select = rows.select.column as usize;
+        // No row of a table that never named the id has it for its value.
+        let naming = db.naming(self.query.space, value);
+        if naming & eval.holders[rows.select.param as usize] == 0 {
+            return;
+        }
         for (slot, cells) in &resolutions[rows.select.param as usize].tables {
-            let Some(table) = db.table(*slot) else {
+            if naming & holder(*slot) == 0 {
                 continue;
-            };
+            }
             let when = Self::when(rows, resolutions, *slot);
-            lookup!(eval, groups, *slot, table.arity(), table, value, |row| {
-                if reads(cells, table.column(select)[row as usize]) {
-                    let bind = (rows.tag, rows.key);
-                    self.row(eval, root, index, atom, rows, table, row, bind, None, when);
+            for (side, table) in db.sides(*slot) {
+                let at = (*slot, side);
+                let bind = (rows.tag, rows.key);
+                if side != 0 {
+                    let rows_found = eval.scan_rows(table.values(), value);
+                    for &row in &rows_found {
+                        if reads(cells, table.column(select)[row as usize]) {
+                            self.row(
+                                eval, root, index, atom, rows, at, table, row, bind, None, when,
+                            );
+                        }
+                    }
+                    eval.pool.push(rows_found);
+                    continue;
                 }
-            });
+                lookup!(eval, groups, *slot, table.arity(), table, value, |row| {
+                    if reads(cells, table.column(select)[row as usize]) {
+                        self.row(
+                            eval, root, index, atom, rows, at, table, row, bind, None, when,
+                        );
+                    }
+                });
+            }
         }
     }
 
-    /// Try one row of an atom's table. `bind` names the scalar that takes the
-    /// row's tag and the variable that takes the row's value, or is checked
-    /// against it when bound. `swapped` picks the reading to try: as
+    /// Try one row of an atom's table, the one of side `side` at `slot`.
+    /// `bind` names the scalar that takes the row's tag and the variable that
+    /// takes the row's value, or is checked against it when bound. `swapped`
+    /// picks the reading to try: as
     /// written or swapped alone, or with `None` both where `when` holds the
     /// row's selected cell.
     #[allow(clippy::too_many_arguments)]
@@ -799,18 +1333,27 @@ impl Plan {
         index: usize,
         atom: usize,
         rows: &RowShape,
+        (slot, side): (u32, usize),
         table: &Table,
         row: u32,
         bind: (Option<Scalar>, Var),
         swapped: Option<bool>,
         when: &[u32],
     ) {
+        // A row a layer above its side re-keyed is read as its copy instead.
+        if eval.db.stale(slot, side, row) {
+            return;
+        }
         let fresh = usize::from(table.stamps()[row as usize] + 1 == eval.db.epoch());
         if fresh == 1 && !eval.nested && atom < eval.old_below {
             return;
         }
         if let Some(slot) = bind.0 {
             eval.scalars[slot as usize] = table.tags()[row as usize] as u64;
+        }
+        if let Some(slot) = rows.cell {
+            eval.scalars[slot as usize] =
+                table.column(rows.select.column as usize)[row as usize] as u64;
         }
         let readings = match swapped {
             None if !when.is_empty()
@@ -853,29 +1396,55 @@ impl Plan {
         let rows = self.rows(atom);
         let select = rows.select.column as usize;
         let bind = (rows.tag, rows.key);
+        // A variable's column holds ids, which a table that never named
+        // the child has no row holding it in.
+        let naming = db.naming(self.query.space, child);
+        if naming & eval.holders[rows.select.param as usize] == 0 {
+            return;
+        }
         for (slot, cells) in &resolutions[rows.select.param as usize].tables {
-            let Some(table) = db.table(*slot) else {
+            if naming & holder(*slot) == 0 {
                 continue;
-            };
+            }
             let when = Self::when(rows, resolutions, *slot);
             // Read swapped, the bound argument sits in the other column. No
             // row of a table with no cell in `when` reads swapped.
             let readings = if when.is_empty() { 1 } else { 2 };
-            for reading in 0..readings {
-                let at = if reading == 1 {
-                    arg.swapped
-                } else {
-                    arg.column
-                } as usize;
-                lookup!(eval, groups, *slot, at, table, child, |row| {
-                    let cell = table.column(select)[row as usize];
-                    if reads(cells, cell) && (reading == 0 || reads(when, cell)) {
-                        let swapped = Some(reading == 1);
-                        self.row(
-                            eval, root, index, atom, rows, table, row, bind, swapped, when,
-                        );
+            for (side, table) in db.sides(*slot) {
+                debug_assert!(arg.column as usize >= table.plain_columns());
+                let where_ = (*slot, side);
+                for reading in 0..readings {
+                    let at = if reading == 1 {
+                        arg.swapped
+                    } else {
+                        arg.column
+                    } as usize;
+                    if side != 0 {
+                        let rows_found = eval.scan_rows(table.column(at), child);
+                        for &row in &rows_found {
+                            let cell = table.column(select)[row as usize];
+                            if reads(cells, cell) && (reading == 0 || reads(when, cell)) {
+                                let swapped = Some(reading == 1);
+                                self.row(
+                                    eval, root, index, atom, rows, where_, table, row, bind,
+                                    swapped, when,
+                                );
+                            }
+                        }
+                        eval.pool.push(rows_found);
+                        continue;
                     }
-                });
+                    lookup!(eval, groups, *slot, at, table, child, |row| {
+                        let cell = table.column(select)[row as usize];
+                        if reads(cells, cell) && (reading == 0 || reads(when, cell)) {
+                            let swapped = Some(reading == 1);
+                            self.row(
+                                eval, root, index, atom, rows, where_, table, row, bind, swapped,
+                                when,
+                            );
+                        }
+                    });
+                }
             }
         }
     }
@@ -926,6 +1495,50 @@ impl Plan {
     }
 }
 
+fn layered_new<C, const S: usize>(
+    db: &Database<C, S>,
+    slot: u32,
+    column: usize,
+    cells: &[u32],
+) -> usize {
+    if !db.layered() {
+        return 0;
+    }
+    let epoch = db.epoch() - 1;
+    db.sides(slot)
+        .filter(|&(side, _)| side != 0 && db.side_new(side))
+        .map(|(_, table)| {
+            let column = table.column(column);
+            let stamps = table.stamps();
+            (0..table.len())
+                .filter(|&row| stamps[row] == epoch && reads(cells, column[row]))
+                .count()
+        })
+        .sum()
+}
+
+pub(super) fn key_columns(keys: u32) -> SmallVec<[u8; 8]> {
+    (0..32).filter(|column| keys >> column & 1 == 1).collect()
+}
+
+pub(super) fn keyed<'w>(
+    words: &'w Words,
+    tuples: &Tuples,
+    keys: u32,
+    scalars: &[u64],
+) -> &'w [u32] {
+    let columns = key_columns(keys);
+    if columns.is_empty() {
+        return words.rows();
+    }
+    let trie = words.trie(&columns);
+    let leaf = columns.iter().try_fold(trie.root(), |node, &column| {
+        let cell = tuples.terms[column as usize].eval(scalars)?;
+        trie.child(node, u32::try_from(cell as u64).ok()?)
+    });
+    leaf.map_or(&[], |leaf| trie.rows(leaf))
+}
+
 /// Whether `cell` is one of `cells`, which is ascending.
 pub(super) fn reads(cells: &[u32], cell: u32) -> bool {
     match cells {
@@ -934,13 +1547,21 @@ pub(super) fn reads(cells: &[u32], cell: u32) -> bool {
     }
 }
 
+#[derive(Default)]
+struct Probe<'a> {
+    keys: u32,
+    columns: SmallVec<[u8; 8]>,
+    tables: SmallVec<[(&'a Words, Option<&'a Trie>); 1]>,
+}
+
 /// State one search threads through the loop nest.
 pub(super) struct Eval<'a, C, const S: usize, A: ?Sized> {
-    pub(super) db: &'a Database<C, S>,
-    host: &'a dyn Host,
+    pub(super) db: &'a Core<C, S>,
+    host: &'a dyn Calls,
     pub(super) groups: &'a Groups,
     /// Per parameter, what it resolved to; shared by the plan and its nots.
     pub(super) resolutions: &'a [Resolution],
+    holders: &'a [u64],
     /// Whether a negated sub-conjunction is being stepped.
     pub(super) nested: bool,
     /// The anchor whose order is being stepped, when the search started at a
@@ -984,6 +1605,9 @@ pub(super) struct Eval<'a, C, const S: usize, A: ?Sized> {
     /// over their indices: the rest run as the loop nest.
     ready: u64,
     pub(super) join: &'a mut Option<Box<JoinScratch>>,
+    below: SmallVec<[Reduced; 2]>,
+    sets: Vec<Vec<u64>>,
+    probes: Vec<Probe<'a>>,
     out: Matches,
 }
 
@@ -995,6 +1619,7 @@ impl<C, const S: usize, A: Allow + ?Sized> Eval<'_, C, S, A> {
             scalars: self.scalars,
             trail: self.trail,
             pool: self.pool,
+            sets: self.sets,
             out: Matches::default(),
         };
         (self.out, scratch)
@@ -1063,6 +1688,30 @@ impl<C, const S: usize, A: Allow + ?Sized> Eval<'_, C, S, A> {
             }
         }
         true
+    }
+
+    pub(super) fn bind_words(
+        &mut self,
+        tuples: &Tuples,
+        keys: u32,
+        words: &Words,
+        row: u32,
+    ) -> bool {
+        let free = || {
+            let terms = tuples.terms.iter().enumerate();
+            terms
+                .filter(|&(column, _)| keys >> column & 1 == 0)
+                .filter_map(|(column, term)| {
+                    Some((
+                        term.lone()? as usize,
+                        words.column(column)[row as usize] as u64,
+                    ))
+                })
+        };
+        for (slot, cell) in free() {
+            self.scalars[slot] = cell;
+        }
+        free().all(|(slot, cell)| self.scalars[slot] == cell)
     }
 
     #[inline(always)]

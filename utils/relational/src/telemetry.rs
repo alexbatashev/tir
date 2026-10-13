@@ -8,7 +8,6 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::Stats;
-use crate::rule::Client;
 use crate::saturate::Delta;
 
 /// Mirrors the core pass timer's switch; this crate cannot see it.
@@ -31,6 +30,9 @@ struct Round {
     noop: usize,
     merged: usize,
     repairs: usize,
+    rebuilds: usize,
+    batches: usize,
+    batched: usize,
 }
 
 thread_local! {
@@ -57,30 +59,15 @@ pub(super) fn register_rules<'a>(names: impl IntoIterator<Item = &'a str>) {
     }
 }
 
-/// Whether a match's application is counted at all: [`RoundStats::apply`]
-/// and [`apply_rule`] do nothing otherwise.
-pub(super) fn counting() -> bool {
-    enabled() || rule_stats_enabled()
-}
-
-pub(super) fn apply_rule<C, const S: usize, X: Client<C, S>>(
-    name: &str,
-    client: &mut X,
-    apply: impl FnOnce(&mut X),
-) {
+pub(super) fn count_rule(name: &str, applications: usize, idle: usize) {
     if !rule_stats_enabled() {
-        return apply(client);
+        return;
     }
-    let before = client.db().stats();
-    apply(client);
-    let after = client.db().stats();
     RULES.with(|counts| {
         let mut counts = counts.borrow_mut();
         let count = counts.get_mut(name).expect("registered saturation rule");
-        count.applications += 1;
-        count.changed += usize::from(
-            (after.merges, after.adds, after.raises) != (before.merges, before.adds, before.raises),
-        );
+        count.applications += applications;
+        count.changed += applications - idle;
     });
 }
 
@@ -143,24 +130,13 @@ impl RoundStats {
         round.delta = round.delta.max(delta.map_or(0, Delta::frontier));
     }
 
-    /// Apply one match, counting it as a no-op if it equated nothing, minted
-    /// nothing and raised nothing — the match was already there, as re-finding
-    /// an old one is.
-    pub fn apply<C, const S: usize, X: Client<C, S>>(
-        &mut self,
-        client: &mut X,
-        apply: impl FnOnce(&mut X),
-    ) {
-        let Some((round, _)) = &mut self.0 else {
-            return apply(client);
-        };
-        round.found += 1;
-        let before = client.db().stats();
-        apply(client);
-        let after = client.db().stats();
-        round.noop += usize::from(
-            (after.merges, after.adds, after.raises) == (before.merges, before.adds, before.raises),
-        );
+    /// Count `found` matches applied, `idle` of them no-ops: they equated
+    /// nothing and minted nothing, as re-finding an old match does.
+    pub fn applied(&mut self, found: usize, idle: usize) {
+        if let Some((round, _)) = &mut self.0 {
+            round.found += found;
+            round.noop += idle;
+        }
     }
 
     /// Close the round; call after the rebuild, whose merges and repairs it counts.
@@ -170,6 +146,9 @@ impl RoundStats {
         };
         round.merged = now.merges - base.merges;
         round.repairs = now.repairs - base.repairs;
+        round.rebuilds = now.rebuilds - base.rebuilds;
+        round.batches = now.batches - base.batches;
+        round.batched = now.batched - base.batched;
         ROUNDS.with(|rounds| rounds.borrow_mut().push(round));
     }
 }
@@ -210,7 +189,8 @@ pub fn report_saturation(pass: &str) {
     };
     eprintln!(
         "tir-sat: pass={pass} rounds={} saturate_ms={:.3} extracts={} extract_ms={:.3} \
-         changed=[{}] delta=[{}] searched=[{}] found=[{}] noop=[{}] merged=[{}] repairs=[{}]",
+         changed=[{}] delta=[{}] searched=[{}] found=[{}] noop=[{}] merged=[{}] repairs=[{}] \
+         rebuilds=[{}] batches=[{}] batched=[{}]",
         rounds.len(),
         ELAPSED.replace(Duration::ZERO).as_secs_f64() * 1e3,
         extracts.0,
@@ -222,5 +202,8 @@ pub fn report_saturation(pass: &str) {
         column(|r| r.noop),
         column(|r| r.merged),
         column(|r| r.repairs),
+        column(|r| r.rebuilds),
+        column(|r| r.batches),
+        column(|r| r.batched),
     );
 }

@@ -12,7 +12,7 @@
 
 use std::hash::{Hash, Hasher};
 
-use tir_adt::{APInt, FxHasher};
+use tir_adt::{APFloat, APInt, FxHasher};
 use tir_egraph::{Carrier, ClassId as Id, Label as ENode};
 
 use crate::attributes::{AttributeValue, NamedAttribute};
@@ -76,6 +76,43 @@ impl IrOp {
         }
     }
 
+    /// The operator `instance` is, which its kind and attributes decide:
+    /// its declaration, its [`OpCost`], and the attributes that identify it.
+    pub fn of(instance: &OpHandle) -> Self {
+        let cost = instance
+            .clone()
+            .as_interface::<dyn OpCost>()
+            .map_or(1, |c| c.cost());
+        let context = &instance.context;
+        let mut op = Self::declared(
+            context,
+            (instance.dialect().as_str(), instance.name().as_str()),
+            instance.attributes().to_vec(),
+            cost,
+        );
+        // The attributes identify what the op computes, in one spelling: a
+        // data layout carried by a detached op and floating-point semantics
+        // equal to the operation's defaults add nothing, and a builder's
+        // order is not an identity.
+        let layout = context.sym(crate::DATA_LAYOUT);
+        op.attrs.retain(|attribute| {
+            Some(attribute.name) != layout
+                && !matches!(
+                    &attribute.value,
+                    AttributeValue::FpSemantics(semantics)
+                        if **semantics == crate::fp::Semantics::default_for_operation(instance.name().as_str())
+                )
+        });
+        op.attrs.sort_by_key(|attribute| attribute.name);
+        op
+    }
+
+    /// The bit of [`Self::result_typed`] operand `index` has; none past the
+    /// eighth.
+    pub fn operand_bit(index: usize) -> u8 {
+        1u8.checked_shl(index as u32).unwrap_or(0)
+    }
+
     /// A pattern over the operator alone, with no laws: a template only
     /// matches.
     pub fn template(dialect: &'static str, name: &'static str, attrs: Vec<NamedAttribute>) -> Self {
@@ -104,7 +141,50 @@ impl Eq for IrOp {}
 pub enum Kind {
     Sym(SymKind),
     Ir(IrOp),
+    /// An automaton state the selection rules insert: the chain `st(P)(f)`
+    /// puts the instruction tree pattern `P` accepts in the value class of
+    /// the row it selects, and its one child is the form the accepted tree
+    /// is over. The seed chain of an operand's class is over that class
+    /// itself. [`ANY_STATE`] in a template matches every state.
+    State(u32),
+    /// A selected row as pattern `P` over its operands' forms,
+    /// `form(P)(w1..wK)`, in a class of its own: it emits nothing, and a
+    /// chain names it. [`ANY_FORM`] in a template matches every form of the
+    /// template's arity.
+    Form(u32),
+    /// Value `index` of an operation the graph does not describe, over what
+    /// the operation reads: its operands in order, then the results of the
+    /// regions it holds. The value is the operation's `index`-th result, or
+    /// the `index`-th port of a loop's body, which reads what the loop is
+    /// entered on. `changes` says the operation changes a state it
+    /// publishes, so each of its results follows that write.
+    ///
+    /// With the [`SemPayload::Input`] payload the node is all the graph
+    /// holds of the value: which operation it is the node's provenance
+    /// says, the label is the same in every function, and each such node is
+    /// a class of its own. Without it the node sits beside the term of a
+    /// value a gate or a loop chooses, a function of what it reads like that
+    /// term.
+    Result {
+        index: u32,
+        changes: bool,
+    },
+    /// Some of the values an operation reads, where a [`Kind::Result`] does
+    /// not hold them all: its children are then rows of this kind, each over
+    /// [`WIDEST_RESULT`] of the values at most, or over such rows again.
+    Operands,
 }
+
+/// The most children a [`Kind::Result`] or a [`Kind::Operands`] node has, so
+/// the rules written per number of children cover them whatever a function
+/// calls.
+pub const WIDEST_RESULT: usize = 5;
+
+/// The state a template names to match every state.
+pub const ANY_STATE: u32 = u32::MAX;
+
+/// The pattern a template names to match every form.
+pub const ANY_FORM: u32 = u32::MAX;
 
 impl Kind {
     /// The semantic operator, or `None` for a label the semantic vocabulary does
@@ -123,6 +203,8 @@ impl Kind {
         }
     }
 
+    // Every state is one operator and every form another, so a template over
+    // any of either finds them all.
     fn hash_into(&self, h: &mut impl Hasher) {
         match self {
             Kind::Sym(kind) => {
@@ -135,6 +217,10 @@ impl Kind {
                 op.name.hash(h);
                 hash_attrs(&op.attrs, h);
             }
+            Kind::State(_) => 2u8.hash(h),
+            Kind::Form(_) => 3u8.hash(h),
+            Kind::Result { .. } => 4u8.hash(h),
+            Kind::Operands => 5u8.hash(h),
         }
     }
 }
@@ -153,6 +239,10 @@ impl PartialEq<SymKind> for Kind {
 pub enum SemPayload {
     Expr(SymPayload<ValueId>),
     Opaque(u32),
+    /// An IR value the graph does not model further. Which one is the
+    /// node's provenance: the label is the same in every function, and each
+    /// such node is a class of its own.
+    Input,
 }
 
 /// An integer literal is its bits at its width: the `signed` flag is how a value
@@ -166,6 +256,7 @@ impl PartialEq for SemPayload {
             }
             (SemPayload::Expr(a), SemPayload::Expr(b)) => a == b,
             (SemPayload::Opaque(a), SemPayload::Opaque(b)) => a == b,
+            (SemPayload::Input, SemPayload::Input) => true,
             _ => false,
         }
     }
@@ -217,7 +308,7 @@ impl SemNode {
     pub fn input(value: ValueId) -> Self {
         Self {
             kind: Kind::Sym(SymKind::Symbol),
-            payload: Some(SemPayload::Expr(SymPayload::Value(value))),
+            payload: Some(SemPayload::Input),
             ty: None,
             children: Vec::new(),
             prov: Prov::Value(value),
@@ -234,6 +325,15 @@ impl SemNode {
             children: Vec::new(),
             prov,
             carrier: None,
+        }
+    }
+
+    /// A float literal, identified by its format and bits. No integer carrier
+    /// holds it, so it is a row of its own class.
+    pub fn float(value: APFloat, prov: Prov) -> Self {
+        Self {
+            payload: Some(SemPayload::Expr(SymPayload::Float(value))),
+            ..Self::constant(APInt::new(1, 0), prov)
         }
     }
 
@@ -263,6 +363,36 @@ impl SemNode {
         Self::projection(Kind::Sym(SymKind::Port), value, args)
     }
 
+    /// Value `index` of an operation the graph does not describe, standing
+    /// for `value` in a class of its own, over what the operation reads; see
+    /// [`Kind::Result`].
+    pub fn result(value: ValueId, index: usize, changes: bool, args: Vec<Id>) -> Self {
+        Self {
+            payload: Some(SemPayload::Input),
+            ..Self::chosen(value, index, changes, args)
+        }
+    }
+
+    /// What `value`, result `index` of a gate or a loop the graph has a term
+    /// for, waits for beside that term; see [`Kind::Result`].
+    pub fn chosen(value: ValueId, index: usize, changes: bool, args: Vec<Id>) -> Self {
+        let index = index as u32;
+        Self::projection(Kind::Result { index, changes }, value, args)
+    }
+
+    /// Some of what an operation reads, for its results to read; see
+    /// [`Kind::Operands`].
+    pub fn operands(args: Vec<Id>) -> Self {
+        Self {
+            kind: Kind::Operands,
+            payload: None,
+            ty: None,
+            children: args,
+            prov: Prov::None,
+            carrier: None,
+        }
+    }
+
     /// A memory access standing for `value` — the value a read yields, or the
     /// state a write publishes — over the vocabulary's operands and the state
     /// it reads.
@@ -285,27 +415,35 @@ impl SemNode {
     /// [`OpCost`] interface, laws from its declarations. `commutative` may
     /// widen what the op declares, for a merge whose inputs are unordered.
     pub fn seeded(instance: &OpHandle, ty: TypeId, commutative: bool, args: Vec<Id>) -> Self {
-        let cost = instance
-            .clone()
-            .as_interface::<dyn OpCost>()
-            .map_or(1, |c| c.cost());
+        Self::seeded_as(IrOp::of(instance), instance, ty, commutative, args)
+    }
+
+    /// [`Self::seeded`] for an `instance` whose operator, [`IrOp::of`] it, the
+    /// caller already holds.
+    pub fn seeded_as(
+        mut op: IrOp,
+        instance: &OpHandle,
+        ty: TypeId,
+        commutative: bool,
+        args: Vec<Id>,
+    ) -> Self {
         let context = &instance.context;
-        let mut op = IrOp::declared(
-            context,
-            (instance.dialect().as_str(), instance.name().as_str()),
-            instance.attributes().to_vec(),
-            cost,
-        );
         op.commutative |= commutative;
-        op.result_typed = instance
+        let result_typed = instance
             .operands()
             .iter()
             .enumerate()
             .filter(|&(_, &operand)| context.get_value(operand).ty() == ty)
-            .fold(0, |bits, (index, _)| {
-                bits | 1u8.checked_shl(index as u32).unwrap_or(0)
-            });
-        Self::ir(op, Some(ty), args, Prov::Op(instance.id))
+            .fold(0, |bits, (index, _)| bits | IrOp::operand_bit(index));
+        Self::seeded_row(op, instance.id, ty, result_typed, args)
+    }
+
+    /// [`Self::seeded_as`] for the op `id` whose row the caller read:
+    /// `result_typed` is [`IrOp::result_typed`], an [`IrOp::operand_bit`] per
+    /// operand of type `ty`.
+    pub fn seeded_row(mut op: IrOp, id: OpId, ty: TypeId, result_typed: u8, args: Vec<Id>) -> Self {
+        op.result_typed = result_typed;
+        Self::ir(op, Some(ty), args, Prov::Op(id))
     }
 
     /// An op a rewrite introduced, built by the ruleset's `idx`-th emitter.
@@ -395,6 +533,18 @@ impl SemNode {
         }
     }
 
+    /// The bits of the literal this node is, an integer's or a float's of at
+    /// most 64.
+    pub fn bits(&self) -> Option<APInt> {
+        match &self.payload {
+            Some(SemPayload::Expr(SymPayload::Int(value))) => Some(value.clone()),
+            Some(SemPayload::Expr(SymPayload::Float(value))) if value.bit_width() <= 64 => {
+                Some(APInt::new(value.bit_width(), value.to_bits() as u64))
+            }
+            _ => None,
+        }
+    }
+
     /// The same term, read at `ty`. A gate or a leaf carries the port's value
     /// type so the width-dependent rules bind on its class like any other.
     pub fn typed(mut self, ty: TypeId) -> Self {
@@ -430,6 +580,13 @@ pub mod field {
     pub const INT_SIGNED: u32 = 3;
     /// The carrier, as [`super::carrier_word`] spells it; zero for none.
     pub const CARRIER: u32 = 4;
+    /// A selection state's number.
+    pub const STATE: u32 = 5;
+    /// A selection form's pattern number.
+    pub const FORM: u32 = 6;
+    /// One for a [`super::Kind::Result`] of an operation that changes a
+    /// state, zero for any other node.
+    pub const CHANGES: u32 = 7;
 }
 
 /// The carrier of an integer `width` bits wide. Every integer of one width
@@ -491,7 +648,9 @@ pub fn cost(node: &SemNode) -> u64 {
     match &node.kind {
         Kind::Ir(op) => op.cost as u64,
         Kind::Sym(SymKind::Constant) => 0,
-        Kind::Sym(_) => GATE_COST,
+        Kind::Sym(_) | Kind::Result { .. } => GATE_COST,
+        Kind::Operands => 0,
+        Kind::State(_) | Kind::Form(_) => u64::MAX,
     }
 }
 
@@ -501,7 +660,7 @@ impl PartialEq for SemNode {
     fn eq(&self, other: &Self) -> bool {
         self.kind == other.kind
             && self.payload == other.payload
-            && self.ty == other.ty
+            && self.label_type() == other.label_type()
             && self.carrier == other.carrier
     }
 }
@@ -509,6 +668,83 @@ impl PartialEq for SemNode {
 impl Eq for SemNode {}
 
 impl ENode for SemNode {
+    type Names = crate::Names;
+    type SortKey = Vec<u8>;
+
+    /// The label spelled field by field: operator, attributes by name,
+    /// arity, payload, type, carrier. A type and an attribute name are
+    /// spelled out, their ids being the order the context met them in. A
+    /// value or a block a label names keeps its number: only the function
+    /// that owns it holds the label, and its own values are numbered in the
+    /// order it made them.
+    fn sort_key(&self, names: &crate::Names) -> Vec<u8> {
+        let mut key = Vec::new();
+        match &self.kind {
+            Kind::Sym(kind) => {
+                key.push(0);
+                key.extend_from_slice(&(*kind as u16).to_be_bytes());
+            }
+            Kind::Ir(op) => {
+                key.push(1);
+                spell_text(op.dialect, &mut key);
+                spell_text(op.name, &mut key);
+                spell_attrs(&op.attrs, names, &mut key);
+            }
+            Kind::State(id) => {
+                key.push(2);
+                key.extend_from_slice(&id.to_be_bytes());
+            }
+            Kind::Form(id) => {
+                key.push(3);
+                key.extend_from_slice(&id.to_be_bytes());
+            }
+            Kind::Result { index, changes } => {
+                key.push(4);
+                key.extend_from_slice(&index.to_be_bytes());
+                key.push(u8::from(*changes));
+            }
+            Kind::Operands => key.push(5),
+        }
+        key.extend_from_slice(&(self.children.len() as u32).to_be_bytes());
+        match &self.payload {
+            None => key.push(0),
+            Some(SemPayload::Expr(SymPayload::SymbolId(symbol))) => {
+                key.push(1);
+                key.extend_from_slice(&symbol.to_be_bytes());
+            }
+            Some(SemPayload::Expr(SymPayload::Value(value))) => {
+                key.push(2);
+                key.extend_from_slice(&value.number().to_be_bytes());
+            }
+            Some(SemPayload::Expr(SymPayload::Int(value))) => {
+                key.push(3);
+                key.extend_from_slice(&value.width().to_be_bytes());
+                key.extend_from_slice(&value.to_u64().to_be_bytes());
+            }
+            Some(SemPayload::Expr(SymPayload::Float(value))) => {
+                key.push(4);
+                spell_text(&format!("{value:?}"), &mut key);
+            }
+            Some(SemPayload::Opaque(serial)) => {
+                key.push(5);
+                key.extend_from_slice(&serial.to_be_bytes());
+            }
+            Some(SemPayload::Input) => key.push(6),
+        }
+        match self.label_type() {
+            None => key.push(0),
+            Some(ty) => {
+                key.push(1);
+                spell_text(&names.type_spelling(ty), &mut key);
+            }
+        }
+        if let Some(carrier) = self.carrier {
+            key.push(carrier.width);
+            key.extend_from_slice(&carrier.key.to_be_bytes());
+        }
+        key
+    }
+
     fn children(&self) -> &[Id] {
         &self.children
     }
@@ -521,6 +757,12 @@ impl ENode for SemNode {
         let mut h = FxHasher::default();
         hash_label(self, &mut h);
         self.children.hash(&mut h);
+        h.finish()
+    }
+
+    fn label_hash(&self) -> u64 {
+        let mut h = FxHasher::default();
+        hash_label(self, &mut h);
         h.finish()
     }
 
@@ -540,14 +782,26 @@ impl ENode for SemNode {
         self == other
     }
 
+    fn bare(&self) -> Self {
+        Self {
+            prov: Prov::None,
+            ty: self.label_type(),
+            ..self.clone()
+        }
+    }
+
     /// Template matching: a typed template only matches a node of exactly that
     /// type, an untyped one (`ty == None`) any type; a payload of `None` is a
     /// wildcard, `Some` matches by equality.
     fn matches_template(&self, target: &Self) -> bool {
-        if self.kind != target.kind {
+        let any = matches!(
+            (&self.kind, &target.kind),
+            (Kind::State(ANY_STATE), Kind::State(_)) | (Kind::Form(ANY_FORM), Kind::Form(_))
+        );
+        if !any && self.kind != target.kind {
             return false;
         }
-        if self.ty.is_some() && target.ty != self.ty {
+        if self.ty.is_some() && target.label_type() != self.label_type() {
             return false;
         }
         match (&self.payload, &target.payload) {
@@ -561,6 +815,7 @@ impl ENode for SemNode {
         match &self.kind {
             Kind::Sym(kind) => kind.is_commutative(),
             Kind::Ir(op) => op.commutative,
+            Kind::State(_) | Kind::Form(_) | Kind::Result { .. } | Kind::Operands => false,
         }
     }
 
@@ -583,6 +838,18 @@ impl ENode for SemNode {
             field::INT_VALUE => self.int().map(APInt::to_u64),
             field::INT_WIDTH => self.int().map(|value| value.width() as u64),
             field::INT_SIGNED => self.int().map(|value| value.to_i64() as u64),
+            field::STATE => match self.kind {
+                Kind::State(state) => Some(u64::from(state)),
+                _ => None,
+            },
+            field::FORM => match self.kind {
+                Kind::Form(pattern) => Some(u64::from(pattern)),
+                _ => None,
+            },
+            field::CHANGES => {
+                let changes = matches!(self.kind, Kind::Result { changes: true, .. });
+                Some(u64::from(changes))
+            }
             _ => None,
         }
     }
@@ -597,6 +864,8 @@ impl ENode for SemNode {
                 field::INT_VALUE => value = Some(word),
                 field::INT_WIDTH => width = Some(word as u32),
                 field::CARRIER => node.carrier = carrier_from_word(word),
+                field::STATE => node.kind = Kind::State(word as u32),
+                field::FORM => node.kind = Kind::Form(word as u32),
                 _ => return None,
             }
         }
@@ -606,9 +875,13 @@ impl ENode for SemNode {
         Some(node)
     }
 
+    fn is_unique(&self) -> bool {
+        matches!(self.payload, Some(SemPayload::Input))
+    }
+
     fn carrier(&self) -> Option<Carrier> {
         match self.literal() {
-            Some(value) => int_carrier(value.width()),
+            Some(value) => self.carrier.or_else(|| int_carrier(value.width())),
             None => self.carrier,
         }
     }
@@ -638,16 +911,26 @@ impl ENode for SemNode {
         self.literal().map(APInt::to_u64)
     }
 
-    /// Only an integer carrier's constants are spelled: a pointer has no
-    /// literal, so no zero to be an offset of.
+    /// A pointer's constant is the address, carried as a pointer: its zero
+    /// is the null address, apart from the zero of the integers as wide.
     fn constant_of(&self, value: u64) -> Option<Self> {
         let carrier = self.carrier()?;
-        (carrier.key & POINTER == 0)
-            .then(|| SemNode::constant(APInt::new(u32::from(carrier.width), value), Prov::None))
+        let pointer = carrier.key & POINTER != 0;
+        let constant = SemNode::constant(APInt::new(u32::from(carrier.width), value), Prov::None);
+        Some(constant.carried(pointer.then_some(carrier)))
     }
 }
 
 impl SemNode {
+    // A pointer is the opaque pointer: what it points at is no part of what a
+    // term computes.
+    fn label_type(&self) -> Option<TypeId> {
+        let pointer = self
+            .carrier
+            .is_some_and(|carrier| carrier.key & POINTER != 0);
+        self.ty.filter(|_| !pointer)
+    }
+
     /// The integer literal this node is, as a constant of the vocabulary.
     fn literal(&self) -> Option<&APInt> {
         (self.kind == SymKind::Constant)
@@ -660,6 +943,7 @@ impl SemNode {
         match &self.kind {
             Kind::Sym(kind) => Some(*kind),
             Kind::Ir(op) => op.law,
+            Kind::State(_) | Kind::Form(_) | Kind::Result { .. } | Kind::Operands => None,
         }
     }
 }
@@ -667,7 +951,12 @@ impl SemNode {
 /// Hashes exactly the fields compared by [`SemNode`]'s label equality.
 fn hash_label(node: &SemNode, state: &mut impl Hasher) {
     node.kind.hash_into(state);
-    node.ty.hash(state);
+    match node.kind {
+        Kind::State(id) | Kind::Form(id) => id.hash(state),
+        Kind::Result { index, changes } => (index, changes).hash(state),
+        Kind::Sym(_) | Kind::Ir(_) | Kind::Operands => {}
+    }
+    node.label_type().hash(state);
     node.carrier.map(|carrier| carrier.key).hash(state);
     match &node.payload {
         None => 0u8.hash(state),
@@ -691,6 +980,99 @@ fn hash_label(node: &SemNode, state: &mut impl Hasher) {
         Some(SemPayload::Opaque(serial)) => {
             5u8.hash(state);
             serial.hash(state);
+        }
+        Some(SemPayload::Input) => 6u8.hash(state),
+    }
+}
+
+fn spell_text(text: &str, key: &mut Vec<u8>) {
+    key.extend_from_slice(text.as_bytes());
+    key.push(0);
+}
+
+fn spell_attrs(attrs: &[NamedAttribute], names: &crate::Names, key: &mut Vec<u8>) {
+    let mut named: Vec<(String, &AttributeValue)> = attrs
+        .iter()
+        .map(|attribute| (names.name(attribute.name), &attribute.value))
+        .collect();
+    named.sort_by(|a, b| a.0.cmp(&b.0));
+    key.extend_from_slice(&(named.len() as u32).to_be_bytes());
+    for (name, value) in named {
+        spell_text(&name, key);
+        spell_attr_value(value, names, key);
+    }
+}
+
+fn spell_attr_value(value: &AttributeValue, names: &crate::Names, key: &mut Vec<u8>) {
+    match value {
+        AttributeValue::Str(text) => {
+            key.push(0);
+            spell_text(text, key);
+        }
+        AttributeValue::Int(value) => {
+            key.push(1);
+            key.extend_from_slice(&value.to_be_bytes());
+        }
+        AttributeValue::UInt(value) => {
+            key.push(2);
+            key.extend_from_slice(&value.to_be_bytes());
+        }
+        AttributeValue::F32(value) => {
+            key.push(3);
+            key.extend_from_slice(&value.to_bits().to_be_bytes());
+        }
+        AttributeValue::F64(value) => {
+            key.push(4);
+            key.extend_from_slice(&value.to_bits().to_be_bytes());
+        }
+        AttributeValue::Bool(value) => key.extend_from_slice(&[5, u8::from(*value)]),
+        AttributeValue::Array(values) => {
+            key.push(6);
+            key.extend_from_slice(&(values.len() as u32).to_be_bytes());
+            for value in values.iter() {
+                spell_attr_value(value, names, key);
+            }
+        }
+        AttributeValue::Dict(entries) => {
+            key.push(7);
+            key.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+            for (name, value) in entries.iter() {
+                spell_text(name, key);
+                spell_attr_value(value, names, key);
+            }
+        }
+        AttributeValue::FpSemantics(semantics) => {
+            key.push(8);
+            spell_text(&format!("{semantics:?}"), key);
+        }
+        AttributeValue::EvaluationContract(contract) => {
+            key.push(9);
+            let untyped = crate::fp::EvaluationContract {
+                result_formats: Vec::new(),
+                ..(**contract).clone()
+            };
+            spell_text(&format!("{untyped:?}"), key);
+            key.extend_from_slice(&(contract.result_formats.len() as u32).to_be_bytes());
+            for &format in &contract.result_formats {
+                spell_text(&names.type_spelling(format), key);
+            }
+        }
+        AttributeValue::Register(register) => {
+            key.push(10);
+            spell_text(&format!("{register:?}"), key);
+        }
+        AttributeValue::Predicate(predicate) => key.extend_from_slice(&[11, *predicate as u8]),
+        AttributeValue::Value(value) => {
+            key.push(12);
+            key.extend_from_slice(&value.number().to_be_bytes());
+        }
+        AttributeValue::Type(ty) => {
+            key.push(13);
+            spell_text(&names.type_spelling(*ty), key);
+        }
+        AttributeValue::Block(block) => {
+            key.push(14);
+            spell_text(&format!("{block:?}"), key);
         }
     }
 }

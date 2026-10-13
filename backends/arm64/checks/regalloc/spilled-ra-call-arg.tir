@@ -14,7 +14,7 @@ module {
     %9 = addi %8, %0 : !i64
     %10 = addi %9, %0 : !i64
     %11 = addi %10, %0 : !i64
-    %12 = func.call %fn_ext(%0 : !i64) -> !i64
+    %12 = func.call %fn_ext(%11 : !i64) -> !i64
     %13 = addi %12, %1 : !i64
     %14 = addi %13, %2 : !i64
     %15 = addi %14, %3 : !i64
@@ -42,9 +42,9 @@ module {
   module_end
 }
 
-// CHECK: arm64.orr {rd = %[[SAVE:[0-9]+]]:[[REG:x[1-9][0-9]*]], rn = x31, rm = x30}
-// CHECK: arm64.store_doubleword {rt = %[[SAVE]]:[[REG]], rn = sp, imm = [[SLOT:[0-9]+]]}
-// CHECK: arm64.orr {rd = x0, rn = x31, rm = %{{[0-9]+}}:x0}
+// CHECK: arm64.orr {rd = %[[SAVE:[0-9]+]]:x0, rn = x31, rm = x30}
+// CHECK: arm64.store_doubleword {rt = %[[SAVE]]:x0, rn = sp, imm = [[SLOT:[0-9]+]]}
+// CHECK: arm64.orr {rd = x0, rn = x31, rm = %{{[0-9]+}}:x1}
 // CHECK: asm.vcall state(%{{[0-9]+}}, %{{[0-9]+}}) {callee = "ext"
-// CHECK: arm64.load_doubleword {rt = %[[RESTORE:[0-9]+]]:[[REG]], rn = sp, imm = [[SLOT]]}
-// CHECK: arm64.orr {rd = x30, rn = x31, rm = %[[RESTORE]]:[[REG]]}
+// CHECK: arm64.load_doubleword {rt = %[[RESTORE:[0-9]+]]:x1, rn = sp, imm = [[SLOT]]}
+// CHECK: arm64.orr {rd = x30, rn = x31, rm = %[[RESTORE]]:x1}

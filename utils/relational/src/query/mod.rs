@@ -1,5 +1,5 @@
 //! Conjunctive queries over a [`Database`](crate::Database): atoms over its
-//! tables, lattice columns and id spaces, guards over the words a match
+//! tables, lattice columns, id spaces and client tables, guards over the words a match
 //! binds, and an evaluator that answers with loops over the tables rather than
 //! a walk over a goal stack.
 //!
@@ -26,9 +26,9 @@ mod set;
 pub(crate) mod trie;
 
 pub(crate) use eval::Unchecked;
-pub use eval::{Allow, Matches, PlanCache, UNBOUND, bound};
+pub use eval::{Allow, Matches, PlanCache, Prepared, UNBOUND, bound};
 pub use ir::{
-    Atom, Cmp, Expr, ExternId, Guard, Host, Lattice, Nested, Out, Param, Place, Query, Read,
-    Resolution, Rows, Scalar, Select, Swap, Term, Var,
+    Atom, Calls, Cmp, Expr, ExternId, Guard, Host, Lattice, Nested, Out, Param, Place, Query, Read,
+    Resolution, Rows, Scalar, Select, Swap, Term, Tuples, Var,
 };
 pub use plan::{Plan, Step};

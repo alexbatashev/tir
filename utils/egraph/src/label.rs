@@ -9,13 +9,29 @@ use crate::{ClassId, FxHashMap, LabelId};
 /// [`matches`](Label::matches) plus equal canonical children, not `Hash`/`Eq`,
 /// so a [`hash_cons`](Label::hash_cons) collision only buckets and never merges
 /// nodes.
-pub trait Label: Debug + Clone {
+pub trait Label: Debug + Clone + Send + Sync {
     fn children(&self) -> &[ClassId];
     fn children_mut(&mut self) -> &mut [ClassId];
 
     /// Hash of the complete node, including its children. Congruent nodes must
     /// have equal hashes; collisions are allowed.
     fn hash_cons(&self) -> u64;
+
+    /// What [`Self::sort_key`] reads the label's interned fields through:
+    /// the tables that spell a type or a name the label holds by id. `()` for
+    /// a label that holds none.
+    type Names: Clone + Send + Sync;
+
+    /// What labels are ordered by; see [`Self::sort_key`].
+    type SortKey: Ord + Clone + Send + Sync;
+
+    /// The label's content as a key: its operator, arity, payload and type,
+    /// each as what it is and never as a hash or as an id handed out in the
+    /// order things were met. A search reads labels in the order of their
+    /// keys, so what it finds first does not depend on which graphs the
+    /// vocabulary served before. Labels that differ have different keys; two
+    /// that share one keep the order they were met in.
+    fn sort_key(&self, names: &Self::Names) -> Self::SortKey;
 
     /// Operator-index bucket for pattern search. Contract: `a.matches(b)` implies
     /// `a.op_key() == b.op_key()`, even when `a` is a loosely-matching template —
@@ -26,6 +42,13 @@ pub trait Label: Debug + Clone {
     /// Operator/label equality, ignoring children. Two nodes share a class iff
     /// this holds and their canonical children are equal.
     fn matches(&self, other: &Self) -> bool;
+
+    /// This node as the label table keeps it: everything [`Self::matches`]
+    /// compares and nothing that names the graph the node came from, its
+    /// provenance say. The table outlives that graph.
+    fn bare(&self) -> Self {
+        self.clone()
+    }
 
     /// Hash of the label alone. Must agree with [`Self::matches`]: equal labels
     /// hash equal. The default zeroes a copy's children and reuses
@@ -244,7 +267,7 @@ impl Laws {
 /// One label at two arities interns twice: a label names a table, and a table
 /// has one arity. That makes label equality finer than [`Label::matches`],
 /// which costs nothing: congruent rows have equal children and so equal arity.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Labels<L> {
     table: Vec<L>,
     /// [`Label::label_hash`] bucket -> the labels interned under it.
@@ -262,7 +285,8 @@ impl<L> Default for Labels<L> {
 
 impl<L: Label> Labels<L> {
     /// The id of `node`'s label, interning it on first sight. The stored copy
-    /// keeps whatever children `node` had; nothing reads them.
+    /// is [`Label::bare`], with whatever children `node` had; nothing reads
+    /// them.
     pub(crate) fn intern(&mut self, node: &L) -> LabelId {
         let bucket = self.index.entry(node.label_hash()).or_default();
         for &id in bucket.iter() {
@@ -273,7 +297,7 @@ impl<L: Label> Labels<L> {
         }
         let id = LabelId(self.table.len() as u32);
         bucket.push(id);
-        self.table.push(node.clone());
+        self.table.push(node.bare());
         id
     }
 

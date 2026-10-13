@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use smallvec::SmallVec;
 
 use super::ghd::{Bag, decompose};
-use super::ir::{Atom, Lattice, Param, Place, Query, Read, Scalar, Select, Var};
+use super::ir::{
+    Atom, Expr, Lattice, Param, Place, Query, Read, Rows, Scalar, Select, Tuples, Var,
+};
 use crate::db::LatticeId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,7 +26,14 @@ pub enum Step {
         slot: u8,
     },
     Guard(usize),
-    /// The row atoms of the run of steps that follows, joined at once: by
+    /// A client table atom. `keys` masks the columns whose term is bound when
+    /// the step is reached: its rows are looked up under those and bind the
+    /// rest.
+    Table {
+        atom: usize,
+        keys: u32,
+    },
+    /// The atoms of the run of steps that follows, joined at once: by
     /// index into the order's joins. The run's steps stay in the order, for
     /// when the loop nest is the cheaper way to run them.
     Join(usize),
@@ -58,6 +67,9 @@ pub struct Planned {
     /// marked, and the joins the marks name.
     pub(super) run: Vec<Step>,
     pub(super) joins: Vec<JoinPlan>,
+    // From there on only client tables, places and comparisons are read, which
+    // no epoch changes.
+    pub(super) settled: usize,
     height: usize,
     /// One compiled plan per negated sub-conjunction, in the query's order.
     pub(super) nots: Vec<Plan>,
@@ -72,6 +84,7 @@ pub struct Planned {
     /// round uses to search from the values the round before raised. Empty for
     /// a plan that cannot be searched that way.
     fact_anchors: OnceLock<Vec<FactAnchor>>,
+    reductions: OnceLock<Vec<Reduction>>,
 }
 
 impl Deref for Plan {
@@ -90,15 +103,18 @@ pub(super) enum Shape {
     Rows(RowShape),
     Lattice(Lattice),
     Place(Place),
+    Words(Tuples),
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct RowShape {
     pub(super) select: Select,
     pub(super) tag: Option<Scalar>,
+    pub(super) cell: Option<Scalar>,
     /// The parameter naming the cells whose rows also read swapped.
     pub(super) when: Option<Param>,
     pub(super) key: Var,
+    pub(super) value: u8,
     pub(super) args: SmallVec<[Arg; 4]>,
 }
 
@@ -115,8 +131,10 @@ impl Shape {
             Atom::Rows(rows) => Shape::Rows(RowShape {
                 select: rows.select,
                 tag: rows.tag,
+                cell: rows.cell,
                 when: rows.swap.map(|swap| swap.when),
                 key: rows.value(),
+                value: (rows.terms.len() - 1) as u8,
                 args: rows
                     .args()
                     .map(|(column, var)| Arg {
@@ -128,6 +146,10 @@ impl Shape {
             }),
             Atom::Lattice(lattice) => Shape::Lattice(lattice.clone()),
             Atom::Place(place) => Shape::Place(*place),
+            Atom::Words(tuples) => {
+                assert!(tuples.terms.len() <= 32, "a mask of columns");
+                Shape::Words(tuples.clone())
+            }
         }
     }
 }
@@ -140,6 +162,43 @@ pub(super) struct Anchor {
     pub(super) atom: usize,
     pub(super) steps: Vec<Step>,
     pub(super) joins: Vec<JoinPlan>,
+    pub(super) below: Vec<Below>,
+}
+
+// A row of the other takes part in a match only where some row of this one
+// has, for its value, the id the other holds in that argument's column.
+#[derive(Clone, Debug)]
+pub(super) struct Below {
+    pub(super) atom: usize,
+    pub(super) column: u8,
+    pub(super) swapped: u8,
+    pub(super) below: Vec<Below>,
+}
+
+fn below(shapes: &[Shape], base: &[Var], atom: usize, taken: &mut [bool]) -> Vec<Below> {
+    let Shape::Rows(above) = &shapes[atom] else {
+        return Vec::new();
+    };
+    let mut found: Vec<Below> = Vec::new();
+    for (index, shape) in shapes.iter().enumerate() {
+        let Shape::Rows(rows) = shape else {
+            continue;
+        };
+        let held = |arg: &&Arg| arg.var == base[rows.key as usize];
+        if let (false, Some(arg)) = (taken[index], above.args.iter().find(held)) {
+            taken[index] = true;
+            found.push(Below {
+                atom: index,
+                column: arg.column,
+                swapped: arg.swapped,
+                below: Vec::new(),
+            });
+        }
+    }
+    for under in &mut found {
+        under.below = below(shapes, base, under.atom, taken);
+    }
+    found
 }
 
 /// An evaluation order that starts at the key a lattice atom reads: its first
@@ -158,6 +217,15 @@ pub(super) struct FactAnchor {
     /// its values has all of them new at once, so only such an anchor can find
     /// a match there.
     pub(super) first_on_key: bool,
+}
+
+// A row whose cell no row of the table holds there is in no match, so the
+// selection need not list the cell.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Reduction {
+    pub(super) rows: Param,
+    pub(super) atom: usize,
+    pub(super) column: u8,
 }
 
 impl Plan {
@@ -183,10 +251,19 @@ impl Plan {
         let mut bound = vec![false; query.vars as usize];
         bound[query.root as usize] = true;
         let known = vec![false; query.scalars as usize];
-        let mut planned = Self::plan(query.clone(), bound.clone(), known, None)
+        let mut planned = Self::plan(query.clone(), bound.clone(), known.clone(), None)
             .expect("every atom is reached and every guard read");
-        (planned.run, planned.joins) =
-            joined(&planned.query, &planned.shapes, &planned.steps, bound, 0);
+        (planned.run, planned.joins) = joined(&planned, &planned.steps, bound, known, 0);
+        let settles = |step: &Step| match *step {
+            Step::Table { .. } => true,
+            Step::Guard(guard) => {
+                !matches!(planned.query.guards[guard], super::Guard::Extern { .. })
+            }
+            Step::Atom(atom) => matches!(planned.shapes[atom], Shape::Place(_)),
+            Step::Parents { .. } | Step::Join(_) | Step::Not(_) => false,
+        };
+        let last = planned.run.iter().rposition(|step| !settles(step));
+        planned.settled = last.map_or(0, |last| last + 1);
         let planned = Arc::new(planned);
         let mut all = PLANNED.lock().unwrap();
         all.get_or_insert_default().insert(query, planned.clone());
@@ -219,6 +296,25 @@ impl Plan {
         if !rooted || !self.nots.is_empty() {
             return Vec::new();
         }
+        // A variable an offset atom reads its base into names the id of the
+        // variable it is keyed by.
+        let mut base: Vec<Var> = (0..query.vars).collect();
+        for atom in &query.atoms {
+            if let Atom::Place(Place {
+                key,
+                read: Read::Offset { base: of, .. },
+            }) = atom
+            {
+                base[*of as usize] = *key;
+            }
+        }
+        for var in 0..base.len() {
+            let mut of = base[var];
+            for _ in 0..base.len() {
+                of = base[of as usize];
+            }
+            base[var] = of;
+        }
         let mut anchors = Vec::new();
         for (index, atom) in query.atoms.iter().enumerate() {
             let Atom::Rows(rows) = atom else {
@@ -230,20 +326,24 @@ impl Plan {
                 bound[arg as usize] = true;
             }
             let mut known = vec![false; query.scalars as usize];
-            if let Some(tag) = rows.tag {
-                known[tag as usize] = true;
+            for slot in atom.writes() {
+                known[slot as usize] = true;
             }
-            let Some((rest, _, _)) = Self::order(query, bound.clone(), known, Some(index)) else {
+            let Some((rest, _, _)) = Self::order(query, bound.clone(), known.clone(), Some(index))
+            else {
                 return Vec::new();
             };
             let mut steps = vec![Step::Atom(index)];
             steps.extend(rest);
             // The search runs the anchor's own step, so no run starts there.
-            let (steps, joins) = joined(query, &self.shapes, &steps, bound, 1);
+            let (steps, joins) = joined(self, &steps, bound, known, 1);
+            let mut taken = vec![false; query.atoms.len()];
+            taken[index] = true;
             anchors.push(Anchor {
                 atom: index,
                 steps,
                 joins,
+                below: below(&self.shapes, &base, index, &mut taken),
             });
         }
         anchors
@@ -291,7 +391,7 @@ impl Plan {
             .enumerate()
             .filter_map(|(index, atom)| match atom {
                 Atom::Lattice(lattice) => Some((index, lattice.column, lattice.key)),
-                Atom::Rows(_) | Atom::Place(_) => None,
+                Atom::Rows(_) | Atom::Place(_) | Atom::Words(_) => None,
             })
             .collect();
         if facts.iter().any(|&(index, _, _)| index >= 64) {
@@ -307,11 +407,12 @@ impl Plan {
             bound[key as usize] = true;
             let known = vec![false; query.scalars as usize];
             // No atom is skipped, but the order is not from the root.
-            let Some((steps, _, _)) = Self::order(query, bound.clone(), known, Some(usize::MAX))
+            let Some((steps, _, _)) =
+                Self::order(query, bound.clone(), known.clone(), Some(usize::MAX))
             else {
                 return Vec::new();
             };
-            let (steps, joins) = joined(query, &self.shapes, &steps, bound, 0);
+            let (steps, joins) = joined(self, &steps, bound, known, 0);
             let first_on_key = !facts[..position].iter().any(|&(_, _, other)| other == key);
             anchors.push(FactAnchor {
                 column,
@@ -326,13 +427,97 @@ impl Plan {
         anchors
     }
 
+    pub(super) fn reductions(&self) -> &[Reduction] {
+        self.reductions.get_or_init(|| self.reduce())
+    }
+
+    fn reduce(&self) -> Vec<Reduction> {
+        let atoms = &self.query.atoms;
+        let tables = || {
+            atoms
+                .iter()
+                .enumerate()
+                .filter_map(|(at, atom)| match atom {
+                    Atom::Words(tuples) => Some((at, tuples)),
+                    _ => None,
+                })
+        };
+        if tables().next().is_none() {
+            return Vec::new();
+        }
+        let orders = std::iter::once(&self.run)
+            .chain(self.anchors().iter().map(|anchor| &anchor.steps))
+            .chain(self.fact_anchors().iter().map(|anchor| &anchor.steps));
+        let orders: Vec<&Vec<Step>> = orders.collect();
+        let follows = |table: usize, rows: usize| {
+            orders.iter().all(|steps| {
+                let at = |atom: usize| {
+                    steps.iter().position(|step| match *step {
+                        Step::Atom(known)
+                        | Step::Parents { atom: known, .. }
+                        | Step::Table { atom: known, .. } => known == atom,
+                        _ => false,
+                    })
+                };
+                matches!((at(rows), at(table)), (Some(rows), Some(table)) if rows < table)
+            })
+        };
+        // The selections one atom alone reads, a negated one counted.
+        let nested = self.query.nots.iter().flat_map(|not| &not.atoms);
+        let selected = |param: Param| {
+            let reads = |atom: &&Atom| match atom {
+                Atom::Rows(rows) => {
+                    rows.select.param == param || rows.swap.is_some_and(|swap| swap.when == param)
+                }
+                Atom::Lattice(lattice) => {
+                    matches!(lattice.out, super::Out::In(read) if read == param)
+                }
+                Atom::Place(_) | Atom::Words(_) => false,
+            };
+            atoms.iter().chain(nested.clone()).filter(reads).count() == 1
+        };
+        let mut reductions = Vec::new();
+        for (at, atom) in atoms.iter().enumerate() {
+            let Atom::Rows(Rows {
+                select,
+                cell: Some(cell),
+                ..
+            }) = atom
+            else {
+                continue;
+            };
+            // The scalar is the cell's wherever a table atom reads it: no
+            // other row, value or guard writes it, a negated one included.
+            let others = atoms.iter().enumerate().filter(|&(other, _)| other != at);
+            let others = others.map(|(_, other)| other).chain(nested.clone());
+            let guards = self.query.nots.iter().flat_map(|not| &not.guards);
+            let mut guards = self.query.guards.iter().chain(guards);
+            let rewritten = others
+                .filter(|other| !matches!(other, Atom::Words(_)))
+                .any(|other| other.writes().contains(cell))
+                || guards.any(|guard| guard.writes().contains(cell));
+            if rewritten || !selected(select.param) {
+                continue;
+            }
+            for (table, tuples) in tables().filter(|&(table, _)| follows(table, at)) {
+                let held = |term: &Expr| term.lone() == Some(*cell);
+                reductions.extend(tuples.terms.iter().position(held).map(|column| Reduction {
+                    rows: select.param,
+                    atom: table,
+                    column: column as u8,
+                }));
+            }
+        }
+        reductions
+    }
+
     /// The lattice columns this plan reads, as a mask over their ids. A match
     /// can be new without any of its rows being new when a value rises under
     /// rows that stand still.
     pub fn fact_columns(&self) -> u64 {
         self.query.atoms.iter().fold(0, |mask, atom| match atom {
             Atom::Lattice(lattice) => mask | 1 << lattice.column.index(),
-            Atom::Rows(_) | Atom::Place(_) => mask,
+            Atom::Rows(_) | Atom::Place(_) | Atom::Words(_) => mask,
         })
     }
 
@@ -358,12 +543,14 @@ impl Plan {
             query,
             run: steps.clone(),
             joins: Vec::new(),
+            settled: usize::MAX,
             steps,
             height,
             nots,
             shapes,
             anchors: OnceLock::new(),
             fact_anchors: OnceLock::new(),
+            reductions: OnceLock::new(),
         })
     }
 
@@ -390,6 +577,7 @@ impl Plan {
         let mut placed = vec![false; query.nots.len()];
         let mut depth = vec![0usize; query.vars as usize];
         let mut height = 0usize;
+        let writes: Vec<SmallVec<[Scalar; 4]>> = query.atoms.iter().map(Atom::writes).collect();
         loop {
             // A host call that binds nothing may be an assertion about a whole
             // match rather than a filter, and a rule's author sees to it that
@@ -438,31 +626,85 @@ impl Plan {
             if taken.iter().all(|&t| t) {
                 break;
             }
-            let downward =
-                (0..query.atoms.len()).find(|&i| !taken[i] && bound[query.atoms[i].key() as usize]);
+            // A client table atom goes once nothing else is left to bind the
+            // scalars it reads, so its rows are looked up under every column
+            // the match can give. `settled` unset takes, of those that wait
+            // for each other or for a guard reading what they bind, the one
+            // with most columns bound.
+            let awaited = |by: usize, slot: Scalar| {
+                let atom = |i: usize| i != by && !taken[i] && writes[i].contains(&slot);
+                let guard = |i: usize| !checked[i] && query.guards[i].writes().contains(&slot);
+                (0..query.atoms.len()).any(atom) || (0..query.guards.len()).any(guard)
+            };
+            let table = |settled: bool| {
+                let placed = |&i: &usize| match &query.atoms[i] {
+                    Atom::Words(tuples) if !taken[i] => tuples.terms.iter().all(|term| {
+                        term.ready(&known)
+                            || term
+                                .lone()
+                                .is_some_and(|slot| !(settled && awaited(i, slot)))
+                    }),
+                    _ => false,
+                };
+                let bound = |&i: &usize| match &query.atoms[i] {
+                    Atom::Words(tuples) => tuples.keys(&known).count_ones(),
+                    _ => 0,
+                };
+                // The first of those with most.
+                (0..query.atoms.len())
+                    .filter(placed)
+                    .rev()
+                    .max_by_key(bound)
+            };
+            let downward = || {
+                (0..query.atoms.len()).find(|&i| {
+                    !taken[i] && query.atoms[i].key().is_some_and(|key| bound[key as usize])
+                })
+            };
             // Nothing left to reach through a bound key: reach a row atom
             // whose value is still free through an argument that is not,
             // which is the one shape a root-first plan cannot cover.
-            let (next, step) = match downward {
-                Some(next) => (next, Step::Atom(next)),
-                None => {
-                    let (next, slot) =
-                        (0..query.atoms.len())
-                            .filter(|&i| !taken[i])
-                            .find_map(|i| match &query.atoms[i] {
-                                Atom::Rows(rows) => rows
-                                    .args()
-                                    .position(|(_, arg)| bound[arg as usize])
-                                    .map(|slot| (i, slot as u8)),
-                                Atom::Lattice(_) | Atom::Place(_) => None,
-                            })?;
-                    (next, Step::Parents { atom: next, slot })
-                }
+            let sideways = || {
+                (0..query.atoms.len())
+                    .filter(|&i| !taken[i])
+                    .find_map(|i| match &query.atoms[i] {
+                        Atom::Rows(rows) => rows
+                            .args()
+                            .position(|(_, arg)| bound[arg as usize])
+                            .map(|slot| {
+                                (
+                                    i,
+                                    Step::Parents {
+                                        atom: i,
+                                        slot: slot as u8,
+                                    },
+                                )
+                            }),
+                        Atom::Lattice(_) | Atom::Place(_) | Atom::Words(_) => None,
+                    })
             };
+            let reached = downward()
+                .map(|next| (next, Step::Atom(next)))
+                .or_else(sideways);
+            let unreached = || reached.is_none().then(|| table(false)).flatten();
+            if let Some(atom) = table(true).or_else(unreached) {
+                let Atom::Words(tuples) = &query.atoms[atom] else {
+                    unreachable!("a client table atom")
+                };
+                let keys = tuples.keys(&known);
+                taken[atom] = true;
+                steps.push(Step::Table { atom, keys });
+                for &slot in &writes[atom] {
+                    known[slot as usize] = true;
+                }
+                continue;
+            }
+            let (next, step) = reached?;
             taken[next] = true;
             steps.push(step);
-            bound[query.atoms[next].key() as usize] = true;
-            let below = depth[query.atoms[next].key() as usize] + 1;
+            let key = query.atoms[next].key()? as usize;
+            bound[key] = true;
+            let below = depth[key] + 1;
             match &query.atoms[next] {
                 Atom::Rows(rows) => {
                     height = height.max(below);
@@ -477,9 +719,9 @@ impl Plan {
                     read: Read::Offset { base, .. },
                     ..
                 }) => bound[*base as usize] = true,
-                Atom::Lattice(_) | Atom::Place(_) => {}
+                Atom::Lattice(_) | Atom::Place(_) | Atom::Words(_) => {}
             }
-            if let Some(slot) = query.atoms[next].writes() {
+            for &slot in &writes[next] {
                 known[slot as usize] = true;
             }
         }
@@ -521,17 +763,17 @@ impl Plan {
     }
 }
 
-/// A run of row-atom steps two of whose atoms read a variable unbound when
-/// the run starts, neither reaching its rows through it: joined by
-/// intersecting the cells each atom allows for that variable, rather than by
-/// probing one atom per row of the other.
+/// A run of row and client table steps two of whose atoms read a variable or
+/// a scalar unbound when the run starts, neither reaching its rows through
+/// it: joined by intersecting the cells each atom allows for it, rather than
+/// by probing one atom per row of the other.
 #[derive(Clone, Debug)]
 pub(super) struct JoinPlan {
     /// How many steps after the join's own make up the run.
     pub(super) len: usize,
-    /// The variables the run binds, in the order the loop nest first binds
-    /// them: the attribute order.
-    pub(super) vars: SmallVec<[Var; 8]>,
+    /// What the run binds, in the order the loop nest first binds it: the
+    /// attribute order.
+    pub(super) vars: SmallVec<[Attr; 8]>,
     /// The run's atoms, in step order.
     pub(super) atoms: SmallVec<[JoinAtom; 4]>,
     /// The run's decomposition: one bag of every atom when they are best
@@ -539,23 +781,42 @@ pub(super) struct JoinPlan {
     pub(super) bags: Vec<Bag>,
 }
 
+/// What a join binds by intersection: a variable to an id, or a scalar to a
+/// cell of a plain column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Attr {
+    Var(Var),
+    Scalar(Scalar),
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct JoinAtom {
     /// The step that reaches the atom in the run.
     pub(super) step: Step,
-    /// The trie column orders the atom reads: the selected column, then one
-    /// per variable, as written and swapped. The second is empty for an atom
-    /// that does not swap.
+    /// The trie column orders the atom reads, as written and swapped: a row
+    /// atom's selected column and then one per variable, a client table
+    /// atom's every column. The second is empty for an atom that does not
+    /// swap.
     pub(super) columns: [SmallVec<[u8; 6]>; 2],
-    /// Per trie level below the selected column, the variable it reads.
+    /// Per trie level, what it reads.
     pub(super) levels: SmallVec<[Level; 6]>,
+    pub(super) cell: Option<u32>,
 }
 
 impl JoinAtom {
     pub(super) fn atom(&self) -> usize {
         match self.step {
-            Step::Atom(atom) | Step::Parents { atom, .. } => atom,
-            _ => unreachable!("a run holds row atoms"),
+            Step::Atom(atom) | Step::Parents { atom, .. } | Step::Table { atom, .. } => atom,
+            _ => unreachable!("a run holds row and client table atoms"),
+        }
+    }
+
+    // The variable a row atom's rows are reached through.
+    fn lookup(&self, shapes: &[Shape]) -> Option<Var> {
+        match (self.step, &shapes[self.atom()]) {
+            (Step::Parents { slot, .. }, Shape::Rows(rows)) => Some(rows.args[slot as usize].var),
+            (_, Shape::Rows(rows)) => Some(rows.key),
+            _ => None,
         }
     }
 }
@@ -563,25 +824,28 @@ impl JoinAtom {
 /// What a trie level reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Level {
+    Select,
     /// A variable bound before the run: looked up.
     Known(Var),
-    /// The run's variable at this index of the attribute order: intersected.
+    Key(u8),
+    /// The run's attribute at this index of the attribute order: intersected.
     Attr(u32),
 }
 
-/// `steps` with a [`Step::Join`] in front of each run worth joining, and the
-/// joins. `bound` is what is bound before the first step; runs start no
-/// earlier than step `from`.
+// `steps` with a [`Step::Join`] in front of each run worth joining, and the
+// joins. `bound` and `known` are what is bound before the first step; runs
+// start no earlier than step `from`.
 fn joined(
-    query: &Query,
-    shapes: &[Shape],
+    planned: &Planned,
     steps: &[Step],
     mut bound: Vec<bool>,
+    mut known: Vec<bool>,
     from: usize,
 ) -> (Vec<Step>, Vec<JoinPlan>) {
-    let rows = |step: &Step| match *step {
+    let (query, shapes) = (&planned.query, &planned.shapes);
+    let joins_rows = |step: &Step| match *step {
         Step::Atom(atom) => matches!(shapes[atom], Shape::Rows(_)),
-        Step::Parents { .. } => true,
+        Step::Parents { .. } | Step::Table { .. } => true,
         _ => false,
     };
     let mut out = Vec::with_capacity(steps.len());
@@ -589,20 +853,30 @@ fn joined(
     let mut at = 0;
     while at < steps.len() {
         let mut end = at;
-        while at >= from && end < steps.len() && rows(&steps[end]) {
+        while at >= from && end < steps.len() && joins_rows(&steps[end]) {
             end += 1;
         }
-        if let Some(join) = JoinPlan::of(query, shapes, &steps[at..end], &bound) {
+        let (len, join) = JoinPlan::of(shapes, &steps[at..end], &bound, &known);
+        if let Some(join) = join {
             out.push(Step::Join(joins.len()));
             joins.push(join);
         }
-        let end = end.max(at + 1);
+        let end = at + len.max(1);
         for step in &steps[at..end] {
             out.push(*step);
             let atom = match *step {
-                Step::Atom(atom) | Step::Parents { atom, .. } => atom,
+                Step::Atom(atom) | Step::Parents { atom, .. } | Step::Table { atom, .. } => atom,
+                Step::Guard(guard) => {
+                    for &slot in query.guards[guard].writes() {
+                        known[slot as usize] = true;
+                    }
+                    continue;
+                }
                 _ => continue,
             };
+            for slot in query.atoms[atom].writes() {
+                known[slot as usize] = true;
+            }
             match &shapes[atom] {
                 Shape::Rows(rows) => {
                     bound[rows.key as usize] = true;
@@ -614,7 +888,7 @@ fn joined(
                     read: Read::Offset { base, .. },
                     ..
                 }) => bound[*base as usize] = true,
-                Shape::Lattice(_) | Shape::Place(_) => {}
+                Shape::Lattice(_) | Shape::Place(_) | Shape::Words(_) => {}
             }
         }
         at = end;
@@ -622,123 +896,173 @@ fn joined(
     (out, joins)
 }
 
+// What a scalar is to a run at one of its steps.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Word {
+    Free,
+    // Bound before the run.
+    Known,
+    // The attribute at this index: every atom reading it agrees on it.
+    Attr(u32),
+    // Written over in the run, so no later atom of it can be held to it.
+    Written,
+}
+
 impl JoinPlan {
-    /// The join of a run of row-atom steps, if two of its atoms read a
-    /// variable `bound` leaves free, neither reaching its rows through it.
-    fn of(query: &Query, shapes: &[Shape], run: &[Step], bound: &[bool]) -> Option<Self> {
-        let shape = |step: &Step| match *step {
-            Step::Atom(atom) | Step::Parents { atom, .. } => match &shapes[atom] {
-                Shape::Rows(rows) => (atom, rows),
-                _ => unreachable!("a run holds row atoms"),
-            },
-            _ => unreachable!("a run holds row atoms"),
-        };
-        let vars = |rows: &RowShape| {
-            let mut vars: SmallVec<[Var; 6]> = rows.args.iter().map(|arg| arg.var).collect();
-            vars.push(rows.key);
-            vars.sort_unstable();
-            vars.dedup();
-            vars
-        };
-        if run.len() < 2 {
-            return None;
-        }
-        // An atom reached through the variable reads only the rows holding
-        // it, so nothing is intersected there: the loop nest looks it up.
-        let shared = (0..query.vars).any(|var| {
-            let readers = run.iter().filter(|step| {
-                let lookup = match **step {
-                    Step::Parents { slot, .. } => shape(step).1.args[slot as usize].var,
-                    _ => shape(step).1.key,
-                };
-                lookup != var && vars(shape(step).1).contains(&var)
-            });
-            !bound[var as usize] && readers.count() >= 2
-        });
-        if !shared {
-            return None;
-        }
-        // The loop nest binds a sideways atom's value, then each atom's
-        // arguments in column order.
-        let mut order: SmallVec<[Var; 8]> = SmallVec::new();
-        let mut seen = bound.to_vec();
+    // How many steps of `run` can be joined at once, and their join, if two
+    // of those atoms read a variable `bound` or a scalar `known` leaves
+    // free, neither reaching its rows through it. A client table atom ends
+    // the run before it when a term of it is neither bound before the run
+    // nor a scalar the run's atoms agree on.
+    fn of(shapes: &[Shape], run: &[Step], bound: &[bool], known: &[bool]) -> (usize, Option<Self>) {
+        let mut words: Vec<Word> = known
+            .iter()
+            .map(|&known| if known { Word::Known } else { Word::Free })
+            .collect();
+        let mut order: SmallVec<[Attr; 8]> = SmallVec::new();
+        let mut atoms: SmallVec<[JoinAtom; 4]> = SmallVec::new();
         for step in run {
-            let rows = shape(step).1;
-            let value = matches!(step, Step::Parents { .. }).then_some(rows.key);
-            for var in value.into_iter().chain(rows.args.iter().map(|arg| arg.var)) {
-                if !std::mem::replace(&mut seen[var as usize], true) {
-                    order.push(var);
+            let mut attr = |words: &mut [Word], slot: Scalar| {
+                order.push(Attr::Scalar(slot));
+                words[slot as usize] = Word::Attr(order.len() as u32 - 1);
+                order.len() as u32 - 1
+            };
+            let shape = match *step {
+                Step::Atom(atom) | Step::Parents { atom, .. } | Step::Table { atom, .. } => {
+                    &shapes[atom]
+                }
+                _ => unreachable!("a run holds row and client table atoms"),
+            };
+            let rows = match shape {
+                Shape::Rows(rows) => rows,
+                Shape::Words(tuples) => {
+                    let agreed = |term: &Expr| match term.lone() {
+                        Some(slot) => words[slot as usize] != Word::Written,
+                        None => term.ready(known),
+                    };
+                    if !tuples.terms.iter().all(agreed) {
+                        break;
+                    }
+                    let mut cells: SmallVec<[(Level, u8); 6]> = SmallVec::new();
+                    for (column, term) in tuples.terms.iter().enumerate() {
+                        let level = match term.lone().map(|slot| (slot, words[slot as usize])) {
+                            Some((slot, Word::Free)) => Level::Attr(attr(&mut words, slot)),
+                            Some((_, Word::Attr(at))) => Level::Attr(at),
+                            _ => Level::Key(column as u8),
+                        };
+                        cells.push((level, column as u8));
+                    }
+                    // The columns looked up first; the attributes follow in
+                    // attribute order, so the trie descends the way the join
+                    // binds.
+                    cells.sort_by_key(|&(level, column)| match level {
+                        Level::Attr(at) => (1, at, column),
+                        _ => (0, 0, column),
+                    });
+                    atoms.push(JoinAtom {
+                        step: *step,
+                        columns: [cells.iter().map(|cell| cell.1).collect(), SmallVec::new()],
+                        levels: cells.iter().map(|cell| cell.0).collect(),
+                        cell: None,
+                    });
+                    continue;
+                }
+                _ => unreachable!("a run holds row and client table atoms"),
+            };
+            // A row atom writes its scalars whatever they held: only the
+            // first to write its selected cell is held to it.
+            if let Some(tag) = rows.tag {
+                words[tag as usize] = Word::Written;
+            }
+            let cell = rows.cell.and_then(|slot| match words[slot as usize] {
+                Word::Free => Some(attr(&mut words, slot)),
+                _ => {
+                    words[slot as usize] = Word::Written;
+                    None
+                }
+            });
+            // The loop nest binds a sideways atom's value, then each atom's
+            // arguments in column order.
+            let (key, sideways) = match *step {
+                Step::Parents { slot, .. } => (rows.args[slot as usize].var, Some(rows.key)),
+                _ => (rows.key, None),
+            };
+            for var in sideways
+                .into_iter()
+                .chain(rows.args.iter().map(|arg| arg.var))
+            {
+                if !bound[var as usize] && !order.contains(&Attr::Var(var)) {
+                    order.push(Attr::Var(var));
                 }
             }
+            let value = rows.value;
+            let mut cells: SmallVec<[(Var, u8, u8); 6]> = rows
+                .args
+                .iter()
+                .map(|arg| (arg.var, arg.column, arg.swapped))
+                .collect();
+            cells.push((rows.key, value, value));
+            // What is bound before the run is looked up first, the key
+            // ahead of the rest; the run's variables follow in attribute
+            // order, so every trie descends the way the join binds.
+            let position = |var: Var| order.iter().position(|&other| other == Attr::Var(var));
+            cells.sort_by_key(|&(var, column, _)| match position(var) {
+                None => (0, usize::from(var != key), column),
+                Some(at) => (1, at, column),
+            });
+            let select = rows.select.column;
+            let written: SmallVec<[u8; 6]> = std::iter::once(select)
+                .chain(cells.iter().map(|cell| cell.1))
+                .collect();
+            let swapped = match rows.when {
+                Some(_) => std::iter::once(select)
+                    .chain(cells.iter().map(|cell| cell.2))
+                    .collect(),
+                None => SmallVec::new(),
+            };
+            let levels = cells.iter().map(|&(var, _, _)| match position(var) {
+                Some(at) => Level::Attr(at as u32),
+                None => Level::Known(var),
+            });
+            atoms.push(JoinAtom {
+                step: *step,
+                columns: [written, swapped],
+                levels: std::iter::once(Level::Select).chain(levels).collect(),
+                cell,
+            });
         }
-        // A decomposition's masks hold this many atoms and variables.
-        if run.len() > 64 || order.len() > 64 {
-            return None;
+        let len = atoms.len();
+        // An atom reached through a variable reads only the rows holding it,
+        // so nothing is intersected there: the loop nest looks it up.
+        let shared = order.iter().enumerate().any(|(at, &attr)| {
+            let reads = |atom: &&JoinAtom| {
+                let reached = attr == Attr::Var(atom.lookup(shapes).unwrap_or(Var::MAX));
+                let read =
+                    atom.cell == Some(at as u32) || atom.levels.contains(&Level::Attr(at as u32));
+                read && !(reached && matches!(attr, Attr::Var(_)))
+            };
+            atoms.iter().filter(reads).count() >= 2
+        });
+        // A decomposition's masks hold this many atoms and attributes.
+        if !shared || len > 64 || order.len() > 64 {
+            return (len, None);
         }
-        let atoms: SmallVec<[JoinAtom; 4]> = run
-            .iter()
-            .map(|step| {
-                let (atom, rows) = shape(step);
-                let key = match *step {
-                    Step::Parents { slot, .. } => rows.args[slot as usize].var,
-                    _ => rows.key,
-                };
-                let Atom::Rows(written) = &query.atoms[atom] else {
-                    unreachable!("a run holds row atoms")
-                };
-                let value = (written.terms.len() - 1) as u8;
-                let mut cells: SmallVec<[(Var, u8, u8); 6]> = rows
-                    .args
-                    .iter()
-                    .map(|arg| (arg.var, arg.column, arg.swapped))
-                    .collect();
-                cells.push((rows.key, value, value));
-                // What is bound before the run is looked up first, the key
-                // ahead of the rest; the run's variables follow in attribute
-                // order, so every trie descends the way the join binds.
-                let position = |var: Var| order.iter().position(|&other| other == var);
-                cells.sort_by_key(|&(var, column, _)| match position(var) {
-                    None => (0, usize::from(var != key), column),
-                    Some(at) => (1, at, column),
-                });
-                let select = rows.select.column;
-                let written: SmallVec<[u8; 6]> = std::iter::once(select)
-                    .chain(cells.iter().map(|cell| cell.1))
-                    .collect();
-                let swapped = match rows.when {
-                    Some(_) => std::iter::once(select)
-                        .chain(cells.iter().map(|cell| cell.2))
-                        .collect(),
-                    None => SmallVec::new(),
-                };
-                let levels = cells
-                    .iter()
-                    .map(|&(var, _, _)| match position(var) {
-                        Some(at) => Level::Attr(at as u32),
-                        None => Level::Known(var),
-                    })
-                    .collect();
-                JoinAtom {
-                    step: *step,
-                    columns: [written, swapped],
-                    levels,
-                }
-            })
-            .collect();
         let edges: SmallVec<[u64; 8]> = atoms
             .iter()
             .map(|atom| {
-                atom.levels.iter().fold(0, |vars, level| match level {
+                let cell = atom.cell.map_or(0, |at| 1 << at);
+                atom.levels.iter().fold(cell, |vars, level| match level {
                     Level::Attr(at) => vars | 1 << at,
-                    Level::Known(_) => vars,
+                    _ => vars,
                 })
             })
             .collect();
-        Some(Self {
-            len: run.len(),
+        let join = Self {
+            len,
             vars: order,
             bags: decompose(&edges),
             atoms,
-        })
+        };
+        (len, Some(join))
     }
 }

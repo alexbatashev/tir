@@ -59,7 +59,9 @@ impl<'a, L: ENode> Extraction<'a, L> {
         eg.extraction(&dirty, Some(self), cost_of)
     }
 
-    fn cost(&self, id: Id) -> Option<u64> {
+    /// What the spelling chosen for `id`'s class costs, its operands'
+    /// spellings included.
+    pub fn cost(&self, id: Id) -> Option<u64> {
         self.chosen(id).map(|chosen| chosen.cost)
     }
 
@@ -81,7 +83,9 @@ impl<L: ENode> Engine<L> {
     /// operands are the node's canonical references, and `offset` is where the
     /// node sits from the class: a model charges an add-of-constant for each
     /// non-zero one it has to spell, and nothing for an operand
-    /// [`Engine::int_const`] reads as a constant. Cycle-tolerant — a node with un-costed
+    /// [`Engine::int_const`] reads as a constant. A [`Label::is_unique`] node
+    /// costs its own price alone: it stands for what it names, which no
+    /// spelling of its operands is. Cycle-tolerant — a node with un-costed
     /// children is skipped and revisited to a fixpoint, so a cycle is costed
     /// through its non-cyclic input. Scope-aware via
     /// [`Engine::classes`]/[`Engine::find`].
@@ -107,7 +111,8 @@ impl<L: ENode> Engine<L> {
                 let node = self.node(row);
                 let operands = self.children(row);
                 let price = cost_of(Id(class), node, &operands, self.value(row).offset);
-                out.push(row.0, price, operands.iter().map(|operand| operand.class.0));
+                let spelled = operands.iter().filter(|_| !node.is_unique());
+                out.push(row.0, price, spelled.map(|operand| operand.class.0));
             }
         });
         let mut best = FxHashMap::default();
@@ -174,5 +179,34 @@ mod tests {
         assert_eq!(eg.node(row).op, "s");
         assert_eq!(eg.value(row), Ref::new(class, 249));
         assert_eq!(eg.node(row).children().len(), 0);
+    }
+
+    // `st(c)` in `c`, at the top price, costs nothing of `c` its other
+    // members did not, wherever a union leaves it.
+    #[test]
+    fn a_self_loop_at_the_top_price_leaves_its_class_its_cost() {
+        let mut eg = Engine::new();
+        let x = eg.add(Term::typed("x", 8, &[]));
+        let y = eg.add(Term::typed("r", 8, &[]));
+        for class in [x, y] {
+            let seed = eg.insert(Term::typed("st", 8, &[ClassId(0)]), &[class]);
+            eg.union(seed, class).unwrap();
+        }
+        let user = eg.insert(Term::typed("k", 8, &[ClassId(0)]), &[y]);
+        eg.union(y, Ref::new(x.class, 5)).unwrap();
+        eg.rebuild();
+        let priced = cost(&eg);
+        let extraction = eg.extract_best(|class, node, operands, offset| match node.op.as_str() {
+            "st" => u64::MAX,
+            _ => priced(class, node, operands, offset),
+        });
+        let class = eg.root(x.class);
+        assert_eq!(
+            extraction.node(class).map(|node| node.op.as_str()),
+            Some("x")
+        );
+        assert_eq!(extraction.cost(class), Some(1));
+        // k(x + 5): itself, the add, and x.
+        assert_eq!(extraction.cost(eg.root(user.class)), Some(12));
     }
 }

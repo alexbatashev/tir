@@ -139,6 +139,13 @@ impl UnionFind {
         self.pinned[self.root(id) as usize]
     }
 
+    /// Whether `id` itself is a carrier's zero: what [`Self::is_zero`] reads
+    /// at a representative.
+    #[inline]
+    pub fn pinned(&self, id: u32) -> bool {
+        self.pinned[id as usize]
+    }
+
     /// Whether a union tried to put `id`'s set at a non-zero offset from
     /// itself.
     pub fn is_conflicted(&self, id: u32) -> bool {

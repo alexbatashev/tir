@@ -26,8 +26,6 @@
 //! That is the rule [`verify_block_order`] checks, and the one selection's
 //! cover order satisfies by construction.
 
-use std::collections::HashMap;
-
 use tir::{BlockHandle, Context, Error, OpHandle, OpId, Terminator, ValueId, utils::Rng};
 
 use crate::analysis::defuse::{PhysReg, execution_regs};
@@ -48,8 +46,10 @@ fn resource((class, index): PhysReg) -> Resource {
 /// The operations of one block and, for each, the ones it must follow.
 pub struct Dependences {
     ops: Vec<OpId>,
-    /// Predecessors as indices into `ops`, ascending and deduplicated.
-    predecessors: Vec<Vec<usize>>,
+    /// Predecessors as indices into `ops`, ascending and deduplicated: those
+    /// of operation `index` are `predecessors[starts[index]..starts[index + 1]]`.
+    predecessors: Vec<usize>,
+    starts: Vec<usize>,
     register_users: Vec<Vec<OpId>>,
     register_live_out: Vec<bool>,
 }
@@ -61,72 +61,54 @@ impl Dependences {
     pub fn of_ops(context: &Context, ops: &[OpId], assignment: &RegAssignment) -> Self {
         let mut graph = Self {
             ops: ops.to_vec(),
-            predecessors: value_edges(context, ops),
+            predecessors: Vec::new(),
+            starts: Vec::with_capacity(ops.len() + 1),
             register_users: vec![Vec::new(); ops.len()],
             register_live_out: vec![false; ops.len()],
         };
-        for (entry, parameter) in graph
-            .predecessors
-            .iter_mut()
-            .zip(parameter_edges(context, ops))
-        {
-            entry.extend(parameter);
-        }
-        graph.add_register_edges(context, assignment);
-        graph.add_terminator_barriers(context);
-        for entry in &mut graph.predecessors {
-            entry.sort_unstable();
-            entry.dedup();
-        }
+        // `(operation, predecessor)`: the one column the graph is sorted from.
+        let mut edges = Vec::new();
+        value_edges(context, ops, &mut edges);
+        graph.add_register_edges(context, assignment, &mut edges);
+        terminator_barriers(context, ops, &mut edges);
+        edges.sort_unstable();
+        edges.dedup();
+        graph.predecessors = edges.iter().map(|&(_, predecessor)| predecessor).collect();
+        let starts = (0..=ops.len()).map(|index| edges.partition_point(|edge| edge.0 < index));
+        graph.starts.extend(starts);
         graph
     }
 
-    /// A register a definition and a use share orders them: a read follows the
-    /// last write, and a write follows both the last write and every read since
-    /// it.
-    fn add_register_edges(&mut self, context: &Context, assignment: &RegAssignment) {
-        let mut written: HashMap<Resource, usize> = HashMap::new();
-        let mut read: HashMap<Resource, Vec<usize>> = HashMap::new();
-        for index in 0..self.ops.len() {
-            let op = context.get_op(self.ops[index]);
-            let regs = execution_regs(&op);
+    // A register a definition and a use share orders them; see
+    // [`in_place_edges`].
+    fn add_register_edges(
+        &mut self,
+        context: &Context,
+        assignment: &RegAssignment,
+        edges: &mut Vec<(usize, usize)>,
+    ) {
+        let mut accesses: Vec<(Resource, usize, bool)> = Vec::new();
+        for (index, &op) in self.ops.iter().enumerate() {
+            let regs = execution_regs(&context.get_op(op));
             let placed = |value: &ValueId| assignment.get(*value).map(resource);
-            let mut follows = |producer: usize| {
-                if producer != index {
-                    self.predecessors[index].push(producer);
-                }
-            };
-            for register in regs
-                .phys_uses
-                .iter()
-                .copied()
-                .map(resource)
-                .chain(regs.uses.iter().filter_map(placed))
-            {
-                if let Some(&writer) = written.get(&register) {
-                    follows(writer);
-                    self.register_users[writer].push(self.ops[index]);
-                }
-                read.entry(register).or_default().push(index);
-            }
-            for register in regs
-                .phys_defs
-                .iter()
-                .copied()
-                .map(resource)
-                .chain(regs.defs.iter().filter_map(placed))
-            {
-                if let Some(&writer) = written.get(&register) {
-                    follows(writer);
-                }
-                for reader in read.remove(&register).unwrap_or_default() {
-                    follows(reader);
-                }
-                written.insert(register, index);
-            }
+            let uses = regs.phys_uses.iter().copied().map(resource);
+            let uses = uses.chain(regs.uses.iter().filter_map(placed));
+            accesses.extend(uses.map(|register| (register, index, false)));
+            let defs = regs.phys_defs.iter().copied().map(resource);
+            let defs = defs.chain(regs.defs.iter().filter_map(placed));
+            accesses.extend(defs.map(|register| (register, index, true)));
         }
-        for writer in written.into_values() {
-            self.register_live_out[writer] = true;
+        let mut users: Vec<(usize, usize)> = Vec::new();
+        let live_out = &mut self.register_live_out;
+        in_place_edges(
+            accesses,
+            edges,
+            |writer, reader| users.push((writer, reader)),
+            |writer| live_out[writer] = true,
+        );
+        users.sort_unstable();
+        for (writer, reader) in users {
+            self.register_users[writer].push(self.ops[reader]);
         }
     }
 
@@ -136,30 +118,10 @@ impl Dependences {
         (!self.register_live_out[index]).then_some(&self.register_users[index])
     }
 
-    /// What leaves a block is not a scheduling question: a terminator is a
-    /// barrier where it stands, by rule rather than by edge. That is last for
-    /// the branch a block ends on, and the place it holds for the markers that
-    /// close a symbol or a section behind it.
-    fn add_terminator_barriers(&mut self, context: &Context) {
-        for index in 0..self.ops.len() {
-            if context
-                .get_op(self.ops[index])
-                .as_interface::<dyn Terminator>()
-                .is_none()
-            {
-                continue;
-            }
-            self.predecessors[index].extend(0..index);
-            for later in &mut self.predecessors[index + 1..] {
-                later.push(index);
-            }
-        }
-    }
-
     /// The operations the reference order's `index` must follow, as indices
     /// into that same order.
     pub fn predecessors(&self, index: usize) -> &[usize] {
-        &self.predecessors[index]
+        &self.predecessors[self.starts[index]..self.starts[index + 1]]
     }
 
     /// A topological order, ties broken by the reference order — so a graph the
@@ -179,59 +141,146 @@ impl Dependences {
     }
 
     fn order(&self, mut pick: impl FnMut(&mut Vec<usize>) -> usize) -> Option<Vec<OpId>> {
-        let mut successors: Vec<Vec<usize>> = vec![Vec::new(); self.ops.len()];
-        let mut pending: Vec<usize> = self.predecessors.iter().map(Vec::len).collect();
-        for (node, predecessors) in self.predecessors.iter().enumerate() {
-            for &predecessor in predecessors {
-                successors[predecessor].push(node);
+        let count = self.ops.len();
+        let mut pending: Vec<usize> = (0..count).map(|n| self.predecessors(n).len()).collect();
+        // The same column by predecessor: the successors of `node`, ascending,
+        // are `successors[ends[node] - its count..ends[node]]` once filled.
+        let mut ends = vec![0; count + 1];
+        for &predecessor in &self.predecessors {
+            ends[predecessor + 1] += 1;
+        }
+        for node in 0..count {
+            ends[node + 1] += ends[node];
+        }
+        let mut filled = ends.clone();
+        let mut successors = vec![0; self.predecessors.len()];
+        for node in 0..count {
+            for &predecessor in self.predecessors(node) {
+                successors[filled[predecessor]] = node;
+                filled[predecessor] += 1;
             }
         }
-        let mut ready: Vec<usize> = (0..self.ops.len()).filter(|&n| pending[n] == 0).collect();
-        let mut order = Vec::with_capacity(self.ops.len());
+        let mut ready: Vec<usize> = (0..count).filter(|&n| pending[n] == 0).collect();
+        let mut order = Vec::with_capacity(count);
         while !ready.is_empty() {
             let node = pick(&mut ready);
             order.push(self.ops[node]);
-            for &next in &successors[node] {
+            for &next in &successors[ends[node]..ends[node + 1]] {
                 pending[next] -= 1;
                 if pending[next] == 0 {
                     ready.push(next);
                 }
             }
         }
-        (order.len() == self.ops.len()).then_some(order)
+        (order.len() == count).then_some(order)
     }
 }
 
-/// Each operation's definitions among `ops`, as indices into it. A duplicated
-/// edge is harmless: the predecessor lists are deduplicated once the graph is
-/// complete.
-///
-/// A block parameter is live in wherever it is named, so an operation writing
-/// one does not define what the block read on entry; those are
-/// [`parameter_edges`], and only they order it.
-fn value_edges(context: &Context, ops: &[OpId]) -> Vec<Vec<usize>> {
-    let defined: HashMap<ValueId, usize> = ops
-        .iter()
-        .enumerate()
-        .flat_map(|(index, &op)| {
-            context
-                .get_op(op)
-                .results()
-                .into_iter()
-                .map(move |result| (result, index))
-        })
-        .filter(|(result, _)| !context.is_block_argument(*result))
-        .collect();
-    let mut predecessors = vec![Vec::new(); ops.len()];
+// What leaves a block is not a scheduling question: a terminator is a
+// barrier where it stands, by rule rather than by edge. That is last for
+// the branch a block ends on, and the place it holds for the markers that
+// close a symbol or a section behind it.
+fn terminator_barriers(context: &Context, ops: &[OpId], edges: &mut Vec<(usize, usize)>) {
     for (index, &op) in ops.iter().enumerate() {
-        for operand in subtree_operands(context, &context.get_op(op)) {
-            match defined.get(&operand) {
-                Some(&producer) if producer != index => predecessors[index].push(producer),
+        let op = context.get_op(op);
+        if op.as_interface::<dyn Terminator>().is_none() {
+            continue;
+        }
+        edges.extend((0..index).map(|earlier| (index, earlier)));
+        edges.extend((index + 1..ops.len()).map(|later| (later, index)));
+    }
+}
+
+// The order a name written in place carries, as edges: a read follows the
+// last write, and a write follows both the last write and every read since
+// it. `accesses` is `(name, operation, writes)`, in any order: an operation
+// reads before it writes. `read` is told the writer and the reader of each
+// read of a name written in the block, and `left` the last writer of each
+// name.
+fn in_place_edges<N: Ord + Copy>(
+    mut accesses: Vec<(N, usize, bool)>,
+    edges: &mut Vec<(usize, usize)>,
+    mut read: impl FnMut(usize, usize),
+    mut left: impl FnMut(usize),
+) {
+    accesses.sort_unstable();
+    for name in accesses.chunk_by(|a, b| a.0 == b.0) {
+        let mut writer = None;
+        let mut unwritten = 0;
+        for (at, &(_, index, writes)) in name.iter().enumerate() {
+            if let Some(writer) = writer.filter(|&writer| writer != index) {
+                edges.push((index, writer));
+            }
+            if !writes {
+                if let Some(writer) = writer {
+                    read(writer, index);
+                }
+                continue;
+            }
+            let readers = name[unwritten..at].iter().map(|reader| reader.1);
+            edges.extend(
+                readers
+                    .filter(|&reader| reader != index)
+                    .map(|reader| (index, reader)),
+            );
+            writer = Some(index);
+            unwritten = at + 1;
+        }
+        if let Some(writer) = writer {
+            left(writer);
+        }
+    }
+}
+
+// Each operation's definitions among `ops`, and the order the block's
+// parameters carry, as edges.
+//
+// A block parameter is live in wherever it is named, so an operation writing
+// one does not define what the block read on entry. Destruction leaves it
+// written in the block that reads it: the back edge of a self-loop assigns
+// the parameter its own block was entered with. The parameter is a register
+// there, not a definition, ordered by [`in_place_edges`].
+fn value_edges(context: &Context, ops: &[OpId], edges: &mut Vec<(usize, usize)>) {
+    let mut read: Vec<(ValueId, usize)> = Vec::new();
+    let mut defined: Vec<(ValueId, usize)> = Vec::new();
+    let mut parameters: Vec<(ValueId, usize, bool)> = Vec::new();
+    let mut holders = Vec::new();
+    context.with_rows(|rows| {
+        for (index, &op) in ops.iter().enumerate() {
+            let row = rows.op_cells(op);
+            read.extend(row.operands().map(|operand| (operand, index)));
+            for result in row.results() {
+                match rows.value_block(result) {
+                    Some(_) => parameters.push((result, index, true)),
+                    None => defined.push((result, index)),
+                }
+            }
+            if row.owns_regions() {
+                holders.push(index);
+            }
+        }
+    });
+    for index in holders {
+        let nested = nested_operands(context, &context.get_op(ops[index]));
+        read.extend(nested.into_iter().map(|operand| (operand, index)));
+    }
+    defined.sort_unstable();
+    context.with_rows(|rows| {
+        for &(value, index) in &read {
+            if rows.value_block(value).is_some() {
+                parameters.push((value, index, false));
+                continue;
+            }
+            let after = defined.partition_point(|&(known, _)| known <= value);
+            match after.checked_sub(1).map(|last| defined[last]) {
+                Some((known, producer)) if known == value && producer != index => {
+                    edges.push((index, producer));
+                }
                 _ => {}
             }
         }
-    }
-    predecessors
+    });
+    in_place_edges(parameters, edges, |_, _| {}, |_| {});
 }
 
 /// Every operation of `block` follows what it depends on: the definitions it
@@ -278,53 +327,16 @@ pub fn verify_block_order(context: &Context, block: &BlockHandle) -> Result<(), 
     Ok(())
 }
 
-/// The order a block parameter carries where destruction left it written in the
-/// block that reads it — the back edge of a self-loop assigns the parameter its
-/// own block was entered with. The parameter is a register there, not a
-/// definition: an operation ahead of the write reads what the block was entered
-/// with, so the write follows it; one behind reads what the write left, so it
-/// follows the write; and one write follows the last.
-fn parameter_edges(context: &Context, ops: &[OpId]) -> Vec<Vec<usize>> {
-    let mut predecessors = vec![Vec::new(); ops.len()];
-    let mut written: HashMap<ValueId, usize> = HashMap::new();
-    let mut read: HashMap<ValueId, Vec<usize>> = HashMap::new();
-    for (index, &op_id) in ops.iter().enumerate() {
-        let op = context.get_op(op_id);
-        for value in subtree_operands(context, &op) {
-            if !context.is_block_argument(value) {
-                continue;
-            }
-            if let Some(&writer) = written.get(&value) {
-                predecessors[index].push(writer);
-            }
-            read.entry(value).or_default().push(index);
-        }
-        for value in op.results() {
-            if !context.is_block_argument(value) {
-                continue;
-            }
-            if let Some(&writer) = written.get(&value) {
-                predecessors[index].push(writer);
-            }
-            for reader in read.remove(&value).unwrap_or_default() {
-                if reader != index {
-                    predecessors[index].push(reader);
-                }
-            }
-            written.insert(value, index);
-        }
-    }
-    predecessors
-}
-
-/// Every value read by `op` or by anything under it: an operation holding a
-/// region names the values around it, and can only run where they do.
-fn subtree_operands(context: &Context, op: &OpHandle) -> Vec<ValueId> {
-    let mut operands = op.operands().to_vec();
+// Every value read by anything under `op`: an operation holding a region
+// names the values around it, and can only run where they do.
+fn nested_operands(context: &Context, op: &OpHandle) -> Vec<ValueId> {
+    let mut operands = Vec::new();
     for region in op.regions().iter().copied() {
         for block in context.get_region(region).iter(context.clone()) {
             for nested in block.op_ids() {
-                operands.extend(subtree_operands(context, &context.get_op(nested)));
+                let nested = context.get_op(nested);
+                operands.extend(nested.operands());
+                operands.extend(nested_operands(context, &nested));
             }
         }
     }

@@ -3,12 +3,17 @@
 //! the key lookup an insert is. A match exists in epoch `t` and not `t-1`
 //! exactly when one of its rows or values is from epoch `t-1`, which is what
 //! lets a semi-naive driver search only the delta.
+//!
+//! A head runs on all the matches of its rule at once, write by write: the
+//! keys an insert comes to are looked up as columns, and a later write reads
+//! what an earlier one bound for the same match.
 
 use smallvec::SmallVec;
 
 use crate::Ref;
-use crate::db::{Database, SpaceId};
-use crate::query::{Expr, Plan, Scalar, Var, bound};
+use crate::db::{Database, LatticeId, SpaceId};
+use crate::query::{Expr, Matches, Plan, Scalar, UNBOUND, Var, bound};
+use crate::store::Values;
 
 /// One write of a rule's head. Variables hold references.
 #[derive(Clone, Debug)]
@@ -37,6 +42,13 @@ pub enum Head {
         offset: Expr,
         into: Var,
     },
+    /// Join what `value` evaluates to onto what `key`'s id is known to be in
+    /// `column`.
+    Raise {
+        column: LatticeId,
+        key: Var,
+        value: Expr,
+    },
 }
 
 /// The key of a row: its cells, and beside them the weights of the cells
@@ -50,6 +62,12 @@ pub struct Key {
 }
 
 impl Key {
+    pub fn clear(&mut self) {
+        self.cells.clear();
+        self.weights.clear();
+        self.weighted = false;
+    }
+
     /// The weights as a table takes them: none when every one is zero.
     pub fn weights(&self) -> &[u64] {
         match self.weighted {
@@ -98,103 +116,314 @@ pub trait Client<C, const S: usize> {
         scalars: &[u64],
         key: &mut Key,
     ) -> Option<Keyed>;
-    /// Insert `key` into `table` with a fresh value id, plus whatever the
-    /// client keeps per row, returning the id.
+    /// The tag of the row the next [`Self::mint`] is for. Each mint takes
+    /// the next tag.
+    fn tag(&self) -> u32;
+    /// Mint the value id of the row just stored under `key` in `table`, plus
+    /// whatever the client keeps per row, returning the id: the next one of
+    /// the space.
     fn mint(&mut self, rule: usize, op: usize, table: u32, key: &Key, scalars: &[u64]) -> u32;
     /// Equate two references, plus whatever the client keeps per id.
     fn equate(&mut self, a: Ref, b: Ref);
 }
 
-/// Run `head` on one match of rule `rule`, whose variables range over
-/// `space`. `held` is scratch for the match's bindings and the head's own.
-/// A missing binding or an insert the client cannot spell stops the rest of
-/// the head; everything before it stands, which is sound because a head only
-/// adds.
-#[allow(clippy::too_many_arguments)]
+/// What a driver keeps between the rules it applies: per match of the rule in
+/// hand its variables, and the inserts being looked up together.
+#[derive(Default)]
+pub struct Batch {
+    // Per match, its bindings and then the head's own variables.
+    held: Vec<Ref>,
+    // Per match, whether its head stopped, and whether it wrote anything.
+    stopped: Vec<bool>,
+    wrote: Vec<bool>,
+    run: Run,
+    key: Key,
+}
+
+impl Batch {
+    /// How many matches of the last rule applied wrote nothing: equated
+    /// nothing, minted nothing and raised nothing.
+    pub fn idle(&self) -> usize {
+        self.wrote.iter().filter(|&&wrote| !wrote).count()
+    }
+}
+
+// Consecutive inserts of one head write into one table: their key columns,
+// and per key the match it is of and the offset its row's value is at from
+// the insert's.
+#[derive(Default)]
+struct Run {
+    table: u32,
+    arity: usize,
+    columns: Vec<Vec<u32>>,
+    weights: Vec<Vec<u64>>,
+    weighted: bool,
+    matches: Vec<u32>,
+    shifts: Vec<u64>,
+    found: Vec<Option<Ref>>,
+}
+
+impl Run {
+    fn push(&mut self, table: u32, key: &Key, matched: u32, shift: u64) {
+        let arity = key.cells.len();
+        if self.matches.is_empty() {
+            (self.table, self.arity) = (table, arity);
+            if self.columns.len() < arity {
+                self.columns.resize_with(arity, Vec::new);
+                self.weights.resize_with(arity, Vec::new);
+            }
+        }
+        if key.weighted && !self.weighted {
+            self.weighted = true;
+            for weights in &mut self.weights[..arity] {
+                weights.resize(self.matches.len(), 0);
+            }
+        }
+        for (column, &cell) in self.columns.iter_mut().zip(&key.cells) {
+            column.push(cell);
+        }
+        if self.weighted {
+            for (at, column) in self.weights[..arity].iter_mut().enumerate() {
+                column.push(key.weights.get(at).copied().unwrap_or(0));
+            }
+        }
+        self.matches.push(matched);
+        self.shifts.push(shift);
+    }
+
+    fn clear(&mut self) {
+        for column in &mut self.columns[..self.arity] {
+            column.clear();
+        }
+        for weights in &mut self.weights[..self.arity] {
+            weights.clear();
+        }
+        self.weighted = false;
+        self.matches.clear();
+        self.shifts.clear();
+    }
+}
+
+/// Run `head` on the matches of rule `rule`, whose variables range over
+/// `space`, one write after another: each write on every match, in match
+/// order, before the next. A missing binding or an insert the client cannot
+/// spell stops the rest of that match's head; everything before it stands,
+/// which is sound because a head only adds.
+///
+/// An equate is visible to the writes after it through the partition alone:
+/// the tables name the absorbed ids until the client canonicalizes them.
 pub fn apply<C, const S: usize>(
     client: &mut impl Client<C, S>,
     space: SpaceId,
     rule: usize,
     head: &[Head],
     head_vars: u32,
-    bindings: &[Ref],
-    scalars: &[u64],
-    held: &mut Vec<Ref>,
+    matches: &Matches,
+    batch: &mut Batch,
 ) {
-    held.clear();
-    held.extend_from_slice(bindings);
-    held.resize(bindings.len() + head_vars as usize, crate::query::UNBOUND);
-    let get = |held: &[Ref], var: usize| bound(*held.get(var)?);
+    let count = matches.len();
+    batch.held.clear();
+    for index in 0..count {
+        let (_, bindings, _) = matches.get(index);
+        batch.held.extend_from_slice(bindings);
+        let own = batch.held.len() + head_vars as usize;
+        batch.held.resize(own, UNBOUND);
+    }
+    let width = batch.held.len().checked_div(count).unwrap_or(0);
+    batch.stopped.clear();
+    batch.stopped.resize(count, false);
+    batch.wrote.clear();
+    batch.wrote.resize(count, false);
+    let get = |held: &[Ref], index: usize, var: Var| {
+        bound(*held[index * width..][..width].get(var as usize)?)
+    };
     for (op, write) in head.iter().enumerate() {
         match write {
             Head::Insert { args, sorted, into } => {
-                let Some(mut operands) = args
-                    .iter()
-                    .map(|&arg| get(held, arg as usize))
-                    .collect::<Option<SmallVec<[Ref; 4]>>>()
-                else {
-                    return;
+                let insert = Insert {
+                    at: (rule, op),
+                    args,
+                    sorted: *sorted,
+                    into: *into as usize,
+                    width,
                 };
-                let Some(value) =
-                    insert(client, space, (rule, op), &mut operands, *sorted, scalars)
-                else {
-                    return;
-                };
-                held[*into as usize] = value;
+                batch_insert(client, space, &insert, matches, batch);
             }
-            Head::Equate(a, b) => {
-                let (Some(a), Some(b)) = (get(held, *a as usize), get(held, *b as usize)) else {
-                    return;
-                };
-                client.equate(a, b);
-            }
-            Head::EquateIndexed { var, offset, index } => {
-                let chosen = *offset as usize + scalars[*index as usize] as usize;
-                let (Some(a), Some(b)) = (get(held, *var as usize), get(held, chosen)) else {
-                    return;
-                };
-                client.equate(a, b);
+            Head::Equate(..) | Head::EquateIndexed { .. } => {
+                for index in 0..count {
+                    let (a, b) = match write {
+                        Head::EquateIndexed {
+                            var,
+                            offset,
+                            index: scalar,
+                        } => {
+                            let scalars = matches.get(index).2;
+                            (*var, *offset + scalars[*scalar as usize] as Var)
+                        }
+                        Head::Equate(a, b) => (*a, *b),
+                        _ => unreachable!("an equate"),
+                    };
+                    let bound = (get(&batch.held, index, a), get(&batch.held, index, b));
+                    let (false, (Some(a), Some(b))) = (batch.stopped[index], bound) else {
+                        batch.stopped[index] = true;
+                        continue;
+                    };
+                    let before = work(client);
+                    client.equate(a, b);
+                    batch.wrote[index] |= work(client) != before;
+                }
             }
             Head::Offset { base, offset, into } => {
-                let (Some(base), Some(offset)) = (get(held, *base as usize), offset.eval(scalars))
-                else {
-                    return;
-                };
-                let shifted = Ref::new(base.id, base.offset.wrapping_add(offset as u64));
-                held[*into as usize] = client.db().find(space, shifted);
+                for index in 0..count {
+                    let scalars = matches.get(index).2;
+                    let bound = (get(&batch.held, index, *base), offset.eval(scalars));
+                    let (false, (Some(base), Some(offset))) = (batch.stopped[index], bound) else {
+                        batch.stopped[index] = true;
+                        continue;
+                    };
+                    let shifted = Ref::new(base.id, base.offset.wrapping_add(offset as u64));
+                    batch.held[index * width + *into as usize] = client.db().find(space, shifted);
+                }
+            }
+            Head::Raise { column, key, value } => {
+                for index in 0..count {
+                    let scalars = matches.get(index).2;
+                    let bound = (get(&batch.held, index, *key), value.eval(scalars));
+                    let (false, (Some(key), Some(value))) = (batch.stopped[index], bound) else {
+                        batch.stopped[index] = true;
+                        continue;
+                    };
+                    let key = client.db().find(space, key).id;
+                    batch.wrote[index] |= client.db_mut().raise(*column, key, value as u64);
+                }
             }
         }
     }
 }
 
-/// The value of the row an insert's client keys by `operands`, minted if no
-/// row has the key.
-fn insert<C, const S: usize>(
+// What a write that changed anything moved.
+fn work<C, const S: usize>(client: &impl Client<C, S>) -> (usize, usize, usize) {
+    let stats = client.db().stats();
+    (stats.merges, stats.adds, stats.raises)
+}
+
+struct Insert<'a> {
+    at: (usize, usize),
+    args: &'a [Var],
+    sorted: bool,
+    into: usize,
+    // How many variables a match holds.
+    width: usize,
+}
+
+// Binds each match's `into` to the value of the row the client keys by its
+// `args`. The keys of consecutive matches that fall into one table are
+// looked up together, in match order: of equal keys the first mints and the
+// rest find it.
+fn batch_insert<C, const S: usize>(
     client: &mut impl Client<C, S>,
     space: SpaceId,
-    (rule, op): (usize, usize),
-    operands: &mut [Ref],
-    sorted: bool,
-    scalars: &[u64],
-) -> Option<Ref> {
-    for operand in operands.iter_mut() {
-        *operand = client.db().find(space, *operand);
+    insert: &Insert<'_>,
+    matches: &Matches,
+    batch: &mut Batch,
+) {
+    let (rule, op) = insert.at;
+    let mut operands: SmallVec<[Ref; 4]> = SmallVec::new();
+    for index in 0..matches.len() {
+        if batch.stopped[index] {
+            continue;
+        }
+        let held = &mut batch.held[index * insert.width..][..insert.width];
+        operands.clear();
+        let db = client.db();
+        operands.extend(
+            insert
+                .args
+                .iter()
+                .map_while(|&arg| Some(db.find(space, bound(*held.get(arg as usize)?)?))),
+        );
+        if operands.len() < insert.args.len() {
+            batch.stopped[index] = true;
+            continue;
+        }
+        if insert.sorted {
+            operands.sort_unstable();
+        }
+        batch.key.clear();
+        let scalars = matches.get(index).2;
+        let before = work(client);
+        let keyed = client.key(rule, op, &operands, scalars, &mut batch.key);
+        batch.wrote[index] |= work(client) != before;
+        match keyed {
+            None => batch.stopped[index] = true,
+            Some(Keyed::Is(found)) => held[insert.into] = found,
+            Some(Keyed::At { table, shift }) => {
+                if batch.run.table != table {
+                    store(client, space, insert, matches, batch);
+                }
+                batch.run.push(table, &batch.key, index as u32, shift);
+            }
+        }
     }
-    if sorted {
-        operands.sort_unstable();
+    store(client, space, insert, matches, batch);
+}
+
+// Look the run's keys up and mint the missing ones.
+fn store<C, const S: usize>(
+    client: &mut impl Client<C, S>,
+    space: SpaceId,
+    insert: &Insert<'_>,
+    matches: &Matches,
+    batch: &mut Batch,
+) {
+    let run = &mut batch.run;
+    if run.matches.is_empty() {
+        return;
     }
-    let mut key = Key::default();
-    let (table, shift) = match client.key(rule, op, operands, scalars, &mut key)? {
-        Keyed::Is(found) => return Some(found),
-        Keyed::At { table, shift } => (table, shift),
+    let (rule, op) = insert.at;
+    let arity = run.arity;
+    let keys: SmallVec<[&[u32]; 8]> = run.columns[..arity].iter().map(Vec::as_slice).collect();
+    let weights: SmallVec<[&[u64]; 8]> = match run.weighted {
+        true => run.weights[..arity].iter().map(Vec::as_slice).collect(),
+        false => SmallVec::new(),
     };
-    let db = client.db();
-    if let Some(found) = db.table(table)
-        && let Some(row) = found.get(&key.cells, key.weights())
-    {
-        let weight = found.weight(found.arity(), row);
-        let value = Ref::new(found.values()[row as usize], weight.wrapping_add(shift));
-        return Some(db.find(space, value));
+    let first = client.db().ids(space) as u32;
+    let tag = client.tag();
+    client.db_mut().insert_rows(
+        run.table,
+        &keys,
+        &weights,
+        Values::From(first),
+        tag,
+        &mut run.found,
+    );
+    let key = &mut batch.key;
+    let mut minted = first;
+    for (at, &index) in run.matches.iter().enumerate() {
+        let shift = run.shifts[at];
+        let value = match run.found[at] {
+            Some(found) => {
+                let found = Ref::new(found.id, found.offset.wrapping_add(shift));
+                client.db().find(space, found)
+            }
+            None => {
+                key.clear();
+                key.cells.extend(keys.iter().map(|column| column[at]));
+                key.weights.resize(arity, 0);
+                for (weight, column) in key.weights.iter_mut().zip(&weights) {
+                    *weight = column[at];
+                    key.weighted |= *weight != 0;
+                }
+                let scalars = matches.get(index as usize).2;
+                batch.wrote[index as usize] = true;
+                let id = client.mint(rule, op, run.table, key, scalars);
+                debug_assert_eq!(id, minted, "the value the row was stored with");
+                minted += 1;
+                Ref::new(id, shift)
+            }
+        };
+        batch.held[index as usize * insert.width + insert.into] = value;
     }
-    Some(Ref::new(client.mint(rule, op, table, &key, scalars), shift))
+    drop((keys, weights));
+    run.clear();
 }

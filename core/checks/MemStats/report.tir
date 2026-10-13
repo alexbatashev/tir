@@ -10,7 +10,7 @@ module {
   module_end
 }
 
-// CHECK: tir-mem: egraph label=instcombine nodes=
+// CHECK: tir-mem: egraph label=instcombine-nodes nodes=
 // CHECK: tir-mem: pass name=instcombine-nodes vmhwm_kb=
 // CHECK-SAME: hwm_delta_kb=
 // CHECK-SAME: rss_delta_kb=

@@ -23,13 +23,14 @@
 
 mod recovery;
 
-use std::collections::{HashMap, HashSet};
-
 pub(crate) use recovery::RecoveryError;
 pub use recovery::{
     ControlDefinition, ControlId, ControlKind, ControlOutcome, DemandDomainId, DemandDomainKind,
     RecoveryPlan, ValueBinding,
 };
+
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 
 use crate::analysis::AnalysisManager;
 use crate::attributes::{AttributeValue, Predicate};
@@ -37,6 +38,9 @@ use crate::builtin::{CmpIOpBuilder, ConstantOp, ConstantOpBuilder, IntegerType, 
 use crate::cfg::{BranchOpBuilder, CondBranchOpBuilder};
 use crate::func::{FuncOp, ReturnOp, ReturnOpBuilder};
 use crate::region::values_read;
+
+type HashMap<K, V> = std::collections::HashMap<K, V, tir_adt::FxBuildHasher>;
+type HashSet<K> = std::collections::HashSet<K, tir_adt::FxBuildHasher>;
 use crate::{
     BlockId, Context, Gamma, OpHandle, OpId, Operation, OperationRef, Pass, PassError, PassTarget,
     RegionId, Theta, ValueId,
@@ -166,6 +170,16 @@ pub trait Edges {
         false
     }
 
+    /// The value of `value`, where selection built it as a literal.
+    fn constant(&self, _value: ValueId) -> Option<u64> {
+        None
+    }
+
+    /// The boolean a selected `value` is the complement of.
+    fn negated(&self, _value: ValueId) -> Option<ValueId> {
+        None
+    }
+
     /// The recovery demand domain assigned to a selected operation.
     fn execution_domain(&self, _op: OpId) -> Option<DemandDomainId> {
         None
@@ -178,6 +192,19 @@ pub trait Edges {
     fn implicit_inputs(&self, _op: OpId) -> Vec<OpId> {
         Vec::new()
     }
+}
+
+pub(crate) fn case_test(
+    context: &Context,
+    predicate: ValueId,
+    case: ValueId,
+) -> crate::builtin::CmpIOp {
+    CmpIOpBuilder::new(context)
+        .lhs(predicate)
+        .rhs(case)
+        .predicate(Predicate::Eq)
+        .result_type(IntegerType::new(context, 1))
+        .build()
 }
 
 /// The `cfg` dialect's edges over core IR.
@@ -231,14 +258,7 @@ impl CfgEdges<'_> {
                             .result_type(ty)
                             .build(),
                     );
-                    let equal = holder.append_op(
-                        CmpIOpBuilder::new(self.context)
-                            .lhs(predicate)
-                            .rhs(case.result())
-                            .predicate(Predicate::Eq)
-                            .result_type(IntegerType::new(self.context, 1))
-                            .build(),
-                    );
+                    let equal = holder.append_op(case_test(self.context, predicate, case.result()));
                     (equal.result(), true)
                 }
             }
@@ -442,7 +462,7 @@ pub fn recover_cfg(
             restructure_ordered_root(context, region)?;
         }
     }
-    RecoveryPlan::analyze(context, region)?.emit(context, region, edges)
+    RecoveryPlan::analyze_selected(context, region, edges)?.emit(context, region, edges)
 }
 
 fn restructure_ordered_root(context: &Context, region: RegionId) -> Result<(), PassError> {
@@ -568,7 +588,7 @@ pub(super) fn cone(
     roots: &[ValueId],
     mut inputs: impl FnMut(OpId) -> Vec<OpId>,
 ) -> HashSet<OpId> {
-    let mut cone = HashSet::new();
+    let mut cone = HashSet::default();
     let mut pending: Vec<OpId> = roots
         .iter()
         .filter_map(|&value| context.get_value(value).defining_op())
@@ -589,30 +609,44 @@ pub(super) fn stable_order(
     mut inputs: impl FnMut(OpId) -> Vec<OpId>,
 ) -> Result<Vec<OpId>, PassError> {
     let ops = context.get_region(region).op_ids();
-    let positions: HashMap<OpId, usize> = ops
-        .iter()
-        .enumerate()
-        .map(|(index, &op)| (op, index))
-        .collect();
-    let mut pending = vec![0; ops.len()];
-    let mut readers = vec![HashSet::new(); ops.len()];
+    let mut positions: Vec<(OpId, usize)> = ops.iter().copied().zip(0..).collect();
+    positions.sort_unstable();
+    // `(dependency, reader)` as positions, each once and sorted: the readers
+    // of an operation are one run of the column.
+    let mut reads: Vec<(usize, usize)> = Vec::new();
     for (index, &op) in ops.iter().enumerate() {
         for input in inputs(op) {
-            if let Some(&dependency) = positions.get(&input)
-                && readers[dependency].insert(index)
-            {
-                pending[index] += 1;
+            if let Ok(at) = positions.binary_search_by_key(&input, |&(held, _)| held) {
+                reads.push((positions[at].1, index));
             }
         }
     }
-    let ranks: Vec<_> = (0..ops.len()).collect();
-    let order = stable_group_order(&readers, &mut pending, &ranks);
+    reads.sort_unstable();
+    reads.dedup();
+    let mut pending = vec![0; ops.len()];
+    for &(_, reader) in &reads {
+        pending[reader] += 1;
+    }
+    let unread = (0..ops.len()).filter(|&node| pending[node] == 0);
+    let mut ready: BinaryHeap<Reverse<usize>> = unread.map(Reverse).collect();
+    let mut order = Vec::with_capacity(ops.len());
+    while let Some(Reverse(node)) = ready.pop() {
+        order.push(ops[node]);
+        let first = reads.partition_point(|&(dependency, _)| dependency < node);
+        let readers = reads[first..].iter().take_while(|read| read.0 == node);
+        for &(_, reader) in readers {
+            pending[reader] -= 1;
+            if pending[reader] == 0 {
+                ready.push(Reverse(reader));
+            }
+        }
+    }
     if order.len() != ops.len() {
         return Err(PassError::InvalidRuleSet(
             "an unordered region contains a dependency cycle".into(),
         ));
     }
-    Ok(order.into_iter().map(|index| ops[index]).collect())
+    Ok(order)
 }
 
 /// Stable Kahn order for contracted groups and the operations inside them.
@@ -892,7 +926,7 @@ impl Lowering<'_> {
 
         // An arm that computes nothing is not a block: what it produces rides
         // the edge into it, straight to the merge block.
-        let mut arms: HashMap<usize, Edge> = HashMap::new();
+        let mut arms: HashMap<usize, Edge> = HashMap::default();
         for &index in &reachable {
             let arm = regions[index];
             let handle = self.context.get_region(arm);

@@ -281,7 +281,35 @@ fn holes_of(node: &AxNode, out: &mut Vec<(String, Option<usize>)>) {
     }
 }
 
+#[derive(PartialEq)]
+pub(crate) enum Shape {
+    Operator(SymKind, Vec<Shape>),
+    Variable(usize),
+    Width,
+    Ones,
+    Constant(u64),
+    Other,
+}
+
 impl Axiom {
+    pub(crate) fn sides(&self) -> (Shape, Shape) {
+        (self.shape(&self.lhs), self.shape(&self.rhs))
+    }
+
+    fn shape(&self, node: &AxNode) -> Shape {
+        match node {
+            AxNode::Node(kind, children) => Shape::Operator(
+                *kind,
+                children.iter().map(|child| self.shape(child)).collect(),
+            ),
+            AxNode::Hole(_, Some(var)) => Shape::Variable(*var),
+            AxNode::Hole(name, None) if self.width_names.contains(name) => Shape::Width,
+            AxNode::ConstMatch(WidthExpr::Ones(_)) => Shape::Ones,
+            AxNode::ConstMatch(WidthExpr::Lit(value)) => Shape::Constant(*value),
+            _ => Shape::Other,
+        }
+    }
+
     pub(crate) fn counterexample(
         &self,
         model: &std::collections::BTreeMap<u32, Vec<bool>>,
@@ -615,9 +643,19 @@ impl Axiom {
                 self.realize(&children[0], g, r)
             }
             AxNode::Node(kind, children) => {
+                // The width an extension extends to is no value of the
+                // register: a register narrower than the width's own digits
+                // would truncate it.
+                let extends = matches!(kind, SymKind::ZExt | SymKind::SExt);
                 let children = children
                     .iter()
-                    .map(|c| self.realize(c, g, r))
+                    .enumerate()
+                    .map(|(index, c)| match c {
+                        AxNode::Const(e, ConstWidth::Register) if extends && index == 1 => {
+                            Some(con(g, e.eval(widths)?, 16))
+                        }
+                        _ => self.realize(c, g, r),
+                    })
                     .collect::<Option<Vec<_>>>()?;
                 Some(op(g, *kind, &children))
             }

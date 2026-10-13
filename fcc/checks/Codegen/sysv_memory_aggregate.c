@@ -24,10 +24,11 @@ long forward_large(struct Large value, long tail) {
 // CHECK: func.call %{{[0-9]+}}(%[[GROUP]], %{{[0-9]+}} : !tuple<!i64, !i64, !i64>, !i64) -> !i64
 
 // ASM-LABEL: consume_large:
+// ASM: mov [[TAIL:[a-z0-9]+]], rdi
 // ASM-DAG: mov {{.*}}, [rsp + 40]
 // ASM-DAG: mov {{.*}}, [rsp + 48]
 // ASM-DAG: mov {{.*}}, [rsp + 56]
-// ASM: add {{.*}}, rdi
+// ASM: add [[TAIL]], {{.*}}
 // ASM-LABEL: forward_large:
 // ASM: add rsp, -72
 // ASM: mov [rsp + 0], {{.*}}

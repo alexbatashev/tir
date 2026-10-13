@@ -73,6 +73,17 @@ impl Trie {
         }
     }
 
+    pub(crate) fn fixed(cells: &[&[u32]], rows: usize) -> Self {
+        let mut trie = Self::default();
+        trie.base.rows.extend(0..rows as u32);
+        trie.base.rows.sort_unstable_by(|&a, &b| {
+            let key = |row: u32| cells.iter().map(move |column| column[row as usize]);
+            key(a).cmp(key(b)).then(a.cmp(&b))
+        });
+        trie.base.build(cells);
+        trie
+    }
+
     /// Bring the trie up to date with `table`.
     pub(crate) fn refresh(&mut self, table: &Table) {
         let columns: SmallVec<[&[u32]; 6]> = self
@@ -325,7 +336,12 @@ mod tests {
                 // moves many rows, a high one few.
                 if let Some(moved) = moved {
                     let map: Vec<u32> = (0..200).map(|cell| if cell == moved { moved - 1 } else { cell }).collect();
-                    table.repair(&map, None, None, 2, &mut Default::default());
+                    let rename = crate::store::Dense {
+                        map: &map,
+                        delta: None,
+                        mask: &[],
+                    };
+                    table.repair(&rename, None, 2, false, &mut Default::default());
                 }
                 trie.refresh(&table);
                 let mut want: Vec<(Vec<u32>, u32)> = (0..table.len() as u32)

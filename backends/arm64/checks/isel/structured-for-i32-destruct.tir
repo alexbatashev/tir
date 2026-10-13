@@ -27,6 +27,7 @@ module {data_layout = #data_layout} {
 // The body advances the counter 32 bits wide and carries it round the back edge.
 // CHECK: ^[[BODY]]:
 // CHECK-NEXT: arm64.add_imm {rd = %{{[0-9]+}}:GPRsp, rn = %{{[0-9]+}}:GPRsp, imm = 5}
-// CHECK-NEXT: arm64.add_w {rd = %[[NEXT:[0-9]+]]:GPR32, rn = %[[IV]]:GPR32, rm = %{{[0-9]+}}:GPR}
+// A three-address instruction reads its two operands in either order.
+// CHECK-NEXT: arm64.add_w {rd = %[[NEXT:[0-9]+]]:GPR32, rn = %{{[0-9]+}}:GPR, rm = %[[IV]]:GPR32}
 // CHECK-NEXT: asm.vbr %[[NEXT]], %{{[0-9]+}} ^[[HDR]]
 // CHECK-NOT: scf.

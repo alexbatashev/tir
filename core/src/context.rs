@@ -111,6 +111,31 @@ struct Registry {
     segment_sizes: Sym,
 }
 
+/// The names and types a context interned, readable from any thread. An id
+/// the registry handed out says in what order things were met; whoever must
+/// not depend on that order reads what the id stands for through this.
+#[derive(Clone)]
+pub struct Names(Arc<RwLock<Registry>>);
+
+impl Names {
+    /// The name `sym` was interned from.
+    pub fn name(&self, sym: Sym) -> String {
+        let registry = self.0.read().unwrap_or_else(|e| e.into_inner());
+        registry.names.resolve(sym).to_string()
+    }
+
+    /// `ty` as the IR spells it, its dialect first.
+    pub fn type_spelling(&self, ty: TypeId) -> String {
+        let registry = self.0.read().unwrap_or_else(|e| e.into_inner());
+        let data = registry.type_cache[ty.as_index()].clone();
+        drop(registry);
+        let mut out = format!("{}.", data.dialect());
+        data.print(&mut IRFormatter::new(&mut out))
+            .expect("type print must succeed");
+        out
+    }
+}
+
 /// What another context over the IR this one reads is opened from; see
 /// [`Context::snapshot`].
 #[derive(Clone)]
@@ -151,6 +176,7 @@ struct Inner {
     db: RefCell<Db>,
     /// Advances at every commit.
     epoch: AtomicU32,
+    frozen: bool,
 }
 
 /// Mints into a partition of its own until dropped; see
@@ -178,6 +204,12 @@ fn schema_vocabulary() -> Interner {
         }
     }
     names
+}
+
+pub(crate) struct Refused(pub(crate) String);
+
+fn refuse(what: String) -> ! {
+    std::panic::resume_unwind(Box::new(Refused(what)))
 }
 
 fn type_hash(ty: &dyn Type) -> u64 {
@@ -210,6 +242,7 @@ impl Context {
             db: RefCell::new(Db::new()),
             state_types: RefCell::default(),
             epoch: AtomicU32::new(0),
+            frozen: false,
         }));
         crate::builtin::StateType::memory(&context);
         context
@@ -247,8 +280,18 @@ impl Context {
         self.0.db.borrow_mut()
     }
 
+    /// See [`Names`].
+    pub fn names(&self) -> Names {
+        Names(self.0.registry.clone())
+    }
+
     /// Intern an attribute name.
     pub fn intern(&self, name: &str) -> Sym {
+        if self.0.frozen {
+            return self
+                .sym(name)
+                .unwrap_or_else(|| refuse(format!("the name `{name}`")));
+        }
         self.registry_mut().names.intern(name)
     }
 
@@ -293,6 +336,10 @@ impl Context {
         let mut registry = self.registry_mut();
         if let Some(id) = registry.op_name_ids.get(&(dialect, name)) {
             return *id;
+        }
+        if self.0.frozen {
+            drop(registry);
+            refuse(format!("the operation `{dialect}.{name}`"));
         }
         let id = OpNameId::new(registry.op_names.len() as u32);
         registry.op_names.push((dialect, name));
@@ -372,6 +419,27 @@ impl Context {
                     .lane(index as u32, count as u32, part, exclusive),
             ),
             epoch: AtomicU32::new(snapshot.epoch),
+            frozen: false,
+        }))
+    }
+
+    pub(crate) fn detach(self) -> Snapshot {
+        Snapshot {
+            registry: self.0.registry.clone(),
+            db: self.db().clone(),
+            epoch: self.epoch(),
+        }
+    }
+
+    // Two threads interning at once would number the registry's entries by
+    // their race.
+    pub(crate) fn open_frozen(snapshot: Snapshot) -> Self {
+        Context(std::rc::Rc::new(Inner {
+            registry: snapshot.registry,
+            state_types: RefCell::default(),
+            db: RefCell::new(snapshot.db),
+            epoch: AtomicU32::new(snapshot.epoch),
+            frozen: true,
         }))
     }
 
@@ -384,6 +452,7 @@ impl Context {
             state_types: RefCell::default(),
             db: RefCell::new(self.db().clone()),
             epoch: AtomicU32::new(self.epoch()),
+            frozen: self.0.frozen,
         }))
     }
 
@@ -574,6 +643,12 @@ impl Context {
                 }
             }
         }
+        if self.0.frozen {
+            drop(registry);
+            let mut spelled = String::new();
+            let _ = ty.print(&mut IRFormatter::new(&mut spelled));
+            refuse(format!("the type `{spelled}`"));
+        }
         let id = TypeId::from_number(registry.type_cache.len() as u32);
         let state = (ty.as_ref() as &dyn Any)
             .downcast_ref::<crate::builtin::StateType>()
@@ -582,6 +657,17 @@ impl Context {
         registry.type_cache.push(ty);
         registry.type_lookup.entry(hash).or_default().push(id);
         id
+    }
+
+    /// The ids of the interned types `keep` holds of, in the order they were
+    /// interned.
+    pub fn types_where(&self, keep: impl Fn(&dyn Type) -> bool) -> Vec<TypeId> {
+        let registry = self.registry();
+        let types = registry.type_cache.iter().enumerate();
+        types
+            .filter(|(_, ty)| keep(ty.as_ref()))
+            .map(|(index, _)| TypeId::from_number(index as u32))
+            .collect()
     }
 
     pub fn get_type_data(&self, ty: TypeId) -> Arc<dyn Type> {
@@ -843,6 +929,23 @@ impl Context {
         self.db().block_parent(block)
     }
 
+    // `read` must not edit the context: the storage is borrowed for the read.
+    pub(crate) fn with_attributes<R>(
+        &self,
+        id: OpId,
+        read: impl FnOnce(&[crate::attributes::NamedAttribute]) -> R,
+    ) -> R {
+        read(self.db().op_attrs(id))
+    }
+
+    // `read` must not edit the context, nor ask it for a use list or for what
+    // a block or a region holds:
+    // those bring a grouping up to date, and the storage is borrowed for the
+    // read.
+    pub(crate) fn with_rows<R>(&self, read: impl FnOnce(&Db) -> R) -> R {
+        read(&self.db())
+    }
+
     /// Read an attribute of `op` in place. For an attribute large enough that
     /// cloning it per lookup would matter.
     ///
@@ -947,6 +1050,14 @@ impl Context {
     /// `region` and every region nested in it.
     pub(crate) fn nested_regions(&self, region: RegionId) -> Vec<RegionId> {
         self.db_mut().nested_regions(region)
+    }
+
+    pub(crate) fn sibling_reads(&self, root: RegionId, nested: bool) -> Vec<(OpId, OpId)> {
+        self.db_mut().sibling_reads(root, nested)
+    }
+
+    pub(crate) fn sibling_read(&self, reader: OpId, value: ValueId) -> Option<(OpId, OpId)> {
+        self.db().sibling_read(reader, value, None)
     }
 
     /// The ports an unordered region owns itself; none for an ordered one.

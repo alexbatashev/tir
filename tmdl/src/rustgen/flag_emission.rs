@@ -173,7 +173,7 @@ fn emit_flag_branch_rules(
                 &mut HashMap::new(),
                 &mut HashMap::new(),
             );
-            let (composed, _) = fold_constant_subtrees(&spliced, spliced_root);
+            let (composed, composed_root) = fold_constant_subtrees(&spliced, spliced_root);
 
             let Some((candidate, candidate_root)) = find_equivalent_comparison(&composed, &symbols)
             else {
@@ -194,19 +194,66 @@ fn emit_flag_branch_rules(
                 typed,
                 float_width: None,
             };
-            let operand_register_specs = operand_register_specs_for_ops(
-                &d.ops,
-                &d_sem.variable_symbols,
-                &width_sensitive_symbols(&canon_pattern, &pattern_widths),
-                &float_classes,
-                &polymorphic_classes,
-            );
-            let imm_range_entries = imm_range_spec_entries(&immediate_operand_ranges(
+            // A value narrower than the register binds where the proof says
+            // an immediate field as wide as the value keeps the register's
+            // higher bits out of the flags.
+            let registers = d_sem.variable_symbols.values().copied();
+            let register = registers
+                .filter(|symbol| !immediate_symbols.contains(symbol))
+                .collect::<Vec<_>>();
+            let immediates: Vec<u32> = immediate_symbols.iter().copied().collect();
+            let narrow = match (&register[..], &immediates[..]) {
+                (&[register], &[immediate]) => {
+                    masked_widths(&composed, composed_root, &symbols, register, immediate)
+                }
+                _ => Vec::new(),
+            };
+            for defined in std::iter::once(None).chain(narrow.into_iter().map(Some)) {
+            let operand_register_specs: Vec<proc_macro2::TokenStream> = match defined {
+                None => operand_register_specs_for_ops(
+                    &d.ops,
+                    &d_sem.variable_symbols,
+                    &width_sensitive_symbols(&canon_pattern, &pattern_widths),
+                    &float_classes,
+                    &polymorphic_classes,
+                ),
+                Some(width) => d
+                    .ops
+                    .iter()
+                    .filter_map(|(name, ty)| {
+                        let Type::Struct(class) = ty else {
+                            return None;
+                        };
+                        let symbol = *d_sem.variable_symbols.get(name)?;
+                        Some(reg_operand_spec(
+                            symbol,
+                            class,
+                            true,
+                            Some(width),
+                            &float_classes,
+                            &polymorphic_classes,
+                        ))
+                    })
+                    .collect(),
+            };
+            let ranges = immediate_operand_ranges(
                 &d_sem.graph,
                 &d.ops,
                 &d_sem.variable_symbols,
                 &d.constraints,
-            ));
+            );
+            let ranges: Vec<ImmediateRange> = ranges
+                .into_iter()
+                .map(|range| match defined {
+                    Some(width) => ImmediateRange {
+                        width,
+                        signed: false,
+                        ..range
+                    },
+                    None => range,
+                })
+                .collect();
+            let imm_range_entries = imm_range_spec_entries(&ranges);
 
             let target_symbol = d_sem
                 .variable_symbols
@@ -215,7 +262,10 @@ fn emit_flag_branch_rules(
                 .map_or(0, |max| max + 1);
             let d_lower = d.inst.name.to_lowercase();
             let b_lower = b.inst.name.to_lowercase();
-            let rule_key = format!("{}_via_{}", b_lower, d_lower);
+            let rule_key = match defined {
+                Some(width) => format!("{}_via_{}_w{}", b_lower, d_lower, width),
+                None => format!("{}_via_{}", b_lower, d_lower),
+            };
             let rule_name = format!("{}+{}", d.mnemonic, b.mnemonic);
             let target_symbol_lit = proc_macro2::Literal::u32_unsuffixed(target_symbol);
             let b_op_ty_ident = format_ident!("{}Op", &b.inst.name);
@@ -257,6 +307,7 @@ fn emit_flag_branch_rules(
                 #rule_ts
             });
             rule_spec_idents.push(rule_ident);
+            }
         }
     }
 }

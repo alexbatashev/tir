@@ -14,4 +14,4 @@ long consume_large(struct Large value) {
 // CHECK: ptr.ptradd %[[VALUE]]
 
 // ASM-LABEL: consume_large:
-// ASM: ldr x0, [x0, 16]
+// ASM: ldur x0, [x0, 16]

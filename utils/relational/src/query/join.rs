@@ -5,14 +5,14 @@
 
 use smallvec::SmallVec;
 
-use super::eval::{Allow, Eval, reads};
+use super::eval::{Allow, Eval, keyed, reads};
 use super::ghd::Bag;
 use super::ir::Resolution;
-use super::plan::{JoinAtom, JoinPlan, Level, Plan, Step};
+use super::plan::{Attr, JoinAtom, JoinPlan, Level, Plan, Step};
 use super::set::Set;
 use super::trie::{Node, Trie};
-use crate::db::{Database, Groups};
-use crate::store::{Group, Table};
+use crate::db::{Core, Database, Groups};
+use crate::store::Group;
 
 /// A join runs as the loop nest unless its first atom reaches at least this
 /// many rows, and its tries are built only where the tables that atom reads
@@ -56,25 +56,27 @@ pub(super) struct JoinScratch {
     keys: Vec<u32>,
 }
 
-/// Where an atom's relation is read: under one selected cell of one table,
-/// as written or swapped.
+// Where an atom's relation is read: under one selected cell of one table,
+// as written or swapped, or under a client table's bound columns.
 #[derive(Clone, Copy)]
 struct Cursor {
     /// Index into the join's sources.
     source: u32,
+    // The selected cell; zero in a client table.
+    cell: u32,
     node: Node,
 }
 
 /// One table an atom reads, in one reading.
 struct Source<'a> {
     trie: &'a Trie,
-    table: &'a Table,
     /// The rank of the table's row zero; a row's rank is this with the row
     /// shifted left by `shift`.
     base: u64,
     shift: u32,
-    /// Whether the atom holds to rows the previous epoch did not write.
-    old: bool,
+    // The table's stamps, where the atom holds to rows the previous epoch
+    // did not write.
+    old: Option<&'a [u32]>,
 }
 
 /// A row's rank in the loop nest's order of an atom's rows: the table's
@@ -100,15 +102,20 @@ fn unrank(rank: u64, sideways: bool) -> (usize, u32, bool) {
 
 impl Plan {
     /// What `atom`, the first of a join, reaches through its step: `count`
-    /// summed over the groupings it looks rows up in, both readings included.
+    /// summed over the groupings it looks rows up in, both readings included,
+    /// or every row of a client table.
     pub(super) fn reach<C, const S: usize>(
         &self,
-        db: &Database<C, S>,
+        db: &Core<C, S>,
         groups: &Groups,
         resolutions: &[Resolution],
         atom: &JoinAtom,
         count: impl Fn(&Group) -> usize,
     ) -> usize {
+        if let Step::Table { atom, .. } = atom.step {
+            let tables = &resolutions[self.tuples(atom).table as usize].tables;
+            return tables.iter().map(|(slot, _)| db.words(*slot).len()).sum();
+        }
         let rows = self.rows(atom.atom());
         let tables = &resolutions[rows.select.param as usize].tables;
         tables
@@ -144,15 +151,22 @@ impl Plan {
         let (rows, cells) = {
             let groups = db.groups();
             let rows = self.reach(db, &groups, resolutions, first, Group::len);
-            (
-                rows,
-                self.reach(db, &groups, resolutions, first, Group::cells),
-            )
+            let cells = match first.step {
+                Step::Table { .. } => 1,
+                _ => self.reach(db, &groups, resolutions, first, Group::cells),
+            };
+            (rows, cells)
         };
         if rows < min_rows.saturating_mul(cells.max(1)) {
             return false;
         }
         for atom in &join.atoms {
+            if let Step::Table { atom: index, .. } = atom.step {
+                for (slot, _) in &resolutions[self.tuples(index).table as usize].tables {
+                    db.words(*slot).trie(&atom.columns[0]);
+                }
+                continue;
+            }
             let rows = self.rows(atom.atom());
             for (slot, _) in &resolutions[rows.select.param as usize].tables {
                 db.prepare_trie(*slot, &atom.columns[0]);
@@ -174,6 +188,14 @@ impl Plan {
     ) -> bool {
         let first = &join.atoms[0];
         let key = match first.step {
+            Step::Table { atom, keys } => {
+                let tuples = self.tuples(atom);
+                let tables = &eval.resolutions[tuples.table as usize].tables;
+                let rows = |(slot, _): &(u32, _)| {
+                    keyed(eval.db.words(*slot), tuples, keys, &eval.scalars).len()
+                };
+                return tables.iter().map(rows).sum::<usize>() >= eval.join_min_rows;
+            }
             Step::Parents { atom, slot } => self.rows(atom).args[slot as usize].var,
             _ => self.rows(first.atom()).key,
         };
@@ -214,13 +236,24 @@ impl Plan {
             let mut fresh = 0;
             let mut held = true;
             for (atom, &rank) in join.atoms.iter().zip(rows(at)) {
-                let shape = self.rows(atom.atom());
                 let sideways = matches!(atom.step, Step::Parents { .. });
                 let (table, row, swapped) = unrank(rank, sideways);
+                if let Step::Table { atom, .. } = atom.step {
+                    let tuples = self.tuples(atom);
+                    let slot = resolutions[tuples.table as usize].tables[table].0;
+                    // The tries agree on every term but the scalars to bind.
+                    held = held && eval.bind_words(tuples, 0, db.words(slot), row);
+                    continue;
+                }
+                let shape = self.rows(atom.atom());
                 let slot = resolutions[shape.select.param as usize].tables[table].0;
                 let table = db.table(slot).expect("a joined table");
                 if let Some(tag) = shape.tag {
                     eval.scalars[tag as usize] = table.tags()[row as usize] as u64;
+                }
+                if let Some(cell) = shape.cell {
+                    eval.scalars[cell as usize] =
+                        table.column(shape.select.column as usize)[row as usize] as u64;
                 }
                 fresh += usize::from(table.stamps()[row as usize] + 1 == db.epoch());
                 held = held
@@ -258,6 +291,40 @@ impl Plan {
         let mut sources: SmallVec<[Source<'_>; 16]> = SmallVec::new();
         for atom in &join.atoms {
             scratch.spans.push(scratch.cursors.len() as u32);
+            if let Step::Table { atom: index, .. } = atom.step {
+                let tuples = self.tuples(index);
+                let tables = &resolutions[tuples.table as usize].tables;
+                for (position, (slot, _)) in tables.iter().enumerate() {
+                    let trie = db.words(*slot).trie(&atom.columns[0]);
+                    let (base, shift) = rank(position, 0, false);
+                    sources.push(Source {
+                        trie,
+                        base,
+                        shift,
+                        old: None,
+                    });
+                    let found = atom.levels.iter().try_fold(trie.root(), |node, level| {
+                        let Level::Key(column) = level else {
+                            return Err(Some(node));
+                        };
+                        let cell = tuples.terms[*column as usize].eval(&eval.scalars);
+                        let cell = cell.and_then(|cell| u32::try_from(cell as u64).ok());
+                        cell.and_then(|cell| trie.child(node, cell)).ok_or(None)
+                    });
+                    if let Ok(node) | Err(Some(node)) = found {
+                        let source = sources.len() as u32 - 1;
+                        scratch.cursors.push(Cursor {
+                            source,
+                            cell: 0,
+                            node,
+                        });
+                    }
+                }
+                if scratch.cursors.len() as u32 == *scratch.spans.last().unwrap() {
+                    return;
+                }
+                continue;
+            }
             let rows = self.rows(atom.atom());
             let sideways = matches!(atom.step, Step::Parents { .. });
             let old = !eval.nested && atom.atom() < eval.old_below;
@@ -276,10 +343,9 @@ impl Plan {
                     let (base, shift) = rank(position, reading, sideways);
                     sources.push(Source {
                         trie,
-                        table,
                         base,
                         shift,
-                        old,
+                        old: old.then(|| table.stamps()),
                     });
                     let source = sources.len() as u32 - 1;
                     for &cell in cells {
@@ -289,18 +355,18 @@ impl Plan {
                         // The rows placed since the trie's base are read as
                         // a trie of their own.
                         for root in [Some(trie.root()), trie.delta_root()].into_iter().flatten() {
-                            let found = atom.levels.iter().try_fold(
+                            let found = atom.levels[1..].iter().try_fold(
                                 trie.child(root, cell),
                                 |node, level| match level {
                                     Level::Known(var) => {
                                         let cell = eval.bound[*var as usize].id;
                                         Ok(node.and_then(|node| trie.child(node, cell)))
                                     }
-                                    Level::Attr(_) => Err(node),
+                                    _ => Err(node),
                                 },
                             );
                             if let Some(node) = found.unwrap_or_else(|node| node) {
-                                scratch.cursors.push(Cursor { source, node });
+                                scratch.cursors.push(Cursor { source, cell, node });
                             }
                         }
                     }
@@ -534,7 +600,7 @@ impl Run<'_, '_> {
             let first = scratch.cursors[span(&scratch.spans, atom).start];
             self.join.atoms[self.atoms[atom]]
                 .levels
-                .get(first.node.depth() - 1)
+                .get(first.node.depth())
                 == Some(&here)
         };
         let trie = |cursor: &Cursor| self.sources[cursor.source as usize].trie;
@@ -551,6 +617,21 @@ impl Run<'_, '_> {
             }
             cells
         });
+        // An atom whose selected cell the attribute is allows the cells its
+        // cursors are under.
+        let selects = |atom: usize| self.join.atoms[self.atoms[atom]].cell == Some(attr);
+        let mut selected: SmallVec<[Vec<u32>; 2]> = SmallVec::new();
+        for atom in (0..width).filter(|&atom| selects(atom)) {
+            let mut under = scratch.unions.pop().unwrap_or_default();
+            under.clear();
+            let cursors = &scratch.cursors[span(&scratch.spans, atom)];
+            under.extend(cursors.iter().map(|cursor| cursor.cell));
+            under.sort_unstable();
+            under.dedup();
+            selected.push(under);
+        }
+        let lists: SmallVec<[&[u32]; 4]> =
+            cells.iter().chain(&selected).map(Vec::as_slice).collect();
         // An atom read through one node allows its set; one read through
         // several allows the union of their cells, taken as the widest set
         // and the others' cells admitted after when those are few.
@@ -559,7 +640,7 @@ impl Run<'_, '_> {
         let mut candidates = std::mem::take(&mut scratch.candidates[depth]);
         {
             let mut sets: SmallVec<[Set<'_>; 8]> =
-                cells.iter().map(|cells| Set::Uint(cells)).collect();
+                lists.iter().map(|cells| Set::Uint(cells)).collect();
             for atom in 0..width {
                 if !reads_here(scratch, atom) {
                     continue;
@@ -632,16 +713,10 @@ impl Run<'_, '_> {
             scratch.unions.extend([part, out, spare]);
         }
         if !patched.is_empty() {
-            self.admit(
-                scratch,
-                frame,
-                here,
-                cells.as_deref(),
-                &patched,
-                &mut candidates,
-            );
+            self.admit(scratch, frame, here, &lists, &patched, &mut candidates);
         }
-        scratch.unions.extend(cells);
+        drop(lists);
+        scratch.unions.extend(cells.into_iter().chain(selected));
         let next = frame + width + 1;
         let mut from = 0;
         'cells: for &cell in &candidates {
@@ -659,7 +734,9 @@ impl Run<'_, '_> {
                 }
                 None => held,
             };
-            if allowed.is_some_and(|allowed| !allowed(var, cell)) {
+            if let (Attr::Var(var), Some(allowed)) = (var, allowed)
+                && !allowed(var, cell)
+            {
                 continue;
             }
             scratch.path[depth] = cell;
@@ -669,23 +746,40 @@ impl Run<'_, '_> {
             for atom in 0..width {
                 scratch.spans.push(scratch.cursors.len() as u32);
                 let cursors = span(&scratch.spans, atom);
+                if selects(atom) {
+                    for at in cursors {
+                        let cursor = scratch.cursors[at];
+                        if cursor.cell == cell {
+                            scratch.cursors.push(cursor);
+                        }
+                    }
+                    continue;
+                }
                 if !reads_here(scratch, atom) {
                     scratch.cursors.extend_from_within(cursors);
                     continue;
                 }
                 let levels = &self.join.atoms[self.atoms[atom]].levels;
                 for at in cursors {
-                    let Cursor { source, mut node } = scratch.cursors[at];
+                    let Cursor {
+                        source,
+                        cell: selected,
+                        mut node,
+                    } = scratch.cursors[at];
                     let trie = self.sources[source as usize].trie;
                     // A variable an atom reads twice is a level per column.
-                    while levels.get(node.depth() - 1) == Some(&here) {
+                    while levels.get(node.depth()) == Some(&here) {
                         match trie.child(node, cell) {
                             Some(child) => node = child,
                             None => break,
                         }
                     }
-                    if levels.get(node.depth() - 1) != Some(&here) {
-                        scratch.cursors.push(Cursor { source, node });
+                    if levels.get(node.depth()) != Some(&here) {
+                        scratch.cursors.push(Cursor {
+                            source,
+                            cell: selected,
+                            node,
+                        });
                     }
                 }
                 if scratch.cursors.len() as u32 == scratch.spans[next + atom] {
@@ -698,15 +792,15 @@ impl Run<'_, '_> {
         scratch.candidates[depth] = candidates;
     }
 
-    /// Admit to `candidates` the cells of the nodes beside the widest of each
-    /// atom in `patched` that every atom allows and the separator's `cells`,
-    /// if held, have.
+    // Admit to `candidates` the cells of the nodes beside the widest of each
+    // atom in `patched` that every atom allows and each of `lists`, the
+    // separator's cells and the selected cells, has.
     fn admit(
         &self,
         scratch: &mut JoinScratch,
         frame: usize,
         here: Level,
-        cells: Option<&[u32]>,
+        lists: &[&[u32]],
         patched: &[(usize, usize)],
         candidates: &mut Vec<u32>,
     ) {
@@ -718,7 +812,7 @@ impl Run<'_, '_> {
             let first = scratch.cursors[span(atom).start];
             self.join.atoms[self.atoms[atom]]
                 .levels
-                .get(first.node.depth() - 1)
+                .get(first.node.depth())
                 == Some(&here)
         };
         let mut pool = || scratch.unions.pop().unwrap_or_default();
@@ -735,7 +829,10 @@ impl Run<'_, '_> {
         }
         part.clear();
         'extras: for &cell in &extras {
-            if cells.is_some_and(|cells| cells.binary_search(&cell).is_err()) {
+            if lists
+                .iter()
+                .any(|cells| cells.binary_search(&cell).is_err())
+            {
                 continue;
             }
             for atom in 0..self.atoms.len() {
@@ -763,9 +860,11 @@ impl Run<'_, '_> {
                 scratch.spans[frame + atom] as usize..scratch.spans[frame + atom + 1] as usize;
             for cursor in &scratch.cursors[cursors] {
                 let source = &self.sources[cursor.source as usize];
-                let stamps = source.table.stamps();
                 for &row in source.trie.rows(cursor.node) {
-                    if source.old && stamps[row as usize] + 1 == self.epoch {
+                    if source
+                        .old
+                        .is_some_and(|stamps| stamps[row as usize] + 1 == self.epoch)
+                    {
                         continue;
                     }
                     list.push(source.base | (row as u64) << source.shift);
@@ -872,10 +971,16 @@ mod tests {
     use proptest::prelude::*;
     use smallvec::{SmallVec, smallvec};
 
-    use super::super::ir::{Atom, Guard, Host, Param, Query, Rows, Select, Swap, Term};
-    use super::super::{Matches, PlanCache};
+    use std::sync::Arc;
+
+    use super::super::ir::{
+        Atom, Cmp, Expr, Guard, Host, Param, Query, Rows, Scalar, Select, Swap, Term, Tuples,
+    };
+    use super::super::{Matches, PlanCache, Unchecked};
     use super::*;
+    use crate::Words;
     use crate::db::SpaceId;
+    use crate::store::Table;
 
     const IDS: u32 = 24;
     /// Two selections over the binary tables, one over the unary table, and
@@ -884,6 +989,8 @@ mod tests {
     const OTHER: Param = 1;
     const UNARY: Param = 2;
     const SWAP: Param = 3;
+    // The client table.
+    const STEP: Param = 4;
 
     struct Selections;
 
@@ -900,6 +1007,7 @@ mod tests {
                 BINARY => &[(1, &[0, 2]), (0, &[0, 1])],
                 OTHER => &[(0, &[1, 2]), (1, &[1])],
                 UNARY => &[(2, &[0, 1])],
+                STEP => &[(0, &[])],
                 _ => &[(1, &[0, 1]), (0, &[1])],
             };
             out.tables = tables
@@ -907,7 +1015,9 @@ mod tests {
                 .map(|&(table, cells)| (table, SmallVec::from_slice(cells)))
                 .collect();
         }
+    }
 
+    impl crate::query::Calls for Selections {
         fn call(&self, _: u32, _: &[u64], _: &mut [u64]) -> bool {
             false
         }
@@ -961,6 +1071,7 @@ mod tests {
             select: Select { column: 0, param },
             terms,
             tag,
+            cell: None,
             swap: (swap && args.len() == 2).then_some(Swap {
                 columns: [1, 2],
                 when: SWAP,
@@ -1053,7 +1164,248 @@ mod tests {
         assert!(plan.joins.is_empty(), "{:?}", plan.run);
     }
 
+    // `atom`, also binding its selected cell to `cell`.
+    fn selecting(atom: Atom, cell: Scalar) -> Atom {
+        let Atom::Rows(rows) = atom else {
+            unreachable!("a row atom")
+        };
+        Atom::Rows(Rows {
+            cell: Some(cell),
+            ..rows
+        })
+    }
+
+    const R: u32 = 0;
+    // The selected cells of the three row atoms, then the scalars only the
+    // client table binds.
+    const CELLS: [Scalar; 3] = [2, 3, 4];
+    const FREE: Scalar = 5;
+
+    // `BINARY(a, b) = r`, `UNARY(x) = a` and `UNARY(y) = b`, each binding its
+    // selected cell, and after them the client table atoms of `tables`. A
+    // `guard` reads the first cell, so it ends the run the first atom is in.
+    fn stepped(tables: &[&[Expr]], swap: bool, guard: bool) -> Query {
+        let (a, b, x, y) = (1, 2, 3, 4);
+        let mut atoms = vec![
+            selecting(atom(BINARY, &[a, b], R, Some(0), swap), CELLS[0]),
+            selecting(atom(UNARY, &[x], a, Some(1), swap), CELLS[1]),
+            selecting(atom(UNARY, &[y], b, None, swap), CELLS[2]),
+        ];
+        atoms.extend(tables.iter().map(|terms| {
+            Atom::Words(Tuples {
+                table: STEP,
+                terms: terms.to_vec(),
+            })
+        }));
+        let small = Guard::Cmp(Cmp::Le, Expr::Scalar(CELLS[0]), Expr::Lit(9));
+        Query {
+            space: SpaceId::nth(0),
+            vars: 5,
+            scalars: 8,
+            params: 5,
+            root: R,
+            atoms,
+            guards: Vec::from_iter(guard.then_some(small)),
+            nots: Vec::new(),
+        }
+    }
+
+    fn words(rows: &[[u32; 5]]) -> Arc<Words> {
+        let mut words = Words::new(5);
+        for row in rows {
+            words.push(row);
+        }
+        Arc::new(words)
+    }
+
+    // The matches `base` and a row of `words` per atom of `tables` make,
+    // base match by base match and row by row, the first atom's rows
+    // outermost: a term that is a scalar from `FREE` on takes the first
+    // cell it meets, and every other term must evaluate to its cell.
+    fn extended(
+        base: &[(u32, Vec<crate::Ref>, Vec<u64>)],
+        tables: &[&[Expr]],
+        words: &Words,
+    ) -> Vec<(u32, Vec<crate::Ref>, Vec<u64>)> {
+        let mut matches: Vec<_> = base
+            .iter()
+            .map(|found| (found.clone(), [false; 3]))
+            .collect();
+        for terms in tables {
+            let mut out = Vec::new();
+            for ((root, bindings, scalars), taken) in &matches {
+                for row in 0..words.len() {
+                    let (mut scalars, mut taken) = (scalars.clone(), *taken);
+                    let holds = terms.iter().enumerate().all(|(column, term)| {
+                        let cell = u64::from(words.column(column)[row]);
+                        match term {
+                            Expr::Scalar(slot)
+                                if *slot >= FREE
+                                    && !std::mem::replace(
+                                        &mut taken[(slot - FREE) as usize],
+                                        true,
+                                    ) =>
+                            {
+                                scalars[*slot as usize] = cell;
+                                true
+                            }
+                            term => term.eval(&scalars) == Some(cell as i64),
+                        }
+                    });
+                    if holds {
+                        out.push(((*root, bindings.clone(), scalars), taken));
+                    }
+                }
+            }
+            matches = out;
+        }
+        matches.into_iter().map(|(found, _)| found).collect()
+    }
+
+    // The terms a column of a client table atom is drawn from: for the
+    // first three columns, mostly the selected cell of the row atom of that
+    // index.
+    fn term(column: usize, choice: usize) -> Expr {
+        let scalar = |slot: Scalar| Expr::Scalar(slot);
+        match (column, choice) {
+            (0..3, 0..=4) => scalar(CELLS[column]),
+            (0, 5) => Expr::And(Box::new(scalar(CELLS[0])), Box::new(Expr::Lit(1))),
+            (_, 6) => Expr::Lit(1),
+            (_, choice) => scalar(FREE + (column + choice) as Scalar % 3),
+        }
+    }
+
+    // A client table atom whose scalars other atoms of the run bind is
+    // joined with them, on the selected cells and on what a second client
+    // table atom binds; one whose term computes on such a scalar is left
+    // out of the run.
+    #[test]
+    fn a_client_table_is_planned_into_the_run() {
+        let [l, t1, t2] = CELLS.map(Expr::Scalar);
+        let [f, g, h] = [FREE, FREE + 1, FREE + 2].map(Expr::Scalar);
+        let first = [l.clone(), t1.clone(), t2.clone(), f.clone(), g.clone()];
+        let second = [g.clone(), h.clone(), h.clone(), f.clone(), Expr::Lit(1)];
+        let plan = Plan::compile(stepped(&[&first, &second], false, false));
+        let table = |atom, keys| Step::Table { atom, keys };
+        let run = [
+            Step::Join(0),
+            Step::Atom(0),
+            Step::Atom(1),
+            Step::Atom(2),
+            table(3, 0b00111),
+            table(4, 0b11001),
+        ];
+        assert_eq!(plan.run, run);
+        assert_eq!(plan.joins[0].atoms[0].cell, Some(0));
+        assert_eq!(plan.joins[0].atoms[4].levels[0], Level::Key(4));
+        // The first table holds the binary atom to its first column. The
+        // unary atoms share one selection, which neither may reduce.
+        let held = |plan: &Plan| -> Vec<(Param, usize, u8)> {
+            let held = plan.reductions().iter();
+            held.map(|by| (by.rows, by.atom, by.column)).collect()
+        };
+        assert_eq!(held(&plan), [(BINARY, 3, 0)]);
+
+        let masked = Expr::And(Box::new(l), Box::new(Expr::Lit(1)));
+        let plan = Plan::compile(stepped(&[&[masked, t1, t2, f, g]], false, false));
+        assert_eq!(plan.run, run[1..5]);
+        assert!(plan.joins.is_empty());
+        assert!(held(&plan).is_empty());
+    }
+
+    // The rows a key names are met in the order the client added them, as a
+    // probe and as a join.
+    #[test]
+    fn a_key_with_several_rows_matches_once_per_row_in_their_order() {
+        let mut db = database(
+            &[(0, 0, 1, 2, 0), (2, 1, 5, 0, 1), (2, 0, 6, 0, 2)],
+            1,
+            3,
+            |_| {},
+        );
+        db.add_words(words(&[
+            [0, 1, 0, 9, 0],
+            [0, 0, 0, 3, 0],
+            [0, 1, 0, 7, 0],
+            [0, 1, 1, 8, 0],
+            [0, 1, 0, 9, 0],
+        ]));
+        let [l, t1, t2] = CELLS.map(Expr::Scalar);
+        let terms = [l, t1, t2, Expr::Scalar(FREE), Expr::Lit(0)];
+        let plan = Plan::compile(stepped(&[&terms], false, false));
+        for join_min_rows in [0, usize::MAX] {
+            let mut cache = PlanCache::default();
+            cache.join_min_rows = join_min_rows;
+            let found = plan.search_all(&db, &Selections, &mut cache);
+            let bound: Vec<u64> = listed(&found)
+                .iter()
+                .map(|(_, _, scalars)| scalars[FREE as usize])
+                .collect();
+            assert_eq!(bound, [9, 7, 9]);
+        }
+    }
+
     proptest! {
+        // Client table atoms extend each match of the atoms before them by
+        // each of their rows that agrees with the match, in row order: as
+        // probes, as a join and at the sizes that choose between the two,
+        // from the root, from every row and from the new rows.
+        #[test]
+        fn a_client_table_matches_the_nested_loop_in_order(
+            rows in prop::collection::vec((0u32..3, 0u32..3, 0u32..8, 0u32..8, 0u32..IDS), 20..200),
+            table in prop::collection::vec([0u32..3, 0u32..2, 0u32..2, 0u32..3, 0u32..3], 0..120),
+            choices in prop::collection::vec(prop::array::uniform5(0usize..9), 1..3),
+            split in 0usize..200,
+            swap in any::<bool>(),
+            guard in any::<bool>(),
+            old_below in 0usize..4,
+        ) {
+            let tables: Vec<Vec<Expr>> = choices
+                .iter()
+                .map(|choices| (0..5).map(|column| term(column, choices[column])).collect())
+                .collect();
+            let tables: Vec<&[Expr]> = tables.iter().map(Vec::as_slice).collect();
+            let plan = Plan::compile(stepped(&tables, swap, guard));
+            let base = Plan::compile(stepped(&[], swap, guard));
+            let table = words(&table);
+            let mut db = database(&rows, 1, split.min(rows.len() - 10), |_| {});
+            db.add_words(table.clone());
+            let search = |plan: &Plan, join_min_rows: Option<usize>| {
+                let mut cache = PlanCache::default();
+                cache.join_min_rows = join_min_rows.unwrap_or(cache.join_min_rows);
+                let roots = plan.search_roots(&db, &Selections, 0..IDS, None::<&Unchecked>, (false, 0), &mut cache);
+                let fresh = plan.search_roots(&db, &Selections, 0..IDS, None::<&Unchecked>, (true, old_below), &mut cache);
+                let all = plan.search_all(&db, &Selections, &mut cache);
+                let new = plan.search_new(&db, &Selections, &mut cache);
+                [roots, fresh, all, new].iter().map(listed).collect::<Vec<_>>()
+            };
+            let nest = search(&plan, Some(usize::MAX));
+            prop_assert_eq!(&search(&plan, Some(0)), &nest);
+            prop_assert_eq!(&search(&plan, None), &nest);
+            // An atom reading every row atom's cell is placed after them all
+            // from wherever a search starts, so the nest meets its rows as
+            // the model does; one placed before a row atom is met earlier.
+            let last: Vec<&[Expr]> = plan
+                .steps
+                .iter()
+                .filter_map(|step| match *step {
+                    Step::Table { atom, .. } => Some(tables[atom - 3]),
+                    _ => None,
+                })
+                .collect();
+            let reads_all = |terms: &&[Expr]| CELLS.iter().all(|&cell| terms.contains(&Expr::Scalar(cell)));
+            let ordered = tables.iter().all(reads_all);
+            for (found, base) in nest.into_iter().zip(search(&base, Some(usize::MAX))) {
+                let mut model = extended(&base, if ordered { &last } else { &tables }, &table);
+                let mut found = found;
+                if !ordered {
+                    model.sort();
+                    found.sort();
+                }
+                prop_assert_eq!(found, model);
+            }
+        }
+
         /// The join emits exactly the loop nest's matches in the loop nest's
         /// order, from the root, from every row and from the new rows, under
         /// a pruning callback and with old rows required below an atom,
@@ -1078,16 +1430,21 @@ mod tests {
             });
             prop_assert!(plan.joins.len() == 1, "the query has a join: {:?}", plan.run);
             let allowed = |var: u32, id: u32| prune == 0 || !(var * 7 + id).is_multiple_of(prune + 3);
-            let search = |join_min_rows| {
+            let search = |join_min_rows, reduce_min_rows| {
                 let mut cache = PlanCache::default();
                 cache.join_min_rows = join_min_rows;
+                cache.reduce_min_rows = reduce_min_rows;
                 let roots = plan.search_roots(&db, &Selections, 0..IDS, Some(&allowed), (false, 0), &mut cache);
                 let fresh = plan.search_roots(&db, &Selections, 0..IDS, Some(&allowed), (true, old_below), &mut cache);
                 let all = plan.search_all(&db, &Selections, &mut cache);
                 let new = plan.search_new(&db, &Selections, &mut cache);
                 [roots, fresh, all, new].iter().map(listed).collect::<Vec<_>>()
             };
-            prop_assert_eq!(search(0), search(usize::MAX));
+            let nest = search(usize::MAX, usize::MAX);
+            prop_assert_eq!(&search(0, usize::MAX), &nest);
+            // Nor does reducing the rows a search starts from change them.
+            prop_assert_eq!(&search(usize::MAX, 0), &nest);
+            prop_assert_eq!(&search(0, 0), &nest);
         }
     }
 }

@@ -2288,6 +2288,7 @@ dependencies = [
  "tir-jit",
  "tir-lit",
  "tir-llvm",
+ "tir-relational",
  "tir-riscv",
  "tir-sim",
  "tir-symbolic",

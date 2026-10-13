@@ -39,6 +39,6 @@ module {data_layout = #data_layout} {
 // instruction.
 // CHECK: ^[[BODY]]:
 // CHECK-NEXT: x86_64.lea_base_disp {dst = %[[NACC:[0-9]+]]:GPR, base = %[[ACC]]:GPR, imm = 5}
-// CHECK-NEXT: x86_64.add {dst = %[[NEXT:[0-9]+]]:GPR, dst_tied = %[[IV]]:GPR, src = %[[ST:[0-9]+]]:GPR}
+// CHECK-NEXT: x86_64.add {dst = %[[NEXT:[0-9]+]]:GPR, dst_tied = %[[ST:[0-9]+]]:GPR, src = %[[IV]]:GPR}
 // CHECK-NEXT: asm.vbr %[[NEXT]], %[[NACC]] ^[[HEAD]]
 // CHECK-NOT: scf.

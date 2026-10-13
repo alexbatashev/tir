@@ -706,7 +706,7 @@ mod isa {
         features: &[Feature],
         abi: &'static tir::backend::abi::AbiInfo,
     ) -> tir::backend::isel::InstructionSelectPass {
-        tir::backend::isel::InstructionSelectPass::new(get_isel_rules(context, features))
+        tir::backend::isel::InstructionSelectPass::new(context, get_isel_rules(context, features))
             .with_function_check(|context, function| {
                 tir::backend::isel::check_default_fp_environment(context, function, "x86-64")
             })

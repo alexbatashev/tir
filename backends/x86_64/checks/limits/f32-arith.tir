@@ -13,7 +13,7 @@ module {
 }
 
 // CHECK:      x86_64.addss {dst = %[[V2:[0-9]+]]:XMM32, dst_tied = %[[V0:[0-9]+]]:XMM, src = %[[V1:[0-9]+]]:XMM}
-// CHECK-NEXT: x86_64.mulss {dst = %[[V3:[0-9]+]]:XMM32, dst_tied = %[[V1]]:XMM, src = %[[V2]]:XMM32}
+// CHECK-NEXT: x86_64.mulss {dst = %[[V3:[0-9]+]]:XMM32, dst_tied = %[[V2]]:XMM32, src = %[[V1]]:XMM}
 // CHECK-NEXT: x86_64.subss {dst = %[[V4:[0-9]+]]:XMM32, dst_tied = %[[V3]]:XMM32, src = %[[V0]]:XMM}
 // CHECK-NEXT: x86_64.divss {dst = %[[V5:[0-9]+]]:XMM32, dst_tied = %[[V4]]:XMM32, src = %[[V1]]:XMM}
 // CHECK-NEXT: asm.vret
@@ -22,10 +22,10 @@ module {
 // ENC-NEXT: f:
 // ENC-NEXT: [0xF3, 0x0F, 0x10, 0xD0]
 // ENC-NEXT: [0xF3, 0x0F, 0x58, 0xD1]
-// ENC-NEXT: [0xF3, 0x0F, 0x10, 0xD9]
-// ENC-NEXT: [0xF3, 0x0F, 0x59, 0xDA]
-// %3 dies at the subtract, so that tie coalesces and runs in place on xmm3.
-// ENC-NEXT: [0xF3, 0x0F, 0x5C, 0xD8]
-// ENC-NEXT: [0xF3, 0x0F, 0x10, 0xC3]
+// %2 dies at the multiply and %3 at the subtract, so both ties coalesce and
+// run in place on xmm2.
+// ENC-NEXT: [0xF3, 0x0F, 0x59, 0xD1]
+// ENC-NEXT: [0xF3, 0x0F, 0x5C, 0xD0]
+// ENC-NEXT: [0xF3, 0x0F, 0x10, 0xC2]
 // ENC-NEXT: [0xF3, 0x0F, 0x5E, 0xC1]
 // ENC-NEXT: [0xC3]

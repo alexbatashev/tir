@@ -25,13 +25,13 @@
 // RVASM: c.jr x1
 
 // A64ASM: read:
-// A64ASM-NEXT: ldr {{.*}}, [{{.*}}, 4]
+// A64ASM-NEXT: ldur {{.*}}, [{{.*}}, 4]
 // A64ASM-NEXT: ret x30
 // A64ASM: copy:
 // A64ASM: movz {{.*}}, 37
-// A64ASM: str {{.*}}, [{{.*}}, 4]
+// A64ASM: stur {{.*}}, [{{.*}}, 4]
 // A64ASM-NOT: bl memcpy
 // A64ASM: ldr {{.*}}, [{{.*}}, 0]
 // A64ASM: str {{.*}}, [{{.*}}, 0]
-// A64ASM: ldr x0, [{{.*}}, 4]
+// A64ASM: ldur x0, [{{.*}}, 4]
 // A64ASM: ret x30

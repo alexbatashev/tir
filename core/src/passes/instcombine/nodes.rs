@@ -1,14 +1,6 @@
-//! The simplifier over unordered regions: the same e-graph, seeded with the
-//! declared loops and gates, committed without an order to place into.
-//!
-//! A rewrite hands a value's readers the cheapest spelling of its class. What
-//! that spelling is in scope of is the region tree and the dependences between
-//! siblings: a value defined in the reader's region, or in one enclosing it and
-//! not downstream of the operation holding the reader, is read as it is; one
-//! defined in an arm the reader cannot see is rebuilt where the reader sits, if
-//! the operation computing it cannot trap, and left where it is otherwise. A
-//! rule-introduced op or a literal is built and placed where its operands say.
-//! Nothing here asks where an operation sits in its region or which came first.
+//! The simplifier over unordered regions: the shared driver's e-graph, seeded
+//! with the declared loops and gates, committed without an order to place
+//! into; see [`crate::rewrite`] for how a value's readers are rewired.
 //!
 //! The commit erases nothing on the way. The sweep after it erases every
 //! operation the region's results do not demand. Demand runs through
@@ -17,34 +9,32 @@
 //! no cone at all never ran under the demand semantics, and goes.
 
 use crate::{IdMap, IdSet};
-use std::collections::HashMap;
 
-/// The spelling a reference already has, so a form rebuilt for one reader
-/// answers every reader that can see it. `add_auto` places a rebuilt form where
-/// its operands allow, which may be well outside the reader's own region.
-type Memo = HashMap<Ref, ValueId>;
+use tir_egraph::{ClassId as Id, Engine, Ref, RowId, Vocabulary};
 
-use tir_egraph::{ClassId as Id, Engine, Extraction, Ref, RowId};
-
-use super::{Driver, Node, Prov, SymKind, cost, state};
+use super::rules::{Rules, Shared, builtin_ruleset};
 use crate::analysis::AnalysisManager;
 use crate::analysis::effects::{observed_state, produced_state};
 use crate::binding::{StateChain, forwards_state, state_chains};
 use crate::func::FuncOp;
-use crate::sem::egraph::type_width;
-use crate::utils::APInt;
+use crate::rewrite::{Commit, Driver, Kinds, Rewrite, RuleSet, is_dead_read, published, seed};
+use crate::sem::node::cost;
+use crate::sem::{Prov, SemNode as Node};
 use crate::{
-    ConstantLike, Context, Gamma, MemoryRead, MemoryWrite, NewOp, OpHandle, OpId, OperationRef,
-    Pass, PassError, PassTarget, PromotableAllocation, RegionId, RegionKind, Speculatable, Theta,
-    TypeId, ValueId,
+    Context, MemoryRead, MemoryWrite, OpId, OperationRef, Pass, PassError, PassTarget,
+    PromotableAllocation, RegionId, RegionKind, Theta, ValueId,
 };
 
 #[derive(Clone, Default)]
-pub struct InstCombineNodesPass;
+pub struct InstCombineNodesPass {
+    shared: Shared,
+    vocabulary: Option<Vocabulary<Node>>,
+    kinds: Kinds,
+}
 
 impl InstCombineNodesPass {
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 }
 
@@ -70,26 +60,22 @@ impl Pass for InstCombineNodesPass {
         _analyses: &AnalysisManager,
     ) -> Result<(), PassError> {
         let root = op.op().id;
-        let mut seeded = super::seed::seed(context, root);
+        let vocabulary = self.vocabulary.take();
+        let vocabulary = vocabulary.unwrap_or_else(|| Vocabulary::new(context.names()));
+        let mut seeded = seed(context, root, vocabulary, &mut self.kinds, false);
         let loop_ports = std::mem::take(&mut seeded.loop_ports);
-        let ruleset = super::builtin_ruleset(context, &seeded);
-        let mut driver = Driver {
-            context,
-            eg: seeded.eg,
-            value_class: seeded.value_class,
-            ruleset,
-            replacing: std::cell::Cell::new(None),
-            named: HashMap::new(),
-            carriers: HashMap::new(),
+        let rewrite = InstCombine {
+            ruleset: builtin_ruleset(context, &seeded, &mut self.shared),
         };
+        let mut driver = Driver::new(context, seeded, &rewrite, self.name());
         driver.saturate();
         driver.hypothesize(loop_ports);
         driver.index_values();
-        let extraction = driver
-            .eg
-            .extract_best(|_, node, operands, _| spelling_cost(&driver.eg, node, operands));
+        let extraction = driver.extract();
         let body = context.get_op(root).regions()[0];
-        driver.commit_nodes(body, &extraction, &mut HashMap::new())?;
+        let committed = driver.commit(body, &extraction, &mut Default::default());
+        self.vocabulary = Some(driver.eg.release());
+        committed?;
         forget_write_only_slots(context, body);
         drop_untouched_chains(context, body);
         let result = sweep(context, body);
@@ -98,721 +84,39 @@ impl Pass for InstCombineNodesPass {
     }
 }
 
-impl Driver<'_> {
-    /// Rewire every port and every value result defined in `region`, then the
-    /// regions nested in it, each arm of a boolean gate under the fact its
-    /// predicate states there.
-    fn commit_nodes(
-        &mut self,
-        region: RegionId,
-        extraction: &Extraction<'_, Node>,
-        memo: &mut Memo,
-    ) -> Result<(), PassError> {
-        let handle = self.context.get_region(region);
-        for port in handle.value_arguments() {
-            self.rewire_nodes(port.id(), region, extraction, memo)?;
-        }
-        let ops = handle.op_ids();
-        for &op in &ops {
-            let instance = self.context.get_op(op);
-            if instance.has_interface::<dyn ConstantLike>() {
-                continue;
-            }
-            if instance.is::<crate::state::JoinOp>()
-                && let Some(merged) = self.merged_state(&instance)
-            {
-                for result in instance.state_results() {
-                    self.context.replace_value_uses(result, merged);
-                    self.context
-                        .rename_region_results(region, result, merged, &[]);
-                }
-                continue;
-            }
-            for result in instance.value_results() {
-                let replaced = self.rewire_nodes(result, region, extraction, memo)?;
-                if replaced {
-                    self.forward_read_state(&instance, region);
-                }
-            }
-        }
-        // Once every read the rewrites answered has let go of its state, a
-        // write nothing else observes is unread.
-        for &op in &ops {
-            self.forward_dead_write(op, region);
-        }
-        self.count_carriers(region)?;
-        for &op in &ops {
-            let instance = self.context.get_op(op);
-            let Some(gamma) = instance.clone().as_interface::<dyn Gamma>() else {
-                for sub in instance.regions() {
-                    self.commit_nodes(sub, extraction, memo)?;
-                }
-                continue;
-            };
-            // An arm runs where the predicate equals its case; a boolean's
-            // second arm, its default, runs where the predicate is 1.
-            let predicate = gamma.predicate();
-            let width = type_width(self.context, self.context.get_value(predicate).ty());
-            let arms = gamma.arms();
-            let boolean = width == Some(1) && arms.len() == 2;
-            let cases = gamma.cases();
-            for (index, arm) in arms.into_iter().enumerate() {
-                let case = if boolean {
-                    Some(index as u64)
-                } else {
-                    cases.get(index).copied()
-                };
-                let (Some(width), Some(case)) = (width, case) else {
-                    self.commit_nodes(arm, extraction, memo)?;
-                    continue;
-                };
-                self.eg.push_context();
-                self.inject(predicate, width, case);
-                self.saturate();
-                let dirty = self.eg.innermost_dirty();
-                let scoped = extraction.refresh(&self.eg, &dirty, |_, node, operands, _| {
-                    spelling_cost(&self.eg, node, operands)
-                });
-                // A spelling built under this arm's fact answers only here.
-                let mut scoped_memo = memo.clone();
-                self.commit_nodes(arm, &scoped, &mut scoped_memo)?;
-                self.eg.pop_context();
-            }
-        }
-        Ok(())
+struct InstCombine {
+    ruleset: Rules,
+}
+
+impl Rewrite for InstCombine {
+    fn rules(&self) -> &RuleSet {
+        &self.ruleset.set
     }
 
-    /// Count, for each operation of `region`, the operations with regions on
-    /// the dependence paths ending at it; see [`Driver::carriers`]. The
-    /// region's own values are rewired by now, and every read an edit under it
-    /// adds is one [`Self::readable`] allows, so the counts stay a bound for
-    /// the rest of the commit.
-    ///
-    /// TODO: this walks the region's dependence graph. Replace it with a join
-    /// over a dependence relation once the IR is stored relationally.
-    fn count_carriers(&mut self, region: RegionId) -> Result<(), PassError> {
-        let ops = self.context.get_region(region).op_ids();
-        if ops
-            .iter()
-            .all(|&op| self.context.get_op(op).regions().is_empty())
-        {
-            return Ok(());
-        }
-        let order = crate::region::topological_order(self.context, region).map_err(|error| {
-            PassError::InvalidIR {
-                pass: "instcombine-nodes",
-                error,
-            }
-        })?;
-        let mut counts: HashMap<OpId, usize> = HashMap::with_capacity(order.len());
-        for op in order {
-            let read = crate::region::values_read(self.context, op)
-                .into_iter()
-                .filter_map(|value| counts.get(&self.context.get_value(value).defining_op()?))
-                .copied()
-                .max()
-                .unwrap_or(0);
-            let own = usize::from(!self.context.get_op(op).regions().is_empty());
-            counts.insert(op, read + own);
-        }
-        self.carriers.extend(counts);
-        Ok(())
+    fn cost(&self, eg: &Engine<Node>, _: Id, node: &Node, operands: &[Ref], _: u64) -> u64 {
+        spelling_cost(eg, node, operands)
     }
 
-    /// The one state a join names, where it names one: the state its inputs all
-    /// are, or the one chain among them something changed.
-    ///
-    /// Dropping an input is only the join's to do where the join is that
-    /// input's one reader: another reader would be left sharing the state with
-    /// whatever reads the join, which is a fork the discipline may forbid.
-    fn merged_state(&self, join: &OpHandle) -> Option<ValueId> {
-        let operands = join.state_operands();
-        let (first, rest) = operands.split_first()?;
-        if rest.iter().all(|other| other == first) {
-            return Some(*first);
-        }
-        if !operands
-            .iter()
-            .all(|&state| self.context.users_of(state).as_slice() == [join.id])
-        {
-            return None;
-        }
-        let mut changed = operands
-            .iter()
-            .copied()
-            .filter(|&state| changed_chain(self.context, state));
-        let kept = changed.next();
-        changed.next().is_none().then(|| kept.unwrap_or(*first))
-    }
-
-    /// A write nothing observes before the next write of its own extent is
-    /// overwritten unread: its readers take the state it was handed, and the
-    /// sweep takes it. Disjoint reads may remain on that chain: their state
-    /// outputs still order the overwriting write after them.
-    fn forward_dead_write(&self, op: OpId, scope: RegionId) {
-        let instance = self.context.get_op(op);
-        if !instance.has_interface::<dyn MemoryWrite>() {
-            return;
-        }
-        let (Some(taken), Some(leaves)) = (observed_state(&instance), produced_state(&instance))
-        else {
-            return;
+    fn spell(&self, out: &mut Commit<'_>, row: RowId, region: RegionId) -> Option<ValueId> {
+        let node = out.eg.node(row);
+        let Prov::Introduced(index) = node.prov else {
+            return out.builtin(row, region);
         };
-        let Some(extent) = self.extent(leaves) else {
-            return;
-        };
-        let mut state = leaves;
-        loop {
-            if published(self.context, scope, state) {
-                return;
-            }
-            let readers: Vec<OpId> = self
-                .context
-                .users_of(state)
-                .into_iter()
-                .filter(|&reader| !is_dead_read(self.context, scope, reader))
-                .collect();
-            if let Some(next) = self.disjoint_read_continuation(state, leaves, &readers, scope) {
-                state = next;
-                continue;
-            }
-            let [reader] = readers[..] else {
-                return;
-            };
-            let handle = self.context.get_op(reader);
-            // The write's own chain is the one it named first, so it is the
-            // first the split hands back; a merge names the memory the change
-            // taking it observes.
-            if handle.is::<crate::state::SplitOp>() && state == handle.state_operands()[0]
-                || handle.is::<crate::state::JoinOp>()
-            {
-                state = handle.state_results()[0];
-                continue;
-            }
-            if !handle.has_interface::<dyn MemoryWrite>() {
-                return;
-            }
-            let (Some(observed), Some(left)) = (observed_state(&handle), produced_state(&handle))
-            else {
-                return;
-            };
-            if observed != state {
-                return;
-            }
-            if self.extent(left) != Some(extent) {
-                return;
-            }
-            break;
+        if !out.sits(row) {
+            return out.builtin(row, region);
         }
-        // The loop's first guard found no region result naming the state the
-        // write leaves, so no result list here names it either.
-        debug_assert!(!published(self.context, scope, leaves));
-        self.context.replace_value_uses(leaves, taken);
-    }
-
-    /// Accept a single disjoint read, or a fork of disjoint reads that meets at
-    /// one join. A join may also name `state` after CSE bypasses a duplicate
-    /// read. Other fork shapes remain unchanged.
-    fn disjoint_read_continuation(
-        &self,
-        state: ValueId,
-        written: ValueId,
-        readers: &[OpId],
-        scope: RegionId,
-    ) -> Option<ValueId> {
-        let (object, offset, bytes) = self.extent(written)?;
-        let mut outputs = Vec::new();
-        let mut join = None;
-        for &reader in readers {
-            let instance = self.context.get_op(reader);
-            if instance.is::<crate::state::JoinOp>() {
-                if join
-                    .replace(reader)
-                    .is_some_and(|previous| previous != reader)
-                {
-                    return None;
-                }
-                continue;
-            }
-            if instance.has_interface::<dyn MemoryWrite>()
-                || observed_state(&instance) != Some(state)
-            {
-                return None;
-            }
-            let read = instance.clone().as_interface::<dyn MemoryRead>()?;
-            let (read_object, read_offset, read_bytes) = self.extent(read.read_value())?;
-            if object != read_object
-                || !self.disjoint(object, (offset, bytes), (read_offset, read_bytes))
-            {
-                return None;
-            }
-            let output = produced_state(&instance)?;
-            if published(self.context, scope, output) {
-                return None;
-            }
-            if readers.len() == 1 {
-                return Some(output);
-            }
-            let users = self.context.users_of(output);
-            let [user] = users[..] else { return None };
-            if !self.context.get_op(user).is::<crate::state::JoinOp>()
-                || join.replace(user).is_some_and(|previous| previous != user)
-            {
-                return None;
-            }
-            outputs.push(output);
-        }
-        if outputs.is_empty() {
-            return None;
-        }
-        let join = self.context.get_op(join?);
-        if !join
-            .state_operands()
-            .iter()
-            .all(|input| *input == state || outputs.contains(input))
-        {
-            return None;
-        }
-        join.state_results().first().copied()
-    }
-
-    /// The extent a load value or a store's published state covers: the class
-    /// its address is an offset of, that offset, and the byte count. An
-    /// address some union tried to place at an offset from itself is placed
-    /// nowhere, and covers no extent anyone can compare.
-    fn extent(&self, value: ValueId) -> Option<(Id, u64, u64)> {
-        let class = self.eg.find(*self.value_class.get(&value)?).class;
-        let row = self
-            .eg
-            .rows(class)
-            .find(|&row| self.eg.node(row).prov == Prov::Value(value))?;
-        let arity = match self.eg.node(row).sym()? {
-            SymKind::LoadMemory => state::LOAD_ARITY,
-            SymKind::StoreMemory => state::STORE_ARITY,
-            _ => return None,
-        };
-        let children = self.eg.children(row);
-        if children.len() != arity {
-            return None;
-        }
-        let address = children[state::ADDRESS];
-        if self.eg.conflicted(address.class) {
-            return None;
-        }
-        let bytes = self.eg.int_const(children[state::BYTES])?;
-        Some((address.class, address.offset, bytes))
-    }
-
-    /// Whether two non-empty extents, each an offset from `base` and a byte
-    /// count, share no byte. Offsets wrap at the address's width, so each is
-    /// measured from the other's start the way the address arithmetic does.
-    fn disjoint(&self, base: Id, (a, a_bytes): (u64, u64), (b, b_bytes): (u64, u64)) -> bool {
-        let mask = self
-            .eg
-            .width(base)
-            .map_or(u64::MAX, |width| u64::MAX >> (64 - width));
-        a_bytes != 0
-            && b_bytes != 0
-            && b.wrapping_sub(a) & mask >= a_bytes
-            && a.wrapping_sub(b) & mask >= b_bytes
-    }
-
-    /// A read whose value was rewritten leaves memory as it found it: the state
-    /// it published is the state it observed, so its readers take that, and the
-    /// read is demanded by nothing.
-    fn forward_read_state(&self, instance: &OpHandle, region: RegionId) {
-        if !instance.has_interface::<dyn MemoryRead>() {
-            return;
-        }
-        if let (Some(observed), Some(published)) =
-            (observed_state(instance), produced_state(instance))
-        {
-            self.context.replace_value_uses(published, observed);
-            self.context
-                .rename_region_results(region, published, observed, &[]);
-        }
-    }
-
-    /// Hand the readers of `value`, defined in `region`, the cheapest spelling
-    /// of its class where that spelling is one the region can see. Answers
-    /// whether anything changed.
-    fn rewire_nodes(
-        &mut self,
-        value: ValueId,
-        region: RegionId,
-        extraction: &Extraction<'_, Node>,
-        memo: &mut Memo,
-    ) -> Result<bool, PassError> {
-        let Some(&reference) = self.value_class.get(&value) else {
-            return Ok(false);
-        };
-        if !self.context.is_used(value) && !published(self.context, region, value) {
-            return Ok(false);
-        }
-        let ty = self.context.get_value(value).ty();
-        self.replacing.set(Some(value));
-        let spelled = self.materialize_nodes(extraction, reference, ty, region, memo);
-        self.replacing.set(None);
-        let Some(new_value) = spelled else {
-            return Ok(false);
-        };
-        if new_value == value {
-            return Ok(false);
-        }
-        self.context.replace_value_uses(value, new_value);
-        // A port's own region may pin a result entry to the port — a counted
-        // loop's exit is its port — so the entries a port's region names stay;
-        // the regions nested in it read the port like any other value.
-        if self.context.region_of_port(value) == Some(region) {
-            for op in self.context.get_region(region).op_ids() {
-                for sub in self.context.get_op(op).regions() {
-                    self.context
-                        .rename_region_results(sub, value, new_value, &[]);
-                }
-            }
-        } else {
-            self.context
-                .rename_region_results(region, value, new_value, &[]);
-        }
-        Ok(true)
-    }
-
-    /// The value of `reference` where `region` can read it, or `None` where
-    /// it has no spelling there: the value being rewritten itself, or an op
-    /// that may trap sitting in a region the reader cannot see.
-    ///
-    /// A constant is a literal. A reference the class's cheapest node sits
-    /// at is that node. One at another offset is an IR value already
-    /// computing exactly it, where the reader can see one, and otherwise one
-    /// add of the difference onto the cheapest node.
-    fn materialize_nodes(
-        &self,
-        extraction: &Extraction<'_, Node>,
-        reference: Ref,
-        expected_ty: TypeId,
-        region: RegionId,
-        memo: &mut Memo,
-    ) -> Option<ValueId> {
-        let reference = self.eg.find(reference);
-        if let Some(&value) = memo.get(&reference)
-            && self.readable(value, region)
-        {
-            return Some(value);
-        }
-        let value = if let Some(bits) = self.eg.int_const(reference) {
-            match self.named_at(reference, 0, expected_ty, region) {
-                Some(value) => value,
-                None => {
-                    let width = self.eg.width(reference.class)?;
-                    let literal = super::spell(&APInt::new_signed(width, bits as i64));
-                    let op =
-                        crate::builtin::ops::constant(self.context, literal, expected_ty).build();
-                    self.context.add(region, crate::Operation::id(&op));
-                    op.result()
-                }
-            }
-        } else {
-            let row = extraction.row(reference.class)?;
-            let at = self.eg.value(row).offset;
-            if at == reference.offset {
-                self.spell_row(extraction, row, expected_ty, region, memo)?
-            } else {
-                match self.named_at(reference, at, expected_ty, region) {
-                    Some(value) => value,
-                    None => {
-                        let base = self.materialize_nodes(
-                            extraction,
-                            Ref::new(reference.class, at),
-                            expected_ty,
-                            region,
-                            memo,
-                        )?;
-                        self.add_offset(base, reference, at, expected_ty, region)?
-                    }
-                }
-            }
-        };
-        memo.insert(reference, value);
+        let ty = node.ty.expect("an op node carries its result type");
+        let types = vec![ty; node.children.len()];
+        let operands = out.operands(row, &types, region)?;
+        let emit = self.ruleset.emit(index);
+        let emit = emit.expect("an introduced op supplies an emit");
+        let (op, value) = emit(out.context, &operands, ty);
+        out.context.add_auto(op.id());
         Some(value)
     }
 
-    /// The node `row` computes, where `region` can read it.
-    fn spell_row(
-        &self,
-        extraction: &Extraction<'_, Node>,
-        row: RowId,
-        expected_ty: TypeId,
-        region: RegionId,
-        memo: &mut Memo,
-    ) -> Option<ValueId> {
-        let node = self.eg.node(row);
-        match node.prov {
-            Prov::Value(_) | Prov::Op(_) => {
-                let named = self.named_value(node)?;
-                // An op whose operands carried offsets its laws moved out is
-                // the row at the sum of them, not the row: the row is the op
-                // over the operands' classes, rebuilt.
-                if !self
-                    .value_class
-                    .get(&named)
-                    .is_some_and(|&value| self.eg.find(value) == self.eg.value(row))
-                {
-                    return self.rebuild(extraction, row, region, memo);
-                }
-                if Some(named) == self.replacing.get() {
-                    return None;
-                }
-                if self.readable(named, region) {
-                    Some(named)
-                } else {
-                    self.rebuild(extraction, row, region, memo)
-                }
-            }
-            Prov::Introduced(idx) => {
-                let ty = node.ty.expect("an op node carries its result type");
-                let types = vec![ty; node.children.len()];
-                let operands = self.materialize_children(extraction, row, &types, region, memo)?;
-                let emit = self.ruleset.emits[idx]
-                    .as_ref()
-                    .expect("an introduced op supplies an emit");
-                let (op, value) = emit(self.context, &operands, ty);
-                self.context.add_auto(op.id());
-                Some(value)
-            }
-            Prov::None => {
-                let literal = node.int()?;
-                let op =
-                    crate::builtin::ops::constant(self.context, super::spell(literal), expected_ty)
-                        .build();
-                self.context.add(region, crate::Operation::id(&op));
-                Some(op.result())
-            }
-        }
-    }
-
-    /// An IR value of type `ty` that is exactly `reference` and is already
-    /// spelled the way [`Self::materialize_nodes`] would spell it, where
-    /// `region` can read one: a literal for a constant, and otherwise one add
-    /// of a literal to the value of the class's cheapest node, which sits at
-    /// `at`. A value computing it any other way is not reused, so a rewrite
-    /// never swaps one long spelling for another.
-    fn named_at(&self, reference: Ref, at: u64, ty: TypeId, region: RegionId) -> Option<ValueId> {
-        let members = self.eg.scope_members(reference.class);
-        let members = if members.is_empty() {
-            std::slice::from_ref(&reference.class)
-        } else {
-            members
-        };
-        members.iter().find_map(|member| {
-            self.named.get(member)?.iter().find_map(|&(offset, value)| {
-                (self.eg.find(Ref::new(*member, offset)) == reference
-                    && self.context.get_value(value).ty() == ty
-                    && self.readable(value, region)
-                    && self.spells(value, Ref::new(reference.class, at)))
-                .then_some(value)
-            })
-        })
-    }
-
-    /// Whether `value`'s operation is a literal, where `base` is a constant,
-    /// or one add of a literal to `base` otherwise.
-    fn spells(&self, value: ValueId, base: Ref) -> bool {
-        let Some(op) = self.context.get_value(value).defining_op() else {
-            return false;
-        };
-        let instance = self.context.get_op(op);
-        if self.eg.int_const(base).is_some() {
-            return instance.has_interface::<dyn ConstantLike>();
-        }
-        let add = instance.is::<crate::builtin::ops::AddIOp>();
-        if !add && !instance.is::<crate::ptr::PtrAddOp>() {
-            return false;
-        }
-        let operands: Option<Vec<Ref>> = instance
-            .operands()
-            .iter()
-            .map(|operand| Some(self.eg.find(*self.value_class.get(operand)?)))
-            .collect();
-        match operands.as_deref() {
-            Some(&[a, b]) => {
-                (a == base && self.eg.int_const(b).is_some())
-                    || (add && b == base && self.eg.int_const(a).is_some())
-            }
-            _ => false,
-        }
-    }
-
-    /// `base`, which is `reference`'s class at `at`, moved on to `reference`
-    /// by one add of a literal: `addi` for an integer, `ptradd` for a
-    /// pointer, placed where its operands say.
-    fn add_offset(
-        &self,
-        base: ValueId,
-        reference: Ref,
-        at: u64,
-        ty: TypeId,
-        region: RegionId,
-    ) -> Option<ValueId> {
-        let width = self.eg.width(reference.class)?;
-        let step = super::spell(&APInt::new_signed(
-            width,
-            reference.offset.wrapping_sub(at) as i64,
-        ));
-        let pointer = (self.context.get_type_data(ty).as_ref() as &dyn std::any::Any)
-            .downcast_ref::<crate::ptr::PtrType>()
-            .is_some();
-        let step_ty = if pointer {
-            crate::builtin::IntegerType::new(self.context, width)
-        } else {
-            ty
-        };
-        let literal = crate::builtin::ops::constant(self.context, step, step_ty).build();
-        self.context.add(region, crate::Operation::id(&literal));
-        let (op, value) = if pointer {
-            let op = crate::ptr::ptradd(self.context, base, literal.result(), ty).build();
-            let value = op.result();
-            (crate::Operation::id(&op), value)
-        } else {
-            let op = crate::builtin::ops::addi(self.context, base, literal.result(), ty).build();
-            let value = op.result();
-            (crate::Operation::id(&op), value)
-        };
-        self.context.add_auto(op);
-        Some(value)
-    }
-
-    /// Spell a seeded op's value where `region` can read it: a copy of the op
-    /// over its operands' spellings, placed where they say. Only an operation
-    /// that cannot trap may run where the original would not have, and one
-    /// without operands names no region to join.
-    fn rebuild(
-        &self,
-        extraction: &Extraction<'_, Node>,
-        row: RowId,
-        region: RegionId,
-        memo: &mut Memo,
-    ) -> Option<ValueId> {
-        let node = self.eg.node(row);
-        let Prov::Op(op) = node.prov else {
-            return None;
-        };
-        let source = self.context.get_op(op);
-        if !source
-            .clone()
-            .as_interface::<dyn Speculatable>()
-            .is_some_and(|op| op.is_speculatable())
-            || !source.regions().is_empty()
-            || !source.state_operands().is_empty()
-            || source.operands().is_empty()
-            || source.results().len() != 1
-        {
-            return None;
-        }
-        let ty = node.ty?;
-        // Each operand is spelled at the type the original read it at: a
-        // comparison's operands are not its boolean.
-        let types: Vec<TypeId> = source
-            .operands()
-            .iter()
-            .map(|&operand| self.context.get_value(operand).ty())
-            .collect();
-        if types.len() != node.children.len() {
-            return None;
-        }
-        let operands = self.materialize_children(extraction, row, &types, region, memo)?;
-        let result = self.context.create_value(ty, None).id();
-        let copy = self.context.add_operation(NewOp::new_dynamic(
-            (source.dialect().as_str(), source.name().as_str()),
-            self.context.clone(),
-            operands,
-            vec![result],
-            vec![],
-            source.attributes().to_vec(),
-        ));
-        self.context.add_auto(copy.id);
-        Some(result)
-    }
-
-    fn materialize_children(
-        &self,
-        extraction: &Extraction<'_, Node>,
-        row: RowId,
-        types: &[TypeId],
-        region: RegionId,
-        memo: &mut Memo,
-    ) -> Option<Vec<ValueId>> {
-        self.eg
-            .children(row)
-            .iter()
-            .zip(types)
-            .map(|(&arg, &ty)| self.materialize_nodes(extraction, arg, ty, region, memo))
-            .collect()
-    }
-
-    /// Whether `region` can read `value`: it is defined in `region`, or in one
-    /// enclosing it and not downstream of the operation there whose regions
-    /// hold `region`. An arm's facts can make a value computed from its own
-    /// gamma's result equal to one the arm computes, and reading that value in
-    /// the arm would close a dependency cycle.
-    fn readable(&self, value: ValueId, region: RegionId) -> bool {
-        let Some(defined) = crate::region::defining_region(self.context, value) else {
-            return true;
-        };
-        let mut current = region;
-        let mut holder = None;
-        while current != defined {
-            let Some(op) = self.context.get_region(current).parent_op() else {
-                return false;
-            };
-            let Some(enclosing) = self.context.region_of_op(op) else {
-                return false;
-            };
-            holder = Some(op);
-            current = enclosing;
-        }
-        // A region the commit never entered, the module's, holds nothing the
-        // commit could make depend on the function.
-        let bound = holder.and_then(|holder| self.carriers.get(&holder));
-        match (bound, self.context.get_value(value).defining_op()) {
-            (Some(&bound), Some(op)) => self.carried(op) < bound,
-            _ => true,
-        }
-    }
-
-    /// [`Driver::carriers`] for `op`, or for one built since, the most any of
-    /// its operands in its own region counts: a built operation has no
-    /// regions.
-    fn carried(&self, op: OpId) -> usize {
-        if let Some(&count) = self.carriers.get(&op) {
-            return count;
-        }
-        let region = self.context.region_of_op(op);
-        self.context
-            .get_op(op)
-            .operands()
-            .iter()
-            .filter_map(|&operand| self.context.get_value(operand).defining_op())
-            .filter(|&producer| self.context.region_of_op(producer) == region)
-            .map(|producer| self.carried(producer))
-            .max()
-            .unwrap_or(0)
-    }
-
-    /// Index every IR value by the reference it is, once the base graph is
-    /// final: a reference at an offset its class's cheapest node does not sit
-    /// at is spelled by a value already computing it before one is built.
-    fn index_values(&mut self) {
-        let mut named: HashMap<Id, Vec<(u64, ValueId)>> = HashMap::new();
-        let mut values: Vec<(&ValueId, &Ref)> = self.value_class.iter().collect();
-        values.sort_by_key(|(value, _)| value.number());
-        for (&value, &reference) in values {
-            let found = self.eg.find(reference);
-            named
-                .entry(found.class)
-                .or_default()
-                .push((found.offset, value));
-        }
-        self.named = named;
+    fn arm_facts(&self) -> bool {
+        true
     }
 }
 
@@ -824,35 +128,6 @@ fn spelling_cost(eg: &Engine<Node>, node: &Node, operands: &[Ref]) -> u64 {
             .iter()
             .filter(|operand| operand.offset != 0 && eg.int_const(**operand).is_none())
             .count() as u64
-}
-
-/// Whether anything changed the memory `state` names since its chain opened.
-/// An entry state names the memory the region was entered with; a loop or a
-/// gate hands back what it was entered on wherever its regions leave that
-/// chain's port alone.
-fn changed_chain(context: &Context, state: ValueId) -> bool {
-    let Some(def) = context.get_value(state).defining_op() else {
-        return true;
-    };
-    let instance = context.get_op(def);
-    if instance.is::<crate::state::EntryStateOp>() {
-        return false;
-    }
-    // The chains a function opens are one entry state split, so a split of a
-    // memory nothing changed names one nothing changed either.
-    if instance.is::<crate::state::SplitOp>() {
-        return changed_chain(context, instance.state_operands()[0]);
-    }
-    let Some(chain) = state_chains(context, &instance)
-        .into_iter()
-        .find(|chain| chain.left == state)
-    else {
-        return true;
-    };
-    if !forwards_state(&chain) {
-        return true;
-    }
-    changed_chain(context, chain.entered)
 }
 
 /// A loop or a gate carrying a chain its body never names carries nothing: the
@@ -954,24 +229,6 @@ fn forget_write_only_slots(context: &Context, body: RegionId) {
     context.rename_region_results_batch(body, &renames);
 }
 
-/// A read nothing demands: its value and state are read by nothing, so the
-/// sweep takes it and the state it observed has one reader fewer.
-fn is_dead_read(context: &Context, scope: RegionId, op: OpId) -> bool {
-    let instance = context.get_op(op);
-    instance.has_interface::<dyn MemoryRead>()
-        && !instance.has_interface::<dyn MemoryWrite>()
-        && instance.results().iter().all(|&result| {
-            context.users_of(result).is_empty() && !published(context, scope, result)
-        })
-}
-
-/// Whether `scope` or a region nested in it publishes `value` as a result,
-/// which no use list says. Only a region that can see `value` names it, so a `scope` wider
-/// than the one it is defined in answers the same.
-fn published(context: &Context, scope: RegionId, value: ValueId) -> bool {
-    context.published_under(scope, value)
-}
-
 /// Whether every use of `address`, through pointer arithmetic, is as the
 /// location of a write or of a read nothing demands; the writes are collected.
 fn only_written(
@@ -1016,23 +273,21 @@ fn only_written(
 /// Demand runs from the callable's results through operands and nested
 /// regions' results, dependencies included: what an effect leaves behind is
 /// what demands it.
-fn sweep(context: &Context, body: RegionId) -> Result<(), PassError> {
+pub(crate) fn sweep(context: &Context, body: RegionId) -> Result<(), PassError> {
     let demanded = crate::passes::demanded_ops(context, &[body]);
-    sweep_region(context, body, &demanded)
+    sweep_demanded(context, body, &demanded)
 }
 
-fn sweep_region(
+pub(crate) fn sweep_demanded(
     context: &Context,
-    region: RegionId,
+    body: RegionId,
     demanded: &IdSet<OpId>,
 ) -> Result<(), PassError> {
-    for op in context.get_region(region).op_ids() {
-        if !demanded.contains(&op) {
+    // An operation is listed ahead of what its regions hold, which goes
+    // with it.
+    for op in context.subtree_ops(&context.get_region(body).op_ids()) {
+        if context.has_operation(op) && !demanded.contains(&op) {
             context.erase_op(&OperationRef::new(context.get_op(op)))?;
-            continue;
-        }
-        for sub in context.get_op(op).regions() {
-            sweep_region(context, sub, demanded)?;
         }
     }
     Ok(())

@@ -6,7 +6,7 @@ use tir_relational::rule as rel;
 use tir_relational::saturate::{Delta, Saturate, saturate};
 
 use crate::engine::{CLASSES, Lists};
-use crate::query::{Externs, Lookup, Plan};
+use crate::query::{Externs, Lookup, Plan, SharedLookup};
 use crate::rule::{Rule, Run, compile};
 use crate::{ClassId, Engine, Label};
 
@@ -69,6 +69,30 @@ fn round_roots<L: Label>(eg: &Engine<L>, plan: &Plan<L>, delta: &mut Delta<OpGro
     }
 }
 
+// A plan prepared ahead of any graph reads the labels the vocabulary has,
+// whatever rows a graph holds.
+struct Unheld<'a, L: Label>(Lookup<'a, L>);
+
+impl<L: Label> tir_relational::query::Calls for Unheld<'_, L> {
+    fn call(&self, id: u32, args: &[u64], out: &mut [u64]) -> bool {
+        self.0.call(id, args, out)
+    }
+}
+
+impl<L: Label> Host for Unheld<'_, L> {
+    fn version(&self) -> u64 {
+        self.0.version()
+    }
+
+    fn resolve(&self, param: u32, since: Option<u64>, out: &mut tir_relational::query::Resolution) {
+        self.0.resolve(param, since, out)
+    }
+
+    fn empty(&self, _param: u32) -> bool {
+        false
+    }
+}
+
 impl<L: Label> Saturate<Lists, 1> for Run<'_, L> {
     type Frontier = OpGroups;
 
@@ -82,6 +106,19 @@ impl<L: Label> Saturate<Lists, 1> for Run<'_, L> {
             plan: &self.rules[rule].plan,
             externs: self.externs,
         }
+    }
+
+    type Shared<'a>
+        = SharedLookup<'a, L>
+    where
+        Self: 'a;
+
+    fn shared(&self, rule: usize) -> Option<SharedLookup<'_, L>> {
+        Some(SharedLookup {
+            terms: self.eg.terms(),
+            plan: &self.rules[rule].plan,
+            externs: self.externs.shared()?,
+        })
     }
 
     fn head(&self, rule: usize) -> Vec<rel::Head> {
@@ -112,16 +149,38 @@ impl<L: Label> Saturate<Lists, 1> for Run<'_, L> {
 }
 
 impl<L: Label> Engine<L> {
+    /// Build what the first saturation with `rules` builds that no row of
+    /// a graph decides; see [`tir_relational::query::Plan::prepare`]. The
+    /// vocabulary keeps it for every graph over it, so a client that makes
+    /// its rules ahead of its graphs pays for it then.
+    pub fn prepare_rules<R: std::borrow::Borrow<Rule<L>>>(&mut self, rules: &[R]) {
+        let mut caches = std::mem::take(self.caches.get_mut().expect("the plan caches"));
+        for rule in rules {
+            let plan = &rule.borrow().plan;
+            let host = Unheld(Lookup {
+                eg: self,
+                plan,
+                externs: &crate::NoExterns,
+            });
+            if let Some(cache) = caches.plan(plan.generic(), &self.db, &host) {
+                plan.generic().prepare(&self.db, &host, cache);
+            }
+        }
+        *self.caches.get_mut().expect("the plan caches") = caches;
+    }
+
     /// Saturate in place with `rules`, and the host functions their guards
     /// call; see [`saturate`]. The fixpoint test counts classes, e-nodes and
     /// raised facts, and the node limit counts e-nodes.
-    pub fn saturate_rules(
+    pub fn saturate_rules<R: std::borrow::Borrow<Rule<L>>>(
         &mut self,
-        rules: &[Rule<L>],
+        rules: &[R],
         externs: &dyn Externs<L>,
         iter_limit: usize,
         node_limit: usize,
     ) {
+        let rules: Vec<&Rule<L>> = rules.iter().map(std::borrow::Borrow::borrow).collect();
+        let rules = &rules[..];
         let mut starts = Vec::with_capacity(rules.len());
         let mut ops = Vec::with_capacity(rules.iter().map(|rule| rule.head.len()).sum());
         for rule in rules {
@@ -137,7 +196,7 @@ impl<L: Label> Engine<L> {
                 post_saturation: rule.post_saturation,
             })
             .collect();
-        let mut caches = std::mem::take(self.caches.get_mut());
+        let mut caches = std::mem::take(self.caches.get_mut().expect("the plan caches"));
         let mut run = Run {
             eg: self,
             rules,
@@ -153,6 +212,6 @@ impl<L: Label> Engine<L> {
             iter_limit,
             node_limit,
         );
-        *self.caches.get_mut() = caches;
+        *self.caches.get_mut().expect("the plan caches") = caches;
     }
 }

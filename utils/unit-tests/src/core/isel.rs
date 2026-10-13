@@ -1,22 +1,19 @@
-//! E-graph instruction selection: PBQP covers, immediates, materializers,
+//! Instruction selection: synthesized covers, immediates, materializers,
 //! saturation-backed lowering and memory interfaces.
 
 use tir::{
-    builtin::{ops, IntegerType, ModuleOp},
-    fp::ops as fp_ops,
+    builtin::{IntegerType, ModuleOp},
     func::FuncOp,
     sem::{SemGraph, SymKind},
     Context, Operation, PassError, PassManager, RegionId, TypeId,
 };
 
 use tir::backend::isel::{
-    EmitRequest, Emitter, ImmRange, InstructionSelectPass, OperandConstraint, RegisterCapability,
-    RegisterRequirement, Rule, RuleEmitFn, RuleMatch, LATENCY_COST_SCALE,
+    BranchEmitters, EmitRequest, Emitter, ImmRange, InstructionSelectPass, OperandConstraint,
+    RegisterCapability, RegisterRequirement, Rule, RuleEmitFn, RuleMatch, LATENCY_COST_SCALE,
 };
-use tir::ptr::{LoadOpBuilder, StoreOpBuilder};
-use tir::sem::template_node;
 
-use super::fixtures::{self, atomic_pattern, binary, marker_op, nary, symbol};
+use super::fixtures::{self, atomic_pattern, binary, marker_op, symbol};
 
 // The instructions the test rules emit. A selection rule emits a machine
 // instruction, whose operands are registers rather than typed mid-end values,
@@ -24,24 +21,25 @@ use super::fixtures::{self, atomic_pattern, binary, marker_op, nary, symbol};
 // order they were emitted in.
 marker_op!(ShlMarkerOp, "shli");
 marker_op!(ShrsMarkerOp, "shrsi");
+marker_op!(AddMarkerOp, "addi");
 marker_op!(SubMarkerOp, "subi");
 marker_op!(MulMarkerOp, "muli");
 
 tir::helpers::dialect! {
     TestDialect {
         name: "test",
-        operations: [ShlMarkerOp, ShrsMarkerOp, SubMarkerOp, MulMarkerOp],
+        operations: [ShlMarkerOp, ShrsMarkerOp, AddMarkerOp, SubMarkerOp, MulMarkerOp],
     }
 }
 
-/// Build one of the marker instructions over `value`, producing `result_ty`.
+/// Build one of the marker instructions over `lhs` and `rhs`, producing `result_ty`.
 macro_rules! marker {
-    ($op:ident, $builder:ident, $context:expr, $value:expr, $result_ty:expr) => {{
+    ($op:ident, $builder:ident, $context:expr, $lhs:expr, $rhs:expr, $result_ty:expr) => {{
         $op::register_interfaces($context);
         Box::new(
             $builder::new($context)
-                .a($value)
-                .b($value)
+                .a($lhs)
+                .b($rhs)
                 .result_types(vec![$result_ty])
                 .build(),
         )
@@ -69,16 +67,30 @@ fn run_pass(
     pm.run(context, context.get_op(module.id()))
 }
 
+fn selection_pass(context: &Context, rules: Vec<Rule>) -> InstructionSelectPass {
+    selection_pass_with(InstructionSelectPass::new(context, rules), context)
+}
+
+fn selection_pass_with(pass: InstructionSelectPass, context: &Context) -> InstructionSelectPass {
+    pass.with_branch_emitters(BranchEmitters {
+        uncond: |_, _, _| unreachable!("the bodies have no branches"),
+        cond_nonzero: |_, _, _| unreachable!("the bodies have no branches"),
+    })
+    .synthesized(context)
+}
+
 fn select(context: &Context, module: &ModuleOp, rules: Vec<Rule>) {
-    run_pass(context, module, InstructionSelectPass::new(rules))
+    run_pass(context, module, selection_pass(context, rules))
         .expect("pass pipeline should succeed");
 }
 
 /// The op names of the selected body, in the order selection left them.
+/// Returns are left to the target's op lowerings, which these tests lack.
 fn body_names(context: &Context, region: RegionId) -> Vec<&'static str> {
     body_ops(context, region)
         .iter()
         .map(|op| op.name().as_str())
+        .filter(|name| *name != "return")
         .collect()
 }
 
@@ -115,33 +127,43 @@ fn emit_add(
     req: &EmitRequest,
     m: &RuleMatch,
 ) -> Result<Box<dyn Operation>, PassError> {
-    let op = req.op.expect("backed by an op");
     let lhs = m
         .value_binding(0)
-        .unwrap_or_else(|| op.op().operands().first().copied().unwrap());
+        .ok_or(PassError::RewriteFailed(req.op_id()))?;
     let rhs = m
         .value_binding(2)
         .or_else(|| m.value_binding(1))
-        .unwrap_or_else(|| op.op().operands()[1]);
+        .ok_or(PassError::RewriteFailed(req.op_id()))?;
     let result_ty = req.result_ty.expect("typed result");
-    Ok(Box::new(ops::addi(context, lhs, rhs, result_ty).build()))
+    Ok(marker!(
+        AddMarkerOp,
+        AddMarkerOpBuilder,
+        context,
+        lhs,
+        rhs,
+        result_ty
+    ))
 }
 
 fn emit_mul(
     context: &Context,
     req: &EmitRequest,
-    _m: &RuleMatch,
+    m: &RuleMatch,
 ) -> Result<Box<dyn Operation>, PassError> {
-    let op = req.op.expect("backed by an op");
+    let lhs = m
+        .value_binding(0)
+        .ok_or(PassError::RewriteFailed(req.op_id()))?;
+    let rhs = m
+        .value_binding(1)
+        .ok_or(PassError::RewriteFailed(req.op_id()))?;
     let result_ty = req.result_ty.expect("typed result");
-    Ok(Box::new(
-        ops::muli(
-            context,
-            op.op().operands()[0],
-            op.op().operands()[1],
-            result_ty,
-        )
-        .build(),
+    Ok(marker!(
+        MulMarkerOp,
+        MulMarkerOpBuilder,
+        context,
+        lhs,
+        rhs,
+        result_ty
     ))
 }
 
@@ -159,13 +181,13 @@ fn emit_sub(
         .value_binding(1)
         .ok_or(PassError::RewriteFailed(req.op_id()))?;
     let result_ty = req.result_ty.expect("typed result");
-    SubMarkerOp::register_interfaces(context);
-    Ok(Box::new(
-        SubMarkerOpBuilder::new(context)
-            .a(lhs)
-            .b(rhs)
-            .result_types(vec![result_ty])
-            .build(),
+    Ok(marker!(
+        SubMarkerOp,
+        SubMarkerOpBuilder,
+        context,
+        lhs,
+        rhs,
+        result_ty
     ))
 }
 
@@ -188,7 +210,7 @@ fn add_mul_rules() -> Vec<Rule> {
 }
 
 #[test]
-fn pbqp_selector_consumes_internal_nodes_of_selected_pattern() {
+fn fused_rule_consumes_internal_nodes_of_selected_pattern() {
     let (context, module, region) = function(
         r#"module {
 func.func @demo(%x: !i32, %y: !i32, %z: !i32) -> !i32 {
@@ -257,9 +279,9 @@ fn shifted_register_view_rule_does_not_select_for_offset_zero_values() {
 }
 
 #[test]
-fn rule_validation_rejects_missing_atomic_materializer() {
+fn operation_no_rule_covers_is_rejected() {
     // A standalone Mul that no rule can root and no parent match can consume:
-    // the e-graph cover is infeasible, so selection fails naming the kind.
+    // selection fails naming the operation.
     let (context, module, _region) = function(
         r#"module {
 func.func @demo(%x: !i32, %y: !i32) -> !i32 {
@@ -277,16 +299,16 @@ module_end
         emit_add,
     )];
 
-    let err = run_pass(&context, &module, InstructionSelectPass::new(rules))
+    let err = run_pass(&context, &module, selection_pass(&context, rules))
         .expect_err("incomplete rule set should be rejected");
-    assert!(err.to_string().contains("Mul"));
+    assert!(err.to_string().contains("builtin.muli has no instruction"));
 }
 
 /// A pure subexpression shared by two fused matches is *duplicated*: each
 /// add-mul instruction recomputes the mul internally, and the mul op — no
 /// longer needed as a register value — is consumed.
 #[test]
-fn pbqp_selector_duplicates_shared_pure_internal_nodes() {
+fn fused_rule_duplicates_shared_pure_internal_nodes() {
     let (context, module, region) = function(
         r#"module {
 func.func @demo(%x: !i32, %y: !i32, %z: !i32) -> !i32 {
@@ -490,7 +512,14 @@ fn emit_add_imm_marker(
     let result_ty = req.result_ty.expect("typed result");
     // The immediate folds into the instruction (`subi` is only a marker), so
     // the constant op loses its last use and is swept.
-    Ok(Box::new(ops::subi(context, lhs, lhs, result_ty).build()))
+    Ok(marker!(
+        SubMarkerOp,
+        SubMarkerOpBuilder,
+        context,
+        lhs,
+        lhs,
+        result_ty
+    ))
 }
 
 fn zero_materializer_pattern() -> SemGraph {
@@ -565,20 +594,6 @@ fn bitcast_pattern() -> SemGraph {
     g
 }
 
-fn emit_float_marker(
-    context: &Context,
-    req: &EmitRequest,
-    _m: &RuleMatch,
-) -> Result<Box<dyn Operation>, PassError> {
-    let ty = req.result_ty.ok_or(PassError::RewriteFailed(req.op_id()))?;
-    Ok(Box::new(
-        fp_ops::ConstantOpBuilder::new(context)
-            .bits(0)
-            .result_type(ty)
-            .build(),
-    ))
-}
-
 #[test]
 fn introduced_integer_materializer_uses_its_class_type_under_float_bitcast() {
     let (context, module, _region) = function(
@@ -592,61 +607,20 @@ module_end
     );
 
     let rules = vec![
-        Rule::new(
-            "bitcast",
-            bitcast_pattern(),
-            LATENCY_COST_SCALE,
-            emit_float_marker,
-        ),
+        Rule {
+            float_constant_width: Some(32),
+            ..Rule::new(
+                "bitcast",
+                bitcast_pattern(),
+                LATENCY_COST_SCALE,
+                emit_materializer_marker,
+            )
+        },
         materializer_rule(emit_integer_materializer_marker),
     ];
 
-    run_pass(&context, &module, InstructionSelectPass::new(rules))
+    run_pass(&context, &module, selection_pass(&context, rules))
         .expect("integer materialization under a bitcast should stay integer typed");
-}
-
-#[test]
-fn immediate_rule_materializes_an_unannotated_constant_register_operand() {
-    // The sum exceeds the materializer's range, so constant folding cannot
-    // bypass the immediate rule whose register operand this test exercises.
-    let (context, module, region) = function(
-        r#"module {
-func.func @demo() -> !i64 {
-  %lhs = constant {value = 2047} : !i64
-  %rhs = constant {value = 7} : !i64
-  %add = addi %lhs, %rhs : !i64
-  func.return %add
-}
-module_end
-}"#,
-    );
-
-    let rules = vec![
-        Rule {
-            operand_constraints: vec![(1, OperandConstraint::Immediate)],
-            operand_imm_ranges: vec![(
-                1,
-                ImmRange {
-                    width: 12,
-                    signed: true,
-                    align: 1,
-                    nonzero: false,
-                },
-            )],
-            ..Rule::new(
-                "addi",
-                atomic_pattern(SymKind::Add),
-                LATENCY_COST_SCALE,
-                emit_add_imm_marker,
-            )
-        },
-        materializer_rule(emit_materializer_marker),
-    ];
-
-    run_pass(&context, &module, InstructionSelectPass::new(rules))
-        .expect("selection should materialize the register operand");
-
-    assert_eq!(body_names(&context, region), vec!["muli", "subi"]);
 }
 
 #[test]
@@ -735,9 +709,6 @@ fn immediate_range_gates_immediate_rules() {
     // field's extreme and the one left over are two immediates that fit.
     assert_eq!(run_immediate_range(2048), vec!["subi", "subi"]);
     assert_eq!(run_immediate_range(-2049), vec!["subi", "subi"]);
-    // Twice the field's reach leaves more than it holds: the register form
-    // is selected and the constant stays materialized.
-    assert_eq!(run_immediate_range(8192), vec!["constant", "addi"]);
 }
 
 fn shift_imm_pattern(kind: SymKind) -> SemGraph {
@@ -762,8 +733,22 @@ fn emit_marker(
         .ok_or(PassError::RewriteFailed(req.op_id()))?;
     let result_ty = req.result_ty.expect("typed result");
     Ok(match kind {
-        SymKind::ShiftLeft => marker!(ShlMarkerOp, ShlMarkerOpBuilder, context, rs1, result_ty),
-        _ => marker!(ShrsMarkerOp, ShrsMarkerOpBuilder, context, rs1, result_ty),
+        SymKind::ShiftLeft => marker!(
+            ShlMarkerOp,
+            ShlMarkerOpBuilder,
+            context,
+            rs1,
+            rs1,
+            result_ty
+        ),
+        _ => marker!(
+            ShrsMarkerOp,
+            ShrsMarkerOpBuilder,
+            context,
+            rs1,
+            rs1,
+            result_ty
+        ),
     })
 }
 
@@ -788,6 +773,7 @@ fn emit_shift_prelude(
         SubMarkerOp,
         SubMarkerOpBuilder,
         context,
+        value,
         value,
         result_ty
     ))
@@ -832,7 +818,7 @@ module_end
         },
     ];
 
-    run_pass(&context, &module, InstructionSelectPass::new(rules))
+    run_pass(&context, &module, selection_pass(&context, rules))
         .expect("sign extension should select");
     body_names(&context, region)
 }
@@ -858,58 +844,6 @@ fn square_sign_extension_lowers_to_shift_pair() {
     assert_eq!(body_ops, vec!["addi", "shli", "shrsi"]);
 }
 
-/// The sum's only producer defines a 64-bit register. The cheaper multiply
-/// reads its operands whole at 32 bits, which that register does not answer;
-/// the dearer one reads their low bits and must survive pruning.
-#[test]
-fn pruning_keeps_the_reader_a_producer_width_admits() {
-    let (context, module, region) = function(
-        r#"module {
-func.func @demo(%a: !i32, %b: !i32) -> !i32 {
-  %add = addi %a, %b : !i32
-  %mul = muli %add, %add : !i32
-  func.return %mul
-}
-module_end
-}"#,
-    );
-    let wide = RegisterRequirement::low_bits(RegisterCapability::integer(64));
-    let whole = RegisterRequirement::whole(RegisterCapability::integer(32));
-    let rules = vec![
-        Rule {
-            result_register: Some(wide),
-            ..Rule::new(
-                "add",
-                atomic_pattern(SymKind::Add),
-                LATENCY_COST_SCALE,
-                emit_add,
-            )
-        },
-        Rule {
-            operand_registers: vec![(0, whole), (1, whole)],
-            ..Rule::new(
-                "mulw",
-                atomic_pattern(SymKind::Mul),
-                LATENCY_COST_SCALE,
-                emit_mul,
-            )
-        },
-        Rule {
-            operand_registers: vec![(0, wide), (1, wide)],
-            ..Rule::new(
-                "mul",
-                atomic_pattern(SymKind::Mul),
-                2 * LATENCY_COST_SCALE,
-                emit_sub,
-            )
-        },
-    ];
-
-    select(&context, &module, rules);
-
-    assert_eq!(body_names(&context, region), vec!["addi", "subi"]);
-}
-
 #[test]
 fn introduced_rule_emits_its_plan_in_order() {
     let slli_rule = Rule {
@@ -930,414 +864,7 @@ fn introduced_rule_emits_its_plan_in_order() {
     assert_eq!(body_ops, vec!["addi", "subi", "shli", "shrsi"]);
 }
 
-/// `LoadMemory(Add(base, offset), bytes, metadata)` — the shape the builder
-/// gives a zero-offset load, with every operand a boundary.
-fn load_pattern() -> SemGraph {
-    let mut g = SemGraph::new();
-    let base = symbol(&mut g, 0);
-    let offset = symbol(&mut g, 1);
-    let addr = nary(&mut g, SymKind::Add, &[base, offset]);
-    let bytes = symbol(&mut g, 3);
-    let metadata = symbol(&mut g, 4);
-    nary(&mut g, SymKind::LoadMemory, &[addr, bytes, metadata]);
-    g
-}
-
-/// `StoreMemory(Add(base, offset), bytes, value, addrspace)`.
-fn store_pattern() -> SemGraph {
-    let mut g = SemGraph::new();
-    let base = symbol(&mut g, 0);
-    let offset = symbol(&mut g, 1);
-    let addr = nary(&mut g, SymKind::Add, &[base, offset]);
-    let bytes = symbol(&mut g, 3);
-    let value = symbol(&mut g, 4);
-    let addrspace = symbol(&mut g, 5);
-    nary(
-        &mut g,
-        SymKind::StoreMemory,
-        &[addr, bytes, value, addrspace],
-    );
-    g
-}
-
-fn emit_load(
-    context: &Context,
-    req: &EmitRequest,
-    m: &RuleMatch,
-) -> Result<Box<dyn Operation>, PassError> {
-    let base = m
-        .value_binding(0)
-        .ok_or(PassError::RewriteFailed(req.op_id()))?;
-    let result_ty = req.result_ty.expect("typed result");
-    Ok(Box::new(
-        LoadOpBuilder::new(context)
-            .ptr(base)
-            .result_type(result_ty)
-            .build(),
-    ))
-}
-
-fn emit_store(
-    context: &Context,
-    req: &EmitRequest,
-    m: &RuleMatch,
-) -> Result<Box<dyn Operation>, PassError> {
-    let base = m
-        .value_binding(0)
-        .ok_or(PassError::RewriteFailed(req.op_id()))?;
-    let value = m
-        .value_binding(4)
-        .ok_or(PassError::RewriteFailed(req.op_id()))?;
-    Ok(Box::new(
-        StoreOpBuilder::new(context).value(value).ptr(base).build(),
-    ))
-}
-
-/// Memory lowering is driven purely by the `MemoryRead`/`MemoryWrite` interfaces:
-/// a `ptr.store` and a `ptr.load` of the same slot must lower to the target's
-/// store/load patterns with the base pointer and stored value bound as operands.
-/// The same-slot case also guards what keeps the two accesses apart: the store
-/// takes the chain to a state the load then reads, so the rules' arity-3/4
-/// memory patterns must still match terms carrying that state operand.
-#[test]
-fn memory_ops_select_via_interfaces() {
-    // Threaded: an access names the chain it reads, and the slot's own chain
-    // starts where it is allocated.
-    let (context, module, region) = function(
-        r#"module {
-func.func @demo(%a: !i32) -> !i32 {
-  %slot, %allocated = ptr.alloca {size = 4, align = 4} : !ptr.p<!i32>
-  %stored = ptr.store %a, %slot state(%allocated)
-  %loaded, %read = ptr.load %slot state(%stored) : !i32
-  func.return %loaded
-}
-module_end
-}"#,
-    );
-    let source_ops = context.get_region(region).op_ids();
-    let source_store = source_ops[1];
-    let source_load = source_ops[2];
-    // The offset is an immediate: the address is the slot at offset zero,
-    // which no addition spells.
-    let offset = |rule: Rule| Rule {
-        operand_constraints: vec![(1, OperandConstraint::Immediate)],
-        ..rule
-    };
-    let rules = vec![
-        offset(Rule::new(
-            "load",
-            load_pattern(),
-            LATENCY_COST_SCALE,
-            emit_load,
-        )),
-        offset(Rule::new(
-            "store",
-            store_pattern(),
-            LATENCY_COST_SCALE,
-            emit_store,
-        )),
-    ];
-
-    run_pass(&context, &module, InstructionSelectPass::new(rules))
-        .expect("memory ops should select through their interfaces");
-
-    let body = body_ops(&context, region);
-    let argument = context.get_region(region).value_arguments()[0].id();
-    assert_eq!(
-        body_names(&context, region),
-        vec!["alloca", "store", "load"]
-    );
-    assert_ne!(body[1].id, source_store);
-    assert_ne!(body[2].id, source_load);
-    assert_eq!(
-        body[1].value_operands().as_slice(),
-        &[argument, body[0].value_results()[0]]
-    );
-    assert_eq!(
-        body[2].value_operands().as_slice(),
-        &[body[0].value_results()[0]]
-    );
-    assert_eq!(body[1].state_results(), body[2].state_operands());
-}
-
-/// Equivalent definitions extract to one tile.
-#[test]
-fn merged_value_classes_resolve_to_earliest_def() {
-    use smallvec::smallvec;
-    use tir::backend::isel::Theory;
-    use tir_egraph::{Atom, ClassId as Id, HeadOp, Plan, Query};
-
-    let (context, module, region) = function(
-        r#"module {
-func.func @demo(%x: !i32, %y: !i32, %z: !i32) -> !i32 {
-  %mul = muli %x, %y : !i32
-  %add = addi %x, %y : !i32
-  %sub = subi %add, %z : !i32
-  func.return %sub
-}
-module_end
-}"#,
-    );
-
-    // A test-only "proof" that x*y == x+y: union the Mul class with the Add
-    // class over the same operands, exactly the shape a discovered algebraic
-    // bridge produces.
-    let template = |kind, class| {
-        let mut node = template_node(kind, None, None);
-        node.children = vec![Id::from_raw(1), Id::from_raw(2)];
-        Atom::Node {
-            template: node,
-            args: smallvec![1, 2],
-            class,
-            row: None,
-        }
-    };
-    let union_mul_add = tir_egraph::Rule {
-        name: "mul-equals-add".to_string(),
-        plan: Plan::compile(Query::tree(
-            4,
-            0,
-            vec![template(SymKind::Mul, 0), template(SymKind::Add, 3)],
-        )),
-        head: vec![HeadOp::Union(0, 3)],
-        head_vars: 0,
-        post_saturation: false,
-    };
-
-    fn emit_sub_bound(
-        context: &Context,
-        req: &EmitRequest,
-        m: &RuleMatch,
-    ) -> Result<Box<dyn Operation>, PassError> {
-        let lhs = m
-            .value_binding(0)
-            .ok_or(PassError::RewriteFailed(req.op_id()))?;
-        let rhs = m
-            .value_binding(1)
-            .ok_or(PassError::RewriteFailed(req.op_id()))?;
-        let result_ty = req.result_ty.expect("typed result");
-        Ok(Box::new(ops::subi(context, lhs, rhs, result_ty).build()))
-    }
-
-    let rules = vec![
-        Rule::new(
-            "mul",
-            atomic_pattern(SymKind::Mul),
-            LATENCY_COST_SCALE,
-            emit_mul,
-        ),
-        Rule::new(
-            "add",
-            atomic_pattern(SymKind::Add),
-            10 * LATENCY_COST_SCALE,
-            emit_add,
-        ),
-        Rule::new(
-            "sub",
-            atomic_pattern(SymKind::Sub),
-            LATENCY_COST_SCALE,
-            emit_sub_bound,
-        ),
-    ];
-
-    let mut theory = Theory::default();
-    theory.push_rule(union_mul_add);
-    let pass = InstructionSelectPass::new(rules).with_theory(theory);
-    run_pass(&context, &module, pass).expect("merged classes should still select");
-
-    let body = body_ops(&context, region);
-    let names: Vec<_> = body.iter().map(|op| op.name().as_str()).collect();
-    assert_eq!(names, vec!["muli", "subi"]);
-
-    let sub_op = &body[1];
-    assert_eq!(sub_op.operands()[0], body[0].results()[0]);
-}
-
-/// A proof that `(m + z) - z == m` puts the subtraction in the product's class,
-/// so the product may be computed from the sum and the sum from the product.
-/// Each of the two is cheaper than the multiplication, and together they define
-/// nothing: the selected instances must admit an order.
-#[test]
-fn instances_reading_each_other_in_a_cycle_are_not_selected() {
-    use smallvec::smallvec;
-    use tir::backend::isel::Theory;
-    use tir_egraph::{Atom, ClassId as Id, HeadOp, Plan, Query};
-
-    let (context, module, region) = function(
-        r#"module {
-func.func @demo(%x: !i32, %y: !i32, %z: !i32) -> !i32 {
-  %mul = muli %x, %y : !i32
-  %add = addi %mul, %z : !i32
-  %sub = subi %add, %z : !i32
-  func.return %sub
-}
-module_end
-}"#,
-    );
-
-    // Variables: 0 the difference, 1 the sum, 2 the product, 3 `z`.
-    let template = |kind, class, lhs: u32, rhs: u32| {
-        let mut node = template_node(kind, None, None);
-        node.children = vec![Id::from_raw(lhs), Id::from_raw(rhs)];
-        Atom::Node {
-            template: node,
-            args: smallvec![lhs, rhs],
-            class,
-            row: None,
-        }
-    };
-    let cancel = tir_egraph::Rule {
-        name: "add-then-sub-cancels".to_string(),
-        plan: Plan::compile(Query::tree(
-            4,
-            0,
-            vec![
-                template(SymKind::Sub, 0, 1, 3),
-                template(SymKind::Add, 1, 2, 3),
-            ],
-        )),
-        head: vec![HeadOp::Union(0, 2)],
-        head_vars: 0,
-        post_saturation: false,
-    };
-
-    let rules = vec![
-        Rule::new(
-            "mul",
-            atomic_pattern(SymKind::Mul),
-            10 * LATENCY_COST_SCALE,
-            emit_mul,
-        ),
-        Rule::new(
-            "add",
-            atomic_pattern(SymKind::Add),
-            LATENCY_COST_SCALE,
-            emit_add,
-        ),
-        Rule::new(
-            "sub",
-            atomic_pattern(SymKind::Sub),
-            LATENCY_COST_SCALE,
-            emit_sub,
-        ),
-    ];
-
-    let mut theory = Theory::default();
-    theory.push_rule(cancel);
-    let pass = InstructionSelectPass::new(rules).with_theory(theory);
-    run_pass(&context, &module, pass).expect("the product has an acyclic cover");
-
-    assert_eq!(body_names(&context, region), vec!["muli"]);
-}
-
-/// The function body's cheapest cover is cyclic, so the search constructs its
-/// assignment. The arm's cover is fine and stays: it holds the cheaper
-/// multiply, where a search deciding the arm afresh returns the other one.
-#[test]
-fn a_region_with_a_valid_cover_keeps_it_when_another_needs_the_search() {
-    use smallvec::smallvec;
-    use tir::backend::isel::Theory;
-    use tir_egraph::{Atom, ClassId as Id, HeadOp, Plan, Query};
-
-    let (context, module, region) = function(
-        r#"module {
-func.func @demo(%x: !i32, %y: !i32, %z: !i32, %c: !i1) -> !i32 {
-  %mul = muli %x, %y : !i32
-  %add = addi %mul, %z : !i32
-  %sub = subi %add, %z : !i32
-  cfg.cond_br %c, ^bb1, ^bb2
-^bb1:
-  %arm = muli %x, %z : !i32
-  cfg.br ^bb3(%arm : !i32)
-^bb2:
-  cfg.br ^bb3(%sub : !i32)
-^bb3(%r: !i32):
-  func.return %r
-}
-module_end
-}"#,
-    );
-
-    // Variables: 0 the difference, 1 the sum, 2 the product, 3 `z`.
-    let template = |kind, class, lhs: u32, rhs: u32| {
-        let mut node = template_node(kind, None, None);
-        node.children = vec![Id::from_raw(lhs), Id::from_raw(rhs)];
-        Atom::Node {
-            template: node,
-            args: smallvec![lhs, rhs],
-            class,
-            row: None,
-        }
-    };
-    let cancel = tir_egraph::Rule {
-        name: "add-then-sub-cancels".to_string(),
-        plan: Plan::compile(Query::tree(
-            4,
-            0,
-            vec![
-                template(SymKind::Sub, 0, 1, 3),
-                template(SymKind::Add, 1, 2, 3),
-            ],
-        )),
-        head: vec![HeadOp::Union(0, 2)],
-        head_vars: 0,
-        post_saturation: false,
-    };
-
-    let low = RegisterRequirement::low_bits(RegisterCapability::integer(64));
-    let whole = RegisterRequirement::whole(RegisterCapability::integer(32));
-    let rules = vec![
-        Rule {
-            operand_registers: vec![(0, whole), (1, whole)],
-            ..Rule::new(
-                "mulw",
-                atomic_pattern(SymKind::Mul),
-                5 * LATENCY_COST_SCALE,
-                emit_shift_prelude,
-            )
-        },
-        Rule {
-            operand_registers: vec![(0, low), (1, low)],
-            ..Rule::new(
-                "mul",
-                atomic_pattern(SymKind::Mul),
-                10 * LATENCY_COST_SCALE,
-                emit_mul,
-            )
-        },
-        Rule::new(
-            "add",
-            atomic_pattern(SymKind::Add),
-            LATENCY_COST_SCALE,
-            emit_add,
-        ),
-        Rule::new(
-            "sub",
-            atomic_pattern(SymKind::Sub),
-            LATENCY_COST_SCALE,
-            emit_sub,
-        ),
-    ];
-
-    let mut theory = Theory::default();
-    theory.push_rule(cancel);
-    let pass = InstructionSelectPass::new(rules).with_theory(theory);
-    run_pass(&context, &module, pass).expect("every region has an acyclic cover");
-
-    let gate = body_ops(&context, region)
-        .into_iter()
-        .find(|op| !op.regions().is_empty())
-        .expect("the branch is a structured gate");
-    let arms: Vec<Vec<&str>> = gate
-        .regions()
-        .iter()
-        .map(|&arm| body_names(&context, arm))
-        .collect();
-    assert!(arms.contains(&vec!["subi"]), "{arms:?}");
-}
-
-/// At *equal* cost, the type-constrained rule must win the tie via dominance
-/// pruning — specificity never reaches the PBQP objective.
+/// At *equal* cost, the type-constrained rule must win the tie.
 #[test]
 fn equal_cost_tie_breaks_to_more_specific_rule() {
     let (context, module, region) = function(ADD_OF_TWO_ARGUMENTS);
@@ -1402,12 +929,10 @@ module_end
             emit_add,
         ),
     ];
-    run_pass(&context, &module, InstructionSelectPass::new(rules))
-        .expect("selection should succeed");
+    run_pass(&context, &module, selection_pass(&context, rules)).expect("selection should succeed");
 
     let body = body_ops(&context, region);
-    let names: Vec<_> = body.iter().map(|op| op.name().as_str()).collect();
-    assert_eq!(names, vec!["subi", "addi"]);
+    assert_eq!(body_names(&context, region), vec!["subi", "addi"]);
     let sub = body[0].results()[0];
     assert!(
         body[1].operands().contains(&sub),

@@ -1,4 +1,6 @@
-use crate::{BlockId, Context, ContextIterator, GetFromContext, OpId, Terminator, Value, ValueId};
+use crate::{
+    BlockId, Context, ContextIterator, GetFromContext, IdMap, OpId, Terminator, Value, ValueId,
+};
 
 id_newtype!(RegionId);
 
@@ -253,7 +255,8 @@ pub(crate) fn topological_order(
     context: &Context,
     region: RegionId,
 ) -> Result<Vec<OpId>, crate::Error> {
-    topological_order_picking(context, region, |ready| ready.pop_first())
+    let reads = SiblingReads::of_region(context, region);
+    topological_order_picking(context, region, &reads, |ready| ready.pop_first())
 }
 
 /// [`topological_order`] with the tie among ready operations broken by `rng`
@@ -263,7 +266,8 @@ pub(crate) fn shuffled_topological_order(
     region: RegionId,
     rng: &mut crate::utils::Rng,
 ) -> Result<Vec<OpId>, crate::Error> {
-    topological_order_picking(context, region, |ready| {
+    let reads = SiblingReads::of_region(context, region);
+    topological_order_picking(context, region, &reads, |ready| {
         if ready.is_empty() {
             return None;
         }
@@ -272,51 +276,25 @@ pub(crate) fn shuffled_topological_order(
     })
 }
 
-/// [`topological_order`] with the tie among ready operations broken by
-/// insertion order: the order the region was built in, which a converter
-/// leaves as source order.
-pub(crate) fn insertion_topological_order(
-    context: &Context,
-    region: RegionId,
-) -> Result<Vec<OpId>, crate::Error> {
-    let inserted: std::collections::HashMap<OpId, usize> = context
-        .get_region(region)
-        .op_ids()
-        .into_iter()
-        .enumerate()
-        .map(|(index, op)| (op, index))
-        .collect();
-    topological_order_picking(context, region, |ready| {
-        let pick = ready.iter().copied().min_by_key(|op| inserted[op])?;
-        ready.take(&pick)
-    })
-}
-
 fn topological_order_picking(
     context: &Context,
     region: RegionId,
+    reads: &SiblingReads,
     mut pick: impl FnMut(&mut std::collections::BTreeSet<OpId>) -> Option<OpId>,
 ) -> Result<Vec<OpId>, crate::Error> {
-    use std::collections::{BTreeSet, HashMap, HashSet};
-
-    let ops: HashSet<OpId> = context.get_region(region).op_ids().into_iter().collect();
-    let mut inputs: HashMap<OpId, Vec<OpId>> = HashMap::new();
-    let mut readers: HashMap<OpId, Vec<OpId>> = HashMap::new();
-    let mut pending: HashMap<OpId, usize> = HashMap::new();
+    let ops = context.get_region(region).op_ids();
+    let mut readers: IdMap<OpId, Vec<OpId>> = IdMap::new();
+    let mut pending: IdMap<OpId, usize> = IdMap::new();
     for &op in &ops {
-        let read: Vec<OpId> = values_read(context, op)
-            .into_iter()
-            .filter_map(|value| context.get_value(value).defining_op())
-            .filter(|producer| ops.contains(producer))
-            .collect();
-        for producer in &read {
-            readers.entry(*producer).or_default().push(op);
+        let mut read = 0;
+        for producer in reads.of(op) {
+            readers.entry(producer).or_default().push(op);
+            read += 1;
         }
-        pending.insert(op, read.len());
-        inputs.insert(op, read);
+        pending.insert(op, read);
     }
 
-    let mut ready: BTreeSet<OpId> = pending
+    let mut ready: std::collections::BTreeSet<OpId> = pending
         .iter()
         .filter(|(_, count)| **count == 0)
         .map(|(op, _)| *op)
@@ -336,7 +314,7 @@ fn topological_order_picking(
     if order.len() == ops.len() {
         return Ok(order);
     }
-    let instance = context.get_op(cycle_member(&inputs, &pending));
+    let instance = context.get_op(cycle_member(reads, &pending));
     Err(crate::Error::VerificationError(format!(
         "{}.{} closes a dependency cycle",
         instance.dialect(),
@@ -367,6 +345,48 @@ pub(crate) fn values_read(context: &Context, op: OpId) -> Vec<ValueId> {
     values
 }
 
+// A value defined under the reader has its producer in another region and
+// orders nothing beside the reader.
+#[derive(Default)]
+pub(crate) struct SiblingReads {
+    // Sorted.
+    pairs: Vec<(OpId, OpId)>,
+}
+
+impl SiblingReads {
+    pub(crate) fn under(
+        context: &Context,
+        root: RegionId,
+        tests: impl IntoIterator<Item = (OpId, ValueId)>,
+    ) -> Self {
+        let mut pairs = context.sibling_reads(root, true);
+        pairs.extend(
+            tests
+                .into_iter()
+                .filter_map(|(reader, value)| context.sibling_read(reader, value)),
+        );
+        Self::sorted(pairs)
+    }
+
+    pub(crate) fn of_region(context: &Context, region: RegionId) -> Self {
+        Self::sorted(context.sibling_reads(region, false))
+    }
+
+    fn sorted(mut pairs: Vec<(OpId, OpId)>) -> Self {
+        pairs.sort_unstable();
+        pairs.dedup();
+        Self { pairs }
+    }
+
+    pub(crate) fn of(&self, op: OpId) -> impl Iterator<Item = OpId> + '_ {
+        let start = self.pairs.partition_point(|pair| pair.0 < op);
+        self.pairs[start..]
+            .iter()
+            .take_while(move |pair| pair.0 == op)
+            .map(|pair| pair.1)
+    }
+}
+
 /// What `region` and everything under it reads, and what the same span defines.
 fn collect_region_reads(
     context: &Context,
@@ -390,10 +410,7 @@ fn collect_region_reads(
 /// One operation actually on a cycle, rather than merely downstream of one:
 /// walk back through the operations Kahn left pending until the walk repeats
 /// itself, and answer with the smallest id it went round.
-fn cycle_member(
-    inputs: &std::collections::HashMap<OpId, Vec<OpId>>,
-    pending: &std::collections::HashMap<OpId, usize>,
-) -> OpId {
+fn cycle_member(reads: &SiblingReads, pending: &IdMap<OpId, usize>) -> OpId {
     let blocked = |op: &OpId| pending.get(op).is_some_and(|count| *count > 0);
     let start = pending
         .keys()
@@ -404,11 +421,10 @@ fn cycle_member(
 
     let mut path = vec![start];
     loop {
-        let next = inputs[path.last().unwrap()]
-            .iter()
+        let next = reads
+            .of(*path.last().unwrap())
             .filter(|input| blocked(input))
             .min()
-            .copied()
             .expect("an operation Kahn left pending reads one it also left");
         if let Some(from) = path.iter().position(|op| *op == next) {
             return path[from..]

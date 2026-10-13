@@ -17,6 +17,20 @@ pub(crate) enum Math {
 }
 
 impl ENode for Math {
+    type Names = ();
+    type SortKey = (u8, u64);
+
+    fn sort_key(&self, _: &()) -> Self::SortKey {
+        match self {
+            Math::Num(value) => (0, *value as u64),
+            Math::FNum(value) => (1, value.to_f64().to_bits()),
+            Math::Sym(name) => (2, u64::from(*name)),
+            Math::Neg(_) => (3, 0),
+            Math::Add(_) => (4, 0),
+            Math::Effect(kind, _) => (5, u64::from(*kind)),
+        }
+    }
+
     fn children(&self) -> &[Id] {
         match self {
             Math::Num(_) | Math::FNum(_) | Math::Sym(_) => &[],
@@ -131,7 +145,7 @@ pub(crate) fn apply_all(g: &mut Engine<Math>, rules: &[Rule<Math>]) {
     for rule in rules {
         let roots = rule.plan.roots(g);
         for m in rule.plan.search(g, roots, &|_, _| true, false, &NoExterns) {
-            g.apply_head(&rule.head, rule.head_vars, &m);
+            g.apply_head(&rule.head, rule.head_vars, std::slice::from_ref(&m));
         }
     }
     g.rebuild();

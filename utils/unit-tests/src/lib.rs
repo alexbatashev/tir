@@ -132,6 +132,7 @@ mod core {
     mod instcombine;
     mod interfaces;
     mod isel;
+    mod isel_automaton;
     mod isel_rules;
     mod layout;
     mod liveness;

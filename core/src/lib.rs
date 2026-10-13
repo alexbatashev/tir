@@ -62,6 +62,7 @@ pub mod passes;
 mod print;
 mod region;
 pub mod region_format;
+pub(crate) mod rewrite;
 pub mod schema;
 mod scoped_attr;
 pub mod sem;
@@ -81,7 +82,7 @@ pub mod parse;
 
 pub use analysis::{Analysis, AnalysisManager};
 pub use block::{BlockHandle, BlockId};
-pub use context::{Census, Context, ContextIterator, FunctionScope, GetFromContext, Parent};
+pub use context::{Census, Context, ContextIterator, FunctionScope, GetFromContext, Names, Parent};
 pub use diagnostics::{print_error_range, print_parse_error};
 pub use dialect::{Dialect, OperationParser};
 pub use error::Error;

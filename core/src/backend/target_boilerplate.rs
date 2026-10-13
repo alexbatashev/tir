@@ -148,6 +148,7 @@ macro_rules! impl_target_machine {
             ) -> $crate::backend::isel::InstructionSelectPass {
                 create_isel_pass_for(context, self.config.features(), self.abi())
                     .with_data_layout(self.data_layout())
+                    .synthesized(context)
             }
 
             fn regalloc_target(&self) -> Box<dyn $crate::backend::regalloc::TargetRegAlloc> {

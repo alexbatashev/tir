@@ -36,5 +36,6 @@ module {
 // CHECK-LABEL: name = "g"
 // CHECK: signed_divide32
 // CHECK-NEXT: imul32
-// CHECK-NEXT: sub32
+// CHECK-NEXT: neg32
+// CHECK-NEXT: add_imm32 {{.*}} imm = 61}
 // CHECK-NOT: signed_divide32

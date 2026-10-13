@@ -78,14 +78,51 @@ impl Grouping {
         self.cursor = log.len();
         self.tail
             .retain(|entry| news.binary_search(&entry[1]).is_err());
+        let kept = self.tail.len();
         let tail = &mut self.tail;
         for owner in news {
             rows.entries(owner, &mut |cell, index| tail.push([cell, owner, index]));
         }
+        Self::merge(&mut self.tail, kept);
         if self.tail.len() > MIN_TAIL.max(self.base.len() / REBUILD_DIVISOR) {
-            return self.rebuild(rows, log, stamp);
+            self.fold(rows, stamp);
         }
-        self.tail.sort_unstable();
+    }
+
+    // Put `entries` in order, where the first `kept` are: the rest is sorted
+    // and merged in from the back, which moves only what sorts after it.
+    fn merge(entries: &mut [[u32; 3]], kept: usize) {
+        entries[kept..].sort_unstable();
+        let new = entries[kept..].to_vec();
+        let (mut free, mut old) = (entries.len(), kept);
+        for entry in new.into_iter().rev() {
+            while old > 0 && entries[old - 1] > entry {
+                free -= 1;
+                old -= 1;
+                entries[free] = entries[old];
+            }
+            free -= 1;
+            entries[free] = entry;
+        }
+    }
+
+    fn fold<R: Rows>(&mut self, rows: &R, stamp: u32) {
+        // What a lookup reads now is the new base: the base entries of the
+        // owners not written since it was built, and the tail.
+        let built = self.built.expect("a built grouping");
+        let mut base = Vec::with_capacity(self.base.len() + self.tail.len());
+        let mut tail = self.tail.drain(..).peekable();
+        for entry in self.base.iter() {
+            if rows.stamp(entry[1]) <= built {
+                base.extend(std::iter::from_fn(|| {
+                    tail.next_if(|written| written < entry)
+                }));
+                base.push(*entry);
+            }
+        }
+        base.extend(tail);
+        self.base = Arc::new(base);
+        self.built = Some(stamp);
     }
 
     fn rebuild<R: Rows>(&mut self, rows: &R, log: &[u32], stamp: u32) {
@@ -102,8 +139,15 @@ impl Grouping {
 
     fn range(entries: &[[u32; 3]], cell: u32) -> &[[u32; 3]] {
         let from = entries.partition_point(|entry| entry[0] < cell);
-        let to = from + entries[from..].partition_point(|entry| entry[0] == cell);
-        &entries[from..to]
+        let rest = &entries[from..];
+        // A cell has few entries, so its end is near its start: doubling
+        // from there finds it without reading the far end of the grouping.
+        let mut reach = 1;
+        while reach < rest.len() && rest[reach][0] == cell {
+            reach *= 2;
+        }
+        let near = &rest[..reach.min(rest.len())];
+        &near[..near.partition_point(|entry| entry[0] == cell)]
     }
 
     /// Append the `(owner, index)` entries holding `cell` to `out`, in owner
@@ -152,8 +196,9 @@ fn news(log: &[u32]) -> Vec<u32> {
 ///
 /// The base lists every cell's owners as they stood. A cell an owner joined,
 /// left or moved inside since then has its whole list kept beside the base,
-/// made again whenever one of those owners is written, so a lookup never
-/// checks an owner: it finds the cell among the remade lists or in the base.
+/// and a written owner is taken out of the list it sat in and put into the
+/// one it sits in now, so a lookup never checks an owner: it finds the cell
+/// among the remade lists or in the base.
 #[derive(Clone, Debug, Default)]
 pub struct Lists {
     /// The cells holding anything, ascending; `offsets[at]..offsets[at + 1]`
@@ -211,11 +256,12 @@ impl Lists {
         }
         let news = news(&log[self.cursor..]);
         self.cursor = log.len();
-        // The cells whose lists changed: where each written owner sat, and
-        // where it sits now.
-        let mut touched = Vec::with_capacity(news.len() * 2);
+        // Where each written owner sat, and where it sits now and at which
+        // position, as `(cell, position, owner)`.
+        let mut left = Vec::with_capacity(news.len());
+        let mut joined = Vec::with_capacity(news.len());
         for &owner in &news {
-            let now = Self::place(rows, owner).0;
+            let (now, position) = Self::place(rows, owner);
             let was = match self.moved.binary_search_by_key(&owner, |moved| moved.0) {
                 Ok(at) => std::mem::replace(&mut self.moved[at].1, now),
                 Err(at) => {
@@ -226,41 +272,57 @@ impl Lists {
                     }
                 }
             };
-            touched.extend([was, now]);
+            left.push((was, 0, owner));
+            joined.push((now, position, owner));
         }
         if self.moved.len() > MIN_TAIL.max(self.owners.len() / REBUILD_DIVISOR) {
             return self.rebuild(rows, log);
         }
+        left.sort_unstable();
+        joined.sort_unstable();
+        let mut touched: Vec<u32> = left.iter().chain(&joined).map(|place| place.0).collect();
         touched.sort_unstable();
         touched.dedup();
         touched.retain(|cell| *cell != NOWHERE);
-        // Each touched cell's list: its base owners that were not written,
-        // and the written owners sitting in it now.
-        let mut lists: Vec<Vec<(u32, u32)>> = vec![Vec::new(); touched.len()];
-        for (list, &cell) in lists.iter_mut().zip(&touched) {
-            for &owner in self.base(cell) {
-                if self
-                    .moved
-                    .binary_search_by_key(&owner, |moved| moved.0)
-                    .is_err()
-                {
-                    list.push((Self::place(rows, owner).1, owner));
+        for cell in touched {
+            let (left, joined) = (Self::of(&left, cell), Self::of(&joined, cell));
+            let at = match self.remade.binary_search_by_key(&cell, |remade| remade.0) {
+                Ok(at) => at,
+                Err(at) => {
+                    let list = self.base(cell).to_vec();
+                    self.remade.insert(at, (cell, list));
+                    at
                 }
+            };
+            // The owners that stay were not written, so they are in order:
+            // one that joined goes where its position says.
+            let list = &mut self.remade[at].1;
+            if !left.is_empty() {
+                list.retain(|&owner| left.binary_search(&(cell, 0, owner)).is_err());
             }
-        }
-        for &(owner, cell) in &self.moved {
-            if let Ok(at) = touched.binary_search(&cell) {
-                lists[at].push((Self::place(rows, owner).1, owner));
+            if joined.len() <= list.len() / REBUILD_DIVISOR {
+                for &(_, position, owner) in joined {
+                    let ahead =
+                        |held: &u32| (Self::place(rows, *held).1, *held) < (position, owner);
+                    list.insert(list.partition_point(ahead), owner);
+                }
+                continue;
             }
+            let stay = list
+                .iter()
+                .map(|&owner| (Self::place(rows, owner).1, owner));
+            let join = joined.iter().map(|&(_, position, owner)| (position, owner));
+            let mut placed: Vec<(u32, u32)> = stay.chain(join).collect();
+            placed.sort_unstable();
+            *list = placed.into_iter().map(|(_, owner)| owner).collect();
         }
-        for (cell, mut list) in touched.into_iter().zip(lists) {
-            list.sort_unstable();
-            let list = list.into_iter().map(|(_, owner)| owner).collect();
-            match self.remade.binary_search_by_key(&cell, |remade| remade.0) {
-                Ok(at) => self.remade[at].1 = list,
-                Err(at) => self.remade.insert(at, (cell, list)),
-            }
-        }
+    }
+
+    // The entries of `cell` among `places`, which are in order.
+    fn of(places: &[(u32, u32, u32)], cell: u32) -> &[(u32, u32, u32)] {
+        let from = places.partition_point(|place| place.0 < cell);
+        let rest = &places[from..];
+        &rest[..rest.partition_point(|place| place.0 == cell)]
     }
 
     fn rebuild<R: Rows>(&mut self, rows: &R, log: &[u32]) {

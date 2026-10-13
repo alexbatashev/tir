@@ -25,6 +25,7 @@ module {
 // CHECK-LABEL: asm.symbol {name = "below", arg_regs = [%[[P:[0-9]+]]:GPR]}
 // CHECK: riscv.ld {rd = %{{[0-9]+}}:GPR, rs1 = %[[P]]:GPR, imm = -8}
 // CHECK-LABEL: asm.symbol {name = "far", arg_regs = [%[[P:[0-9]+]]:GPR]}
+// CHECK-NEXT: state.entry_state
 // CHECK-NEXT: riscv.lui {rd = %[[K:[0-9]+]]:GPR, imm = 1}
 // CHECK-NEXT: riscv.add {rd = %[[A:[0-9]+]]:GPR, rs1 = %[[P]]:GPR, rs2 = %[[K]]:GPR}
 // CHECK: riscv.ld {rd = %{{[0-9]+}}:GPR, rs1 = %[[A]]:GPR, imm = 904}

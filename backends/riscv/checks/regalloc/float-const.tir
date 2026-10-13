@@ -15,5 +15,5 @@ module {
 
 // CHECK: riscv.lui {rd = %{{[0-9]+}}:{{x[0-9]+}}, imm = 262656}
 // CHECK: riscv.fmv.w.x {fd = %{{[0-9]+}}:{{f[0-9]+}}, rs1 = %{{[0-9]+}}:{{x[0-9]+}}}
-// CHECK: riscv.fmul.s.rne {fd = %{{[0-9]+}}:{{f[0-9]+}}, fs1 = %{{[0-9]+}}:{{f[0-9]+}}, fs2 = %{{[0-9]+}}:f10}
+// CHECK: riscv.fmul.s.rne {fd = %{{[0-9]+}}:{{f[0-9]+}}, fs1 = %{{[0-9]+}}:f10, fs2 = %{{[0-9]+}}:{{f[0-9]+}}}
 // CHECK: asm.vret

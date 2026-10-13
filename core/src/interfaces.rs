@@ -42,8 +42,9 @@ pub trait OpCost {
     }
 }
 
-/// An operation that yields a compile-time constant integer, exposed generically so
-/// rewriters can read the value without knowing the concrete constant op.
+/// An operation that yields a compile-time constant, exposed generically so
+/// rewriters can read the value without knowing the concrete constant op: an
+/// integer, or the bits of a value of another type.
 pub trait ConstantLike {
     fn constant_value(&self) -> APInt;
 }

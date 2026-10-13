@@ -40,6 +40,10 @@ impl Theory {
         self.axioms.push(axiom);
     }
 
+    pub(crate) fn axioms(&self) -> &[Axiom] {
+        &self.axioms
+    }
+
     /// Add a rule that is not an axiom — a target's own bridge, or a test's.
     pub fn push_rule(&mut self, rule: Rule<SemNode>) {
         self.rules.push(rule);

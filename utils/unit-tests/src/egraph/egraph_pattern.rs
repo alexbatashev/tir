@@ -21,6 +21,16 @@ impl Wild {
 }
 
 impl ENode for Wild {
+    type Names = ();
+    type SortKey = (u8, u32);
+
+    fn sort_key(&self, _: &()) -> Self::SortKey {
+        match self {
+            Wild::Leaf(tag) => (0, *tag),
+            Wild::Op(tag, _) => (1, *tag),
+        }
+    }
+
     fn children(&self) -> &[Id] {
         match self {
             Wild::Leaf(_) => &[],

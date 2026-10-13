@@ -6,6 +6,19 @@ use crate::Csr;
 /// No slot: an id the fold does not cover.
 const NONE: u32 = u32::MAX;
 
+/// The price of a member that cannot be chosen where its id has any other.
+pub const UNPRICED: u64 = u64::MAX;
+
+// A sum of prices is unpriced only where a term is: finite terms too large
+// to add stay below it.
+fn sum(cost: u64, term: u64) -> u64 {
+    match cost.checked_add(term) {
+        Some(total) => total,
+        None if cost == UNPRICED || term == UNPRICED => UNPRICED,
+        None => UNPRICED - 1,
+    }
+}
+
 /// Where a client hands over the members of one id.
 pub struct Members<'a> {
     index: &'a [u32],
@@ -30,7 +43,7 @@ impl Members<'_> {
         for child in children {
             match self.index[child as usize] {
                 NONE => match (self.outside)(child) {
-                    Some(cost) => member.base = member.base.saturating_add(cost),
+                    Some(cost) => member.base = sum(member.base, cost),
                     None => member.costable = false,
                 },
                 child => {
@@ -48,7 +61,12 @@ impl Members<'_> {
 ///
 /// `members(id, out)` pushes every member of `id` onto `out`. A member costs
 /// its price plus each child's least cost; a child outside `ids` is priced by
-/// `outside`, and a member with a child nothing prices is never chosen.
+/// `outside`, and a member with a child nothing prices is never chosen. A
+/// sum costs [`UNPRICED`] only where one of its terms does: prices too large
+/// to add come to the largest cost below it, so they tie with each other and
+/// still beat a member that has no price.
+/// Neither is a member with its own id for a child, whatever it costs: it
+/// spells the id by the id.
 /// Members wait for un-costed children and the fold runs to a fixpoint, so a
 /// cycle is costed through its other inputs. On a tie the first member in scan
 /// order wins: `ids` in order, then each id's members in the order pushed.
@@ -96,6 +114,9 @@ pub fn fold(
         if let Some(settled) = cost[member.slot]
             && chosen[member.slot].is_none()
             && table.cost_of(member, &cost) == Some(settled)
+            // A zero price or a sum at the top ties a self-loop with the
+            // member that costed its id.
+            && !table.children[member.children.clone()].contains(&member.slot)
         {
             chosen[member.slot] = Some((member.tag, settled));
         }
@@ -176,8 +197,52 @@ impl Table {
         }
         let mut total = member.base;
         for &slot in &self.children[member.children.clone()] {
-            total = total.saturating_add(cost[slot]?);
+            total = sum(total, cost[slot]?);
         }
         Some(total)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn folded(members: &[&[(u32, u64, &[u32])]]) -> Vec<Option<(u32, u64)>> {
+        let ids: Vec<u32> = (0..members.len() as u32).collect();
+        fold(members.len(), &ids, &|_| None, |id, out| {
+            for &(tag, price, children) in members[id as usize] {
+                out.push(tag, price, children.iter().copied());
+            }
+        })
+    }
+
+    #[test]
+    fn an_id_with_a_self_loop_alone_has_no_cost() {
+        assert_eq!(folded(&[&[(0, u64::MAX, &[0])]]), vec![None]);
+        assert_eq!(folded(&[&[(0, 0, &[0])]]), vec![None]);
+    }
+
+    // The loop's sum saturates to the id's own cost, and at no price it is
+    // that cost: first in scan order, it still does not spell the id.
+    #[test]
+    fn a_self_loop_that_ties_is_not_chosen() {
+        let top = u64::MAX;
+        assert_eq!(
+            folded(&[&[(0, top, &[0]), (1, top, &[])]]),
+            vec![Some((1, top))]
+        );
+        assert_eq!(
+            folded(&[&[(0, 0, &[0]), (1, 3, &[])], &[(2, 1, &[0])]]),
+            vec![Some((1, 3)), Some((2, 4))]
+        );
+    }
+
+    #[test]
+    fn finite_prices_too_large_to_add_beat_an_unpriced_member() {
+        let large = u64::MAX / 2 + 1;
+        assert_eq!(
+            folded(&[&[(0, large, &[])], &[(1, UNPRICED, &[]), (2, large, &[0])]]),
+            vec![Some((0, large)), Some((2, UNPRICED - 1))]
+        );
     }
 }

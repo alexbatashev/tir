@@ -13,10 +13,10 @@
 use smallvec::SmallVec;
 
 use tir_relational::query::{
-    self as rel, Cmp, Expr, ExternId, Host, Out, Param, Resolution, Scalar, Var,
+    self as rel, Calls, Cmp, Expr, ExternId, Host, Out, Param, Resolution, Scalar, Var,
 };
 
-use crate::engine::{CLASSES, lattice, leaf_constant};
+use crate::engine::{CLASSES, Terms, lattice, leaf_constant};
 use crate::{ClassId, Engine, Label, LabelId, Ref, RowId};
 
 /// A field of a label the language lets a rule read or fill.
@@ -29,6 +29,9 @@ pub enum ColumnId {
     Const,
     /// The type its terms carry.
     Type,
+    /// A column a client registered, numbered in the order
+    /// [`Engine::add_column`] made them.
+    Client(u32),
 }
 
 /// The host's primitive functions over what a match bound: labels an atom
@@ -39,6 +42,13 @@ pub enum ColumnId {
 pub trait Externs<L> {
     /// Fill `out` and report success; failure fails the match.
     fn call(&self, id: ExternId, labels: &[&L], args: &[u64], out: &mut [u64]) -> bool;
+
+    /// These functions as several threads may call them at once: `None`
+    /// where they read what is bound to one thread, which keeps every search
+    /// that calls them on the saturation's own.
+    fn shared(&self) -> Option<&(dyn Externs<L> + Sync)> {
+        None
+    }
 }
 
 /// No externs: every call fails.
@@ -75,7 +85,7 @@ impl Source {
 }
 
 /// A total or partial predicate over bound scalars.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Guard {
     Cmp(Cmp, Expr, Expr),
     /// Bind `out` to what `value` evaluates to.
@@ -106,7 +116,10 @@ pub enum Guard {
 
 /// One conjunct of a [`Query`]. Variables bind references: a class and an
 /// offset. A variable bound twice must bind the same reference both times.
-#[derive(Clone, Debug)]
+// Two predicates compare by address: equal ones behave alike, and unequal
+// ones only cost a caller that pools equal queries a duplicate.
+#[allow(unpredictable_function_pointer_comparisons)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Atom<L> {
     /// A row whose label matches `template`, whose value is `class` and whose
     /// operands bind `args`, one per operand. `row` binds the matched row,
@@ -120,6 +133,20 @@ pub enum Atom<L> {
         args: SmallVec<[Var; 4]>,
         class: Var,
         row: Option<Scalar>,
+    },
+    /// [`Atom::Node`] over every label `accept` holds of, whatever its
+    /// operator, at the arity `args` gives: one atom for a rule that reads
+    /// what the label is from a client table rather than from a template.
+    /// `label` binds the id of the label the row has, the word
+    /// [`Engine::label`] gives: the row's selected cell, so a table atom
+    /// reading it joins with the row. An engine never renumbers a label, so
+    /// the id keys a client table for the life of that engine.
+    Any {
+        accept: fn(&L) -> bool,
+        args: SmallVec<[Var; 4]>,
+        class: Var,
+        row: Option<Scalar>,
+        label: Option<Scalar>,
     },
     /// `class` is the constant `value`: its carrier's zero at that offset,
     /// or, outside a carrier, a class the constant column holds it for.
@@ -140,6 +167,12 @@ pub enum Atom<L> {
     /// it is placed two ways at once, so nowhere. A law that refuses what it
     /// cannot place matches this, in a negated conjunction as well.
     Conflicted { key: Var },
+    /// A row of client table `table` (see [`Engine::add_words`]), one term
+    /// per column. A term that is a lone scalar nothing has bound is bound
+    /// to the row's cell; any other is evaluated and the row must hold its
+    /// value there. Several rows may agree with what is bound: each is a
+    /// match, in the order the client added them. See [`rel::Tuples`].
+    Table { table: u32, terms: Vec<Expr> },
 }
 
 /// A negated sub-conjunction: no solution of it exists, given what the outer
@@ -152,15 +185,18 @@ pub struct Nested<L> {
 
 impl<L> Atom<L> {
     /// The variable this atom's rows are looked up under; bound before the atom
-    /// is stepped.
-    pub fn class(&self) -> Var {
+    /// is stepped. A client table has rows of words alone.
+    pub fn class(&self) -> Option<Var> {
         match self {
-            Atom::Node { class, .. } | Atom::Literal { class, .. } => *class,
+            Atom::Node { class, .. } | Atom::Any { class, .. } | Atom::Literal { class, .. } => {
+                Some(*class)
+            }
             Atom::Fact { key, .. }
             | Atom::Offset { key, .. }
             | Atom::Const { key, .. }
             | Atom::Width { key, .. }
-            | Atom::Conflicted { key } => *key,
+            | Atom::Conflicted { key } => Some(*key),
+            Atom::Table { .. } => None,
         }
     }
 }
@@ -231,12 +267,26 @@ pub struct Plan<L> {
 enum ParamSpec<L> {
     /// The labels in the `op` bucket that `template` matches at its arity, by
     /// the table their rows live in.
-    Template { template: L, arity: usize, op: u64 },
-    /// The labels of that template parameter that commute, by table.
+    Template {
+        template: L,
+        arity: usize,
+        op: u64,
+    },
+    Any {
+        arity: usize,
+        accept: fn(&L) -> bool,
+    },
+    /// The labels of that template or any-label parameter that commute, by
+    /// table.
     Commuting(Param),
     /// The labels in the `op` bucket that `value` matches: the constants a
     /// literal accepts.
-    Equal { value: L, op: u64 },
+    Equal {
+        value: L,
+        op: u64,
+    },
+    // The client table at this slot.
+    Table(u32),
 }
 
 /// What a host call of the compiled query decodes its words as.
@@ -270,6 +320,36 @@ impl<L: Label> Lower<L> {
         self.params.len() as Param - 1
     }
 
+    fn rows(
+        &mut self,
+        labels: Param,
+        args: &[Var],
+        class: Var,
+        row: Option<Scalar>,
+        label: Option<Scalar>,
+    ) -> rel::Atom {
+        // Every binary atom may read a row swapped: which labels it reads
+        // decides which of them commute.
+        let swap = (args.len() == 2).then(|| rel::Swap {
+            columns: [1, 2],
+            when: self.param(ParamSpec::Commuting(labels)),
+        });
+        let mut terms: SmallVec<[rel::Term; 6]> = SmallVec::new();
+        terms.push(rel::Term::Any);
+        terms.extend(args.iter().map(|&arg| rel::Term::Var(arg)));
+        terms.push(rel::Term::Var(class));
+        rel::Atom::Rows(rel::Rows {
+            select: rel::Select {
+                column: 0,
+                param: labels,
+            },
+            terms,
+            tag: row,
+            cell: label,
+            swap,
+        })
+    }
+
     fn atom(&mut self, atom: &Atom<L>) -> rel::Atom {
         match atom {
             Atom::Node {
@@ -278,33 +358,25 @@ impl<L: Label> Lower<L> {
                 class,
                 row,
             } => {
-                let arity = args.len();
-                let op = template.op_key();
-                let template = template.clone();
                 let labels = self.param(ParamSpec::Template {
-                    template,
-                    arity,
-                    op,
+                    template: template.clone(),
+                    arity: args.len(),
+                    op: template.op_key(),
                 });
-                // Every binary atom may read a row swapped: which labels a
-                // template matches decides which of them commute.
-                let swap = (arity == 2).then(|| rel::Swap {
-                    columns: [1, 2],
-                    when: self.param(ParamSpec::Commuting(labels)),
+                self.rows(labels, args, *class, *row, None)
+            }
+            Atom::Any {
+                accept,
+                args,
+                class,
+                row,
+                label,
+            } => {
+                let labels = self.param(ParamSpec::Any {
+                    arity: args.len(),
+                    accept: *accept,
                 });
-                let mut terms: SmallVec<[rel::Term; 6]> = SmallVec::new();
-                terms.push(rel::Term::Any);
-                terms.extend(args.iter().map(|&arg| rel::Term::Var(arg)));
-                terms.push(rel::Term::Var(*class));
-                rel::Atom::Rows(rel::Rows {
-                    select: rel::Select {
-                        column: 0,
-                        param: labels,
-                    },
-                    terms,
-                    tag: *row,
-                    swap,
-                })
+                self.rows(labels, args, *class, *row, *label)
             }
             // A carrier's constant is a reference, which the host tests; any
             // other is what the constant column holds.
@@ -330,6 +402,10 @@ impl<L: Label> Lower<L> {
             Atom::Const { key, value } => place(*key, rel::Read::Pinned { offset: *value }),
             Atom::Width { key, width } => place(*key, rel::Read::Width { width: *width }),
             Atom::Conflicted { key } => place(*key, rel::Read::Conflicted),
+            Atom::Table { table, terms } => rel::Atom::Words(rel::Tuples {
+                table: self.param(ParamSpec::Table(*table)),
+                terms: terms.clone(),
+            }),
         }
     }
 
@@ -417,7 +493,11 @@ impl<L: Label> Plan<L> {
                     .collect(),
             })
             .collect();
-        let root_op = match query.atoms.iter().find(|atom| atom.class() == query.root) {
+        let root_op = match query
+            .atoms
+            .iter()
+            .find(|atom| atom.class() == Some(query.root))
+        {
             Some(Atom::Node { template, .. }) => Some(template.op_key()),
             _ => None,
         };
@@ -496,8 +576,8 @@ impl<L: Label> Plan<L> {
             plan: self,
             externs,
         };
-        let mut caches = eg.caches.borrow_mut();
-        let Some(cache) = caches.plan(&self.plan, &host) else {
+        let mut caches = eg.caches.lock().expect("the plan caches");
+        let Some(cache) = caches.plan(&self.plan, &eg.db, &host) else {
             return Vec::new();
         };
         let allowed = |var, class| allowed(var, ClassId(class));
@@ -530,31 +610,34 @@ impl<L: Label> Plan<L> {
         out: &mut Resolution,
     ) {
         let since = since.map(|since| since as usize);
-        match &self.params[param as usize] {
-            ParamSpec::Template {
-                template,
-                arity,
-                op,
-            } => eg.labels_matching(*op, (template, *arity), false, since, out),
-            ParamSpec::Commuting(labels) => {
-                let ParamSpec::Template {
+        let rows =
+            |labels: Param, commuting, out: &mut Resolution| match &self.params[labels as usize] {
+                ParamSpec::Template {
                     template,
                     arity,
                     op,
-                } = &self.params[*labels as usize]
-                else {
-                    unreachable!("commutativity is of a template's labels")
-                };
-                eg.labels_matching(*op, (template, *arity), true, since, out)
-            }
+                } => {
+                    let matches = |node: &L| template.matches_template(node);
+                    eg.labels_matching(Some(*op), *arity, matches, commuting, since, out)
+                }
+                ParamSpec::Any { arity, accept } => {
+                    eg.labels_matching(None, *arity, accept, commuting, since, out)
+                }
+                _ => unreachable!("commutativity is of a row atom's labels"),
+            };
+        match &self.params[param as usize] {
+            ParamSpec::Template { .. } | ParamSpec::Any { .. } => rows(param, false, out),
+            ParamSpec::Commuting(labels) => rows(*labels, true, out),
             ParamSpec::Equal { value, op } => eg.labels_equal(*op, value, since, out),
+            ParamSpec::Table(slot) if since.is_none() => out.tables.push((*slot, SmallVec::new())),
+            ParamSpec::Table(_) => {}
         }
     }
 
     /// Run host call `id` over `args`, decoding the words that name terms.
     pub(crate) fn call(
         &self,
-        eg: &Engine<L>,
+        eg: &Terms<'_, L>,
         externs: &dyn Externs<L>,
         id: ExternId,
         args: &[u64],
@@ -594,6 +677,18 @@ pub(crate) struct Lookup<'a, L: Label> {
     pub(crate) externs: &'a dyn Externs<L>,
 }
 
+impl<L: Label> Calls for Lookup<'_, L> {
+    fn call(&self, id: ExternId, args: &[u64], out: &mut [u64]) -> bool {
+        self.plan
+            .call(&self.eg.terms(), self.externs, id, args, out)
+    }
+
+    fn accepts(&self, id: ExternId, reference: tir_relational::Ref) -> bool {
+        let value = &self.plan.literals[id as usize];
+        self.eg.is_literal(reference.into(), value) == Some(true)
+    }
+}
+
 impl<L: Label> Host for Lookup<'_, L> {
     /// Labels only accumulate, so what a parameter resolves to is fixed
     /// between two readings that agree on how many there are.
@@ -605,21 +700,29 @@ impl<L: Label> Host for Lookup<'_, L> {
         self.plan.resolve(self.eg, param, since, out)
     }
 
+    /// A template whose operator the graph has never met matches nothing.
+    fn empty(&self, param: Param) -> bool {
+        match &self.plan.params[param as usize] {
+            ParamSpec::Template { op, .. } => !self.eg.holds_op(*op),
+            _ => false,
+        }
+    }
+}
+
+pub(crate) struct SharedLookup<'a, L: Label> {
+    pub(crate) terms: Terms<'a, L>,
+    pub(crate) plan: &'a Plan<L>,
+    pub(crate) externs: &'a (dyn Externs<L> + Sync),
+}
+
+impl<L: Label> Calls for SharedLookup<'_, L> {
     fn call(&self, id: ExternId, args: &[u64], out: &mut [u64]) -> bool {
-        self.plan.call(self.eg, self.externs, id, args, out)
+        self.plan.call(&self.terms, self.externs, id, args, out)
     }
 
     fn accepts(&self, id: ExternId, reference: tir_relational::Ref) -> bool {
         let value = &self.plan.literals[id as usize];
-        self.eg.is_literal(reference.into(), value) == Some(true)
-    }
-
-    /// A template whose operator the graph has never met matches nothing.
-    fn empty(&self, param: Param) -> bool {
-        match &self.plan.params[param as usize] {
-            ParamSpec::Template { op, .. } => self.eg.labels_with_op(*op).is_empty(),
-            _ => false,
-        }
+        self.terms.is_literal(reference.into(), value) == Some(true)
     }
 }
 
@@ -677,6 +780,87 @@ mod tests {
         assert_eq!(found[0].bindings.as_slice(), &[f, g, y, x].map(Ref::from));
     }
 
+    // Four unary labels in two tables, met by the pass in the order `met`
+    // and then `later`, an earlier graph having searched in between, before
+    // a graph of five rows over them is seeded, two of them of one class in
+    // different tables: every match of "any unary node", first by visiting
+    // the classes, then by scanning.
+    fn any_unary(met: &[usize], later: &[usize]) -> [Vec<(u32, tir_relational::Ref)>; 2] {
+        let labels = [
+            Term::op("g", &[ClassId(0)]),
+            Term::op("f", &[ClassId(0)]),
+            Term::typed("neg", 8, &[ClassId(0)]),
+            Term::typed("p", 8, &[ClassId(0)]),
+        ];
+        let plan = Plan::compile(Query::tree(
+            2,
+            0,
+            vec![Atom::Any {
+                accept: |_| true,
+                args: smallvec::smallvec![1],
+                class: 0,
+                row: None,
+                label: None,
+            }],
+        ));
+        let mut vocabulary = crate::Vocabulary::default();
+        for &at in met {
+            vocabulary.intern(&labels[at]);
+        }
+        if !later.is_empty() {
+            let mut earlier = Engine::over(vocabulary);
+            let x = earlier.add(Term::leaf("x"));
+            earlier.insert(labels[met[0]].clone(), &[x]);
+            let found = plan.search(
+                &earlier,
+                plan.roots(&earlier),
+                &|_, _| true,
+                false,
+                &NoExterns,
+            );
+            assert_eq!(found.len(), 1);
+            vocabulary = earlier.release();
+        }
+        for &at in later {
+            vocabulary.intern(&labels[at]);
+        }
+        let mut eg = Engine::over(vocabulary);
+        let x = eg.add(Term::leaf("x"));
+        let w = eg.add(Term::typed("w", 8, &[]));
+        let rows = [(3, x), (0, x), (2, w), (1, x), (3, w)]
+            .map(|(label, operand)| eg.insert(labels[label].clone(), &[operand]));
+        eg.union(rows[2], rows[4]).unwrap();
+        eg.rebuild();
+        let visited = plan
+            .search(&eg, plan.roots(&eg), &|_, _| true, false, &NoExterns)
+            .iter()
+            .map(|found| (found.root.0, found.bindings[1].into()))
+            .collect();
+        let host = Lookup {
+            eg: &eg,
+            plan: &plan,
+            externs: &NoExterns,
+        };
+        let mut caches = eg.caches.lock().unwrap();
+        let cache = caches.plan(plan.generic(), &eg.db, &host).unwrap();
+        let found = plan.generic().search_all(&eg.db, &host, cache);
+        let scanned = (0..found.len())
+            .map(|at| (found.get(at).0, found.get(at).1[1]))
+            .collect();
+        [visited, scanned]
+    }
+
+    #[test]
+    fn a_search_finds_matches_in_one_order_whatever_order_the_pass_met_the_labels_in() {
+        let found = any_unary(&[0, 1, 2, 3], &[]);
+        assert_eq!(found[0].len(), 5);
+        assert_eq!(found[1].len(), 5);
+        assert_eq!(any_unary(&[3, 2, 1, 0], &[]), found);
+        assert_eq!(any_unary(&[2, 0, 3, 1], &[]), found);
+        assert_eq!(any_unary(&[3, 0], &[2, 1]), found);
+        assert_eq!(any_unary(&[2], &[3, 1, 0]), found);
+    }
+
     /// Every assignment of `query`'s variables to classes that satisfies every
     /// atom, found by trying all of them.
     fn brute_force(eg: &Engine<Term>, query: &Query<Term>) -> Vec<Vec<ClassId>> {
@@ -697,7 +881,9 @@ mod tests {
     }
 
     fn holds(eg: &Engine<Term>, atom: &Atom<Term>, assignment: &[ClassId]) -> bool {
-        let class = assignment[atom.class() as usize];
+        let Some(class) = atom.class().map(|class| assignment[class as usize]) else {
+            return true;
+        };
         match atom {
             Atom::Literal { value, .. } => eg
                 .const_of(class)
@@ -707,6 +893,8 @@ mod tests {
             Atom::Const { .. } => eg.int_const(class).is_some(),
             Atom::Width { .. } => eg.width(class).is_some(),
             Atom::Conflicted { .. } => eg.conflicted(class),
+            Atom::Table { .. } => true,
+            Atom::Any { .. } => unreachable!("no property queries one"),
             Atom::Node { template, args, .. } => eg.rows(class).any(|row| {
                 let children: Vec<ClassId> = eg.children(row).iter().map(|c| c.class).collect();
                 if children.len() != args.len() || !template.matches_template(eg.node(row)) {
@@ -822,6 +1010,54 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].root, hit);
         assert_eq!(found[0].scalars[1], 3);
+    }
+
+    // A table atom is placed once the guard binding its key has run, and
+    // each row the key names is a match, in the order the rows were added.
+    #[test]
+    fn a_table_atom_matches_once_per_row_of_its_key() {
+        let mut eg = Engine::new();
+        let three = eg.add(Term::int(3)).class;
+        let y = eg.add(Term::leaf("y")).class;
+        let f = eg.add(Term::op("f", &[three, y])).class;
+        eg.rebuild();
+        let mut table = tir_relational::Words::new(2);
+        for row in [[3, 7], [4, 8], [3, 9]] {
+            table.push(&row);
+        }
+        let table = eg.add_words(std::sync::Arc::new(table));
+
+        let plan = Plan::compile(Query {
+            vars: 3,
+            scalars: 3,
+            root: 0,
+            atoms: vec![
+                Atom::Table {
+                    table,
+                    terms: vec![Expr::Scalar(1), Expr::Scalar(2)],
+                },
+                node(Term::op("f", &[ClassId(0), ClassId(0)]), &[1, 2], 0),
+                Atom::Fact {
+                    column: ColumnId::Const,
+                    key: 1,
+                    value: 0,
+                },
+            ],
+            guards: vec![Guard::Read {
+                term: Source::Label(0),
+                field: 0,
+                out: 1,
+            }],
+            nots: Vec::new(),
+        });
+        let table = Step::Table { atom: 0, keys: 1 };
+        assert_eq!(
+            plan.steps(),
+            &[Step::Atom(1), Step::Atom(2), Step::Guard(0), table]
+        );
+        let found = plan.search(&eg, [f], &|_, _| true, false, &NoExterns);
+        let values: Vec<u64> = found.iter().map(|found| found.scalars[2]).collect();
+        assert_eq!(values, [7, 9]);
     }
 
     /// `g(?a)` at a 32-bit carrier, with `?a` read as a base and an offset.
@@ -1003,6 +1239,114 @@ mod tests {
         assert_eq!(
             found.iter().map(|m| m.root).collect::<Vec<_>>(),
             vec![on_node.class]
+        );
+    }
+
+    // `g(?1)`, `?1 == ?2 + d`, `st(?3)` in `?2`: the operand's base holds the
+    // loop over itself, whichever offset the operand names the base at.
+    #[test]
+    fn a_self_loop_binds_its_operand_to_the_class_it_is_read_in() {
+        let (mut eg, x, y) = typed_graph();
+        let st = Term::typed("st", 32, &[ClassId(0)]);
+        for class in [x, y] {
+            let seed = eg.insert(st.clone(), &[class]);
+            eg.union(seed, class).unwrap();
+        }
+        let near = g_of(&mut eg, x);
+        let far = g_of(&mut eg, y);
+        eg.union(y, Ref::new(x.class, 5)).unwrap();
+        eg.rebuild();
+        let plan = Plan::compile(Query {
+            vars: 4,
+            scalars: 1,
+            root: 0,
+            atoms: vec![
+                node(Term::typed("g", 32, &[ClassId(0)]), &[1], 0),
+                Atom::Offset {
+                    key: 1,
+                    base: 2,
+                    offset: 0,
+                },
+                node(st, &[3], 2),
+            ],
+            guards: Vec::new(),
+            nots: Vec::new(),
+        });
+        let found = plan.search(
+            &eg,
+            [near.class, far.class],
+            &|_, _| true,
+            false,
+            &NoExterns,
+        );
+        let got: Vec<(ClassId, Option<Ref>, Option<Ref>, u64)> = found
+            .iter()
+            .map(|m| (m.root, m.binding(2), m.binding(3), m.scalars[0]))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (near.class, Some(x), Some(x), 0),
+                (far.class, Some(x), Some(x), 5)
+            ]
+        );
+    }
+
+    fn not_st(term: &Term) -> bool {
+        term.op != "st"
+    }
+
+    // `?(?1)` over every unary label but `st`, each priced by a table keyed
+    // by label and built before the graph had a row.
+    #[test]
+    fn any_label_of_an_arity_binds_its_id_for_a_client_table() {
+        let mut eg = Engine::new();
+        let g = Term::typed("g", 32, &[ClassId(0)]);
+        let k = Term::op("k", &[ClassId(0)]);
+        let mut prices = tir_relational::Words::new(2);
+        prices.push(&[eg.intern(&g).0, 10]);
+        prices.push(&[eg.intern(&k).0, 20]);
+        let m = Term::op("m", &[ClassId(0)]);
+        prices.push(&[eg.intern(&m).0, 30]);
+        let table = eg.add_words(std::sync::Arc::new(prices));
+        let x = eg.add(Term::typed("x", 32, &[]));
+        let on_g = eg.insert(g, &[x]);
+        let on_k = eg.insert(k, &[x]);
+        eg.insert(Term::op("st", &[ClassId(0)]), &[x]);
+        eg.insert(Term::op("k", &[ClassId(0), ClassId(0)]), &[x, x]);
+        eg.rebuild();
+        let plan = Plan::compile(Query {
+            vars: 2,
+            scalars: 3,
+            root: 0,
+            atoms: vec![
+                Atom::Any {
+                    accept: not_st,
+                    args: SmallVec::from_slice(&[1]),
+                    class: 0,
+                    row: None,
+                    label: Some(1),
+                },
+                Atom::Table {
+                    table,
+                    terms: vec![Expr::Scalar(1), Expr::Scalar(2)],
+                },
+            ],
+            guards: Vec::new(),
+            nots: Vec::new(),
+        });
+        let priced = |eg: &Engine<Term>| -> Vec<(ClassId, u64)> {
+            let roots: Vec<ClassId> = eg.class_ids().collect();
+            let found = plan.search(eg, roots, &|_, _| true, false, &NoExterns);
+            found.iter().map(|m| (m.root, m.scalars[2])).collect()
+        };
+        assert_eq!(priced(&eg), vec![(on_g.class, 10), (on_k.class, 20)]);
+        // A label the graph meets after the plan first ran is read as well.
+        let on_m = eg.insert(m, &[x]);
+        eg.rebuild();
+        assert_eq!(
+            priced(&eg),
+            vec![(on_g.class, 10), (on_k.class, 20), (on_m.class, 30)]
         );
     }
 

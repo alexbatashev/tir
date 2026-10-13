@@ -701,6 +701,95 @@ fn comparison_candidate(
     (g, root)
 }
 
+fn masked_candidate(
+    kind: tir_symbolic::lang::SymKind,
+    width: u32,
+) -> (tir_symbolic::sem::SemGraph, tir_adt::NodeId) {
+    use tir_symbolic::lang::{SymKind, SymPayload};
+    let mut g = tir_symbolic::sem::SemGraph::new();
+    let a = g.add_node(SymKind::Symbol);
+    g.set_leaf_data(a, SymPayload::SymbolId(0));
+    let b = g.add_node(SymKind::Symbol);
+    g.set_leaf_data(b, SymPayload::SymbolId(1));
+    let masked = g.add_node(SymKind::And);
+    g.add_edge(masked, a);
+    g.add_edge(masked, b);
+    let zero = g.add_node(SymKind::Constant);
+    g.set_leaf_data(zero, tir_symbolic::sem::int_payload(width, 0, false));
+    let root = g.add_node(kind);
+    g.add_edge(root, masked);
+    g.add_edge(root, zero);
+    (g, root)
+}
+
+fn masked_below(
+    graph: &tir_symbolic::sem::SemGraph,
+    root: tir_adt::NodeId,
+    symbols: &[u32],
+    width: u32,
+    widths: &[u32],
+) -> tir_symbolic::sem::SemGraph {
+    use tir_symbolic::lang::{SymKind, SymPayload};
+    let mut masks = tir_symbolic::sem::SemGraph::new();
+    let substitute: HashMap<u32, tir_adt::NodeId> = symbols
+        .iter()
+        .map(|&symbol| {
+            let leaf = masks.add_node(SymKind::Symbol);
+            masks.set_leaf_data(leaf, SymPayload::SymbolId(symbol));
+            let ones = masks.add_node(SymKind::Constant);
+            let low = (1u64 << width) - 1;
+            masks.set_leaf_data(
+                ones,
+                tir_symbolic::sem::int_payload(widths[symbol as usize], low, false),
+            );
+            let masked = masks.add_node(SymKind::And);
+            masks.add_edge(masked, leaf);
+            masks.add_edge(masked, ones);
+            (symbol, masked)
+        })
+        .collect();
+    let mut out = tir_symbolic::sem::SemGraph::new();
+    compose_guard_with_definer(
+        &mut out,
+        graph,
+        root,
+        &substitute,
+        &masks,
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+    );
+    out
+}
+
+// Sound where the composed condition reads nothing of `register` above the
+// width once `immediate` is an unsigned field that wide:
+// a narrower value then answers the instruction.
+fn masked_widths(
+    composed: &tir_symbolic::sem::SemGraph,
+    root: tir_adt::NodeId,
+    symbols: &ComparisonSymbols,
+    register: u32,
+    immediate: u32,
+) -> Vec<u32> {
+    use tir_symbolic::sem::{EquivalenceOracle, FuzzOracle, SmtOracle};
+    if symbols.floating() {
+        return Vec::new();
+    }
+    let fuzz = FuzzOracle::default();
+    let narrower = [1, 8, 16, 32]
+        .into_iter()
+        .filter(|&width| width < symbols.widths[register as usize]);
+    narrower
+        .filter(|&width| {
+            let field = masked_below(composed, root, &[immediate], width, &symbols.widths);
+            let both = [immediate, register];
+            let low = masked_below(composed, root, &both, width, &symbols.widths);
+            fuzz.equivalent(&field, &low, &symbols.widths)
+                && SmtOracle.equivalent(&field, &low, &symbols.widths)
+        })
+        .collect()
+}
+
 /// The `cmpf` graph for an equality predicate: floating equality is compound,
 /// so it has no single-kind candidate.
 fn floating_equality_candidate(
@@ -748,10 +837,14 @@ fn find_equivalent_comparison(
             });
     }
     let fuzz = FuzzOracle::default();
+    let masked = EQUALITY
+        .iter()
+        .map(|(kind, _)| masked_candidate(*kind, symbols.widths[0]));
     EQUALITY
         .iter()
         .chain(ORDERED)
         .map(|(kind, swap)| comparison_candidate(*kind, *swap))
+        .chain(masked)
         .find(|(candidate, _)| {
             fuzz.equivalent(composed, candidate, &symbols.widths)
                 && SmtOracle.equivalent(composed, candidate, &symbols.widths)

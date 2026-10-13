@@ -48,15 +48,27 @@ pub(crate) fn regions_under(context: &Context, root: OpId) -> Vec<RegionId> {
 /// one. An operation in a region nobody demands is demanded by nothing, however
 /// its own region reads it.
 pub(crate) fn demanded_ops(context: &Context, roots: &[RegionId]) -> crate::IdSet<OpId> {
+    demanded_ops_with(context, roots, &[], &|_| &[])
+}
+
+pub(crate) fn demanded_ops_with<'a>(
+    context: &Context,
+    roots: &[RegionId],
+    seeds: &[OpId],
+    implicit: &dyn Fn(OpId) -> &'a [OpId],
+) -> crate::IdSet<OpId> {
+    // A callee names a function already lowered, whose op is gone.
     let defining = |values: Vec<ValueId>| {
         values
             .into_iter()
             .filter_map(|value| context.get_value(value).defining_op())
+            .filter(|&op| context.has_operation(op))
             .collect::<Vec<_>>()
     };
     let mut worklist: Vec<OpId> = roots
         .iter()
         .flat_map(|&region| defining(context.get_region(region).results()))
+        .chain(seeds.iter().copied())
         .collect();
     let mut demanded = crate::IdSet::new();
     while let Some(op) = worklist.pop() {
@@ -65,6 +77,7 @@ pub(crate) fn demanded_ops(context: &Context, roots: &[RegionId]) -> crate::IdSe
         }
         let instance = context.get_op(op);
         worklist.extend(defining(instance.operands().to_vec()));
+        worklist.extend_from_slice(implicit(op));
         for region in instance.regions() {
             worklist.extend(defining(context.get_region(region).results()));
         }

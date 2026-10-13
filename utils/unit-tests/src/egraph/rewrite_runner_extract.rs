@@ -275,11 +275,27 @@ fn math_rules() -> Vec<Rule<Math>> {
                 HeadOp::Union(0, 3),
             ],
         ),
+        // add(x, neg(y)) => x = y, and then neg(x): a write keyed by what the
+        // equate before it, of this match or an earlier one, merged.
+        rule(
+            "add-neg",
+            5,
+            vec![
+                node(Math::Add([Id::from_raw(1), Id::from_raw(2)]), &[1, 2], 0),
+                node(Math::Neg([Id::from_raw(3)]), &[3], 2),
+            ],
+            vec![
+                HeadOp::Union(1, 3),
+                insert(Math::Neg([Id::from_raw(1)]), &[1], 4),
+                HeadOp::Union(2, 4),
+            ],
+        ),
     ]
 }
 
 /// The pre-semi-naive driver: every round searches every rule over the whole
-/// graph. The reference the delta rounds must agree with.
+/// graph and applies the matches one at a time, with one rebuild at its end.
+/// The reference the delta rounds and the batched heads must agree with.
 fn saturate_naive(
     g: &mut Engine<Math>,
     rules: &[&Rule<Math>],
@@ -304,7 +320,7 @@ fn saturate_naive(
             .collect();
         for (rule, matches) in &searched {
             for m in matches {
-                g.apply_head(&rule.head, rule.head_vars, m);
+                g.apply_head(&rule.head, rule.head_vars, std::slice::from_ref(m));
             }
         }
         g.rebuild();
@@ -376,12 +392,16 @@ fn expr_strategy() -> impl proptest::strategy::Strategy<Value = Expr> {
 proptest::proptest! {
     #![proptest_config(proptest::prelude::ProptestConfig::with_cases(500))]
 
-    /// Semi-naive rounds skip roots whose downward cone did not change; the
-    /// fixpoint they reach must be the one a full search per round reaches.
+    /// Semi-naive rounds skip roots whose downward cone did not change, and
+    /// apply a rule's matches as one batch with a rebuild after each rule;
+    /// the fixpoint they reach must be the one a full search per round,
+    /// applied a match at a time, reaches. Under a layer too: `assumed`
+    /// equates two of the roots in one before the saturation.
     #[test]
     fn semi_naive_equals_naive(
         exprs in proptest::collection::vec(expr_strategy(), 1..4),
-        mask in 1u32..64,
+        mask in 1u32..128,
+        assumed in proptest::option::of((0usize..4, 0usize..4)),
     ) {
         let all = math_rules();
         let rules: Vec<&Rule<Math>> = all
@@ -395,14 +415,23 @@ proptest::proptest! {
             exprs.iter().map(|e| build(g, e)).collect()
         };
 
+        let assume = |g: &mut Engine<Math>, roots: &[Id]| {
+            g.rebuild();
+            if let Some((a, b)) = assumed {
+                g.push_context();
+                let _ = g.union(roots[a % roots.len()], roots[b % roots.len()]);
+                g.rebuild();
+            }
+        };
+
         let mut naive = Engine::new();
         let naive_roots = seed(&mut naive);
-        naive.rebuild();
+        assume(&mut naive, &naive_roots);
         saturate_naive(&mut naive, &rules, 30, 10_000);
 
         let mut semi = Engine::new();
         let semi_roots = seed(&mut semi);
-        semi.rebuild();
+        assume(&mut semi, &semi_roots);
         let owned: Vec<Rule<Math>> = rules.iter().map(|&rule| rule.clone()).collect();
         semi.saturate_rules(&owned, &NoExterns, 30, 10_000);
 

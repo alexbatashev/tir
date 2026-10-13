@@ -24,7 +24,7 @@ mod saturate;
 #[cfg(test)]
 mod testing;
 
-pub use engine::{ClassRef, Contradiction, Engine, Rows};
+pub use engine::{ClassRef, Contradiction, Engine, Rows, Vocabulary};
 pub use extract::Extraction;
 pub use label::{Carrier, Label};
 pub use query::{

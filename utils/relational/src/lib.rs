@@ -28,6 +28,10 @@
 //! least-cost fold a client reads a solution off with. They name tables,
 //! columns and cells, and ask their client for whatever means more than that.
 //!
+//! [`Words`] is a client's own table: rows of words, built once and shared by
+//! every database whose queries range over it, for what a rule set knows and
+//! no id names.
+//!
 //! The e-graph is one such client and lives in its own crate, `tir-egraph`.
 
 pub mod chunk;
@@ -42,12 +46,16 @@ pub mod saturate;
 pub mod store;
 mod telemetry;
 pub mod unionfind;
+mod words;
 
 pub use column::{Column, Fact, Join};
 pub use csr::Csr;
-pub use db::{Database, Dissolve, Groups, LatticeId, Marks, SpaceId, Stats};
+pub use db::{
+    Core, Database, Dissolve, Groups, LatticeId, Marks, Placed, Placement, SpaceId, Stats,
+};
 pub use query::{Cmp, Expr, Scalar, Step, Var};
 pub use telemetry::{RoundStats, Timer, report_saturation};
+pub use words::Words;
 
 pub(crate) type FxHashMap<K, V> = std::collections::HashMap<K, V, tir_adt::FxBuildHasher>;
 

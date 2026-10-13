@@ -32,6 +32,13 @@ impl Sym {
 }
 
 impl ENode for Sym {
+    type Names = ();
+    type SortKey = (u32, usize);
+
+    fn sort_key(&self, _: &()) -> Self::SortKey {
+        (self.op, self.children.len())
+    }
+
     fn children(&self) -> &[Id] {
         &self.children
     }

@@ -165,8 +165,8 @@ pub fn generate(file: &File) -> Result<String, Vec<Diagnostic>> {
         quote! { #base => #table(id % PDL_EXTERN_STRIDE, args, &mut *out), }
     });
     format_rust(quote! {
-        pub(super) fn generated_ruleset(context: &Context, pointer_width: Option<u32>) -> Ruleset {
-            let mut ruleset = Ruleset::new(context, pointer_width);
+        pub(super) fn generated_ruleset(context: &Context) -> Ruleset {
+            let mut ruleset = Ruleset::new();
             #(#initializers)*
             ruleset
         }

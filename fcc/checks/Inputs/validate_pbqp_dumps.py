@@ -40,7 +40,7 @@ def validate_dump(path):
     }
     assert data["format"] == "tir-pbqp"
     assert data["version"] == 1
-    assert data["kind"] in {"isel", "regalloc"}
+    assert data["kind"] == "regalloc"
     assert path.name.startswith(data["kind"] + "-")
     assert data["inf_cost"] == INF_COST
 
@@ -76,9 +76,9 @@ def capture(fcc, source):
         result = compile_source(fcc, source, root / "output.s", dump_dir)
         assert result.returncode == 0, result.stderr.decode()
         dumps = sorted(dump_dir.glob("*.json"))
-        assert len(dumps) > 1
-        assert all(re.fullmatch(r"(isel|regalloc)-\d+-\d+\.json", path.name) for path in dumps)
-        assert {validate_dump(path) for path in dumps} == {"isel", "regalloc"}
+        assert dumps
+        assert all(re.fullmatch(r"regalloc-\d+-\d+\.json", path.name) for path in dumps)
+        assert {validate_dump(path) for path in dumps} == {"regalloc"}
 
 
 def disabled(fcc, source):
@@ -165,9 +165,9 @@ def concurrent(fcc, source):
             assert process.returncode == 0, stderr.decode()
 
         dumps = list(dump_dir.glob("*.json"))
-        assert len(dumps) >= 4
+        assert len(dumps) >= 2
         assert len({path.name for path in dumps}) == len(dumps)
-        assert {validate_dump(path) for path in dumps} == {"isel", "regalloc"}
+        assert {validate_dump(path) for path in dumps} == {"regalloc"}
 
 
 def main():

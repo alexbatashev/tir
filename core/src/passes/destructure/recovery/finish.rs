@@ -1,9 +1,12 @@
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::BTreeSet;
+
+use smallvec::SmallVec;
 
 use super::{
     BlockId, Context, ControlDefinition, ControlId, ControlOutcome, ControlPortId, Edge, Edges,
-    GammaPlan, OpId, OperationRef, PassError, Point, Prepared, RecoveryError, RecoveryPlan,
-    RegionId, SequenceEnd, Test, ThetaPlan, ValueBinding, ValueId, values_read, values_then_states,
+    GammaPlan, HashMap, HashSet, OpId, OperationRef, PassError, Point, Prepared, RecoveryError,
+    RecoveryPlan, RegionId, SequenceEnd, Test, ThetaPlan, ValueBinding, ValueId, values_read,
+    values_then_states,
 };
 
 /// Bindings name values at the originating fragment, not at an intermediate
@@ -109,9 +112,9 @@ pub(crate) fn emit_recovery(
     recovery: &RecoveryPlan,
 ) -> Result<(), RecoveryError> {
     let mut prepared = Prepared::analyze(context, region, edges, recovery)?;
-    let mut constants = HashMap::new();
-    let mut ambiguous_facts = HashSet::new();
-    let mut projected_types = HashMap::new();
+    let mut constants = HashMap::default();
+    let mut ambiguous_facts = HashSet::default();
+    let mut projected_types = HashMap::default();
     for (&value, &ty) in &recovery.control_types {
         let mapped = edges.value(value);
         if projected_types
@@ -178,15 +181,15 @@ pub(crate) fn emit_recovery(
         recovery,
         prepared,
         fragments: Vec::new(),
-        computations: HashMap::new(),
-        controls: HashMap::new(),
-        definitions: HashMap::new(),
-        cycles: HashMap::new(),
+        computations: HashMap::default(),
+        controls: HashMap::default(),
+        definitions: HashMap::default(),
+        cycles: HashMap::default(),
         constants,
         ambiguous_facts,
         literals: hoisted.iter().copied().collect(),
         theta_regions,
-        lost_direct: HashSet::new(),
+        lost_direct: HashSet::default(),
     };
     let entry = finish.new_fragment(hoisted);
     let point = Point {
@@ -202,25 +205,36 @@ pub(crate) fn emit_recovery(
     finish.emit(region, entry).map_err(RecoveryError::Invalid)
 }
 
+// What `op` reads: its operands off their column, and what the regions it
+// holds read where it holds any.
+fn read_by(context: &Context, op: OpId) -> SmallVec<[ValueId; 4]> {
+    let operands = context.with_rows(|rows| {
+        let row = rows.op_cells(op);
+        (!row.owns_regions()).then(|| row.operands().collect())
+    });
+    operands.unwrap_or_else(|| values_read(context, op).into())
+}
+
 fn movable_literal(
     context: &Context,
     edges: &dyn Edges,
     constants: &HashMap<ValueId, ControlOutcome>,
     op: OpId,
 ) -> bool {
-    let op = context.get_op(op);
-    if op.results().is_empty()
-        || !op.operands().is_empty()
-        || !op.state_results().is_empty()
-        || !op.regions().is_empty()
-        || !edges.implicit_inputs(op.id).is_empty()
-        || !op
-            .results()
-            .iter()
-            .all(|value| constants.contains_key(value))
-    {
+    let literal = context.with_rows(|rows| {
+        let row = rows.op_cells(op);
+        let mut results = row.results();
+        row.operands().len() == 0
+            && !row.owns_regions()
+            && results.len() != 0
+            && results.all(|value| {
+                constants.contains_key(&value) && !context.is_state_type(rows.value_type(value))
+            })
+    });
+    if !literal || !edges.implicit_inputs(op).is_empty() {
         return false;
     }
+    let op = context.get_op(op);
     if let Some(machine) = op
         .clone()
         .as_interface::<dyn crate::backend::MachineInstruction>()
@@ -247,7 +261,7 @@ impl Finish<'_> {
     }
 
     fn canonical(&self, point: Point) -> Route {
-        let mut facts = HashMap::new();
+        let mut facts = HashMap::default();
         for entry in self
             .prepared
             .entry_facts
@@ -266,7 +280,7 @@ impl Finish<'_> {
             point,
             bindings: Vec::new(),
             facts,
-            control_facts: HashMap::new(),
+            control_facts: HashMap::default(),
             skip_control: None,
             // A new fragment starts a new transfer, regardless of its entries.
             loops_back: false,
@@ -294,7 +308,7 @@ impl Finish<'_> {
     }
 
     fn fact(&self, route: &Route, value: ValueId) -> Option<ControlOutcome> {
-        self.fact_with(route, value, &mut HashSet::new())
+        self.fact_with(route, value, &mut HashSet::default())
     }
 
     fn fact_with(
@@ -520,7 +534,7 @@ impl Finish<'_> {
     }
 
     fn advance(&self, route: &mut Route) -> Result<Destination, PassError> {
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         loop {
             if let Some(&control) = self.prepared.control_at.get(&route.point) {
                 if route.skip_control == Some(control) {
@@ -1048,17 +1062,16 @@ impl Finish<'_> {
             let mut defined: HashSet<ValueId> = if index == root.0 {
                 ports.iter().copied().collect()
             } else {
-                HashSet::new()
+                HashSet::default()
             };
             let mut read = BTreeSet::new();
             for &op in &fragment.ops {
-                let instance = self.context.get_op(op);
-                let mut inputs = values_read(self.context, op);
+                let mut inputs = read_by(self.context, op);
                 for input in self.edges.implicit_inputs(op) {
-                    inputs.extend(self.context.get_op(input).results());
+                    inputs.extend(self.context.op_results(input));
                 }
                 read.extend(inputs.into_iter().filter(|value| !defined.contains(value)));
-                defined.extend(instance.results());
+                defined.extend(self.context.op_results(op));
             }
             read.extend(
                 self.branch_reads(&fragment.term)?
@@ -1087,36 +1100,33 @@ impl Finish<'_> {
                 .successors()
                 .into_iter()
                 .flat_map(|edge| edge.bindings.iter().map(|binding| binding.current));
-            for value in read.iter().copied().chain(routed) {
-                if self
-                    .context
-                    .get_value(value)
-                    .defining_op()
-                    .is_some_and(|op| self.context.has_operation(op) && !all_ops.contains(&op))
-                {
-                    globals.insert(value);
+            self.context.with_rows(|rows| {
+                for value in read.iter().copied().chain(routed) {
+                    let defined = rows.value_def(value);
+                    if defined.is_some_and(|op| rows.op_live(op) && !all_ops.contains(&op)) {
+                        globals.insert(value);
+                    }
                 }
-            }
+            });
             defs.push(defined);
             uses.push(read);
         }
         let mut live = uses;
-        let mut queue: VecDeque<_> = (0..self.fragments.len()).collect();
-        let mut queued = vec![true; self.fragments.len()];
-        while let Some(index) = queue.pop_front() {
-            queued[index] = false;
-            let needed = live[index].clone();
+        // Each value a fragment came to need is handed to its predecessors
+        // once.
+        let mut news: Vec<(usize, ValueId)> = live
+            .iter()
+            .enumerate()
+            .flat_map(|(index, values)| values.iter().map(move |&value| (index, value)))
+            .collect();
+        while let Some((index, value)) = news.pop() {
             for (source, edge) in &incoming[index] {
-                let before = live[source.0].len();
-                for &value in &needed {
-                    let value = Self::resolved(&edge.bindings, value);
-                    if !defs[source.0].contains(&value) && !globals.contains(&value) {
-                        live[source.0].insert(value);
-                    }
-                }
-                if before != live[source.0].len() && !queued[source.0] {
-                    queued[source.0] = true;
-                    queue.push_back(source.0);
+                let value = Self::resolved(&edge.bindings, value);
+                if !defs[source.0].contains(&value)
+                    && !globals.contains(&value)
+                    && live[source.0].insert(value)
+                {
+                    news.push((source.0, value));
                 }
             }
         }
@@ -1165,8 +1175,8 @@ impl Finish<'_> {
             demands,
             defs,
             incoming,
-            aliases: HashMap::new(),
-            parameters: HashMap::new(),
+            aliases: HashMap::default(),
+            parameters: HashMap::default(),
             blocks: Vec::new(),
             available,
         })
@@ -1212,11 +1222,11 @@ impl Finish<'_> {
     }
 
     fn discard_unused_literals(&mut self, ssa: &Ssa, root: Node) -> Result<(), PassError> {
-        let mut used = HashSet::new();
+        let mut used = HashSet::default();
         for fragment in &self.fragments {
             for &op in &fragment.ops {
                 if !self.literals.contains(&op) {
-                    used.extend(values_read(self.context, op));
+                    used.extend(read_by(self.context, op));
                 }
             }
             used.extend(self.branch_reads(&fragment.term)?);
@@ -1233,8 +1243,7 @@ impl Finish<'_> {
             !self.literals.contains(&op)
                 || self
                     .context
-                    .get_op(op)
-                    .results()
+                    .op_results(op)
                     .iter()
                     .any(|value| used.contains(value))
         });
@@ -1250,7 +1259,7 @@ impl Finish<'_> {
         for (index, fragment) in self.fragments.iter().enumerate() {
             let mut read = Vec::new();
             for &op in &fragment.ops {
-                read.extend(values_read(self.context, op));
+                read.extend(read_by(self.context, op));
             }
             read.extend(self.branch_reads(&fragment.term)?);
             if let Term::Leave { values, states } = &fragment.term {
@@ -1280,7 +1289,7 @@ impl Finish<'_> {
             .collect();
         let mut placements = vec![Vec::new(); self.fragments.len()];
         for op in literals {
-            let results = self.context.get_op(op).results();
+            let results = self.context.op_results(op);
             let uses: Vec<_> = local_reads
                 .iter()
                 .enumerate()
@@ -1332,7 +1341,7 @@ impl Finish<'_> {
                 .any(|value| local_reads[node.0].contains(&SsaValue::Definition(*value)));
             let mut position = self.fragments[node.0].ops.len();
             for (index, &held) in self.fragments[node.0].ops.iter().enumerate() {
-                let reads = values_read(self.context, held);
+                let reads = read_by(self.context, held);
                 if reads.into_iter().any(|raw| {
                     ssa.at(node, raw).is_ok_and(|value| {
                         let value = ssa.canonical(value);
@@ -1392,7 +1401,7 @@ impl Finish<'_> {
             }
         }
         let mut groups = Vec::new();
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         for (index, predecessor) in previous.iter().enumerate() {
             if predecessor.is_some() {
                 continue;
@@ -1545,20 +1554,16 @@ impl Finish<'_> {
             let fragment = &self.fragments[index];
             let block = ssa.blocks[index];
             for &op in &fragment.ops {
-                let instance = self.context.get_op(op);
-                let operands = instance
-                    .operands()
-                    .iter()
-                    .map(|&value| ssa.value(Node(index), value))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let renames: Vec<_> = instance
-                    .operands()
-                    .iter()
-                    .copied()
-                    .zip(operands)
-                    .filter(|(source, current)| source != current)
-                    .collect();
-                super::super::rename_within(self.context, op, &renames);
+                let mut renames: SmallVec<[(ValueId, ValueId); 4]> = SmallVec::new();
+                for source in self.context.op_operands(op) {
+                    let current = ssa.value(Node(index), source)?;
+                    if source != current {
+                        renames.push((source, current));
+                    }
+                }
+                if !renames.is_empty() {
+                    super::super::rename_within(self.context, op, &renames);
+                }
                 if let Some(region) = self.context.parent_nodes_region(op) {
                     self.context.remove_from_region(region, op);
                 }
