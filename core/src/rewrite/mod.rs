@@ -54,7 +54,9 @@ pub(crate) const ADDRESS: usize = 0;
 pub(crate) const BYTES: usize = 1;
 
 const ITER_LIMIT: usize = 30;
-const NODE_LIMIT: usize = 100_000;
+// How far saturation may grow the graph it was given: a seeded graph past a
+// fixed size would otherwise be left unsearched.
+const NODE_GROWTH: usize = 100_000;
 
 /// The spelling a reference already has, so a form rebuilt for one reader
 /// answers every reader that can see it. `add_auto` places a rebuilt form where
@@ -135,8 +137,9 @@ impl<'a, R: Rewrite> Driver<'a, R> {
     pub(crate) fn saturate(&mut self) {
         let set = self.pass.rules();
         crate::sem::workload::dump(self.name, &self.eg, &set.rules);
+        let limit = self.eg.total_size().saturating_add(NODE_GROWTH);
         self.eg
-            .saturate_rules(&set.rules, &*set.externs, ITER_LIMIT, NODE_LIMIT);
+            .saturate_rules(&set.rules, &*set.externs, ITER_LIMIT, limit);
         crate::memstats::egraph_census(self.name, &self.eg);
     }
 
@@ -195,8 +198,9 @@ impl<'a, R: Rewrite> Driver<'a, R> {
                 }
                 self.eg.rebuild();
                 let set = self.pass.rules();
+                let limit = self.eg.total_size().saturating_add(NODE_GROWTH);
                 self.eg
-                    .saturate_rules(&set.rules, &*set.externs, ITER_LIMIT, NODE_LIMIT);
+                    .saturate_rules(&set.rules, &*set.externs, ITER_LIMIT, limit);
                 self.hypothesize_within(loops, order, Some(holder.op));
                 let refuted: Vec<bool> = hypotheses
                     .iter()
