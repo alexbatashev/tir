@@ -1,0 +1,35 @@
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
+
+// A read of `*r`, two more reads of the same state, and a write to `*r` that
+// observes the join of the three. One instruction covers the read and the
+// write. It is the write: it observes the join and publishes the body's
+// state, and the join reads the state the covered read observed.
+
+module {
+  %fn_acc = func.func @acc(%r: !ptr.p, %a: !ptr.p, %b: !ptr.p, %n: !i32) {
+    %zero = constant {value = 0} : !i32
+    %one = constant {value = 1} : !i32
+    %entry = state.entry_state : !state<memory>
+    %last, %left = scf.for %i = %zero to %n step %one (%m = %entry) {
+      %wide = extsi %i : !i64
+      %sum, %m1 = ptr.load %r state(%m) : !i32
+      %pa = ptr.ptradd %a, %wide : !ptr.p
+      %x, %m2 = ptr.load %pa state(%m) : !i32
+      %pb = ptr.ptradd %b, %wide : !ptr.p
+      %y, %m3 = ptr.load %pb state(%m) : !i32
+      %product = muli %x, %y : !i32
+      %next = addi %sum, %product : !i32
+      %joined = state.join state(%m2, %m3, %m1)
+      %written = ptr.store %next, %r state(%joined)
+      -> %written
+    }
+    -> %left
+  }
+  module_end
+}
+
+// CHECK: ^bb2(%[[M:[0-9]+]]: !state<memory>):
+// CHECK: %[[A:[0-9]+]] = x86_64.mov_load32{{.*}} state(%[[M]])
+// CHECK: %[[B:[0-9]+]] = x86_64.imul32_mem {{.*}} state(%[[M]])
+// CHECK: %[[J:[0-9]+]] = state.join state(%[[A]], %[[B]], %[[M]])
+// CHECK: x86_64.add32_mem_rmw {{.*}} state(%[[J]])

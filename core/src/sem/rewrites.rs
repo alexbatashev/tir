@@ -5,10 +5,10 @@
 
 use std::sync::OnceLock;
 
-use tir_relational::Rule;
+use tir_egraph::Rule;
 
 use super::SymKind;
-use super::axioms::pdl::axioms_from_pdl;
+use super::axioms::pdl::isel_axioms;
 use super::axioms::{Axiom, Folding, Interpretation};
 use super::egraph::SemEGraph;
 use super::node::SemNode;
@@ -40,6 +40,10 @@ impl Theory {
         self.axioms.push(axiom);
     }
 
+    pub(crate) fn axioms(&self) -> &[Axiom] {
+        &self.axioms
+    }
+
     /// Add a rule that is not an axiom — a target's own bridge, or a test's.
     pub fn push_rule(&mut self, rule: Rule<SemNode>) {
         self.rules.push(rule);
@@ -52,7 +56,7 @@ impl Theory {
     ) -> Self {
         use super::{SymPayload, template_node};
         use smallvec::smallvec;
-        use tir_relational::{Atom, HeadOp, LabelFill, Plan, Query};
+        use tir_egraph::{Atom, HeadOp, LabelFill, Plan, Query};
 
         let constant = |width, value| {
             template_node(
@@ -150,7 +154,7 @@ impl Default for SaturationLimits {
 
 /// Saturate `eg` with `theory` under `limits`, then run the theory's
 /// post-saturation rules once over the fixpoint. See
-/// [`tir_relational::Engine::saturate_rules`] for the round loop and for what a
+/// [`tir_egraph::Engine::saturate_rules`] for the round loop and for what a
 /// stop on a limit leaves behind.
 ///
 /// Round 0 starts from the change log rather than from the whole graph, so an
@@ -173,13 +177,11 @@ pub fn saturate(ctx: &Context, eg: &mut SemEGraph, theory: &Theory, limits: Satu
 
 /// The target-independent semantic invariants every rule set gets.
 pub fn discover_rewrites() -> Theory {
-    // The rule file is one per process; parsing it again for every pass built
+    // The rule set is one per process; reading it again for every pass built
     // would be the only work here that does not depend on the graph.
     static AXIOMS: OnceLock<Vec<Axiom>> = OnceLock::new();
-    let axioms = AXIOMS.get_or_init(|| {
-        axioms_from_pdl(include_str!("../../defs/isel.pdl"))
-            .expect("core/defs/isel.pdl must be a valid rule set")
-    });
+    let axioms =
+        AXIOMS.get_or_init(|| isel_axioms().expect("core/defs/isel.pdl must be a valid rule set"));
     let mut theory = Theory::default();
     for axiom in axioms.iter().cloned() {
         theory.push(axiom);

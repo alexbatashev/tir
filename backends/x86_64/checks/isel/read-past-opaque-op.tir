@@ -1,0 +1,125 @@
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
+
+// A read folds into its reader only where nothing else the reader waits for
+// follows a write after the read. A call, a gate and a loop are in the graph
+// as what they read, so the order runs through them: the read ahead of one
+// stays an instruction of its own, and the read after it folds.
+
+module {
+  %g = func.declare @g() -> !i32
+  %fn_past_call = func.func @past_call(%p: !ptr.p<!i32>, %q: !ptr.p<!i32>) -> !i32 {
+    %l = ptr.load %p : !i32
+    %c = func.call %g() -> !i32
+    %x = ptr.load %q : !i32
+    %r = addi %l, %x : !i32
+    func.return %r
+  }
+  %fn_no_call = func.func @no_call(%p: !ptr.p<!i32>, %q: !ptr.p<!i32>) -> !i32 {
+    %l = ptr.load %p : !i32
+    %x = ptr.load %q : !i32
+    %r = addi %l, %x : !i32
+    func.return %r
+  }
+  %fn_call_result = func.func @call_result(%p: !ptr.p<!i32>) -> !i32 {
+    %l = ptr.load %p : !i32
+    %c = func.call %g() -> !i32
+    %r = addi %l, %c : !i32
+    func.return %r
+  }
+  %fn_past_gate = func.func @past_gate(%p: !ptr.p<!i32>, %q: !ptr.p<!i32>, %c: !i1, %v: !i32) -> !i32 {
+    %l = ptr.load %p : !i32
+    cfg.cond_br %c, ^bb1, ^bb2
+  ^bb1:
+    ptr.store %v, %q
+    cfg.br ^bb2
+  ^bb2:
+    %x = ptr.load %q : !i32
+    %r = addi %l, %x : !i32
+    func.return %r
+  }
+  %fn_gate_result = func.func @gate_result(%p: !ptr.p<!i32>, %q: !ptr.p<!i32>, %c: !i1, %v: !i32) -> !i32 {
+    %l = ptr.load %p : !i32
+    cfg.cond_br %c, ^bb1, ^bb2(%v : !i32)
+  ^bb1:
+    %y = ptr.load %q : !i32
+    cfg.br ^bb2(%y : !i32)
+  ^bb2(%x: !i32):
+    %r = addi %x, %l : !i32
+    func.return %r
+  }
+  %fn_past_loop = func.func @past_loop(%p: !ptr.p<!i32>, %q: !ptr.p<!i32>, %n: !i32) -> !i32 {
+    %l = ptr.load %p : !i32
+    %zero = constant {value = 0} : !i32
+    %one = constant {value = 1} : !i32
+    cfg.br ^bb1(%zero : !i32)
+  ^bb1(%i: !i32):
+    ptr.store %i, %q
+    %next = addi %i, %one : !i32
+    %more = cmpi %next, %n {predicate = "slt"} : !i1
+    cfg.cond_br %more, ^bb1(%next : !i32), ^bb2
+  ^bb2:
+    %x = ptr.load %q : !i32
+    %r = addi %l, %x : !i32
+    func.return %r
+  }
+  %fn_reread = func.func @reread(%p: !ptr.p, %q: !ptr.p, %s: !ptr.p) -> !i32 {
+    %m0 = state.entry_state : !state<memory>
+    %a, %m1 = ptr.load %p state(%m0) : !i32
+    %x, %y = state.split state(%m1)
+    %c, %m2 = ptr.load %s state(%y) : !i32
+    %j = state.join state(%x, %m2)
+    %b, %m3 = ptr.load %q state(%j) : !i32
+    %zero = constant {value = 0} : !i32
+    %none = cmpi %b, %zero {predicate = "eq"} : !i1
+    %g = scf.switch %none {
+      -> %b
+    }
+    {
+      -> %c
+    }
+    %r = ori %g, %a : !i32
+    -> %r, %m3
+  }
+  module_end
+}
+
+// CHECK-LABEL: name = "past_call"
+// CHECK: %[[READ:[0-9]+]] = x86_64.mov_load32 {{.*}} state(%{{[0-9]+}})
+// CHECK: %[[CALLED:[0-9]+]], %{{[0-9]+}} = asm.vcall state(%[[READ]],
+// CHECK: x86_64.add32_mem {{.*}} state(%[[CALLED]])
+
+// With no call between them the two reads observe one state, and the reader
+// folds one of them.
+// CHECK-LABEL: name = "no_call"
+// CHECK: x86_64.mov_load32 {{.*}} state(%[[ENTRY:[0-9]+]])
+// CHECK-NEXT: x86_64.add32_mem {{.*}} state(%[[ENTRY]])
+
+// The value a call returns follows what the call wrote.
+// CHECK-LABEL: name = "call_result"
+// CHECK: x86_64.mov_load32
+// CHECK: asm.vcall
+// CHECK-NOT: x86_64.add32_mem
+// CHECK: x86_64.add32 {
+
+// CHECK-LABEL: name = "past_gate"
+// CHECK: x86_64.mov_load32
+// CHECK: x86_64.add32_mem
+// CHECK: x86_64.mov_store32
+
+// The gate's arm only reads, but the gate takes the state the read ahead of
+// it published: the read folded into the reader of the gate's result would
+// have to run both before the gate and after it.
+// CHECK-LABEL: name = "gate_result"
+// CHECK-NOT: x86_64.add32_mem
+// CHECK-LABEL: name = "past_loop"
+// CHECK: x86_64.mov_load32
+// CHECK: x86_64.mov_store32
+// CHECK: x86_64.add32_mem
+
+// The second and the third read observe what the first left, through a split
+// and a merge, as reads inlined from a callee do. The first read's
+// instruction publishes the state they wait for, so it is not folded into
+// the reader of the gate that chooses between them.
+// CHECK-LABEL: name = "reread"
+// CHECK: %[[FIRST:[0-9]+]] = x86_64.mov_load32 {{.*}} state(%{{[0-9]+}})
+// CHECK-NOT: x86_64.or32_mem

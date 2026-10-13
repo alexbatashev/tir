@@ -1,0 +1,58 @@
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
+
+// `t + 1` stores no row: it is the class of `t` at an offset. The add is
+// then no reader of the read, and the read has the one reader the store is,
+// so the three fold into one instruction. A second reader of the read or of
+// the sum keeps them apart.
+
+module {
+  %fn_a = func.func @bump(%p: !ptr.p<!i32>) {
+    %t = ptr.load %p : !i32
+    %one = constant {value = 1} : !i32
+    %u = addi %t, %one : !i32
+    ptr.store %u, %p
+    func.return
+  }
+  %fn_b = func.func @bump_and_read(%p: !ptr.p<!i32>) -> !i32 {
+    %t = ptr.load %p : !i32
+    %one = constant {value = 1} : !i32
+    %u = addi %t, %one : !i32
+    ptr.store %u, %p
+    func.return %t
+  }
+  %fn_c = func.func @bump_and_keep(%p: !ptr.p<!i32>) -> !i32 {
+    %t = ptr.load %p : !i32
+    %one = constant {value = 1} : !i32
+    %u = addi %t, %one : !i32
+    ptr.store %u, %p
+    func.return %u
+  }
+  %fn_d = func.func @bump_beside_read(%p: !ptr.p<!i32>, %q: !ptr.p<!i32>) -> !i32 {
+    %t = ptr.load %p : !i32
+    %x = ptr.load %q : !i32
+    %one = constant {value = 1} : !i32
+    %u = addi %t, %one : !i32
+    ptr.store %u, %p
+    func.return %x
+  }
+  module_end
+}
+
+// CHECK-LABEL: name = "bump"
+// CHECK: x86_64.inc32_mem
+// CHECK-LABEL: name = "bump_and_read"
+// CHECK: x86_64.mov_load32
+// CHECK: x86_64.inc32 {
+// CHECK: x86_64.mov_store32
+// CHECK-LABEL: name = "bump_and_keep"
+// CHECK: x86_64.mov_load32
+// CHECK: x86_64.inc32 {
+// CHECK: x86_64.mov_store32
+
+// Another read of the state leaves a merge ahead of the store. The folded
+// read is the instruction's own, so the merge takes the state it observed,
+// and the instruction observes the merge alone, as the store did.
+// CHECK-LABEL: name = "bump_beside_read"
+// CHECK: %[[OTHER:[0-9]+]] = x86_64.mov_load32 {{.*}} state(%[[ENTRY:[0-9]+]])
+// CHECK: %[[MERGED:[0-9]+]] = state.join state(%[[ENTRY]], %[[OTHER]])
+// CHECK: x86_64.inc32_mem {{.*}} state(%[[MERGED]])

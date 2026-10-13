@@ -8,10 +8,11 @@
 //! a semantic type is spelled as. What a *backend* makes of a class — a
 //! register's type, a low-bit view of one — stays with the backend.
 
-use tir_relational::{Carrier, ClassId as Id, Engine, Ref};
+use tir_egraph::{Carrier, Engine, Ref};
 
 use crate::builtin::{FloatType, IntegerType};
 use crate::sem::{FloatFormat, SemNode, SemPayload, SemType, SymKind, SymPayload};
+use crate::vector::VectorType;
 use crate::{Context, TypeId};
 use tir_adt::APInt;
 
@@ -90,6 +91,26 @@ pub(crate) fn carrier_of(
         .and_then(crate::sem::node::pointer_carrier)
 }
 
+// The width of a constant of the index type, which a length given to a vector
+// operation has.
+pub(crate) const LANES_WIDTH: u32 = 64;
+
+// The count is held by the row as a child after its values.
+pub(crate) fn counted_vector(context: &Context, ty: TypeId) -> Option<(TypeId, u32)> {
+    let data = context.get_type_data(ty);
+    let vector = (data.as_ref() as &dyn std::any::Any).downcast_ref::<VectorType>()?;
+    let any = VectorType::dynamic(context, vector.element(context));
+    Some((any, vector.length()?))
+}
+
+pub(crate) fn canonical_type(context: &Context, ty: TypeId) -> TypeId {
+    let data = context.get_type_data(ty);
+    if (data.as_ref() as &dyn std::any::Any).is::<crate::ptr::PtrType>() {
+        return crate::ptr::PtrType::opaque(context);
+    }
+    counted_vector(context, ty).map_or(ty, |(any, _)| any)
+}
+
 /// The bit-width of an IR integer or float type, or `None` for any other type.
 pub(crate) fn type_width(context: &Context, ty: TypeId) -> Option<u32> {
     if context.is_state_type(ty) {
@@ -157,29 +178,4 @@ pub(crate) fn ir_type(context: &Context, ty: &SemType) -> Option<TypeId> {
         SemType::Unit => Some(crate::builtin::UnitType::new(context)),
         _ => None,
     }
-}
-
-/// The integer width of an e-class, taken from whichever member carries a known
-/// integer type.
-pub(crate) fn class_width(ctx: &Context, egraph: &SemEGraph, class: Id) -> Option<u32> {
-    egraph
-        .nodes(class)
-        .find_map(|n| n.ty.and_then(|ty| type_width(ctx, ty)))
-        .or_else(|| class_type(egraph, class).and_then(|ty| type_width(ctx, ty)))
-}
-
-/// The type the engine's type column holds for `class`: what a carrier's zero,
-/// whose constants are references rather than typed rows, is known by.
-fn class_type(egraph: &SemEGraph, class: Id) -> Option<TypeId> {
-    egraph
-        .fact(tir_relational::ColumnId::Type, class)
-        .map(|number| TypeId::from_number(number as u32))
-}
-
-/// A ground semantic type carried by any typed member of an e-class.
-pub(crate) fn class_semantic_type(ctx: &Context, egraph: &SemEGraph, class: Id) -> Option<SemType> {
-    egraph
-        .nodes(class)
-        .find_map(|node| node.ty.and_then(|ty| semantic_type(ctx, ty)))
-        .or_else(|| class_type(egraph, class).and_then(|ty| semantic_type(ctx, ty)))
 }

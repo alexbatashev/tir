@@ -1,0 +1,20 @@
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
+
+// A subtraction and the subtraction of the same two values the other way
+// are two rows over the same classes. Each tree reads its own operands in
+// its own order: only a row whose label commutes matches exchanged.
+
+module {
+  %fn_both = func.func @both(%a: !i64, %b: !i64) -> !i64 {
+    %0 = subi %a, %b : !i64
+    %1 = subi %b, %a : !i64
+    %2 = muli %0, %1 : !i64
+    func.return %2
+  }
+  module_end
+}
+
+// CHECK: asm.symbol {name = "both", arg_regs = [%[[A:[0-9]+]]:GPR, %[[B:[0-9]+]]:GPR]}
+// CHECK-DAG: x86_64.sub {dst = %{{[0-9]+}}:GPR, dst_tied = %[[A]]:GPR, src = %[[B]]:GPR}
+// CHECK-DAG: x86_64.sub {dst = %{{[0-9]+}}:GPR, dst_tied = %[[B]]:GPR, src = %[[A]]:GPR}
+// CHECK: x86_64.imul

@@ -8,7 +8,7 @@
 //! byte-identical.
 //!
 //! The arranger ranks the schedules; the cheapest few are built, each in a
-//! fork of the overlay, and the nest the model charges least once it stands
+//! fork of the context, and the nest the model charges least once it stands
 //! is the one kept ([`crate::variants`]). A tie keeps the earlier one, so the
 //! arranger's order decides it.
 //!

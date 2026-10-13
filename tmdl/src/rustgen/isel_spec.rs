@@ -156,9 +156,14 @@ fn reg_operand_spec(
     symbol: u32,
     class_name: &str,
     sensitive: bool,
+    defined: Option<u32>,
     float_classes: &HashSet<String>,
     polymorphic_classes: &HashSet<String>,
 ) -> proc_macro2::TokenStream {
+    let defined = match defined {
+        Some(width) => quote! { Some(#width) },
+        None => quote! { None },
+    };
     let symbol_lit = proc_macro2::Literal::u32_unsuffixed(symbol);
     let class_id = reg_class_id(class_name);
     let capability = if polymorphic_classes.contains(class_name) {
@@ -173,6 +178,7 @@ fn reg_operand_spec(
             symbol: #symbol_lit,
             class: #class_id,
             whole: #sensitive,
+            defined: #defined,
             capability: #capability,
         }
     }
@@ -192,6 +198,7 @@ fn operand_register_specs(
                 *symbol,
                 class_name,
                 sensitive_symbols.contains(symbol),
+                None,
                 float_classes,
                 polymorphic_classes,
             )

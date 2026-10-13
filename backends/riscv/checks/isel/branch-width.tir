@@ -29,4 +29,4 @@ module {
 // RV64-NEXT: riscv.srai {rd = %[[AX:[0-9]+]]:GPR, rs1 = %[[AS]]:GPR, imm = 32}
 // RV64-NEXT: riscv.slli {rd = %[[BS:[0-9]+]]:GPR, rs1 = %[[B]]:GPR, imm = 32}
 // RV64-NEXT: riscv.srai {rd = %[[BX:[0-9]+]]:GPR, rs1 = %[[BS]]:GPR, imm = 32}
-// RV64-NEXT: riscv.slt {rd = %{{[0-9]+}}:GPR, rs1 = %[[AX]]:GPR, rs2 = %[[BX]]:GPR}
+// RV64-NEXT: riscv.blt {rs1 = %[[AX]]:GPR, rs2 = %[[BX]]:GPR, imm = ^bb2}

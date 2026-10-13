@@ -181,6 +181,7 @@ fn build_rules_resolves_register_widths() {
         symbol: 0,
         class: r(),
         whole: true,
+        defined: None,
         capability: CapabilityKind::Integer,
     }];
     let mut spec = rule_spec(offset, &[]);

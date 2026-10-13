@@ -186,9 +186,12 @@ pub(super) fn emit_machine_code(
         std::process::exit(1);
     });
 
-    let unit = parse_source_opts(opts, name, source);
     let context = fcc_context();
     target.register_dialects(&context);
+    // The selection rules are synthesized on a thread from here on, beside
+    // the front end and the mid-end.
+    let isel = target.isel_pass(&context);
+    let unit = parse_source_opts(opts, name, source);
     let module = lower_to_ir(
         &context,
         unit,
@@ -233,6 +236,7 @@ pub(super) fn emit_machine_code(
             target.as_ref(),
             &context,
             &module,
+            isel,
             oracles,
             |context, op| {
                 printer
@@ -255,6 +259,7 @@ pub(super) fn emit_machine_code(
         target.as_ref(),
         &context,
         &module,
+        isel,
         oracles,
         |context, op| {
             writer

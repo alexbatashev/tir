@@ -39,8 +39,12 @@ impl tir::backend::TargetMachine for PtxTarget {
     }
 
     fn isel_pass(&self, context: &tir::Context) -> tir::backend::isel::InstructionSelectPass {
-        tir::backend::isel::InstructionSelectPass::new(get_isel_rules(context, Feature::ALL))
-            .with_data_layout(self.data_layout())
+        tir::backend::isel::InstructionSelectPass::new(
+            context,
+            get_isel_rules(context, Feature::ALL),
+        )
+        .with_data_layout(self.data_layout())
+        .synthesized(context)
     }
 
     fn data_layout(&self) -> Option<tir::attributes::AttributeValue> {

@@ -8,7 +8,7 @@
 //! share a key is the client's business; the table reports the pair.
 //!
 //! A cell may carry a weight next to its id: an element of the group the id's
-//! [`Shift::mask`] names, part of the key for a key cell. A table whose
+//! [`Rename::shift`] names, part of the key for a key cell. A table whose
 //! weights are all zero stores none.
 //!
 //! Each row also carries a tag, a word the table stores and never interprets,
@@ -19,18 +19,59 @@
 
 use tir_adt::simd::{self, hash_row};
 
+/// An index places the rows appended or moved since its base was built until
+/// they, with the base entries they left behind, outnumber this fraction of
+/// the base, and then rebuilds the base.
+pub(crate) const REBUILD_DIVISOR: usize = 8;
+
+const FIRST_ROWS: usize = 64;
+
 /// Slot of the key index that never held a row.
 const EMPTY: u32 = 0;
 /// Slot whose row was removed; a probe walks past it.
 const TOMBSTONE: u32 = u32::MAX;
 
-/// How [`Table::repair`] moves weights along with ids: id `i` now stands at
-/// `delta[i]` from the id its map sends it to, and a weight on an id `i` names
-/// lives modulo `mask[i] + 1`. Both are indexed like the map.
+/// How [`Table::repair`] renames cells: each cell to the cell that now stands
+/// for it, and the offset it stands at from it.
+pub trait Rename {
+    /// The rows of `column` whose cell the rename moves, ascending, into `out`.
+    fn select_moved(&self, column: &[u32], out: &mut Vec<u32>);
+    /// The cell that stands for `cell`; `cell` itself when nothing does.
+    fn to(&self, cell: u32) -> u32;
+    /// The offset `cell` sits at from [`Self::to`] and the mask weights on the
+    /// destination live modulo, or `None` while no cell sits at an offset.
+    fn shift(&self, cell: u32) -> Option<(u64, u64)>;
+}
+
+/// A rename by a flattened map over every id: id `i` stands at `delta[i]`
+/// from `map[i]`, and a weight on id `i` lives modulo `mask[i] + 1`.
 #[derive(Clone, Copy, Debug)]
-pub struct Shift<'a> {
-    pub delta: &'a [u64],
+pub struct Dense<'a> {
+    pub map: &'a [u32],
+    /// `None` while every delta is zero.
+    pub delta: Option<&'a [u64]>,
     pub mask: &'a [u64],
+}
+
+impl Rename for Dense<'_> {
+    #[inline]
+    fn select_moved(&self, column: &[u32], out: &mut Vec<u32>) {
+        simd::select_moved(column, self.map, out);
+    }
+
+    #[inline]
+    fn to(&self, cell: u32) -> u32 {
+        self.map[cell as usize]
+    }
+
+    #[inline]
+    fn shift(&self, cell: u32) -> Option<(u64, u64)> {
+        let delta = self.delta?;
+        Some((
+            delta[cell as usize],
+            self.mask[self.map[cell as usize] as usize],
+        ))
+    }
 }
 
 /// A row [`Table::repair`] re-keyed, as its caller's `dissolve` sees it.
@@ -51,6 +92,15 @@ pub struct Collision {
     /// The value and its weight, and the tag, of the row that was removed.
     pub removed: (u32, u64),
     pub tag: u32,
+}
+
+/// The values of the rows [`Table::probe_or_insert`] stores.
+#[derive(Clone, Copy, Debug)]
+pub enum Values<'a> {
+    /// Key `index` of the batch is stored with `values[index]`.
+    Each(&'a [u32]),
+    /// The `n`-th row stored gets the value `first + n`.
+    From(u32),
 }
 
 /// What a [`Table::repair`] did, appended to whatever the lists already hold.
@@ -79,8 +129,15 @@ pub struct Table {
     /// How many leading key columns [`Self::repair`] leaves as they are: cells
     /// that name something other than what the map renames.
     plain: usize,
+    // Two key columns whose cells are an unordered pair: every row holds
+    // the lesser `(cell, weight)` in the first.
+    unordered: Option<[usize; 2]>,
     tag: Vec<u32>,
     stamp: Vec<u32>,
+    // The highest stamp a row was given since the table was last empty.
+    stamped: u32,
+    // Every row written since `mark` was called sits at or past this one.
+    marked: usize,
     /// Whether the key is unique. A table that is not keyed is a bag: it has no
     /// index and never reports a collision.
     keyed: bool,
@@ -93,6 +150,14 @@ pub struct Table {
     used: usize,
     /// Bumped by every change, so a reader can tell a derived index is stale.
     version: u64,
+    /// The rows every [`Self::repair`] rewrote or moved another row into,
+    /// oldest first, with per repair the version it left the table at, where
+    /// its rows start and the length it left the table at; and the version
+    /// the log is complete from. The log is what lets an index merge a repair
+    /// instead of rebuilding.
+    touched: Vec<u32>,
+    repairs: Vec<(u64, u32, u32)>,
+    floor: u64,
     key: Vec<u32>,
     key_weights: Vec<u64>,
     moved: Vec<u32>,
@@ -128,12 +193,18 @@ impl Table {
             weighted: false,
             coefficients: vec![0; arity],
             plain: 0,
+            unordered: None,
             tag: Vec::new(),
             stamp: Vec::new(),
+            stamped: 0,
+            marked: 0,
             keyed: true,
             slots: vec![EMPTY as u64; 8],
             used: 0,
             version: 0,
+            touched: Vec::new(),
+            repairs: Vec::new(),
+            floor: 0,
             key: vec![0; arity],
             key_weights: vec![0; arity],
             moved: Vec::new(),
@@ -147,6 +218,43 @@ impl Table {
             keyed: false,
             slots: Vec::new(),
             ..Self::new(arity)
+        }
+    }
+
+    /// Remove every row, keeping what the table allocated.
+    pub fn clear(&mut self) {
+        for column in &mut self.columns {
+            column.clear();
+        }
+        for weights in &mut self.weights {
+            weights.clear();
+        }
+        self.weighted = false;
+        self.tag.clear();
+        self.stamp.clear();
+        self.stamped = 0;
+        self.marked = 0;
+        self.slots.fill(EMPTY as u64);
+        self.used = 0;
+        self.version += 1;
+        self.touched.clear();
+        self.repairs.clear();
+        self.floor = self.version;
+        self.moved.clear();
+        self.dead.clear();
+    }
+
+    /// An empty table of the same shape: arity, key, plain columns and
+    /// coefficients.
+    pub fn like(&self) -> Self {
+        let table = match self.keyed {
+            true => Self::new(self.arity),
+            false => Self::bag(self.arity),
+        };
+        let table = table.plain(self.plain).coefficients(&self.coefficients);
+        match self.unordered {
+            Some(columns) => table.unordered(columns),
+            None => table,
         }
     }
 
@@ -164,8 +272,44 @@ impl Table {
         self
     }
 
+    /// Make key columns `columns` an unordered pair: a key is stored and
+    /// looked up with the lesser `(cell, weight)` first, which
+    /// [`Self::order`] puts it in and [`Self::repair`] keeps it in. Both
+    /// columns have one coefficient.
+    pub fn unordered(mut self, columns: [usize; 2]) -> Self {
+        debug_assert_eq!(self.coefficients[columns[0]], self.coefficients[columns[1]]);
+        self.unordered = Some(columns);
+        self
+    }
+
+    /// Put a key of this table, `weights` one per cell, in the order its
+    /// unordered pair is stored in. Reports whether the pair was exchanged.
+    #[inline]
+    pub fn order(&self, cells: &mut [u32], weights: &mut [u64]) -> bool {
+        let Some([a, b]) = self.unordered else {
+            return false;
+        };
+        let exchange = (cells[a], weights[a]) > (cells[b], weights[b]);
+        if exchange {
+            cells.swap(a, b);
+            weights.swap(a, b);
+        }
+        exchange
+    }
+
     pub fn arity(&self) -> usize {
         self.arity
+    }
+
+    /// How many leading key columns hold cells [`Self::repair`] leaves alone.
+    pub fn plain_columns(&self) -> usize {
+        self.plain
+    }
+
+    /// The coefficient [`Self::repair`] moves `column`'s weight to the value
+    /// with; zero keeps it in the key.
+    pub fn coefficient(&self, column: usize) -> i64 {
+        self.coefficients[column]
     }
 
     pub fn len(&self) -> usize {
@@ -178,6 +322,24 @@ impl Table {
 
     pub fn version(&self) -> u64 {
         self.version
+    }
+
+    /// The rows the repairs since the table was at `version` rewrote or
+    /// moved another row into, and the fewest rows the table has had since;
+    /// `None` when the table no longer remembers that far back.
+    pub fn moved_since(&self, version: u64) -> Option<(&[u32], usize)> {
+        if version < self.floor {
+            return None;
+        }
+        let at = self
+            .repairs
+            .partition_point(|&(after, ..)| after <= version);
+        let since = &self.repairs[at..];
+        let start = since
+            .first()
+            .map_or(self.touched.len(), |&(_, start, _)| start as usize);
+        let shortest = since.iter().map(|&(.., len)| len as usize).min();
+        Some((&self.touched[start..], shortest.unwrap_or(self.len())))
     }
 
     /// One column, key columns first and the value column last.
@@ -206,9 +368,25 @@ impl Table {
         &self.tag
     }
 
+    /// Replace the tag of `row`.
+    pub fn set_tag(&mut self, row: u32, tag: u32) {
+        self.tag[row as usize] = tag;
+    }
+
     /// The epoch each row was last written in.
     pub fn stamps(&self) -> &[u32] {
         &self.stamp
+    }
+
+    /// The latest epoch a row was written in: no row is stamped above it.
+    pub fn stamped(&self) -> u32 {
+        self.stamped
+    }
+
+    /// Mark the rows the table has now as old: [`Self::repair`] can be told
+    /// to look only at the rows written since.
+    pub fn mark(&mut self) {
+        self.marked = self.len();
     }
 
     fn set_weight(&mut self, column: usize, row: usize, weight: u64) {
@@ -260,6 +438,131 @@ impl Table {
         }
     }
 
+    fn hash_keys(keys: &[&[u32]], weights: &[&[u64]], hashes: &mut Vec<u32>) {
+        hashes.clear();
+        hashes.resize(keys.first().map_or(0, |column| column.len()), 0);
+        simd::hash_rows(keys, hashes);
+        for (column, weights) in weights.iter().enumerate() {
+            for (hash, &weight) in hashes.iter_mut().zip(*weights) {
+                *hash ^= weight_hash(column, weight);
+            }
+        }
+    }
+
+    // The row holding key `index` of a batch, or the empty slot its walk
+    // from `hash` ends at.
+    #[inline]
+    fn walk(
+        &self,
+        hash: u32,
+        keys: &[&[u32]],
+        weights: &[&[u64]],
+        index: usize,
+    ) -> Result<u32, usize> {
+        let mask = self.slots.len() - 1;
+        let mut at = hash as usize & mask;
+        loop {
+            let slot = self.slots[at];
+            match slot as u32 {
+                EMPTY => return Err(at),
+                TOMBSTONE => {}
+                row if (slot >> 32) as u32 == hash
+                    && (0..self.arity).all(|column| {
+                        self.columns[column][row as usize - 1] == keys[column][index]
+                            && self.weight(column, row - 1)
+                                == weights.get(column).map_or(0, |weights| weights[index])
+                    }) =>
+                {
+                    return Ok(row - 1);
+                }
+                _ => {}
+            }
+            at = (at + 1) & mask;
+        }
+    }
+
+    /// The row holding each key of a batch, or `u32::MAX` where the table has
+    /// none. `keys` is one slice per key column, all of one length, and
+    /// `weights` is empty or the same of the weights beside them. The hashes
+    /// of the whole batch are computed column by column before any slot is
+    /// read. A bag holds no key.
+    pub fn probe(&self, keys: &[&[u32]], weights: &[&[u64]], rows: &mut Vec<u32>) {
+        debug_assert_eq!(keys.len(), self.arity);
+        Self::hash_keys(keys, weights, rows);
+        if !self.keyed {
+            rows.fill(u32::MAX);
+            return;
+        }
+        for (index, found) in rows.iter_mut().enumerate() {
+            *found = self.walk(*found, keys, weights, index).unwrap_or(u32::MAX);
+        }
+    }
+
+    /// [`Self::probe`] that stores each key the table has none of as a row,
+    /// stamped `stamp`: the `n`-th row stored is tagged `tag + n` and valued
+    /// as `values` says. `rows[index]` is `u32::MAX` for a key stored and
+    /// otherwise the row holding it, which a key earlier in the batch may
+    /// have stored. The batch is hashed column by column once and each key
+    /// walks the slots once. A bag stores every key.
+    pub fn probe_or_insert(
+        &mut self,
+        keys: &[&[u32]],
+        weights: &[&[u64]],
+        values: Values<'_>,
+        tag: u32,
+        stamp: u32,
+        rows: &mut Vec<u32>,
+    ) {
+        debug_assert_eq!(keys.len(), self.arity);
+        let arity = self.arity;
+        Self::hash_keys(keys, weights, rows);
+        if self.keyed {
+            self.reserve(rows.len());
+        }
+        let mut stored = 0;
+        for (index, found) in rows.iter_mut().enumerate() {
+            let hash = *found;
+            let free = match self.keyed {
+                true => match self.walk(hash, keys, weights, index) {
+                    Ok(row) => {
+                        *found = row;
+                        continue;
+                    }
+                    Err(free) => Some(free),
+                },
+                false => None,
+            };
+            *found = u32::MAX;
+            let row = self.stamp.len();
+            for (column, key) in self.columns.iter_mut().zip(keys) {
+                column.push(key[index]);
+            }
+            self.columns[arity].push(match values {
+                Values::Each(values) => values[index],
+                Values::From(first) => first + stored,
+            });
+            self.tag.push(tag + stored);
+            self.stamp.push(stamp);
+            for weights in &mut self.weights {
+                if !weights.is_empty() {
+                    weights.push(0);
+                }
+            }
+            for (column, weights) in weights.iter().enumerate() {
+                self.set_weight(column, row, weights[index]);
+            }
+            if let Some(free) = free {
+                self.slots[free] = (hash as u64) << 32 | (row + 1) as u64;
+                self.used += 1;
+            }
+            stored += 1;
+        }
+        if stored != 0 {
+            self.version += 1;
+            self.stamped = self.stamped.max(stamp);
+        }
+    }
+
     /// Append `key -> value`, with `weights` as for [`Self::get`] and
     /// `weight` beside the value. In a keyed table the key must not be
     /// present.
@@ -275,6 +578,9 @@ impl Table {
         if self.keyed {
             self.reserve(1);
         }
+        if self.tag.len() == self.tag.capacity() {
+            self.grow_rows();
+        }
         let row = self.len() as u32;
         for (column, &cell) in self.columns.iter_mut().zip(key) {
             column.push(cell);
@@ -282,6 +588,7 @@ impl Table {
         self.columns[self.arity].push(value.0);
         self.tag.push(tag);
         self.stamp.push(stamp);
+        self.stamped = self.stamped.max(stamp);
         if self.weighted {
             for weights in &mut self.weights {
                 if !weights.is_empty() {
@@ -300,6 +607,17 @@ impl Table {
         }
         self.version += 1;
         row
+    }
+
+    // Room for as many rows again, in every column at once: a table's first
+    // rows would otherwise grow each column several times over.
+    fn grow_rows(&mut self) {
+        let more = self.tag.len().max(FIRST_ROWS);
+        for column in &mut self.columns {
+            column.reserve(more);
+        }
+        self.tag.reserve(more);
+        self.stamp.reserve(more);
     }
 
     /// Put `row` in the first free slot of its probe sequence.
@@ -375,13 +693,16 @@ impl Table {
         }
     }
 
-    /// The rows any of whose cells in `columns` `map` moves, ascending, into
-    /// `self.moved`.
-    fn select_moved(&mut self, columns: std::ops::Range<usize>, map: &[u32]) {
+    /// The rows from `from` on any of whose cells in `columns` `map` moves,
+    /// ascending, into `self.moved`.
+    fn select_moved(&mut self, columns: std::ops::Range<usize>, from: usize, map: &impl Rename) {
         self.moved.clear();
         let several = columns.len() > 1;
         for column in columns {
-            simd::select_moved(&self.columns[column], map, &mut self.moved);
+            map.select_moved(&self.columns[column][from..], &mut self.moved);
+        }
+        for row in &mut self.moved {
+            *row += from as u32;
         }
         if several {
             self.moved.sort_unstable();
@@ -402,32 +723,39 @@ impl Table {
     /// instead: the caller has taken its equation elsewhere. Row numbers are
     /// not stable across this call.
     ///
+    /// With `recent`, `map` moves no cell of a row written before the last
+    /// [`Self::mark`], and those rows are not read.
+    ///
     /// Reports whether any cell moved.
     pub fn repair(
         &mut self,
-        map: &[u32],
-        shift: Option<Shift<'_>>,
+        map: &impl Rename,
         mut dissolve: Option<&mut dyn FnMut(RowView<'_>) -> bool>,
         stamp: u32,
+        recent: bool,
         report: &mut Repair,
     ) -> bool {
         let arity = self.arity;
-        self.select_moved(arity..arity + 1, map);
+        let start = self.touched.len();
+        let from = match recent {
+            true => self.marked.min(self.len()),
+            false => 0,
+        };
+        self.select_moved(arity..arity + 1, from, map);
         let mut any = !self.moved.is_empty();
         for at in 0..self.moved.len() {
             let row = self.moved[at] as usize;
             let from = self.columns[arity][row];
-            let to = map[from as usize];
-            self.columns[arity][row] = to;
-            if let Some(shift) = shift {
-                let weight = self.weight(arity, row as u32);
-                let weight =
-                    weight.wrapping_add(shift.delta[from as usize]) & shift.mask[to as usize];
+            self.columns[arity][row] = map.to(from);
+            if let Some((delta, mask)) = map.shift(from) {
+                let weight = self.weight(arity, row as u32).wrapping_add(delta) & mask;
                 self.set_weight(arity, row, weight);
             }
             self.stamp[row] = stamp;
         }
-        self.select_moved(self.plain..arity, map);
+        self.touched.extend_from_slice(&self.moved);
+        let mut logged = start..self.touched.len();
+        self.select_moved(self.plain..arity, from, map);
         any |= !self.moved.is_empty();
         for at in 0..self.moved.len() {
             let row = self.moved[at];
@@ -440,16 +768,13 @@ impl Table {
             }
             for column in self.plain..arity {
                 let from = self.columns[column][row as usize];
-                let to = map[from as usize];
-                self.columns[column][row as usize] = to;
-                let Some(shift) = shift else {
+                self.columns[column][row as usize] = map.to(from);
+                let Some((delta, mask)) = map.shift(from) else {
                     continue;
                 };
-                let delta = shift.delta[from as usize];
                 if delta == 0 {
                     continue;
                 }
-                let mask = shift.mask[to as usize];
                 match self.coefficients[column] {
                     0 => {
                         let weight = self.weight(column, row).wrapping_add(delta) & mask;
@@ -460,10 +785,20 @@ impl Table {
                     coefficient => {
                         let moved = (coefficient as u64).wrapping_mul(delta);
                         let value = self.columns[arity][row as usize];
-                        let weight = self.weight(arity, row).wrapping_sub(moved)
-                            & shift.mask[value as usize];
+                        let (_, mask) = map.shift(value).unwrap_or((0, u64::MAX));
+                        let weight = self.weight(arity, row).wrapping_sub(moved) & mask;
                         self.set_weight(arity, row as usize, weight);
                     }
+                }
+            }
+            if let Some([a, b]) = self.unordered {
+                let at = row as usize;
+                let first = (self.columns[a][at], self.weight(a, row));
+                let second = (self.columns[b][at], self.weight(b, row));
+                if first > second {
+                    (self.columns[a][at], self.columns[b][at]) = (second.0, first.0);
+                    self.set_weight(a, at, second.1);
+                    self.set_weight(b, at, first.1);
                 }
             }
             self.stamp[row as usize] = stamp;
@@ -505,10 +840,17 @@ impl Table {
                         });
                         self.dead.push(row);
                     }
-                    None => self.place(row, key_hash(&key, weights_or_none)),
+                    None => {
+                        self.place(row, key_hash(&key, weights_or_none));
+                        self.touch(row, &mut logged);
+                    }
                 }
                 self.key = key;
                 self.key_weights = weights;
+            }
+        } else {
+            for at in 0..self.moved.len() {
+                self.touch(self.moved[at], &mut logged);
             }
         }
         self.moved.clear();
@@ -518,18 +860,43 @@ impl Table {
             self.swap_remove(self.dead[at]);
         }
         self.dead.clear();
-        self.version += u64::from(any);
+        if any {
+            self.version += 1;
+            self.stamped = self.stamped.max(stamp);
+            self.repairs
+                .push((self.version, start as u32, self.len() as u32));
+            // A log longer than the delta an index rebuilds at serves no one.
+            if self.touched.len() > self.len() / REBUILD_DIVISOR {
+                self.touched.clear();
+                self.repairs.clear();
+                self.floor = self.version;
+            }
+        }
         any
+    }
+
+    /// Log `row` as touched unless the value phase did, whose rows `logged`
+    /// walks: both ascend.
+    fn touch(&mut self, row: u32, logged: &mut std::ops::Range<usize>) {
+        while logged.start < logged.end && self.touched[logged.start] < row {
+            logged.start += 1;
+        }
+        if logged.start == logged.end || self.touched[logged.start] != row {
+            self.touched.push(row);
+        }
     }
 
     /// Remove `row`, which the index does not hold, moving the last row into
     /// its place.
     fn swap_remove(&mut self, row: u32) {
         let last = self.len() as u32 - 1;
+        // The row that fills the hole may be one written since the mark.
+        self.marked = self.marked.min(row as usize);
         if row != last && self.keyed {
             self.load_key(last);
             let slot = self.slot_of(last);
             self.slots[slot] = self.slots[slot] >> 32 << 32 | (row + 1) as u64;
+            self.touched.push(row);
         }
         for column in &mut self.columns {
             column.swap_remove(row as usize);
@@ -544,44 +911,280 @@ impl Table {
     }
 }
 
+/// What an index keeps beside its base, built over the first rows of a
+/// table: which rows changed since, for the index to place again, and how
+/// much it has placed and dropped, which decides when the base is rebuilt.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Delta {
+    /// The rows the last refresh found changed, ascending, and the rows the
+    /// table dropped since the one before.
+    pub(crate) changed: Vec<u32>,
+    pub(crate) dropped: std::ops::Range<u32>,
+    /// The table's version and length at the last refresh.
+    version: u64,
+    seen: usize,
+    built: bool,
+    /// How many rows the base was built over, and how many were placed or
+    /// dropped since.
+    base: usize,
+    merged: usize,
+}
+
+/// What [`Delta::refresh`] found to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Refresh {
+    /// The table is as it was.
+    Current,
+    /// The changed rows are to leave where they sit and be placed again under
+    /// their cells now, and the dropped rows to leave.
+    Merged,
+    /// The base is to be built over the table again.
+    Rebuild,
+}
+
+/// Where a row sits in an index when not at a position of its base.
+pub(crate) const ABSENT: u32 = u32::MAX;
+pub(crate) const TAIL: u32 = u32::MAX - 1;
+
+impl Delta {
+    /// Bring the delta up to date with `table`.
+    pub(crate) fn refresh(&mut self, table: &Table) -> Refresh {
+        let len = table.len();
+        if self.built && self.version == table.version() {
+            return Refresh::Current;
+        }
+        let moved = self
+            .built
+            .then(|| table.moved_since(self.version))
+            .flatten();
+        self.version = table.version();
+        let seen = std::mem::replace(&mut self.seen, len);
+        if let Some((touched, shortest)) = moved {
+            // The rows repairs touched and the rows appended since, each
+            // once.
+            self.changed.clear();
+            self.changed
+                .extend(touched.iter().filter(|&&row| (row as usize) < len));
+            self.changed.extend(shortest.min(seen) as u32..len as u32);
+            self.changed.sort_unstable();
+            self.changed.dedup();
+            self.dropped = len as u32..seen.max(len) as u32;
+            self.merged += self.changed.len() + self.dropped.len();
+            if self.merged <= self.base / REBUILD_DIVISOR {
+                return Refresh::Merged;
+            }
+        }
+        Refresh::Rebuild
+    }
+
+    /// Note the base built over `base` rows.
+    pub(crate) fn rebuilt(&mut self, base: usize) {
+        self.built = true;
+        self.base = base;
+        self.merged = 0;
+        self.changed.clear();
+        self.dropped = 0..0;
+    }
+
+    /// The rows that leave where they sit: the changed and the dropped.
+    pub(crate) fn leaving(&self) -> impl Iterator<Item = u32> + '_ {
+        self.changed.iter().copied().chain(self.dropped.clone())
+    }
+}
+
+/// Take `row` out of a base whose entries lie in the ascending runs
+/// `rows[from..to]` of `runs`, `pos` saying where each row sits.
+pub(crate) fn drop_row(rows: &mut [u32], pos: &mut [u32], runs: &mut [(u32, u32)], row: u32) {
+    let at = pos[row as usize];
+    let run = runs.partition_point(|&(from, _)| from <= at) - 1;
+    let (at, end) = (at as usize, runs[run].1 as usize);
+    pos[row as usize] = ABSENT;
+    rows.copy_within(at + 1..end, at);
+    for &row in &rows[at..end - 1] {
+        pos[row as usize] -= 1;
+    }
+    runs[run].1 -= 1;
+}
+
+// Runs of a grouping by a plain column whose cells run past this many times
+// its rows are not kept: laying them out costs a pass over the cells, most of
+// them empty.
+const SPARSE: usize = 8;
+
 /// The rows of a table grouped by one column: `cell -> rows`, for the side of a
 /// join that is looked up rather than scanned. Cells are dense small numbers,
 /// so the grouping is a counting sort and a lookup is a slice.
+///
+/// The counting sort is a base over the rows the table had when it was built,
+/// each cell's run left some slack. A row that changes since is placed in its
+/// cell's run, or in a tail sorted by cell when the cell has no run; a run
+/// that fills up has the base rebuilt. A base over a plain column whose cells
+/// are sparse has no runs, and every row in the tail.
 #[derive(Clone, Debug, Default)]
 pub struct Group {
-    /// `offsets[cell]..offsets[cell + 1]` is the cell's range of `rows`.
-    offsets: Vec<u32>,
+    /// `rows[from..to]` is the cell's run for `ranges[cell] == (from, to)`,
+    /// which may grow to the next cell's `from`; the last entry closes the
+    /// last run. `pos[row]` is where a row sits, [`TAIL`] or [`ABSENT`].
+    ranges: Vec<(u32, u32)>,
     rows: Vec<u32>,
+    pos: Vec<u32>,
+    live: usize,
+    delta: Delta,
+    /// The tail's rows sorted by cell, then ascending, their cells, and a bit
+    /// per cell that has any.
+    tail: Vec<u32>,
+    cells: Vec<u32>,
+    has: Vec<u64>,
 }
 
 impl Group {
-    /// Group the rows of `column`, every cell of which is below `cells`. Each
-    /// group lists its rows ascending.
-    pub fn build(&mut self, column: &[u32], cells: usize) {
-        self.offsets.clear();
-        self.offsets.resize(cells + 2, 0);
-        for &cell in column {
-            self.offsets[cell as usize + 2] += 1;
+    /// Bring the grouping of `table` by `column` up to date. Cells of a column
+    /// past the plain ones are below `ids`.
+    pub fn refresh(&mut self, table: &Table, column: usize, ids: usize) {
+        let cells = table.column(column);
+        match self.delta.refresh(table) {
+            Refresh::Current => return,
+            Refresh::Merged if self.place(cells) => return,
+            _ => {}
         }
-        for cell in 2..self.offsets.len() {
-            self.offsets[cell] += self.offsets[cell - 1];
+        let plain = column < table.plain_columns();
+        let bound = match plain {
+            true => cells.iter().max().map_or(0, |&max| max as usize + 1),
+            false => ids,
+        };
+        self.tail.clear();
+        if plain && bound > cells.len().saturating_mul(SPARSE) {
+            // Runs would be mostly empty: every row goes in the tail.
+            self.ranges.clear();
+            self.rows.clear();
+            self.pos.clear();
+            self.pos.resize(cells.len(), TAIL);
+            self.live = 0;
+            self.tail.extend(0..cells.len() as u32);
+            self.index_tail(cells);
+            self.delta.rebuilt(cells.len());
+            return;
+        }
+        self.ranges.clear();
+        self.ranges.resize(bound + 1, (0, 0));
+        for &cell in cells {
+            self.ranges[cell as usize].1 += 1;
+        }
+        // Each run gets an eighth and one of slack.
+        let mut sum = 0;
+        for range in &mut self.ranges {
+            let count = range.1;
+            *range = (sum, sum);
+            sum += count + if count == 0 { 0 } else { count / 8 + 1 };
         }
         self.rows.clear();
-        self.rows.resize(column.len(), 0);
-        // `offsets[cell + 1]` is the cell's cursor, and ends as its end.
-        for (row, &cell) in column.iter().enumerate() {
-            let cursor = &mut self.offsets[cell as usize + 1];
+        self.rows.resize(sum as usize, 0);
+        self.pos.clear();
+        self.pos.resize(cells.len(), ABSENT);
+        // A cell's end is its cursor, and ends as its end.
+        for (row, &cell) in cells.iter().enumerate() {
+            let cursor = &mut self.ranges[cell as usize].1;
             self.rows[*cursor as usize] = row as u32;
+            self.pos[row] = *cursor;
             *cursor += 1;
+        }
+        self.live = cells.len();
+        self.cells.clear();
+        self.has.clear();
+        self.delta.rebuilt(cells.len());
+    }
+
+    // Sort the tail by cell and row, and list its cells.
+    fn index_tail(&mut self, cells: &[u32]) {
+        self.tail
+            .sort_unstable_by_key(|&row| (cells[row as usize], row));
+        self.cells.clear();
+        self.cells
+            .extend(self.tail.iter().map(|&row| cells[row as usize]));
+        self.has.clear();
+        let top = self.cells.last().map_or(0, |&cell| cell as usize + 1);
+        self.has.resize(top.div_ceil(64), 0);
+        for &cell in &self.cells {
+            self.has[cell as usize / 64] |= 1 << (cell % 64);
         }
     }
 
-    /// The rows holding `cell`, ascending.
-    pub fn rows(&self, cell: u32) -> &[u32] {
-        match self.offsets.get(cell as usize..cell as usize + 2) {
-            Some(&[from, to]) => &self.rows[from as usize..to as usize],
-            _ => &[],
+    /// Place the changed rows again; `false` when a run is full, which has
+    /// the base rebuilt.
+    fn place(&mut self, cells: &[u32]) -> bool {
+        if self.pos.len() < cells.len() {
+            self.pos.resize(cells.len(), ABSENT);
         }
+        for row in self.delta.leaving() {
+            match self.pos[row as usize] {
+                ABSENT => {}
+                TAIL => self.pos[row as usize] = ABSENT,
+                _ => {
+                    drop_row(&mut self.rows, &mut self.pos, &mut self.ranges, row);
+                    self.live -= 1;
+                }
+            }
+        }
+        let pos = &self.pos;
+        self.tail.retain(|&row| pos[row as usize] == TAIL);
+        for &row in &self.delta.changed {
+            let cell = cells[row as usize] as usize;
+            let (from, to) = self.ranges.get(cell).copied().unwrap_or((0, 0));
+            let room = self.ranges.get(cell + 1).map_or(0, |next| next.0);
+            if to < room {
+                let run = &self.rows[from as usize..to as usize];
+                let at = from as usize + run.partition_point(|&other| other < row);
+                self.rows.copy_within(at..to as usize, at + 1);
+                self.rows[at] = row;
+                for &moved in &self.rows[at + 1..=to as usize] {
+                    self.pos[moved as usize] += 1;
+                }
+                self.pos[row as usize] = at as u32;
+                self.ranges[cell].1 += 1;
+                self.live += 1;
+            } else if from != to {
+                return false;
+            } else {
+                self.tail.push(row);
+                self.pos[row as usize] = TAIL;
+            }
+        }
+        self.index_tail(cells);
+        true
+    }
+
+    /// The rows holding `cell`, ascending.
+    #[inline(always)]
+    pub fn rows(&self, cell: u32) -> &[u32] {
+        match self.ranges.get(cell as usize) {
+            Some(&(from, to)) if from != to => &self.rows[from as usize..to as usize],
+            _ => match self.has.get(cell as usize / 64) {
+                Some(word) if word >> (cell % 64) & 1 != 0 => self.tail_of(cell),
+                _ => &[],
+            },
+        }
+    }
+
+    #[inline(never)]
+    fn tail_of(&self, cell: u32) -> &[u32] {
+        let from = self.cells.partition_point(|&other| other < cell);
+        let to = from + self.cells[from..].partition_point(|&other| other == cell);
+        &self.tail[from..to]
+    }
+
+    /// How many cells the grouping has room for: one past the highest.
+    pub fn cells(&self) -> usize {
+        let tail = self.cells.last().map_or(0, |&cell| cell as usize + 1);
+        self.ranges.len().saturating_sub(1).max(tail)
+    }
+
+    /// How many rows the cells have, all together.
+    pub fn len(&self) -> usize {
+        self.live + self.tail.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -590,6 +1193,14 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    fn plain(map: &[u32]) -> Dense<'_> {
+        Dense {
+            map,
+            delta: None,
+            mask: &[],
+        }
+    }
 
     #[test]
     fn a_key_is_found_after_the_index_grows() {
@@ -600,6 +1211,39 @@ mod tests {
         assert_eq!(table.get(&[7, 8], &[]), Some(7));
         assert_eq!(table.get(&[7, 9], &[]), None);
         assert_eq!(table.values()[7], 70);
+    }
+
+    #[test]
+    fn a_batch_stores_the_keys_the_table_lacks_once_each() {
+        let mut table = Table::new(2);
+        table.insert(&[1, 2], &[], (10, 0), 0, 1);
+        table.insert(&[3, 4], &[0, 5], (11, 0), 1, 1);
+        let mut rows = Vec::new();
+        // A key the table holds, one it holds only at a weight, a new key
+        // twice, and enough more for the index to grow under the batch.
+        let mut keys = [vec![1, 3, 7, 7], vec![2, 4, 8, 8]];
+        for cell in 20..60 {
+            keys[0].push(cell);
+            keys[1].push(cell);
+        }
+        let values: Vec<u32> = (100..100 + keys[0].len() as u32).collect();
+        table.probe_or_insert(
+            &[&keys[0], &keys[1]],
+            &[],
+            Values::Each(&values),
+            50,
+            2,
+            &mut rows,
+        );
+        assert_eq!(rows[..4], [0, u32::MAX, u32::MAX, 3]);
+        assert!(rows[4..].iter().all(|&row| row == u32::MAX));
+        assert_eq!(table.len(), 2 + 2 + 40);
+        assert_eq!(table.get(&[3, 4], &[]), Some(2));
+        assert_eq!(table.get(&[3, 4], &[0, 5]), Some(1));
+        assert_eq!(table.get(&[7, 8], &[]), Some(3));
+        assert_eq!(table.get(&[59, 59], &[]), Some(43));
+        assert_eq!((table.values()[3], table.tags()[3]), (102, 51));
+        assert_eq!((table.values()[43], table.tags()[43]), (143, 91));
     }
 
     #[test]
@@ -621,7 +1265,7 @@ mod tests {
             .map(|cell| if cell == 1 { 0 } else { cell })
             .collect();
         let mut report = Repair::default();
-        assert!(table.repair(&map, None, None, 2, &mut report));
+        assert!(table.repair(&plain(&map), None, 2, false, &mut report));
         assert_eq!(
             report.collisions,
             vec![Collision {
@@ -651,12 +1295,13 @@ mod tests {
         let map = [0, 0, 3, 3, 4, 5, 6];
         let delta = [0, 3, 1, 0, 0, 0, 0];
         let mask = [0xff; 7];
-        let shift = Shift {
-            delta: &delta,
+        let shift = Dense {
+            map: &map,
+            delta: Some(&delta),
             mask: &mask,
         };
         let mut report = Repair::default();
-        table.repair(&map, Some(shift), None, 2, &mut report);
+        table.repair(&shift, None, 2, false, &mut report);
         // f(0 + 3, 3 + 1) = 5, so f(0, 3 + 1) = 5 - 3, which the second row
         // says is 6.
         assert_eq!(
@@ -672,16 +1317,53 @@ mod tests {
     }
 
     #[test]
+    fn repair_keeps_an_unordered_pair_in_order() {
+        let mut table = Table::new(3).plain(1).unordered([1, 2]);
+        table.insert(&[9, 1, 5], &[], (4, 0), 0, 1);
+        table.insert(&[9, 2, 3], &[0, 0, 4], (4, 0), 1, 1);
+        table.insert(&[9, 0, 5], &[], (4, 0), 2, 1);
+        // 5 is 0, and 3 is 2 + 1 modulo 2^8: the first row reads (0, 1) and
+        // meets no other, the second (2, 2 + 5) in order, the third (0, 0).
+        let map = [0, 1, 2, 2, 4, 0];
+        let delta = [0, 0, 0, 1, 0, 0];
+        let mask = [0xff; 6];
+        let shift = Dense {
+            map: &map,
+            delta: Some(&delta),
+            mask: &mask,
+        };
+        let mut report = Repair::default();
+        table.repair(&shift, None, 2, false, &mut report);
+        assert!(report.collisions.is_empty());
+        assert_eq!(table.get(&[9, 0, 1], &[]), Some(0));
+        assert_eq!(table.get(&[9, 1, 0], &[]), None);
+        assert_eq!(table.get(&[9, 2, 2], &[0, 0, 5]), Some(1));
+        assert_eq!(table.get(&[9, 0, 0], &[]), Some(2));
+        // A weight alone orders two cells that became one.
+        let mut table = Table::new(3).plain(1).unordered([1, 2]);
+        table.insert(&[9, 1, 2], &[0, 7, 0], (4, 0), 0, 1);
+        let map = [0, 1, 1, 3, 4];
+        let delta = [0, 0, 3, 0, 0];
+        let shift = Dense {
+            map: &map,
+            delta: Some(&delta),
+            mask: &mask,
+        };
+        table.repair(&shift, None, 2, false, &mut report);
+        assert_eq!(table.get(&[9, 1, 1], &[0, 3, 7]), Some(0));
+    }
+
+    #[test]
     fn a_bag_keeps_rows_that_come_to_share_a_key() {
         let mut table = Table::bag(1);
         table.insert(&[0], &[], (10, 0), 0, 1);
         table.insert(&[1], &[], (11, 0), 1, 1);
         let mut report = Repair::default();
         assert!(table.repair(
-            &[0, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-            None,
+            &plain(&[0, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
             None,
             2,
+            false,
             &mut report
         ));
         assert!(report.collisions.is_empty());
@@ -710,7 +1392,7 @@ mod tests {
                 table.insert(&[a, b], &[], (0, 0), tag as u32, 1);
             }
             let mut report = Repair::default();
-            table.repair(&map, None, None, 2, &mut report);
+            table.repair(&plain(&map), None, 2, false, &mut report);
             let expected: std::collections::BTreeSet<(u32, u32)> =
                 keys.iter().map(|&(a, b)| (map[a as usize], map[b as usize])).collect();
             let found: std::collections::BTreeSet<(u32, u32)> =
@@ -725,13 +1407,44 @@ mod tests {
             prop_assert_eq!(found, expected);
         }
 
+        /// However the table grew and was repaired between refreshes, with a
+        /// repair dissolving some of the rows it re-keyed or not, a grouping
+        /// lists each cell's rows ascending.
         #[test]
-        fn a_group_lists_each_cells_rows_ascending(column in prop::collection::vec(0u32..6, 0..80)) {
+        fn a_group_lists_each_cells_rows_ascending(
+            rows in prop::collection::vec((0u32..32, 0u32..32, 0u32..32), 0..300),
+            cuts in prop::collection::vec((0usize..300, prop::option::of(1u32..32)), 0..8),
+            keyed in any::<bool>(),
+            dissolving in any::<bool>(),
+            column in 0usize..3,
+        ) {
+            let mut table = if keyed { Table::new(2) } else { Table::bag(2) };
+            let mut dissolve = |row: RowView<'_>| row.value.0.is_multiple_of(3);
             let mut group = Group::default();
-            group.build(&column, 6);
-            for cell in 0..8 {
-                let expected: Vec<u32> = (0..column.len() as u32).filter(|&row| column[row as usize] == cell).collect();
-                prop_assert_eq!(group.rows(cell), &expected[..]);
+            let mut cuts: Vec<_> = cuts.into_iter().map(|(cut, repair)| (cut.min(rows.len()), repair)).collect();
+            cuts.sort();
+            cuts.push((rows.len(), None));
+            let mut inserted = 0;
+            for (cut, moved) in cuts {
+                for &(a, b, value) in &rows[inserted..cut] {
+                    if !keyed || table.get(&[a, b], &[]).is_none() {
+                        table.insert(&[a, b], &[], (value, 0), 0, 1);
+                    }
+                }
+                inserted = cut;
+                // One cell comes to stand for the one below it.
+                if let Some(moved) = moved {
+                    let map: Vec<u32> = (0..32).map(|cell| if cell == moved { moved - 1 } else { cell }).collect();
+                    let dissolve = dissolving
+                        .then_some(&mut dissolve as &mut dyn FnMut(RowView<'_>) -> bool);
+                    table.repair(&plain(&map), dissolve, 2, false, &mut Repair::default());
+                }
+                group.refresh(&table, column, 32);
+                let cells = table.column(column);
+                for cell in 0..34 {
+                    let expected: Vec<u32> = (0..table.len() as u32).filter(|&row| cells[row as usize] == cell).collect();
+                    prop_assert_eq!(group.rows(cell), &expected[..]);
+                }
             }
         }
     }

@@ -85,6 +85,8 @@ impl Pass for InlinePass {
         let mut graph = CallGraph::read(context, module.op());
         for index in graph.callees_first() {
             let caller = graph.nodes[index].func;
+            // The copies belong to the caller they are spliced into.
+            let _scope = context.partition_scope(caller);
             let mut caller_ops = cost_of(context, caller);
             for site in std::mem::take(&mut graph.nodes[index].sites) {
                 if caller_ops >= MAX_CALLER_OPS {

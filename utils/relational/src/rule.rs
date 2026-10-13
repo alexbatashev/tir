@@ -1,343 +1,429 @@
-//! A rule as data: a query, and a head that only writes.
+//! Rule heads: what a match writes. A head only adds — a row, an equality —
+//! so a match that fired cannot be un-fired, and a head reads nothing beyond
+//! the key lookup an insert is. A match exists in epoch `t` and not `t-1`
+//! exactly when one of its rows or values is from epoch `t-1`, which is what
+//! lets a semi-naive driver search only the delta.
 //!
-//! Nothing in a head reads the graph and nothing outside an atom reads it
-//! either, so a match exists in round `t` and not `t-1` exactly when one of its
-//! rows or facts is from round `t-1`'s delta. That is what a hand-asserted
-//! "this applier reads no deeper than its pattern" used to promise and nothing
-//! checked.
+//! A head runs on all the matches of its rule at once, write by write: the
+//! keys an insert comes to are looked up as columns, and a later write reads
+//! what an earlier one bound for the same match.
 
 use smallvec::SmallVec;
 
-use crate::query::{Expr, Field, Match, Plan, Scalar, UNBOUND, Var};
-use crate::{ClassId, Engine, Label, LabelId, Ref};
+use crate::Ref;
+use crate::db::{Database, LatticeId, SpaceId};
+use crate::query::{Expr, Matches, Plan, Scalar, UNBOUND, Var, bound};
+use crate::store::Values;
 
-/// A node a head builds: a template with scalars written into named fields.
+/// One write of a rule's head. Variables hold references.
 #[derive(Clone, Debug)]
-pub struct LabelFill<L> {
-    pub template: L,
-    pub fills: SmallVec<[(Field, Scalar); 2]>,
-}
-
-impl<L> LabelFill<L> {
-    pub fn plain(template: L) -> Self {
-        Self {
-            template,
-            fills: SmallVec::new(),
-        }
-    }
-}
-
-/// One write of a rule's right-hand side. Variables hold references.
-#[derive(Clone, Debug)]
-pub enum HeadOp<L> {
-    /// Hash-cons `label(args)` and bind its value to `into`.
+pub enum Head {
+    /// Bind `into` to the value of the row the client keys by `args`. If no
+    /// row has the key, the client inserts one with a fresh value id.
     Insert {
-        label: LabelFill<L>,
         args: SmallVec<[Var; 4]>,
+        /// Whether the arguments are sorted, once canonical, before the
+        /// client keys them.
+        sorted: bool,
         into: Var,
     },
-    Union(Var, Var),
-    /// Bind `into` to `base` plus `offset`.
+    Equate(Var, Var),
+    /// Equate `var` with variable `offset + scalars[index]`: the one head that
+    /// chooses among bound variables, for a rule that picks an argument by a
+    /// guard's answer.
+    EquateIndexed {
+        var: Var,
+        offset: Var,
+        index: Scalar,
+    },
+    /// Bind `into` to `base` plus what `offset` evaluates to.
     Offset {
         base: Var,
         offset: Expr,
         into: Var,
     },
-    /// Union `class` with the variable `offset + scalars[index]` — the one head
-    /// that chooses among bound variables, for a rule that picks an operand by
-    /// a guard's answer (which arm of a decided gate).
-    UnionIndexed {
-        class: Var,
-        offset: Var,
-        index: Scalar,
+    /// Join what `value` evaluates to onto what `key`'s id is known to be in
+    /// `column`.
+    Raise {
+        column: LatticeId,
+        key: Var,
+        value: Expr,
     },
 }
 
-/// What a head's variables hold: the match's, then the head's own.
-struct Bound<'a>(&'a mut [Ref]);
+/// The key of a row: its cells, and beside them the weights of the cells
+/// whose offsets stay in the key.
+#[derive(Default)]
+pub struct Key {
+    pub cells: SmallVec<[u32; 8]>,
+    pub weights: SmallVec<[u64; 8]>,
+    /// Whether some weight is non-zero.
+    pub weighted: bool,
+}
 
-impl Bound<'_> {
-    /// The reference `var` holds, if any.
-    #[inline]
-    fn get(&self, var: usize) -> Option<Ref> {
-        crate::query::bound(*self.0.get(var)?)
+impl Key {
+    pub fn clear(&mut self) {
+        self.cells.clear();
+        self.weights.clear();
+        self.weighted = false;
     }
 
-    #[inline]
-    fn set(&mut self, var: Var, reference: Ref) {
-        self.0[var as usize] = reference;
+    /// The weights as a table takes them: none when every one is zero.
+    pub fn weights(&self) -> &[u64] {
+        match self.weighted {
+            true => &self.weights,
+            false => &[],
+        }
     }
 }
 
-/// A rule: what to look for, and what it proves.
-#[derive(Clone, Debug)]
-pub struct Rule<L> {
-    pub name: String,
-    pub plan: Plan<L>,
-    pub head: Vec<HeadOp<L>>,
-    /// Variables the head binds, numbered above the query's. A match carries
-    /// only what it matched; a head's own classes exist for as long as it runs.
+/// What an insert comes to before its table is probed.
+pub enum Keyed {
+    /// The client settles it without a row.
+    Is(Ref),
+    /// The key is built: the table its row lives in, and what the row's value
+    /// is shifted by.
+    At { table: u32, shift: u64 },
+}
+
+/// A rule as a driver runs it: what to look for. What it proves, its head,
+/// the driver asks the client for at the rule's first match.
+#[derive(Clone, Copy)]
+pub struct Rule<'a> {
+    pub name: &'a str,
+    pub plan: &'a Plan,
+    /// Variables the head binds, numbered above the query's.
     pub head_vars: u32,
-    /// Applied once after the iterative fixpoint rather than in it, for a law
-    /// whose right-hand side would feed back through the others.
+    /// Applied once after the fixpoint rather than in it, for a rule whose
+    /// head would feed back through the others.
     pub post_saturation: bool,
 }
 
-impl<L: Label> Engine<L> {
-    /// Run `head` on one match. A head that cannot be spelled — a fill the
-    /// language has no term for — writes nothing; everything before it stands,
-    /// which is sound because a head only ever adds.
-    pub fn apply_head(&mut self, head: &[HeadOp<L>], head_vars: u32, matched: &Match) {
-        let (bindings, scalars) = (&matched.bindings, &matched.scalars);
-        self.apply_head_cached(head, head_vars, bindings, scalars, &mut Vec::new());
-    }
-
-    /// [`Self::apply_head`] for a head run many times: `labels` keeps the label
-    /// of each insert whose node is the template as written, so a node the
-    /// graph already holds costs a key lookup and no term is built for it.
-    pub(crate) fn apply_head_cached(
+/// What a head asks its client: the database, and the parts of a write only
+/// the client can do.
+pub trait Client<C, const S: usize> {
+    fn db(&self) -> &Database<C, S>;
+    fn db_mut(&mut self) -> &mut Database<C, S>;
+    /// What insert `op` of rule `rule` over `operands`, which are canonical,
+    /// comes to given the match's scalars: a reference, or the key its row is
+    /// stored under, written into `key`. `None`: the client cannot spell it,
+    /// and the head stops.
+    fn key(
         &mut self,
-        head: &[HeadOp<L>],
-        head_vars: u32,
-        bindings: &[Ref],
+        rule: usize,
+        op: usize,
+        operands: &[Ref],
         scalars: &[u64],
-        labels: &mut Vec<Option<LabelId>>,
-    ) {
-        if labels.len() < head.len() {
-            labels.resize(head.len(), None);
+        key: &mut Key,
+    ) -> Option<Keyed>;
+    /// The tag of the row the next [`Self::mint`] is for. Each mint takes
+    /// the next tag.
+    fn tag(&self) -> u32;
+    /// Mint the value id of the row just stored under `key` in `table`, plus
+    /// whatever the client keeps per row, returning the id: the next one of
+    /// the space.
+    fn mint(&mut self, rule: usize, op: usize, table: u32, key: &Key, scalars: &[u64]) -> u32;
+    /// Equate two references, plus whatever the client keeps per id.
+    fn equate(&mut self, a: Ref, b: Ref);
+}
+
+/// What a driver keeps between the rules it applies: per match of the rule in
+/// hand its variables, and the inserts being looked up together.
+#[derive(Default)]
+pub struct Batch {
+    // Per match, its bindings and then the head's own variables.
+    held: Vec<Ref>,
+    // Per match, whether its head stopped, and whether it wrote anything.
+    stopped: Vec<bool>,
+    wrote: Vec<bool>,
+    run: Run,
+    key: Key,
+}
+
+impl Batch {
+    /// How many matches of the last rule applied wrote nothing: equated
+    /// nothing, minted nothing and raised nothing.
+    pub fn idle(&self) -> usize {
+        self.wrote.iter().filter(|&&wrote| !wrote).count()
+    }
+}
+
+// Consecutive inserts of one head write into one table: their key columns,
+// and per key the match it is of and the offset its row's value is at from
+// the insert's.
+#[derive(Default)]
+struct Run {
+    table: u32,
+    arity: usize,
+    columns: Vec<Vec<u32>>,
+    weights: Vec<Vec<u64>>,
+    weighted: bool,
+    matches: Vec<u32>,
+    shifts: Vec<u64>,
+    found: Vec<Option<Ref>>,
+}
+
+impl Run {
+    fn push(&mut self, table: u32, key: &Key, matched: u32, shift: u64) {
+        let arity = key.cells.len();
+        if self.matches.is_empty() {
+            (self.table, self.arity) = (table, arity);
+            if self.columns.len() < arity {
+                self.columns.resize_with(arity, Vec::new);
+                self.weights.resize_with(arity, Vec::new);
+            }
         }
-        // The match's bindings and the head's own, in one array the engine
-        // keeps between heads.
-        let mut bound = std::mem::take(&mut self.head_bound);
-        bound.clear();
-        bound.extend_from_slice(bindings);
-        bound.resize(bound.len() + head_vars as usize, UNBOUND);
-        self.run_head(head, scalars, &mut Bound(&mut bound), labels);
-        self.head_bound = bound;
+        if key.weighted && !self.weighted {
+            self.weighted = true;
+            for weights in &mut self.weights[..arity] {
+                weights.resize(self.matches.len(), 0);
+            }
+        }
+        for (column, &cell) in self.columns.iter_mut().zip(&key.cells) {
+            column.push(cell);
+        }
+        if self.weighted {
+            for (at, column) in self.weights[..arity].iter_mut().enumerate() {
+                column.push(key.weights.get(at).copied().unwrap_or(0));
+            }
+        }
+        self.matches.push(matched);
+        self.shifts.push(shift);
     }
 
-    fn run_head(
-        &mut self,
-        head: &[HeadOp<L>],
-        scalars: &[u64],
-        bound: &mut Bound<'_>,
-        labels: &mut [Option<LabelId>],
-    ) {
-        for (index, op) in head.iter().enumerate() {
-            match op {
-                HeadOp::Insert { label, args, into } if label.fills.is_empty() => {
-                    let template = &label.template;
-                    debug_assert_eq!(template.children().len(), args.len());
-                    // The cache is keyed by the rule's plan, and nothing stops
-                    // two rules from sharing one, so a remembered label is
-                    // checked against the template before it is trusted.
-                    let id = match labels[index] {
-                        Some(id) if self.label_is(id, template) => id,
-                        _ => {
-                            let id = self.intern(template);
-                            labels[index] = Some(id);
-                            id
+    fn clear(&mut self) {
+        for column in &mut self.columns[..self.arity] {
+            column.clear();
+        }
+        for weights in &mut self.weights[..self.arity] {
+            weights.clear();
+        }
+        self.weighted = false;
+        self.matches.clear();
+        self.shifts.clear();
+    }
+}
+
+/// Run `head` on the matches of rule `rule`, whose variables range over
+/// `space`, one write after another: each write on every match, in match
+/// order, before the next. A missing binding or an insert the client cannot
+/// spell stops the rest of that match's head; everything before it stands,
+/// which is sound because a head only adds.
+///
+/// An equate is visible to the writes after it through the partition alone:
+/// the tables name the absorbed ids until the client canonicalizes them.
+pub fn apply<C, const S: usize>(
+    client: &mut impl Client<C, S>,
+    space: SpaceId,
+    rule: usize,
+    head: &[Head],
+    head_vars: u32,
+    matches: &Matches,
+    batch: &mut Batch,
+) {
+    let count = matches.len();
+    batch.held.clear();
+    for index in 0..count {
+        let (_, bindings, _) = matches.get(index);
+        batch.held.extend_from_slice(bindings);
+        let own = batch.held.len() + head_vars as usize;
+        batch.held.resize(own, UNBOUND);
+    }
+    let width = batch.held.len().checked_div(count).unwrap_or(0);
+    batch.stopped.clear();
+    batch.stopped.resize(count, false);
+    batch.wrote.clear();
+    batch.wrote.resize(count, false);
+    let get = |held: &[Ref], index: usize, var: Var| {
+        bound(*held[index * width..][..width].get(var as usize)?)
+    };
+    for (op, write) in head.iter().enumerate() {
+        match write {
+            Head::Insert { args, sorted, into } => {
+                let insert = Insert {
+                    at: (rule, op),
+                    args,
+                    sorted: *sorted,
+                    into: *into as usize,
+                    width,
+                };
+                batch_insert(client, space, &insert, matches, batch);
+            }
+            Head::Equate(..) | Head::EquateIndexed { .. } => {
+                for index in 0..count {
+                    let (a, b) = match write {
+                        Head::EquateIndexed {
+                            var,
+                            offset,
+                            index: scalar,
+                        } => {
+                            let scalars = matches.get(index).2;
+                            (*var, *offset + scalars[*scalar as usize] as Var)
                         }
+                        Head::Equate(a, b) => (*a, *b),
+                        _ => unreachable!("an equate"),
                     };
-                    let build = |cells: &[u32]| {
-                        let mut node = template.clone();
-                        for (child, &cell) in node.children_mut().iter_mut().zip(cells) {
-                            *child = ClassId(cell);
-                        }
-                        node
+                    let bound = (get(&batch.held, index, a), get(&batch.held, index, b));
+                    let (false, (Some(a), Some(b))) = (batch.stopped[index], bound) else {
+                        batch.stopped[index] = true;
+                        continue;
                     };
-                    if self.is_plain(id) {
-                        // The key is the label and then the operand classes;
-                        // all but the widest operators fit on the stack.
-                        let mut inline = [0u32; 8];
-                        let mut spilled = Vec::new();
-                        let key = match inline.get_mut(..=args.len()) {
-                            Some(key) => key,
-                            None => {
-                                spilled.resize(args.len() + 1, 0);
-                                &mut spilled[..]
-                            }
-                        };
-                        key[0] = id.0;
-                        let mut at_zero = true;
-                        for (cell, &arg) in key[1..].iter_mut().zip(args) {
-                            let Some(operand) = bound.get(arg as usize) else {
-                                return;
-                            };
-                            let operand = self.find(operand);
-                            at_zero &= operand.offset == 0;
-                            *cell = operand.class.0;
-                        }
-                        if at_zero {
-                            if self.commutes(id) && key[2] < key[1] {
-                                key.swap(1, 2);
-                            }
-                            let reference = self.insert_plain(id, key, build);
-                            bound.set(*into, reference);
-                            continue;
-                        }
-                    }
-                    let reference = if self.is_int_constant(id) {
-                        self.insert(template.clone(), &[])
-                    } else {
-                        let Some(mut operands) = args
-                            .iter()
-                            .map(|&arg| bound.get(arg as usize))
-                            .collect::<Option<SmallVec<[Ref; 4]>>>()
-                        else {
-                            return;
-                        };
-                        let sort = self.commutes(id);
-                        self.insert_labelled(id, &mut operands, sort, build)
-                    };
-                    bound.set(*into, reference);
+                    let before = work(client);
+                    client.equate(a, b);
+                    batch.wrote[index] |= work(client) != before;
                 }
-                HeadOp::Insert { label, args, into } => {
-                    let Some(mut operands) = args
-                        .iter()
-                        .map(|&arg| bound.get(arg as usize))
-                        .collect::<Option<SmallVec<[Ref; 4]>>>()
-                    else {
-                        return;
+            }
+            Head::Offset { base, offset, into } => {
+                for index in 0..count {
+                    let scalars = matches.get(index).2;
+                    let bound = (get(&batch.held, index, *base), offset.eval(scalars));
+                    let (false, (Some(base), Some(offset))) = (batch.stopped[index], bound) else {
+                        batch.stopped[index] = true;
+                        continue;
                     };
-                    let fills: SmallVec<[(Field, u64); 2]> = label
-                        .fills
-                        .iter()
-                        .map(|&(field, slot)| (field, scalars[slot as usize]))
-                        .collect();
-                    let Some(node) = L::fill(&label.template, &fills) else {
-                        return;
-                    };
-                    debug_assert_eq!(node.children().len(), args.len());
-                    if node.commutative() {
-                        for operand in operands.iter_mut() {
-                            *operand = self.find(*operand);
-                        }
-                        operands.sort_unstable();
-                    }
-                    let reference = self.insert(node, &operands);
-                    bound.set(*into, reference);
+                    let shifted = Ref::new(base.id, base.offset.wrapping_add(offset as u64));
+                    batch.held[index * width + *into as usize] = client.db().find(space, shifted);
                 }
-                HeadOp::Union(a, b) => {
-                    let (Some(a), Some(b)) = (bound.get(*a as usize), bound.get(*b as usize))
-                    else {
-                        return;
+            }
+            Head::Raise { column, key, value } => {
+                for index in 0..count {
+                    let scalars = matches.get(index).2;
+                    let bound = (get(&batch.held, index, *key), value.eval(scalars));
+                    let (false, (Some(key), Some(value))) = (batch.stopped[index], bound) else {
+                        batch.stopped[index] = true;
+                        continue;
                     };
-                    // A contradiction is recorded by the engine.
-                    let _ = self.union(a, b);
-                }
-                HeadOp::Offset { base, offset, into } => {
-                    let (Some(base), Some(offset)) =
-                        (bound.get(*base as usize), offset.eval(scalars))
-                    else {
-                        return;
-                    };
-                    let shifted = Ref::new(base.class, base.offset.wrapping_add(offset as u64));
-                    bound.set(*into, self.find(shifted));
-                }
-                HeadOp::UnionIndexed {
-                    class,
-                    offset,
-                    index,
-                } => {
-                    let chosen = *offset as usize + scalars[*index as usize] as usize;
-                    let (Some(a), Some(b)) = (bound.get(*class as usize), bound.get(chosen)) else {
-                        return;
-                    };
-                    let _ = self.union(a, b);
+                    let key = client.db().find(space, key).id;
+                    batch.wrote[index] |= client.db_mut().raise(*column, key, value as u64);
                 }
             }
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ClassId;
-    use crate::query::{Atom, NoExterns, Query};
-    use crate::testing::Term;
+// What a write that changed anything moved.
+fn work<C, const S: usize>(client: &impl Client<C, S>) -> (usize, usize, usize) {
+    let stats = client.db().stats();
+    (stats.merges, stats.adds, stats.raises)
+}
 
-    /// `f(?1, ?2)` proves `f(?1, ?2) = g(?1)`.
-    fn rule() -> Rule<Term> {
-        Rule {
-            name: "f-to-g".into(),
-            plan: Plan::compile(Query::tree(
-                4,
-                0,
-                vec![Atom::Node {
-                    template: Term::op("f", &[ClassId(0), ClassId(0)]),
-                    args: SmallVec::from_slice(&[1, 2]),
-                    class: 0,
-                    row: None,
-                }],
-            )),
-            head: vec![
-                HeadOp::Insert {
-                    label: LabelFill::plain(Term::op("g", &[ClassId(0)])),
-                    args: SmallVec::from_slice(&[1]),
-                    into: 3,
-                },
-                HeadOp::Union(0, 3),
-            ],
-            head_vars: 0,
-            post_saturation: false,
+struct Insert<'a> {
+    at: (usize, usize),
+    args: &'a [Var],
+    sorted: bool,
+    into: usize,
+    // How many variables a match holds.
+    width: usize,
+}
+
+// Binds each match's `into` to the value of the row the client keys by its
+// `args`. The keys of consecutive matches that fall into one table are
+// looked up together, in match order: of equal keys the first mints and the
+// rest find it.
+fn batch_insert<C, const S: usize>(
+    client: &mut impl Client<C, S>,
+    space: SpaceId,
+    insert: &Insert<'_>,
+    matches: &Matches,
+    batch: &mut Batch,
+) {
+    let (rule, op) = insert.at;
+    let mut operands: SmallVec<[Ref; 4]> = SmallVec::new();
+    for index in 0..matches.len() {
+        if batch.stopped[index] {
+            continue;
+        }
+        let held = &mut batch.held[index * insert.width..][..insert.width];
+        operands.clear();
+        let db = client.db();
+        operands.extend(
+            insert
+                .args
+                .iter()
+                .map_while(|&arg| Some(db.find(space, bound(*held.get(arg as usize)?)?))),
+        );
+        if operands.len() < insert.args.len() {
+            batch.stopped[index] = true;
+            continue;
+        }
+        if insert.sorted {
+            operands.sort_unstable();
+        }
+        batch.key.clear();
+        let scalars = matches.get(index).2;
+        let before = work(client);
+        let keyed = client.key(rule, op, &operands, scalars, &mut batch.key);
+        batch.wrote[index] |= work(client) != before;
+        match keyed {
+            None => batch.stopped[index] = true,
+            Some(Keyed::Is(found)) => held[insert.into] = found,
+            Some(Keyed::At { table, shift }) => {
+                if batch.run.table != table {
+                    store(client, space, insert, matches, batch);
+                }
+                batch.run.push(table, &batch.key, index as u32, shift);
+            }
         }
     }
+    store(client, space, insert, matches, batch);
+}
 
-    /// A caller may union and saturate without a rebuild in between: the first
-    /// round still matches through the class the union absorbed.
-    #[test]
-    fn saturation_matches_through_a_union_nobody_rebuilt_for() {
-        let mut eg = Engine::new();
-        // The older class survives a union, so the `f` row names the absorbed one.
-        let older = eg.add(Term::leaf("older")).class;
-        let x = eg.add(Term::leaf("x")).class;
-        let y = eg.add(Term::leaf("y")).class;
-        let g = eg.add(Term::op("g", &[x])).class;
-        let f = eg.add(Term::op("f", &[g, y])).class;
-        eg.rebuild();
-        eg.union(older, g).unwrap();
-
-        // `f(g(?3), ?2)` proves `f(g(?3), ?2) = ?2`.
-        let atom = |op: &str, children: usize, args: &[u32], class| Atom::Node {
-            template: Term::op(op, &vec![ClassId(0); children]),
-            args: SmallVec::from_slice(args),
-            class,
-            row: None,
-        };
-        let rule = Rule {
-            name: "f-of-g".into(),
-            plan: Plan::compile(Query::tree(
-                4,
-                0,
-                vec![atom("g", 1, &[3], 1), atom("f", 2, &[1, 2], 0)],
-            )),
-            head: vec![HeadOp::Union(0, 2)],
-            head_vars: 0,
-            post_saturation: false,
-        };
-        eg.saturate_rules(&[rule], &NoExterns, 1, usize::MAX);
-        assert!(eg.connected(f, y));
+// Look the run's keys up and mint the missing ones.
+fn store<C, const S: usize>(
+    client: &mut impl Client<C, S>,
+    space: SpaceId,
+    insert: &Insert<'_>,
+    matches: &Matches,
+    batch: &mut Batch,
+) {
+    let run = &mut batch.run;
+    if run.matches.is_empty() {
+        return;
     }
-
-    #[test]
-    fn a_head_inserts_and_unions() {
-        let mut eg = Engine::new();
-        let a = eg.add(Term::leaf("a")).class;
-        let b = eg.add(Term::leaf("b")).class;
-        let f = eg.add(Term::op("f", &[a, b])).class;
-        eg.rebuild();
-
-        let rule = rule();
-        let found = rule.plan.search(&eg, [f], &|_, _| true, false, &NoExterns);
-        assert_eq!(found.len(), 1);
-        for matched in &found {
-            eg.apply_head(&rule.head, rule.head_vars, matched);
-        }
-        eg.rebuild();
-
-        let g = eg.add(Term::op("g", &[a])).class;
-        assert!(eg.connected(f, g));
+    let (rule, op) = insert.at;
+    let arity = run.arity;
+    let keys: SmallVec<[&[u32]; 8]> = run.columns[..arity].iter().map(Vec::as_slice).collect();
+    let weights: SmallVec<[&[u64]; 8]> = match run.weighted {
+        true => run.weights[..arity].iter().map(Vec::as_slice).collect(),
+        false => SmallVec::new(),
+    };
+    let first = client.db().ids(space) as u32;
+    let tag = client.tag();
+    client.db_mut().insert_rows(
+        run.table,
+        &keys,
+        &weights,
+        Values::From(first),
+        tag,
+        &mut run.found,
+    );
+    let key = &mut batch.key;
+    let mut minted = first;
+    for (at, &index) in run.matches.iter().enumerate() {
+        let shift = run.shifts[at];
+        let value = match run.found[at] {
+            Some(found) => {
+                let found = Ref::new(found.id, found.offset.wrapping_add(shift));
+                client.db().find(space, found)
+            }
+            None => {
+                key.clear();
+                key.cells.extend(keys.iter().map(|column| column[at]));
+                key.weights.resize(arity, 0);
+                for (weight, column) in key.weights.iter_mut().zip(&weights) {
+                    *weight = column[at];
+                    key.weighted |= *weight != 0;
+                }
+                let scalars = matches.get(index as usize).2;
+                batch.wrote[index as usize] = true;
+                let id = client.mint(rule, op, run.table, key, scalars);
+                debug_assert_eq!(id, minted, "the value the row was stored with");
+                minted += 1;
+                Ref::new(id, shift)
+            }
+        };
+        batch.held[index as usize * insert.width + insert.into] = value;
     }
+    drop((keys, weights));
+    run.clear();
 }

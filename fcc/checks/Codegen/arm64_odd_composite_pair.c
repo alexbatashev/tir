@@ -36,6 +36,6 @@ struct Twelve make_twelve(struct Twelve *value) {
 // ASM-NOT: bl memcpy
 // ASM: ldr {{.*}}, [{{.*}}, 0]
 // ASM: str {{.*}}, [{{.*}}, 0]
-// ASM: ldr {{.*}}, [{{.*}}, 8]
-// ASM: str {{.*}}, [{{.*}}, 8]
+// ASM: ldur {{.*}}, [{{.*}}, 8]
+// ASM: stur {{.*}}, [{{.*}}, 8]
 // ASM: bl consume_twelve

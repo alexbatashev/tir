@@ -55,7 +55,7 @@ fn count_region(
 
 fn assert_within_budget(context: &Context, root: OpId, after: &str) {
     let live = count_live(context, root);
-    let census = context.slab_census();
+    let census = context.census();
     let mut over = Vec::new();
     let mut check = |kind: &str, slab: usize, counted: usize| {
         if slab > 2 * counted {

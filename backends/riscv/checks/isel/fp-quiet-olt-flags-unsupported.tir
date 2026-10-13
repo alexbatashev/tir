@@ -9,4 +9,4 @@ module {
   module_end
 }
 
-// CHECK: missing atomic materializer rule
+// CHECK: invalid rule set: fp.cmp has no instruction: %{{[0-9]+}}, %{{[0-9]+}} = fp.cmp %{{[0-9]+}}, %{{[0-9]+}} state(%{{[0-9]+}}) {predicate = \"olt\", semantics = {exceptions = \"flags\"}} : !i1

@@ -64,6 +64,14 @@ otherwise identical operations over those inputs become equivalent too.
 This property is called congruence. Rebuilding the graph restores it after
 rules merge classes.
 
+A commutative binary operation is a node over the multiset of its two
+operands. Its table row is keyed with the lesser operand first, by class and
+then by the offset the key keeps, so `a + b` and `b + a` are one row and one
+class wherever they come from: the IR, a rule, or a merge that puts a stored
+row's operands out of order, which the rebuild re-keys in order again. The
+node itself keeps its operands as the operation wrote them, and of two
+spellings the graph keeps the first it met.
+
 ### Constant offsets are part of identity
 
 The graph refers to a value as a class plus a constant offset, taken modulo
@@ -93,7 +101,9 @@ negated (`not(x + k)` is `not(x) - k`). A node reads its laws once, from the
 declaration and from the integer or pointer carrier its type is, so a node a
 rule introduces has the same laws as a seeded one. A pointer's carrier is the
 data layout's pointer width; with no layout in scope a pointer has none, and
-its arithmetic keeps no offsets.
+its arithmetic keeps no offsets. The null pointer is the zero of the pointer
+carrier, a reference as an integer constant is one of its width's zero, and
+the two zeros stay apart.
 
 The graph is not a syntax tree. Different expressions can share inputs, and
 equalities can introduce cycles. For example, a loop's carried value can be a
@@ -136,10 +146,78 @@ assuming anything about its implementation. This allows partial knowledge:
 an identity such as `x + 0 = x` does not require understanding how `x` was
 computed.
 
+The seeder can also give such a result a row over what its operation reads,
+in place of the leaf, for a client that orders effects. The instruction
+selector asks for these rows and its chapter describes them. Instcombine
+does not. With them every value has a parent in whatever is computed after
+it, and the passes that follow a change upward (the delta of a round, the
+classes an arm's fact dirties and re-extracts) then reach the rest of the
+function: on CoreMark the mid-end ran twice the instructions.
+
 Structured branches contribute conditional values. Loops contribute their
 carried inputs, backedges, and published results. Memory accesses contribute
 terms tied to the state they observe. These relationships come from the IR's
 operation interfaces and dependencies.
+
+What every operation of a kind shares is read once, at the first one seeded:
+which of those interfaces the kind has and, per attribute list, the operator
+a representable operation becomes, with its laws and cost. An operation then
+contributes only its own operands, type and identity. An attribute the
+operation's schema does not declare is no part of that identity, so two
+operations differing only in such an attribute are one. The pass keeps what was
+read beside its vocabulary (`rewrite::Kinds`) and lends it to the seeding of
+its next function, as instruction selection does. Whether an operation is
+representable depends on its attributes and on the data layout in scope, so a
+function under another data layout starts the record again. An attribute list
+that is not representable is kept for one function only: it may name what
+only that function has, such as a symbol.
+
+The walk follows each region's operation list in position order and enters a
+nested region where the operation holding it sits. An operand whose
+definition the walk has not reached pulls that definition in first. This
+order numbers the classes. A pure operation of a kind already met, with one
+result and operands that all have classes, is seeded from its row in the IR
+storage. The seeder reads the kind from the name column and the operands and
+the result as slices of the operand and result columns. It reads their types
+from the value type column and each operand's class from the column the
+driver keeps per value. An operand without a class names its definition in
+the def column, and a definition that is such a row itself is seeded first,
+its value operands ahead of its states, as the walk through a handle would.
+No operation handle is made for such a row. The
+first operation of a kind in a function goes through its handle, which
+fills the kind's facts, and so does an operation with regions, several
+results, or an interface the walk branches on.
+
+A pure operation gets its class where the walk meets it and its row later.
+The walk asks the engine what the node is over its operands: a reference
+its laws settle without a row, as `x + 0` is `x`, or a fresh class at the
+offset the node's row is shifted by. Classes are therefore minted in walk
+order whichever order the rows are stored in, and the representative of a
+set, its lowest class, is the operation the walk met first. The operations
+waiting for a row are held per label as columns, one per operand position,
+and stored a label at a time when the walk next has to read the partition,
+so a batch holds the rows of its label since the last such read. Storing a batch
+canonicalizes each row's operands, hashes the keys of the whole batch column
+by column and walks the table's index once per key: a key the table holds,
+or an earlier row of the batch stored, unites the operation's class with
+that row and makes no node, and any other key becomes a row of the class
+reserved for it. A row whose key keeps an operand's offset is looked up
+alone. Classes reserved for rows that turned out to exist leave gaps in the
+class ids.
+
+A row stored before a later batch unites one of its operands names a class
+that is no longer a representative, and the equalities that follow from the
+merge are not known yet. Gates, loops, memory accesses and joins are
+inserted where the walk meets them, over operands whose rows may be waiting.
+So before the walk reads the partition (whether a gate's arms agree, whether
+a loop carries a port unchanged, whether a join merges one state), the
+waiting batches are stored and the graph is rebuilt, and once more when the
+walk ends. That rebuild finds the rows stored too early congruent to others.
+Such a row's node was stored only because of the order of the batches, so
+it leaves its class's node list with its table; of two congruent nodes the
+one whose class was minted first stays. The seeded graph then holds the
+classes, representatives, rows and node lists that inserting the operations
+one at a time in walk order produces.
 
 ### Rules discover equalities
 
@@ -183,14 +261,214 @@ For an expression such as `(x + y) - y`, the query joins a subtraction node
 to an addition node and requires both appearances of `y` to name the same
 class. A successful match can merge the subtraction's class with `x`.
 
+The e-graph (`tir-egraph`) is one client of a generic relational engine
+(`tir-relational`) and uses only its public interface. Each label is a
+cell of a table keyed by its operands, a pattern node selects the labels it
+matches, and a commutative label lets a binary row match with its operands
+exchanged: the row stores the pair in key order, and a pattern reads it both
+ways. Commutative binary labels have tables of their own, whose key the
+relational layer keeps in order when a repair renames a cell. The engine's
+union-find keeps each class's offset from its
+representative, and a table cell carries a weight beside its class, so a cell
+reads as a reference; a table's columns say which operand offsets stay in the
+key and which move to the value. Types, and the constants no carrier holds,
+are lattice columns over classes. A client declares further columns for
+facts of its own (`Engine::add_column`), which a rule reads with a fact atom
+and where a class said two different values holds none. A client can also
+register tables of its own: relations of 32-bit words, built once, shared with their indexes by
+every graph that reads them and never written during saturation. A rule
+ranges over one with a table atom that has a term per column. A term that is
+a scalar nothing has bound yet is bound to the row's cell; any other term is
+computed from the words the match has bound, and the row must hold that value.
+An atom with every term bound therefore asks whether a row exists, and one
+with some bound yields a match for each row that agrees with them, in the
+order the client added the rows. A pattern node can also select every label
+of its arity that a predicate of the client accepts, whatever the operator,
+and bind the label id of the row it matches to a scalar. One rule then covers
+every operator, with a client table keyed by label id saying what each label
+means. A graph never renumbers a label, so the table holds for the life of
+that graph; the ids are the graph's own, and another graph numbers the same
+labels in the order it meets them. The planner places a table atom once
+its computed terms can be evaluated and no other atom or guard is left to
+bind a scalar it reads, so its rows are looked up under as many columns as
+the match can give; atoms that wait for each other go after the row atoms,
+the one with most columns bound first. The query evaluator, rule actions,
+saturation rounds and extraction see only tables, id spaces and lattice
+columns; the e-graph compiles its patterns and actions onto them, and keeps
+the offset laws to itself: it tells an insert which key a node is stored under
+and tells a rebuild which re-keyed rows its laws now settle. When several
+atoms of a pattern share an operand none of them has bound yet or reaches its
+rows through, the evaluator binds it by intersecting the classes each atom
+allows, read from tries of the tables, rather than by probing one atom for
+each row of another. The tries hold classes; a match holds the rows to one
+reference per operand when it binds them, as the row-by-row search does.
+Scalars join the same way. A scalar that a run of consecutive row and table
+atoms binds is an attribute of the join beside the operands: a table atom
+reads it at a level of a trie over its columns, and the row atom that binds
+its label id to it allows the labels its rows have. A table atom leaves
+the run when a term of it computes on a scalar the run binds, or reads one a
+row atom wrote over. The join runs when the first atom of the run reaches at
+least 32 rows; below that each atom probes for the rows under its bound
+columns. Both produce the same matches in the same order.
+
+A pattern node that binds its label id to a scalar is held to the client
+tables that read the scalar. Where every order a rule is searched in reaches
+a table atom after the node, with the scalar as the term of one column, a row
+of the node is in a match only if some row of the table holds its label in
+that column, beside the literals the atom names in others. What the node
+resolves to therefore lists those labels alone, and no graph table all of
+whose labels dropped out: a rule over a table that knows three labels tries
+rows of those three. The labels are read off a trie of the table when the
+rule is resolved, and a label met later is tested when it arrives. A node is
+not reduced where another atom or a guard writes the scalar, or where
+another node reads the same selection. The reduced selection is kept with
+the vocabulary's caches, so the table a rule reads at a slot has to be the
+same relation in every graph of the pass.
+
+A search works out a table atom's key columns and the trie over them at its
+first lookup, and descends that trie for every lookup after.
+
+A lookup of the rows naming a class, as their value or in an operand
+column, passes over the tables that never named it. Each class records the
+tables with a row naming it, which a rebuild also reads, and a pattern node
+keeps the tables it reads as the same bits: one test of a word settles a
+node none of whose tables named the class, and one per table the rest. A
+layer's own rows are not recorded, so under an open layer every table is
+read. A search from a set of classes first drops the ones no table of the
+pattern's root node named, and prepares nothing where none is left.
+
+A search that starts from every row of a pattern node reads the node's tables
+grouped by label. A graph's table holds few of the labels a pass has met, so
+where the label ids run past eight times the table's rows the grouping is the
+rows sorted by label, and no run is laid out per label id.
+
+A search that starts from many rows of one atom first reduces them by the
+atoms below it. An atom is below another when its value is one of the other's
+operands. For each such atom the evaluator makes one pass over its rows and
+marks the classes they are values of, having reduced those rows the same way
+by what is below them. A starting row is then tried only if each operand
+column holds a marked class, as written or exchanged for a commutative label.
+This is the bottom-up half of a semi-join reduction: a row whose operand has
+no node of the nested operator costs one bit test instead of a failed descent.
+The marks ignore offsets, guards and facts, so they only remove rows that
+cannot match, and the matches and their order are those of the unreduced
+search. Searches from fewer than 64 rows, and searches under an open layer,
+skip the reduction.
+
+The labels the graphs have met, the table each label's rows live in, and
+what saturation keeps per rule (what each pattern node resolves to, and which
+rules a written cell wakes) belong to no one graph. They form a vocabulary
+that the pass owns and lends to each function's engine in turn: the engine is
+built over it and hands it back when the function is committed. A label
+therefore has one id and one table in every function the pass runs on, a
+client table keyed by label ids built when the pass is created stays valid,
+and a rule is resolved against a label once per pass. A label can be interned
+into the vocabulary before any graph exists. A copy of the pass, which a
+parallel pipeline makes per worker each time it runs, is a copy of the pass
+as it was added to the pipeline: it has the labels interned by then, none the
+original met since, and none of the caches.
+
+A label is the operator, its payload, its result type, its carrier and its
+arity. The vocabulary keeps a node without its provenance, which names one
+function's IR. An opaque input is one label for every value: which value it
+stands for is its node's provenance, and each such node is a class of its
+own, never hash-consed. The laws of a label (commutativity, offset
+coefficients, identities) are read off the first node interned under it.
+
+A rule that only some graphs call for (a fold per operator, a decided gate
+per arity) is compiled at the first function that needs it and kept, so its
+plan and the cache of it are one object for the pass. Whether a rule can
+match at all is still asked of each graph: a rule whose operator the graph
+stores no row of is skipped.
+
+A label's id and its table's slot say in what order the pass met them, so
+nothing is read in the order of either. The vocabulary ranks its labels by
+their content: operator, attributes by name, arity, payload, type and
+carrier, with a type and an attribute name spelled out, since their ids are
+the order the context interned them in. A search reads a table's labels by
+rank and the tables in the order of what they hold (arity, uniqueness,
+offset coefficients), and a rebuild merges the rows that came to share a key
+table by table in that order too. The labels a function holds are a subset
+of the vocabulary's, and a subset keeps the order of its members, so a
+function's matches come in the order they would in a pass that ran it alone.
+What the pass makes of a function then depends on neither the functions it
+ran before nor how many run at once.
+
 A saturation round searches the current graph, collects matches, applies
 their actions, and rebuilds congruence. Later rounds use recorded changes to
 restrict searches where a rule's dependencies permit that restriction.
-This avoids treating every rule as a fresh whole-function traversal.
+This avoids treating every rule as a fresh whole-function traversal. A table
+remembers the last round that wrote one of its rows, so a round lists the new
+rows of the tables the round before wrote and of no other, and wakes only the
+rules that read a cell of those rows.
+
+A rule the new rows cannot be searched from is searched at the classes near a
+change, and a match none of whose rows or facts is new is dropped: the round
+before found it. A match is new by a graph row or a fact alone, since no
+round writes a client table and an offset or a comparison reads only what is
+bound. So where the atoms left of a pattern are table atoms, offsets and
+comparisons, a match with nothing new so far is dropped there, before any of
+them is looked up. A guard that calls the host is never passed over.
+
+A round's searches read a frozen graph, so they can run at the same time.
+The database keeps what a search reads (tables, the partition, lattice
+columns, client tables) apart from the indexes it derives on demand. A search
+is split in two: preparing it builds every grouping and trie it will read, on
+the saturation's thread; running it reads only the core, those indexes and
+its own plan's scratch. A client whose guard functions read nothing bound to
+one thread says so, and the round then prepares each such rule in rule order,
+runs the prepared searches on up to eight threads, one fewer than the
+processors it may use (`TIR_SATURATE_THREADS` overrides the count), and puts
+each rule's matches back in its place. Actions
+are applied afterwards on one thread, a rule at a time in rule order, so the
+graph a round produces does not depend on how many threads searched. A thread
+is used for every 2048 starting rows, so a small round stays on one. The
+instruction selector's rule synthesis runs its pattern rules this way; the
+mid-end's guards interpret semantics against the context and stay on the
+saturation's thread.
+
+A rule's action runs on all of the rule's matches together, one write after
+another: the first write for every match, in match order, then the second.
+An insert builds the key of each match's node. The keys of consecutive
+matches that fall into one table are looked up as a batch: the key columns
+are hashed column by column, each key walks the table's index once, and the
+keys the table lacks are appended as rows in match order, each valued with a
+new class. Of equal keys in one batch the first makes the class and the rest
+find it. A later write reads what an earlier one bound for the same match, so
+an insert over a node the action has just made is keyed by the classes the
+earlier batch returned. Under a layer the batch is first looked up in the
+base and in each lower layer, passing over the rows a layer made stale, and
+the keys left go to the layer's own rows through the same lookup. A node its
+laws settle, such as a constant or a sum with zero, is a reference and joins
+no batch.
+
+Writes are grouped by write and not by match, so an insert sees the merges
+of the writes before it for every match and of the writes after it for none.
+Two matches can then each make a node that a later merge of the same action
+makes congruent, where applying them one after the other would have found
+the first node again. The rebuild unites the two. The classes a saturation
+proves equal are the same either way; how many e-nodes a class lists, and in
+what order, can differ.
+
+Congruence is rebuilt after each rule that merged classes, so the next
+rule's inserts are looked up in tables that name representatives. A rebuild
+costs what the merges touched. Each class records which tables have a row
+naming it, and a merge adds the record of the absorbed class to the
+survivor's; the rebuild rewrites only the tables on the records of the
+classes absorbed since the last one. When each of those classes was made in
+the current round, only rows written in the round can name one, and the
+rebuild reads those rows alone. The usual action, which makes a node and
+merges it into the class it matched, is thus repaired by rewriting the value
+of the row it has just stored. A row stored naming a class that was already
+absorbed puts its table on the list in full. Under a layer the rebuild
+rewrites the layer's own rows and copies the lower rows naming an absorbed
+class, which it finds through an index from classes to the base rows naming
+them.
 
 The rounds stop when no further progress is found or when a resource limit
 is reached. Bounds on work and graph size keep compilation finite even when
-the rules can generate many alternatives. The result therefore contains the
+the rules can generate many alternatives. The bound on size is a growth over
+the seeded graph, so a large function is searched like a small one. The result therefore contains the
 equivalences discovered within the search budget, not every possible identity.
 
 Some rules run in a terminal post-saturation phase. Reassociating a product
@@ -251,9 +529,18 @@ Extraction chooses finite expressions with low modeled cost. An operation's
 cost combines with the costs of its inputs, plus one add for each input read
 at a non-zero offset. Constants have no computation cost in this model. Opaque
 or structural forms remain available when no better representation is known.
+A unique node, one that stands for a value and is never hash-consed, costs
+its own price alone: no spelling of its operands is a spelling of it.
+A class may hold a node whose operand is the class itself, the equation
+`c = f(c)`. Such a node is hash-consed, rebuilt and matched like any other,
+with its operand bound to the class it is read in. Extraction never chooses
+it, whatever it costs, since it would spell the class by the class; a class
+with nothing else to choose has no cost.
 
 A reference is written back in one of three ways. A constant is a literal, or
-an existing visible literal of the same value and type. A reference at the
+an existing visible literal of the same value and type. A null pointer is a
+copy of a null the function already has, and a constant pointer past null is
+one add of a literal to null. A reference at the
 offset its class's cheapest node sits at is that node. Any other offset is an
 existing visible value already spelled as one add of a literal to that node,
 or else such an add, built: `addi` for an integer, `ptradd` for a pointer.
@@ -278,6 +565,13 @@ dependence path ending at it. A value is reused only where its count is below
 the holder's. The count never decreases along a dependence, so every dependent
 value is refused. An independent value is refused only when a longer chain of
 region-carrying operations leads to it.
+
+The dependences come from the use lists, not from a walk of the region. A
+value an operation of the region defines is read by the operation of the
+region that holds each of its readers, however deep, and by the one that holds
+each nested region publishing it. The counts are the least fixpoint of that
+relation: every read raises its reader to its producer's count, plus one for a
+reader that carries regions, until nothing rises.
 
 An existing operation can be recreated elsewhere only when its behavior allows
 that speculation and its inputs can be made available. Potential traps matter:

@@ -16,5 +16,6 @@ module {
 }
 
 // CHECK-LABEL: asm.symbol {name = "far", arg_regs = [%[[P:[0-9]+]]:GPR]}
+// CHECK-NEXT: state.entry_state
 // CHECK-NEXT: arm64.add_imm {rd = %[[A:[0-9]+]]:GPRsp, rn = %[[P]]:GPR, imm = 4}
 // CHECK: arm64.load_doubleword {rt = %{{[0-9]+}}:GPR, rn = %[[A]]:GPRsp, imm = 4096}

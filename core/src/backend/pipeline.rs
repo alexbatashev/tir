@@ -108,6 +108,23 @@ impl Pass for TargetIntegerLegalizer {
     }
 }
 
+/// Turn every function under `root` that still holds a control-flow graph into
+/// regions, memory order constructed on the way, and schedule its loops. A
+/// caller whose input is a raw graph (IR text, LLVM IR, the C API) runs this
+/// ahead of [`build_pipeline`]; a front end that builds regions itself does
+/// not.
+pub fn structure(context: &Context, root: tir::OpHandle) -> Result<(), PassError> {
+    let mut pm = PassManager::new();
+    let functions = pm.nest::<FuncOp>();
+    // A no-alias fact is mid-end vocabulary: no machine has an instruction
+    // for it, so it becomes the range check it stands for. The lowering reads
+    // blocks, so it goes ahead of the conversion.
+    functions.add_pass(LowerPtrDisjointPass::new());
+    functions.add_pass(RestructureNodesPass::new());
+    functions.add_pass(AffineSchedulePass::new());
+    pm.run(context, root)
+}
+
 /// Build the lowering pipeline for `target`: instruction selection, pre-RA
 /// lowerings, register allocation, and post-RA finalization. Rooted at a module,
 /// it lowers every function in it.
@@ -118,7 +135,7 @@ pub fn build_pipeline(
     oracles: Oracles,
 ) -> PassManager {
     let mut pm = module_prologue(target);
-    add_function_passes(&mut pm, target, context, stop, oracles);
+    add_function_passes(&mut pm, target, target.isel_pass(context), stop, oracles);
     pm
 }
 
@@ -128,18 +145,12 @@ fn module_prologue(target: &dyn TargetMachine) -> PassManager {
     let mut pm = PassManager::new();
     {
         let functions = pm.nest::<FuncOp>();
-        // A no-alias fact is mid-end vocabulary: no machine has an instruction
-        // for it, so it becomes the range check it stands for.
-        functions.add_pass(LowerPtrDisjointPass::new());
-        // Selection takes an unordered body: a function that still holds a raw
-        // CFG (a `.tir` input, or JIT text) is converted here, memory order
-        // constructed on the way. One already unordered is left alone, and
-        // its chains are checked rather than rebuilt. Both run while the
-        // module is whole: they read a function's calls, and by the time it is
-        // lowered one at a time the λ those name may already be a machine
-        // symbol.
-        functions.add_pass(RestructureNodesPass::new());
-        functions.add_pass(AffineSchedulePass::new());
+        // Selection takes an unordered body, and whoever hands the module over
+        // builds one: a front end restructures its own control flow, and a
+        // caller with a raw graph runs [`structure`] first. The chains are
+        // checked here, while the module is whole: the check reads
+        // a function's calls, and by the time it is lowered one at a time the
+        // λ those name may already be a machine symbol.
         functions.add_pass(DeadCodeEliminationPass::new());
         functions.add_pass(VerifyDepsPass::new());
     }
@@ -158,13 +169,14 @@ fn module_prologue(target: &dyn TargetMachine) -> PassManager {
 fn add_function_passes(
     pm: &mut PassManager,
     target: &dyn TargetMachine,
-    context: &Context,
+    isel: InstructionSelectPass,
     stop: StopAfter,
     oracles: Oracles,
 ) {
     pm.add_pass(TargetIntegerLegalizer::new(target));
     let function_pipeline = pm.nest::<FuncOp>();
-    let isel = std::sync::Arc::new(std::sync::Mutex::new(target.isel_pass(context)));
+    let isel = std::sync::Arc::new(std::sync::Mutex::new(isel));
+    function_pipeline.add_boxed_pass(Box::new(SettleSelectionRules(isel.clone())));
     function_pipeline.add_boxed_pass(Box::new(ResolveFpPass::shared(isel.clone())));
     function_pipeline.add_boxed_pass(Box::new(SharedInstructionSelect(isel)));
     // Remove pure instructions left dead by selection (e.g. a value recomputed in
@@ -216,6 +228,7 @@ pub fn lower_and_emit(
     target: &dyn TargetMachine,
     context: &Context,
     module: &ModuleOp,
+    isel: InstructionSelectPass,
     oracles: Oracles,
     mut emit: impl FnMut(&Context, &tir::OpHandle) -> Result<(), String>,
 ) -> Result<(), String> {
@@ -230,7 +243,7 @@ pub fn lower_and_emit(
         .map_err(failed)?;
 
     let mut pipeline = PassManager::new();
-    add_function_passes(&mut pipeline, target, context, StopAfter::Finalize, oracles);
+    add_function_passes(&mut pipeline, target, isel, StopAfter::Finalize, oracles);
     let mut index = 0;
     while let Some(&op_id) = context.get_block(body).op_ids().get(index) {
         let op = context.get_op(op_id);
@@ -253,6 +266,31 @@ pub fn lower_and_emit(
     }
     tir::memstats::summary();
     Ok(())
+}
+
+// Waits for the selection rules, so the passes that select are timed
+// without their synthesis.
+struct SettleSelectionRules(std::sync::Arc<std::sync::Mutex<InstructionSelectPass>>);
+
+impl Pass for SettleSelectionRules {
+    fn name(&self) -> &'static str {
+        "instruction-select-synthesis"
+    }
+
+    fn run(
+        &mut self,
+        op: &OperationRef,
+        context: &Context,
+        _analyses: &AnalysisManager,
+    ) -> Result<(), PassError> {
+        if !op.op().regions().is_empty() {
+            self.0
+                .lock()
+                .expect("instruction select")
+                .settle(context, op);
+        }
+        Ok(())
+    }
 }
 
 struct SharedInstructionSelect(std::sync::Arc<std::sync::Mutex<InstructionSelectPass>>);

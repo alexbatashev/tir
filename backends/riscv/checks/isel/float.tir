@@ -68,7 +68,7 @@ module {
 // CHECK: asm.symbol {name = "fp32", arg_regs = [%[[V0:[0-9]+]]:FPR32, %[[V1:[0-9]+]]:FPR32]
 // CHECK: riscv.fadd.s.rne {fd = %[[V2:[0-9]+]]:FPR32, fs1 = %[[V0]]:FPR32, fs2 = %[[V1]]:FPR32}
 // CHECK: riscv.fsub.s.rne {fd = %[[V3:[0-9]+]]:FPR32, fs1 = %[[V2]]:FPR32, fs2 = %[[V1]]:FPR32}
-// CHECK: riscv.fmul.s.rne {fd = %[[V4:[0-9]+]]:FPR32, fs1 = %[[V0]]:FPR32, fs2 = %[[V3]]:FPR32}
+// CHECK: riscv.fmul.s.rne {fd = %[[V4:[0-9]+]]:FPR32, fs1 = %[[V3]]:FPR32, fs2 = %[[V0]]:FPR32}
 // CHECK: riscv.fdiv.s.rne {fd = %[[V5:[0-9]+]]:FPR32, fs1 = %[[V4]]:FPR32, fs2 = %[[V1]]:FPR32}
 // CHECK: asm.vret
 

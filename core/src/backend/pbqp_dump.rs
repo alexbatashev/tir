@@ -7,14 +7,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(super) enum PbqpTaskKind {
-    Isel,
     RegAlloc,
 }
 
 impl PbqpTaskKind {
     fn as_str(&self) -> &'static str {
         match self {
-            Self::Isel => "isel",
             Self::RegAlloc => "regalloc",
         }
     }

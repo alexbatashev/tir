@@ -35,5 +35,5 @@ module {
 
 // REGALLOC-LABEL: name = "div64"
 // REGALLOC: sign_extend_dividend {rax = %[[D:[0-9]+]]:rax, rdx_def = rdx}
-// REGALLOC: signed_divide {dst = %{{[0-9]+}}:rsi, rax = %{{[0-9]+}}:rax, rdx = rdx, rax_def = %{{[0-9]+}}:rax, rdx_def = rdx}
+// REGALLOC: signed_divide {dst = %{{[0-9]+}}:rsi, rax = %{{[0-9]+}}:rax, rdx = rdx, rax_def = %{{[0-9]+}}:rax, rdx_def = %{{[0-9]+}}:rdx}
 // REGALLOC: asm.vret

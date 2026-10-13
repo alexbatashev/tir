@@ -21,8 +21,8 @@ long call_large(struct Large *value) {
 // ASM-NOT: bl memcpy
 // ASM: ldr {{.*}}, [{{.*}}, 0]
 // ASM: str {{.*}}, [{{.*}}, 0]
-// ASM: ldr {{.*}}, [{{.*}}, 8]
-// ASM: str {{.*}}, [{{.*}}, 8]
-// ASM: ldr {{.*}}, [{{.*}}, 16]
-// ASM: str {{.*}}, [{{.*}}, 16]
+// ASM: ldur {{.*}}, [{{.*}}, 8]
+// ASM: stur {{.*}}, [{{.*}}, 8]
+// ASM: ldur {{.*}}, [{{.*}}, 16]
+// ASM: stur {{.*}}, [{{.*}}, 16]
 // ASM: bl consume_large

@@ -1,6 +1,6 @@
 // RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
-// The no-alias fact is mid-end vocabulary: the backend prologue turns it into
+// The no-alias fact is mid-end vocabulary: structuring the input turns it into
 // the range check it stands for, and that selects like any other compare.
 
 #data_layout = {types = {i1 = {abi = 8, size = 1}, i64 = {abi = 64, size = 64}, p = {abi = 64, size = 64}}}

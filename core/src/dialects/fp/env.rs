@@ -35,19 +35,20 @@ operation! {
         name: "rounding_constant", dialect: "fp",
         attributes: A { mode: "Str" },
         results: R { result: "RoundingType" },
-        interfaces: [crate::interp::Interp, crate::Speculatable],
+        interfaces: [crate::ConstantLike, crate::interp::Interp, crate::Speculatable],
         sem: "(set result $value_semantics)",
         verifier: "true",
     }
 }
 
 impl RoundingConstantOp {
+    /// The mode as the environment's rounding field holds it.
+    pub fn code(&self) -> Option<u64> {
+        parse_rounding(&self.mode()).map(rounding_code)
+    }
+
     fn value_semantics(&self, graph: &mut crate::sem::SemGraph) -> Option<NodeId> {
-        Some(resource::constant(
-            graph,
-            3,
-            rounding_code(parse_rounding(&self.mode())?),
-        ))
+        Some(resource::constant(graph, 3, self.code()?))
     }
 }
 
@@ -185,6 +186,12 @@ operation! {
 }
 
 impl crate::Speculatable for RoundingConstantOp {}
+
+impl crate::ConstantLike for RoundingConstantOp {
+    fn constant_value(&self) -> APInt {
+        APInt::new(3, self.code().unwrap_or_default())
+    }
+}
 
 fn required_effects(access: ResourceAccess, memory: bool) -> Vec<(StateResource, ResourceAccess)> {
     let mut effects = vec![(StateResource::FpEnv, access)];

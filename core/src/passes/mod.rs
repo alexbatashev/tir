@@ -31,8 +31,6 @@ pub use restructure::RestructureNodesPass;
 pub use symbol_uniqueness::CheckUniqueSymbolsPass;
 pub use verify_deps::{VerifyDepsPass, verify_deps};
 
-use std::collections::HashSet;
-
 use crate::{ConstantLike, Context, OpHandle, OpId, Pure, RegionId, ValueId};
 
 /// Every region under `root`, each one ahead of the regions nested inside it.
@@ -49,24 +47,37 @@ pub(crate) fn regions_under(context: &Context, root: OpId) -> Vec<RegionId> {
 /// through an operand of a demanded one, or through the results of a region of
 /// one. An operation in a region nobody demands is demanded by nothing, however
 /// its own region reads it.
-pub(crate) fn demanded_ops(context: &Context, roots: &[RegionId]) -> HashSet<OpId> {
+pub(crate) fn demanded_ops(context: &Context, roots: &[RegionId]) -> crate::IdSet<OpId> {
+    demanded_ops_with(context, roots, &[], &|_| &[])
+}
+
+pub(crate) fn demanded_ops_with<'a>(
+    context: &Context,
+    roots: &[RegionId],
+    seeds: &[OpId],
+    implicit: &dyn Fn(OpId) -> &'a [OpId],
+) -> crate::IdSet<OpId> {
+    // A callee names a function already lowered, whose op is gone.
     let defining = |values: Vec<ValueId>| {
         values
             .into_iter()
             .filter_map(|value| context.get_value(value).defining_op())
+            .filter(|&op| context.has_operation(op))
             .collect::<Vec<_>>()
     };
     let mut worklist: Vec<OpId> = roots
         .iter()
         .flat_map(|&region| defining(context.get_region(region).results()))
+        .chain(seeds.iter().copied())
         .collect();
-    let mut demanded = HashSet::new();
+    let mut demanded = crate::IdSet::new();
     while let Some(op) = worklist.pop() {
         if !demanded.insert(op) {
             continue;
         }
         let instance = context.get_op(op);
         worklist.extend(defining(instance.operands().to_vec()));
+        worklist.extend_from_slice(implicit(op));
         for region in instance.regions() {
             worklist.extend(defining(context.get_region(region).results()));
         }

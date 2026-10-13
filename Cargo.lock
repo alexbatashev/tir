@@ -2045,6 +2045,7 @@ dependencies = [
  "tir-adt",
  "tir-arrange",
  "tir-bench",
+ "tir-egraph",
  "tir-macros",
  "tir-pbqp",
  "tir-pdl",
@@ -2095,6 +2096,19 @@ dependencies = [
  "tir-arm64",
  "tir-riscv",
  "tir-x86_64",
+]
+
+[[package]]
+name = "tir-egraph"
+version = "0.1.0"
+dependencies = [
+ "egg",
+ "egglog",
+ "proptest",
+ "smallvec",
+ "tir-adt",
+ "tir-bench",
+ "tir-relational",
 ]
 
 [[package]]
@@ -2212,12 +2226,9 @@ dependencies = [
 name = "tir-relational"
 version = "0.1.0"
 dependencies = [
- "egg",
- "egglog",
  "proptest",
  "smallvec",
  "tir-adt",
- "tir-bench",
 ]
 
 [[package]]
@@ -2273,6 +2284,7 @@ dependencies = [
  "tir-adt",
  "tir-arm64",
  "tir-capi",
+ "tir-egraph",
  "tir-jit",
  "tir-lit",
  "tir-llvm",

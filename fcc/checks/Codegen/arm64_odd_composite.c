@@ -46,6 +46,6 @@ struct Three make_three(struct Three *value) {
 // ASM-NOT: bl memcpy
 // ASM: ldrh
 // ASM: strh
-// ASM: ldrb
-// ASM: strb
+// ASM: ldurb
+// ASM: sturb
 // ASM: bl consume_three

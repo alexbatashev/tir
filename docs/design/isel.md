@@ -46,12 +46,12 @@ excluded because a self-move can still change the rest of the register.
 
 ```mermaid
 flowchart TD
-	IR["Function IR with explicit dependencies"] --> G["Graph of equivalent computations"]
-	D["Target instruction descriptions"] --> P["Patterns and operand constraints"]
-	G --> M["Legal instruction matches"]
-	P --> M
-	M --> C["Compatible choices for each region"]
-	C --> E["Machine IR and control-flow blocks"]
+	D["Target instruction descriptions"] --> S["Rules synthesized once, when the pass is created"]
+	S --> A["Selection automaton: row key to state, state to instruction tree"]
+	IR["Function IR with explicit dependencies"] --> G["The function's e-graph"]
+	A --> G
+	G --> X["Cheapest state per class"]
+	X --> E["Machine IR and control-flow blocks"]
 	E --> R["Register allocation"]
 	R --> B["Final lowering and encoding"]
 ```
@@ -152,292 +152,733 @@ instruction can match a computation even when the IR expresses it through
 several operations. The selector still checks operand constraints. Equivalent
 arithmetic alone does not make an encoding legal.
 
-## Equivalent forms stay available
+## Rules are synthesized once
 
-A rewrite can expose a useful instruction and hide another. Committing to one
-form too early makes later choices depend on rewrite order.
+Matching a target's thousands of patterns against every function is work the
+compiler would repeat for each function and each compile. TIR does that work
+once, when the selection pass is created, and keeps its result as a table of
+rules. A function then pays only for looking its rows up in that table.
 
-TIR retains alternatives in an e-graph. An e-graph stores expressions in
-equivalence classes, usually called e-classes. Each e-class groups expressions
-known to compute the same result. Expressions refer to their inputs through
-other e-classes, so alternatives can share their inputs.
+Synthesis starts from the dialects the context holds. Every operation with
+semantics is instantiated at each integer width the target computes in, at
+each floating-point format, and with a pointer where it takes an address; a
+memory access is instantiated at each width it moves. Each instance is an
+operation whose operands are placeholders, and each variant of an instance
+holds one operand constant.
 
-Some equivalences need no form of their own. A value is a reference: an
-e-class plus a constant offset, wrapping at the value's width. Integer
-constants are offsets of their width's zero class, and an operation whose
-offset law says how a constant operand moves to its result stores no node for
-it. Subtracting 5 from `x` and adding -5 to `x` are both the reference to `x`'s
-class at offset -5, and so is `(x + 3) - 8`. The e-graph applies these laws
-itself, so no rewrite rule rediscovers them.
+A vector operation is instantiated once per element width, with the lane count
+left open. A function may compute in `vec<4xi32>` or `vec<8xi32>`, and no list
+of lane counts exists when the pass is created, so the count is not part of
+the instance. The element widths come from the target's patterns: a pattern
+that cuts a register into a number of lanes it is told, as the RISC-V vector
+instructions do through `vl`, admits the element width it names, or every
+whole number of bytes where it is told the width too. A target with no such
+pattern gets no vector instance. The instance's type is the vector of that
+element with no lane count. An operation with a length operand reads its count
+there; one without names the operand it lacks, which stands for the lane count
+of whatever type a row computes at. Operands and result of an elementwise
+operation are one vector type, which the operation verifies, so no instance
+mixes element widths.
 
-```mermaid
-flowchart TD
-	R["x - 5, x + -5, (x + 3) - 8: the reference (X, -5)"] --> X["Class X: x"]
-	R -. "the offset fits the immediate" .-> I["Add-immediate instruction"]
+A function's row matches such an instance because the lane count is not in a
+row's label either. The seeder labels a row of `vec<4xi32>` with the vector of
+`i32` at any count and gives the row one more child after its values, the
+64-bit constant four, which is an offset of that width's zero class like any
+constant. A length operand sits in the same place, so an operation given the
+constant length four and an operation of a four-lane type are one row. The
+instance without a length operand is described with that child, and its tree
+reads the count there (`Accept::lanes`).
+
+Synthesis produces one list of rules. A rule's left side is a small graph of
+instance rows, the row it rewrites first. Each operand of a row is one of four
+things: an operand of the rule read from a register, an operand of the rule a
+constant defines and an immediate field holds, a literal the rule names (`inc`
+is an add of the literal one), or another row of the rule. An operand or a row
+named at two places is one value read twice, as the address of a
+read-modify-write is. A rule's right side is the instruction tree, the tree's
+cost (latency times sixteen plus bytes, summed, with the constants it reads
+from registers built), the field of each immediate, which of the last
+instruction's values the root row is (x86 `idiv` gives one rule for the
+quotient and one for the remainder over one instruction), and whether the root
+row reads or writes memory. A rule whose value a conditional branch tests also
+keeps the tree branching on it and the tree branching when it is false.
+
+The forward pass finds the rules of one row. It lowers every instance to its
+semantic graph three ways: over registers, with each integer or pointer operand
+an immediate, and with that operand each literal the target's patterns and the
+shared axioms name as a value under the instance's operator. No list of
+literals is written by hand. It saturates the graph with the shared axioms
+(`core/defs/isel.pdl`), matches the target's patterns into it, and covers each
+root with the cheapest tree of instructions, by the declared costs. Equivalent
+forms stay available in that graph, so a target instruction matches a
+computation however the IR spells it, but the search runs over the instances,
+never over a function. A left side with an immediate also takes the tree
+ending in each other instruction of its class, because that instruction may
+encode constants the cheapest one cannot. A row that is one of its own
+operands, or a constant whatever it reads, becomes a rule with no instruction.
+Patterns that build a constant from an immediate become the target's
+builders. The branch on a compare is the cheapest branch instruction in the
+compare's class, and its inverse is the branch in the class of the
+complementary comparison over the same operands.
+
+The backward pass finds the rules of several rows. It tiles every pattern
+that has more than one operator top-down with instance rows, up to four rows:
+a node of operator F takes a row whose head is F and whose operand types fit,
+a symbol is an operand of the rule, a constant is a literal of the row, and an
+operator child takes its row next. A symbol or a subterm the pattern spells
+twice is read twice. A pattern that adds a displacement to an address is tiled
+a second time as its zero form, the sum read as its other operand, so a
+sign-extending load whose only form takes an offset still folds the extension
+of a load from a bare address. A row of a tiling that holds a literal is also
+tried as every row the pool proves equal to it, a multiply by four where the
+pattern shifts by two. The left side of each axiom is tiled the same way, at
+the axiom's own length: `cmpi (andi (xori a, b), 255), 0` is one 8-bit compare
+on x86-64. Where an axiom's right side is one operator over variables alone,
+the rows spelling its left side are also a tile for that operator in a pattern:
+the variables are bound to the pattern node's children, which are tiled as
+usual, and only the rows beneath count against the four. The mask form of a
+select is the tile of `If`, which is how `cmp` with `cmovcc` on x86-64 and
+`cmp` with `csel` on AArch64 are found, as rules of six rows. The pass lowers each distinct left side as one term, saturates once
+more, and covers each as the forward pass does. No rows are paired blindly:
+every left side comes from a pattern or an axiom.
+
+Pruning then tries the rules by row count and by cost ascending, and keeps a
+rule unless the rules already kept compute its left side at no more than its
+cost. That one test drops a duplicate (the same left side after the rows are
+put in walk order, the operands numbered by first use and commutative operands
+ordered), a composite whose parts together cost no more, and a literal that an
+immediate field holds as cheaply. A rule whose field holds constants a cheaper
+rule's field does not is kept, and so is a rule whose branch is cheaper than
+the branches of the rules that would compute it, such as `test` and `jcc` for
+a compare with zero.
+
+Synthesis starts when the pass is created, once the target has configured it,
+and runs on a thread of its own beside the front end and the mid-end. The
+first function selected joins the thread. A pipeline joins it in a step of
+its own, `instruction-select-synthesis`, so `TIR_TIME_PASSES` reports what
+was left to wait for apart from the time of `instruction-select`. The thread
+also builds what a first saturation would build lazily and no function
+decides (`Rules::warm`, `Engine::prepare_rules`): the search orders of every
+generated rule, what its atoms resolve to in the vocabulary, and the tries of
+the tables for each order. A driver that wants the overlap creates the pass early
+and hands it to `lower_and_emit`, as `fcc` does before it parses. A pass that
+never selects a function leaves the thread detached, and a panic on the
+thread resumes in the function that joins it.
+
+On that thread the pattern rules are matched against the pool by rounds whose
+searches run on several threads (see "Relational queries drive matching" in
+the instruction combining chapter). The rules' guards ask what a type means
+to an instruction and what carrier its values have; both are read off the
+context into tables indexed by type before each saturation, so a guard reads
+no context and the searches share nothing but the frozen graph. The matches
+are applied on the synthesis thread in rule order, which keeps the rules the
+same whatever the thread count.
+
+Creating the pass instantiates the operations on the caller's thread. That
+interns the types, attribute names and operation names the rules refer to, so
+their ids are fixed before the thread starts. The thread then works in a
+frozen context, which shares the registry and interns nothing: an id says in
+which order the registry met things, and two threads interning at once would
+number them by their race. The numbers the automaton stores therefore mean
+the same in the function's context and do not depend on how the thread raced
+the front end. Should synthesis ask for a type or a name the registry does
+not hold, the thread stops, and the function that joins it synthesizes the
+rules in place; `TIR_ISEL_SYNTH` names what it stopped at.
+
+A function whose data layout changes the pointer width has the rules
+synthesized again, in place, in the same step.
+
+## The selection automaton
+
+`core/src/backend/isel/automaton.rs` turns the rule list into tables. A
+pattern is a prefix of some rule's left side: one row's label over the patterns
+of its operands. Rules that share a prefix share its pattern, so one step per
+row of a function matches every rule at once.
+
+Every operand's class holds a chain that says what state the operand is in,
+and the states are numbered in one space. The seeds come first. `REG(type)` is
+a value of that type in a register, a pointer as the opaque pointer and a
+vector as the vector of its element at any lane count. `CONST(width)` is the
+zero of an integer or pointer carrier that wide: a constant is the reference to that zero
+at the constant's value, so a step tells the constant five from a register at
+offset five. The patterns are numbered after the seeds, in the order the rules
+first spell them, which is the order of the rule list and does not depend on
+how ids were interned.
+
+The tables are keyed by label ids of the pass's vocabulary
+(`tir_egraph::Vocabulary`). Synthesis builds the vocabulary: it interns the
+label of each instance the rules name exactly as the seeder builds it for a
+function's row (`IrOp::of` and `SemNode::seeded_as` for an operation, the
+access term for a read or a write), so the label carries the laws and the
+commutes bit a function's row has, and it interns the chain label `st(P)` of
+every state and the form label of every pattern. A label types every pointer
+as one type, whatever it points at: label identity in `core/src/sem/node.rs`
+leaves the type out where the carrier is a pointer's, for instcombine as for
+selection. The synthesis thread returns the vocabulary with the tables; the
+pass owns it from the join on and lends it to each function's graph. A row's
+word `L` is its label id, and an operand's word `T` is the label id of the
+chain its class holds, which a rule reads as a cell of the chain's row.
+
+A function's graph stores no row for an add of a constant: the sum is the
+reference at that offset from its operand's class. The tables follow it. A
+folded row that adds a constant disappears into its reader, whose child becomes
+the base's state with the constant as its offset. A rule whose root adds a
+constant to a register has no row to step on; it becomes an adder, the builder
+of a register at an offset no field of the reader holds (`add r, imm`,
+`lea base+disp`, `inc r`). The rule of one row that adds two registers is an
+adder as well as a pattern. It admits any offset, and its tree reads the
+offset from a register that the builders of constants fill (`Adder::built`).
+A rule whose root subtracts a constant from a register is an adder too, at
+the offsets whose negation its field holds, and the commit encodes the negated
+offset (`Held::Negated`): `x - 8` on AArch64, whose add holds no negative
+immediate, is `sub` with the immediate eight. The label says which operand an
+addition moves the other by, and a subtraction moves it back by, so no adder is
+found by an operation's name. Three kinds of rule stay out of the tables: one
+that folds a row subtracting a constant, which the graph holds as the addition
+of the negated one; one whose root adds a constant to another row, such as
+`lea` of an index and a displacement, because the sum is that row's class at
+an offset and no register holds the row yet; and one over an offset of an
+offset.
+
+The tables are relations of 32-bit cells (`tir_relational::Words`), one per
+number of children `K` the labels have, memory terms with four and five among
+them:
+
+- `step[K]` holds `(L, T1..TK, m1..mK, P, c)`: a row with label `L` whose
+  children are in states `Ti` at offset classes `mi` is pattern `P`. `c` is the
+  row's carrier, which its form gets, so a reader holds the form at an offset
+  the way it holds the row's value at one.
+- `step_effect[K]` holds the same for a pattern a reader folds a memory access
+  through. Such a pattern is a different one from the access selected alone,
+  because it holds only where the reader is the access's one reader, in its
+  region.
+- `step_over[K]` holds the same for a pattern with a folded access in some
+  child. `carried[P]` has a bit per such child.
+- `effects[K]` holds `(L, s, w)` for a label that is a memory access: child `s`
+  is the state it observes, and `w` is one for a write.
+- `step_tied[K]` holds the same for a pattern that reads one value at two
+  places. `ties[P]` lists those places as pairs of paths through the form's
+  children.
+- `imm[K]` holds `(L, T1..TK, i, m, W, add, sub, h, sgn, b, align, nonzero)`:
+  the classes of offset that the transitions on a key have at child `i`. An
+  offset `d` is of class `m` where `x == x & ones(b)` for
+  `x = (d + add - sub + ones(h) + sgn) & ones(W)`, `d & align == 0`, and
+  `d != 0` if `nonzero`. A signed field of `b` bits has `h = b - 1` and
+  `sgn = 1`; a literal `v` has `sub = v` (or `add = -v`) and `b = 0`. Class
+  zero is any offset and belongs to a child read from a register.
+
+A field that holds the offset of a register splits an offset it cannot hold
+whole. Its `imm` row admits any offset, and `children[P]` keeps the cells of
+the field. The field holds the part of the offset that agrees with it in the
+field's bits, and the instruction reads the register at the rest:
+`load(p + 5000)` on RISC-V reads `p + 4096` at displacement 904, and the
+scaled AArch64 load reads `p + 4` at 4096 for `p + 4100`. The form pays for
+the rest as for any offset no field holds. A field that refuses zero, the
+offset of a folded row and a constant operand are not split.
+
+The classes of one child are not ordered. A rule that joins `imm` gets one row
+per class the offset fits, steps once for each, and the extraction keeps the
+cheapest tree accepted. The scaled AArch64 load holds an unsigned multiple of
+the access size and the unscaled one a signed nine-bit offset; a displacement
+both hold steps to both.
+
+A child a rule reads from a register may be a constant in a function, which is
+then built into a register. Each such child steps under `CONST(width)` at class
+zero too, to the same pattern. That holds for a child of an integer or a
+pointer type and for one of a type the semantics read as bits, the rounding
+mode among them. A float child steps as a register only. A row of a commutative label is entered in one
+order: the engine reads such a row with its two children either way.
+
+A folded child is read at offset zero, or at an offset a field of the pattern
+holds, as the displacement of a read over a folded index. No register holds a
+folded row, so nothing could add another offset to it. `and(x, load(p) + 5)`
+therefore reads the load from a register.
+
+The other tables are indexed by state. `field[P]` has a bit per child whose
+offset a field holds. `children[P]` has the state of each child, which names
+the adders that can move it. `accept[P]` is the tree of the cheapest rule whose left
+side is `P`: the instructions, what a reader of the row reads, the cost, the
+result the row is, and for each operand of the rule the path to the form child
+that holds it and how: read from a register, the base of a held offset, the
+held offset, or a constant. A pattern that is only a prefix accepts nothing.
+`branches` gives a compare pattern its branch tree and the inverse. The
+builders of constants are kept beside the tables as the pool made them.
+
+Two instances a function's row does not tell apart, such as a store of a
+pointer and a store of a 64-bit integer whose value another row computes, spell
+one pattern with one tree, and the pattern is entered once. `TIR_ISEL_SYNTH=1`
+lists a rule shadowed by a cheaper one with another tree, and each rule left
+out of the tables with the reason.
+
+## Selecting one function
+
+A function is selected on the rewrite driver that instcombine runs on
+(`core/src/rewrite`), in a fork of the context, over a graph whose labels are
+the pass's vocabulary. `core/src/backend/isel/select.rs` holds what selection
+adds to the driver, and `edges.rs` the adapter control recovery asks for
+branches.
+
+The seeder reads the function's regions into one e-graph. A value is a
+reference, an e-class at an offset, so an integer constant is an offset of its
+width's zero class and an addition of a constant stores no row. A gate's result
+is the gamma over its arms' values. A memory access is a term over its address,
+extent, value and state. `seed::children` says which operand of an operation
+each child of its row stands for, and the seeder and the commit both read it.
+
+An operation with the constant interface is a constant of the graph.
+`fp.rounding_constant` is the integer code the environment holds, three bits
+wide. `fp.constant` is a float literal of its bits at its type. No integer
+carrier holds a float, so the literal is a row in a class of its own, and a
+reader reads it from a register.
+
+Selection asks the seeder for one more kind of row, which instcombine's graph
+does not have. A result the graph cannot describe is no bare leaf: the result
+of a call, of an operation with several results or with effects and no
+semantics, a state a gate or a loop publishes. It is a row over what its
+operation reads (`Kind::Result`), the operands in order and then the results
+of the regions the operation holds. The row says nothing of what the
+operation computes. Two calls over the same operands are two classes, because
+the row is unique the way an input leaf is: which operation it stands for is
+its provenance, and its label, the same in every function, holds the index of
+the result and whether the operation changes a state. The seeder reads that
+off the operation's declared resource effects: an effect that changes a
+resource and publishes a state. An operation that declares none and publishes
+a state is taken to change it.
+
+Four more places get such a row:
+
+- A value a gate chooses among its arms, or a loop carries out, keeps its
+  term (`If`, `Loop`) and gets the row beside it in its class. The value is
+  there only once the gate or the loop has run, whatever the arms or the body
+  wrote, and the term alone names the values chosen among, not the states.
+  This row is hash-consed like the term: it is a function of what it reads.
+  A result whose arms agree, or that a loop hands back as it took it, is the
+  value agreed on and gets none.
+- A state a loop's body changes is read at the head of an iteration through
+  a row over what the loop is entered on, so the states inside the body are
+  no shallower than the ones before the loop.
+- A value the function's module defines, such as a callee, is a row over
+  nothing. The seeder never reads an operation outside the function.
+
+- A state a read publishes is the class of the state it observed, unless a
+  later read observes what it left, directly or through splits and merges
+  of it, as reads inlined from a callee do. That state is a row over the
+  state observed, marked like a write's. The later read waits for this one:
+  the instruction this one becomes publishes the state the later one reads.
+
+A row has at most five children (`WIDEST_RESULT`), which is as many as the
+rules below are generated for. Where an operation reads more, its results
+read rows of those values instead (`Kind::Operands`), five to a row, and rows
+of such rows where that is still too many. A merge of more than five states
+keeps its own row and gets a result row over the bundled states beside it.
+
+The commit treats a result row as the operation itself: the row names the IR
+value and nothing is built from its children. Extraction prices it the same
+way, as the row alone. A unique node stands for what it names, so the engine
+adds nothing for its operands.
+
+Selection then gives every class that some operation or access reads its seed
+chain, `c == st(seed)(c)`. The classes come from the engine, as the children of its
+rows at offset zero, because the tables key a row by what its operands are and
+the IR's values do not list the zero classes or say which classes are read. A
+carrier's zero class gets `CONST(width)`. Any other class gets `REG(type)` for
+the canonical type of the type fact the seeder raised. A class whose type has
+no seed gets no chain, and no rule steps a row over it.
+
+Three facts are said of the classes IR values are. They are lattice columns
+the selection registers on the engine (`Engine::add_column`), filled from the
+use lists.
+
+- `USES` is the number of operand slots and region results that read the
+  class's values, all of them together. Each value's readers are said once
+  and the column adds them (`Join::Sum`), so two reads that are one class,
+  each read once, are read twice. An operation whose result is the class of
+  one of its own operands, as an add of a constant is that operand at an
+  offset, is the class and not a reader of it: what reads its result is
+  counted there. So `t = load p; store t + 1, p` leaves the read one reader,
+  the store. A read still counts as a reader of the state it observes.
+- `REGION` is the region the value is defined in. Each region that reads the
+  value or names it as a result is said of the class as well, so the fact
+  exists only where the value is defined and read in one region: a class
+  said two regions holds none.
+- `DATA` is said of a boolean: how many of the slots `USES` counts read the
+  value from a register. A gate reading its predicate and a loop reading its
+  repeat predicate do not, because recovery branches there. A class whose `DATA` is
+  zero is read only by controls. A wider predicate gets no `DATA`: its case
+  tests read the register.
+
+A class may hold several IR values. Two reads of one address in one state in
+sibling arms are one class, and so are a value and the arm ports it is
+forwarded through. Their regions differ, so the class has no `REGION`.
+
+Two more columns order the accesses. `DEPTH` keeps the greatest value said of
+a class and `LIMIT` the least (`Join::Max`, `Join::Min`).
+
+- `DEPTH` is how many writes, one after another, a value waits for at least.
+  The rules below compute it. Selection says zero only of a port that carries
+  a value in, which nothing computes.
+- `LIMIT` is said of a form with a folded access in it: the least `DEPTH` of
+  the states those accesses observe.
+
+The order is sound where two things hold of every value: its depth is at
+least the depth of whatever it waits for, and a value that waits for a write
+is deeper than the state the write observes. The result rows give the first
+for what the graph cannot describe. A gate's results read the states its arms
+yield, so they are no shallower than a store in an arm. A loop's results read
+the states its body yields, which start from the row at the head. The second
+holds for a result of an operation that changes a state: it is one deeper
+than anything the operation reads, the value a call returns like the state it
+publishes. A gate or a loop that publishes a state counts as changing it,
+whatever its regions do. The IR hands such an operation the state the reads
+before it published, as it does a write, and a read's state is its observed
+state's class, so only the extra depth keeps a read ahead of the gate out of
+an instruction that reads the gate's result.
+
+A class without a `DEPTH` refuses a fold beside it. What is left without one
+is a row with more children than the rules read that is neither a result nor
+a merge of states, and whatever is computed from it.
+
+### The generic rules
+
+The rules are generated from the tables when the pass is created
+(`select::Rules::of`). No rule names an operation, a pattern or a target.
+
+The first rules say `DEPTH`, and they are saturated alone before the others
+(`Rules::order`). A rule that compares a depth reads the value its round
+found, so that value has to be final. A rule's head raises a fact with
+`HeadOp::Raise`.
+
+```
+op(c1..cK) in C, DEPTH(ci) = di, w = changes(L)        => DEPTH(C) >= d1 + w .. dK + w
+op(c1..cK) in C, effects[K](L, s, 1), DEPTH(cs) = d   => DEPTH(C) >= d + 1
 ```
 
-The selector expands this graph with semantic rewrite rules. The rules are
-shared by every target and live in `core/defs/isel.pdl`. They express
-identities, constant computations, and alternative forms of operations. A rule
-never names a target: the graph keeps every form, and the target's instruction
-patterns decide which forms selection can cover.
+The first runs over the rows of operations, accesses, constants and results,
+for `K` from zero to five. `w` is a field of the row's label: one for a
+result of an operation that changes a state, zero for every other row. A row
+without children has depth `w`. The rule needs the depth of every child, so
+a row over a value without one has none. It passes over the term of a gate
+or a loop, because the result row beside the term reads everything the term
+reads: a class then gets its depth from one row and is said once. The second
+is generated per place `s` a write observes its state at.
 
-Repeated application of these rules is called saturation. Selection bounds the
-search to control compilation time and memory use. The graph therefore contains
-the alternatives discovered within those bounds, not every equivalent program.
+The rounds are as many as the longest path of rows a value waits through,
+since a round carries a depth across one row. A function that is one long
+run of calls and stores takes a round per row of that run.
 
-Equivalence depends on the operation's semantics. Width, signedness, and
-floating-point rules matter. A familiar algebraic identity is not permission
-to ignore overflow or change floating-point rounding.
+Then, for each number of children `K` that some row of the tables has, there
+is one rule per table:
 
-## A match covers a computation
-
-Selection covers references, not classes. Two IR values of one class at
-different offsets, such as `p` and `p + 8`, are two values: each needs its
-own register unless a consumer folds one into its encoding.
-
-A pattern match identifies a candidate instruction and the part of the semantic
-graph that the instruction computes. This is often called a tile. Its boundary
-contains the inputs that the instruction needs from elsewhere.
-
-The distinction between an internal computation and a boundary input explains
-instruction fusion. If one instruction computes both an address and a memory
-access, the address arithmetic can be internal to that match. The inputs to
-the address arithmetic still have to be available.
-
-Boundary inputs have different requirements. A register input needs a value in
-a suitable register. An immediate input needs an encodable constant, without a
-separate register. Type information such as a width can guide a match without
-requiring any runtime computation.
-
-The selector checks those requirements before it accepts a match. It also
-checks target features and the availability of values at the proposed use.
-An expression elsewhere in the function does not automatically supply a usable
-register here.
-
-### Offsets in a match
-
-A pattern node adding an immediate to a value, such as the `rs1 + imm` of a
-RISC-V load or the displacement of an x86 address, matches no node: it reads
-the offset straight off the reference it meets. The node's base binds the
-class at offset zero and the immediate binds the offset, taken in the
-representative its encoding field reads (two's complement for a signed field,
-the raw bits for an unsigned one) and checked against the field's range and
-alignment. So `load((base + index * 4) + 5000)` and `load((base + 5000) +
-index * 4)`, which are one reference, select one x86 load with a scaled index
-and a displacement.
-
-When the offset does not fit and the base is a register operand, the match
-takes the part of the offset the field holds, its low bits rounded towards
-zero to the field's alignment, and demands the base at the rest. A RISC-V load
-from `p + 5000` reads `p + 4096` in a register at displacement 904. The base
-is a reference no IR value names; demanding it adds it to the values the
-region must cover, where it is matched like any other. A use of `(X, k)` is
-therefore met in one of three ways: folded into its consumer's encoding, as
-above; defined by an instruction adding to a base reference of `X`, an
-immediate or a register holding the constant; or, when `X` is a zero class, by
-the target's constant materialization. A node computed at another offset of
-the same class also answers when the operand taking the offset is read once
-in the pattern: `sub(a, b) + k` is `sub(a + k, b)`, so a subtraction can take
-the offset into its minuend. A remainder reads that dividend again inside the
-division, so `(a % d) + k` is an addition of the remainder, not the remainder
-of `a + k`.
-
-A match adding at offset zero to its own root would compute the value from
-itself. The cover rejects such a match, while an addition at `(X, k)` reading
-`(X, 0)` is an ordinary dependency between two values.
-
-## Compatible choices and their cost
-
-The cheapest match for one result may make another result impossible to
-produce. Choosing each instruction independently would miss that conflict.
-
-TIR records the choices of a whole function before it makes any of them. For
-every region the record holds the candidate instructions, called instances,
-and what each one demands of the values it binds: a register at a given width
-and view, a constant to encode, or an effect it performs itself. It also holds
-the registers that exist without an instance, the effects that must run, and
-every way each branch test can be realized. Matching runs under the facts of
-the region it visits, so each region is recorded before its facts are dropped.
-Nothing in the record changes once the last region is written, and nothing in
-it names a solver.
-
-```mermaid
-flowchart TD
-	V["Result: x + 5"] --> I["Choice: add immediate 5"]
-	V --> R["Choice: add two registers"]
-	I --> X["Require x in a register"]
-	R --> X
-	R --> K["Require 5 in a register"]
-	K --> P["Select instructions that produce 5"]
+```
+op(c1..cK) in C              any label of K children, its id L bound on the row
+ci == bi + di                the operand as a base class and an offset
+st(Ti)(vi) in bi             any chain of the base, its label id Ti bound on the row
+step[K](L, T1..TK, m1..mK, P)
+imm[K](L, T1..TK, i, mi, W, add, sub, h, sgn, b, align, nonzero)   for each i
+di fits the class mi         three comparisons over the cells of the imm row
+=> wi := vi + di
+   f  := form(P)(w1..wK)
+   C  == st(P)(f)
 ```
 
-Two solvers read the record. A Partitioned Boolean Quadratic Programming
-heuristic, or PBQP, builds the first assignment. Each relevant e-class is a
-node whose alternatives produce its value, emit nothing, or leave the value to
-an instruction that performs it; incompatible pairs receive a prohibitive
-cost. The heuristic is exact on sparse problems and takes the first feasible
-choice on dense ones. It backs out of a bounded number of failed choices and
-then gives up.
+`L` and each `Ti` are cells of rows of the graph, so the executor joins the
+row atoms with the two tables. The fit test is the one the `imm` cells spell,
+computed by the query's expressions. A register operand binds its seed chain,
+so `vi` is the class itself. A constant binds the seed of its zero class with
+the value as the offset. A folded row binds a chain an earlier round inserted,
+so `wi` is that row's form. The rounds are as many as the deepest rule tree
+plus the one that finds nothing.
 
-The second solver is a bounded search. The record becomes one Boolean and
-bit-vector formula: a variable per instance and per branch realization, the
-legality of every input, one owner per effect, a strictly increasing rank
-along every selected register dependency, and the summed cost. The in-tree
-bit-blaster and SAT solver answer whether an assignment cheaper than the best
-known one exists. The rank is what rejects instances that read each other's
-registers in a cycle, however long the cycle.
+The rule over `step_effect[K]` is the same with two more atoms, the `USES` and
+`REGION` facts of `C`, and the test that `USES` is one. It runs on the access
+row and inserts the chain a reader folds the access through. A fact a class
+does not hold fails the atom, so the chain exists only where the access has one
+reader and is defined and read in one region. Twin accesses in sibling arms
+are never folded, whatever reads them. The rule also reads `effects[K]` for
+the child that is the observed state and raises `LIMIT` of the form to that
+state's `DEPTH`.
 
-A solver's answer is a proposal. Each assignment is checked against the record
-by code that knows nothing of how it was found, and one that fails is excluded
-from the next query. The PBQP assignment is the incumbent. The search replaces
-it only with a strictly cheaper assignment that passed the check, and it
-constructs an assignment where PBQP found none or gave up. Instances no
-obligation reaches are dropped from a search answer before it is used.
+The rule over `step_over[K]` is generated per set of children that hold a
+folded access. It reads the `DEPTH` of every child's value class and the
+`LIMIT` of each such child's form, and tests that no other child is deeper
+than that limit. Its head raises `LIMIT` of the new form to the limits it
+read. So `r = op(load(p, m0), x)` folds the load only where `x` waits for no
+write after `m0`. A tied rule over such children has the same atoms.
 
-Looking for a cheaper assignment costs far more than the cover, so it runs
-only when `TIR_ISEL_SEARCH` is set. Constructing a missing assignment always
-runs. With `TIR_MEM_STATS` set, each function reports the size of its problem,
-the cost of the incumbent and of the best assignment, and how the search ended:
+A row with a folded access in its form is guarded like the access where a
+reader folds the row in turn: its pattern as a folded row holds only where
+the row has one reader, in its region (`guarded[P]`). `total += x` followed by
+a compare of the sum keeps the add out of the store's read-modify-write tree,
+because the add has two readers.
 
-| Status | Meaning |
-|---|---|
-| `optimal` | No assignment of the recorded problem is cheaper. |
-| `feasible` | An assignment was constructed. A cheaper one may exist. |
-| `infeasible` | The recorded problem has no assignment. |
-| `exhausted` | The budget ended first. |
-| `skipped` | The incumbent was kept without a search. |
+A pattern of `step_tied[K]` reads one value at two paths of its form. The
+patterns are grouped by their pairs of paths and by the number of children of
+each form on the way to them, and each group gets one rule. The rule adds a
+form atom for every form a path passes through, names the base of the two
+references with one variable, and tests that their offsets are equal. A small
+table generated beside the rules says which group a pattern belongs to.
 
-A status speaks for the recorded instances and the additive cost only. A
-missing instance is a gap in the rules or axioms, and no status reports it.
+### Cost
 
-The chosen set is a cover of the demanded computations. A demanded computation
-is one whose result or effect the emitted program must preserve. Internal
-expressions absorbed by a match need no separate instruction unless another
-use requires them.
+`Select::price` is the cost the driver extracts by. A chain costs the tree its
+pattern accepts, and the top price where the pattern accepts nothing or is a
+seed. A chain in a class whose `DATA` is zero costs the branch on it instead:
+the `branches` entry of its pattern where the pattern's form holds no access
+(`carried[P]` is zero), and otherwise its tree and the branch that tests a
+boolean in a register (`edges::Cases::tested`). So a
+compare only controls read is extracted by what its branch costs: `cbz` on
+AArch64 and not `cmp` with `b.eq`, and on RISC-V `blt` over a built constant
+where the result of `slti` would have to be tested.
 
-Costs account for declared instruction cost and encoding size. They guide the
-choice between legal alternatives, but they do not predict every runtime
-effect. Register pressure and later machine transformations can affect the
-final result. Selection does not promise the globally cheapest machine program.
+A form pays for each child no field of the pattern holds: the builders
+`pool::plan` chooses for a constant's bits, and for a register at a non-zero
+offset what `Select::sum` answers. `sum` takes the state of the register and
+the offset. It prices every adder of that state whose class admits the
+offset, the one that reads the offset from a register with the builders of
+that offset added, and keeps the cheapest. Two adders, one over a part of the
+offset its field admits and one over the rest, replace it only where they
+cost less. The parts tried are the one that agrees with the offset in the
+field's bits and the field's value nearest the offset. `2048` on RISC-V is
+`addi 2047` and `addi 1`, which cost less than `lui`, `addi` and `add`. A
+field that holds part of an offset leaves the rest to the same answer. A
+carrier's zero class costs
+nothing, so a constant a field holds is free. A constant no carrier holds
+costs its builders plus the move into a float register. An operation
+synthesis made no instance of, such as a call, an alloca or a symbol address,
+stays the operation it is and costs nothing, and so does a result row. Any other row costs the top
+price. A class extracted at the top price is uncovered, and `Select::covered`
+fails selection with `<dialect>.<op> has no instruction: <the operation>`.
 
-### Narrow operations
+The extraction is a tree cost: a value two operands of one row lead to is
+counted under each, so the cost of a state doubles with every access that
+reads it beside the write that follows. The top price means only that a
+member has no spelling. A sum of prices too large to add is the largest cost
+below it (`tir_relational::extract`), so a long run of statements keeps its
+spelling. The members of a class that reach that cost tie, and the first in
+scan order is chosen: past about sixty dependent statements the chain inserted
+first wins, which is the one over registers, and a fold a later round found is
+not preferred.
 
-A target may compare, shift right, or divide only at its register widths.
-RISC-V compares 64-bit registers; AArch64 compares 32- or 64-bit registers;
-x86-64 also has 8- and 16-bit forms. Addition, multiplication, and bitwise
-operations need no special handling, because their low result bits read only
-the low bits of their operands. A comparison, a right shift, or a division
-reads every operand bit. Shared rules therefore give each narrow form an
-equivalent computed on extended operands: comparisons at 32 and 64 bits, right
-shifts at 32 bits, and 8-bit divisions at 32 bits. The axiom proofs cannot
-bit-blast a division of wider inputs. A comparison keeps its one-bit result. A
-shift or division yields the low bits of the wide result, so the narrow value
-becomes a low-bit view of the wide computation.
+### The commit
 
-A view reads its source's register and needs no instruction of its own. When a
-rewrite introduced the source, no IR operation computes it, and its only
-readers are views. Selection may then leave the source uncomputed and select
-each view with an instruction of its own. The cover makes this choice by cost:
-x86-64 keeps its 8-bit `shr`, and RISC-V shifts the extended value with `srlw`.
+The driver's commit walks the regions, outermost first, and hands a value's
+readers the spelling of its class. Selection is a `Rewrite` of its own,
+`select::Commit`, which wraps the rules and the cost with what the commit
+emits. The driver asks it for its `RuleSet`, the price of a node, and through
+`spell` for every reference a reader wants written. Beside those it keeps one
+hook of the region walk, `rewire_op`.
 
-### Shared values and memory effects
+`rewire_op` rewires an operation the rules replace by demand. A value of it is
+handed its spelling where an operation that stays reads it or a region names
+it as a result. An operation that changes a state is spelled whether or not
+anything reads it. Every other value is spelled by the tree of whatever reads
+it from a register, so a row folded into its reader is emitted once, inside
+that reader. An operation is replaced where the rules were synthesized for its
+name, or where it is a constant. The commit names the IR value each spelling
+is of: the value of the operation `rewire_op` rewires, and for an operand a
+tree reads from a register the operand of that operation. Twin operations in
+sibling arms are one class and one chain, and each is rewired in its own
+region from its own value.
 
-Several uses can share a computed value. Selection must account for those uses
-when it decides whether to keep the value in a register or compute it within a
-consumer's instruction.
+The driver places what a spelling writes. It records each written operation
+with the operation that defines the named IR value, where both are in one
+region, and after the walk of a region gives the written operation that
+operation's place in the region's order (`Driver::place`). A tree a reader
+demanded therefore sits where the operation it covers sat, not at the reader.
+Recovery and the block linearizer break ties between independent operations by
+this order, so a value computed ahead of a call in the IR is computed ahead of
+it in the block.
 
-One emission can define several values. x86 division leaves the quotient in one
-register and the remainder in another. A rule lists the semantics of each
-result, and an instance is rooted at each result the program computes.
-Instances of one rule over the same operands are the results of one emission:
-the instructions are emitted once and their cost is counted once. A result
-nothing reads is a clobbered register.
+A value a control branches on is rewired by what reads it. A control branches
+on a value where the chain extracted for its class has a `branches` entry and
+its form holds no access (`Commit::tested`). A gate reading the value as its
+predicate and a loop reading it as its repeat predicate keep reading the IR
+value. The operation that defines it stays in its region, and its operands
+become the registers the branch reads, in the order `Commit::slots` names
+them for the entry's two trees. No instruction computes the value for these
+readers. Whatever reads the value from a register, a result of a region
+included, is handed the spelling of the chain as usual. The instruction that
+computes it then follows the operation that stayed (`Emitted::implicit`), so
+the operation is kept beside it and recovery finds the branch from either.
+The driver's memo holds the value of the operation that stayed as the
+spelling of the chain's form, which no instruction spells. A twin whose
+region can read that value hands its controls the same value and goes, so
+two gates on one compare read one predicate.
 
-An instruction that reads or writes memory takes over the state chain of an
-access its match covers. A match that covers no access is not a candidate for
-such an instruction, because selecting it would perform an effect the program
-does not have.
+A row that stays, such as a gate's, may be several alike operations. Its
+reader reads the value it names where the region can read that value.
 
-An effect can execute as its own tile or inside a selected tile that owns it.
-The latter choice requires that exact owner and does not provide a register for
-an independent reader. State edges between accesses inside one instruction
-contract to its external state ports. An indirect dependency through an
-external state producer or register operand prevents contraction: it would
-make the instruction depend on its own publication. The existing dependency
-DAG supplies reachability for this legality check. Independent state inputs
-remain external ports. Register demands across regions remain separate from
-effect demands. Child regions can reuse registers actually produced for
-ancestor effects, while pure computations retain the demand analysis's
-choice to recompute.
+`spell` writes a chain `st(P)(f)` as the tree `accept[P]`. It reads the
+children of the chain and of its forms and nothing else of the graph's
+selection rows:
 
-Extending loads retain both their narrow and full behavior-derived patterns.
-Extension widths are structural integers, so their matching does not depend on
-the bit width used to encode an IR attribute.
+- Each operand of the rule is at a path of the form, `accept[P].operands`. An
+  operand an instruction reads from a register is materialized by the driver,
+  at the type fact of its class: the child itself, or for a base the child's
+  class at offset zero. An operand an instruction encodes is the child's
+  offset where the field holds an offset, and the constant the child is
+  otherwise.
+- Each step of the tree is emitted by `Emitter::emit` with those bindings.
+  What an earlier step defines is bound for the later ones. A literal the tree
+  names is encoded, or built where the instruction reads it from a register.
+- The row's value is the result `accept[P].port` of the last instruction, the
+  operand the row is, or the constant it is, as `accept[P].value` says. A
+  write's value is the state its instruction publishes.
 
-Effects impose stricter constraints. If two matches each include the same
-effect, selecting both could execute that effect twice. The cover rejects
-incompatible overlaps. State dependencies also preserve the order required by
-memory operations.
+The instructions go into the region of the operation the root row was seeded
+from where the reader sees that region, so a value computed ahead of a gate
+stays ahead of it, and into the reader's region otherwise.
 
-This is why the selector needs more than arithmetic equivalence. The chosen
-instructions must preserve the program's effects as well as its values.
+An instruction that defines several values is emitted once. The quotient and
+the remainder of a division are two patterns with one tree, each with its own
+form, so the emission is remembered by the rule of the tree's last
+instruction and the operands it was bound to. The last instruction is asked
+for every result, and a later chain over the same operands reads its own.
 
-## One function graph, separate region choices
+A reference that is no row is `spell`'s to write as well. A constant a carrier
+holds is built by the automaton's builders, a float by its bits moved through
+a form of `floats`. The builders are the plan `Select::plan` answers, the one
+the price read: `Builder::builds` admits a builder where it builds the
+constant's width and its result register holds that width. The builders are
+listed cheapest first. One that adds to a register or shifts one builds only
+the widths at which synthesis kept its instruction alone for a row over a
+register and a constant, so on RV64 a 32-bit constant is finished by `addiw`
+and never by the 64-bit `addi`. Such a builder adds at its own width
+(`Builder::bits`): the part left for the builders before it is the one whose
+sum with its immediate is the constant there. A reference at an
+offset no field held is the class's row moved by the adders `Select::sum`
+answers for the seed of the reference's type, the ones the form was priced
+by. Without a builder or an adder `spell` leaves the reference to the shared
+commit (`Commit::builtin`), which writes the IR constant or addition, and the
+end of the commit reports it.
 
-TIR shares the semantic graph across a function, but chooses covers for
-individual regions. The shared graph exposes computations across region
-boundaries. Region-specific checks determine which values and assumptions are
-valid at each use.
+A constant no carrier holds may share its class with a value that carries it,
+as a loop's port does. That value costs nothing and wins the extraction.
+Where a reader cannot see it, `spell` builds the class's constant.
 
-A branch arm provides a useful example. Inside the true arm of a condition,
-the selector can use the fact that the condition is true. It applies that fact
-while selecting the arm and its nested regions, then removes the assumption
-before considering code outside that scope.
+#### State ports
 
-```mermaid
-flowchart TD
-	G["Shared function graph"] --> Q["Condition c"]
-	Q --> T["True arm: assume c is true"]
-	Q --> F["False arm: assume c is false"]
-	T --> TS["Select with the true-arm facts"]
-	F --> FS["Select with the false-arm facts"]
-	TS --> J["Outside the arms: neither assumption applies"]
-	FS --> J
-```
+Memory order is the mid-end's. An emitted instruction takes over the states of
+the IR operations its rows were seeded from, read from the IR as it stands
+when the instruction is emitted:
 
-A repeated test inside an arm can become a known constant. The selector can
-then avoid instructions that would compute or branch on that test again.
-The assumption must stay within its scope. Treating it as a fact about the
-whole function would change the program.
+- The source of the root row is the operation that defines the value being
+  spelled. An operation whose value is in the class of one of its operands,
+  as an add of a constant is, is an offset and no row, so the source is the
+  operation behind it. The source of a row folded at a child of a form is
+  found the same way from the operand that child stands for. No row's
+  provenance is read, because one row is every twin of its operation.
+- An operand may no longer be the value the row was seeded over. An earlier
+  rewire handed the operation the spelling of that value, as it does for a
+  truncation that emits nothing and is its operand's register. The child
+  stands for such an operand where the driver's memo says the child was
+  spelled as it.
+- A row of two children matches in both orders where its operator commutes,
+  so a form may hold them exchanged. The commit takes the order in which each
+  child is the operand it stands for: a reference to the operand's class, or
+  the form of the row the operand refers to.
+- A step threads the states it names past its form's own operands. Each such
+  argument is a state child of some form of the tree, and the step takes the
+  ports of that form's source. A source no step names goes to the last step.
+- Within one step, a state one source publishes and another observes is
+  dropped, as for a load and the store that follows it. Its readers are handed
+  the state the first one observed.
+- Within one step that covers a write, a read of the same resource is no
+  port. The instruction observes what the write observed and publishes what
+  the write published. The readers of the state the read published, such as
+  a join of several reads that the write observes, are handed the state the
+  read observed. `*r += a[i] * b[i]` is one instruction that observes the
+  join, and the join reads the body's entering state in place of the read's.
+- A tree of no instruction, such as a write the target hardwires, takes no
+  port. The readers of each state its sources published are handed the state
+  observed, and a write's value is that state.
+- The instruction publishes states of its own, and the readers of each state a
+  source published are handed the new one. The IR is the only record: the
+  next access reads its operand, which is the new state by then. The ports are
+  read after the operands are spelled, because an operand emitted just before
+  took the readers of the state it published.
+- An instruction with ports sits in its source's region. Where the reader
+  cannot see that region the chain has no spelling.
 
-Conditional branches also have their own selection step. A control-recovery
-plan identifies their predicates before source operations are replaced. When
-a predicate can directly own its continuation and a branch instruction can
-test its comparison, the selector can combine the comparison and branch.
-Every branch instruction matching a test is recorded, with a branch on the
-materialized condition as the remaining alternative. The cover fuses each test
-into the cheapest branch whose operands it can name. The search weighs each
-alternative together with the instructions that produce its operands.
-The plan assigns a stable identity and an outcome partition to each predicate
-definition. A predicate returned by a Gamma arm is selected in that arm, before
-its outcome crosses the region boundary. Structural consumers route these
-outcomes without owning another branch.
+A chain is refused, with the reason under `TIR_ISEL_TRACE`, where a source's
+states were taken already, and where its tree reads memory and the value being
+spelled leads to no source.
 
-A predicate with data uses retains the value those readers need. A local
-conversion can fuse a pure comparison when its inputs are available there.
-If placement rejects a continuation, selection discards the staged function
-and retries with its connected selector roles materialized. Those replacement
-tests must read the materialized value. Every retry permanently demotes at
-least one definition; a request that cannot demote a definition fails before
-reselection. Recovery reports placement conflicts together. A fused branch
-may only read operands available where
-it executes.
+The end of the commit (`Commit::finish`) hands the readers of every replaced
+read that got no instruction the state it observed, sweeps what nothing
+demands, and fails on a replaced operation that is still there, printing it
+as written.
 
-Each selected instruction inherits its source computation's demand domain.
-Effectful computations from different lazy-loop paths cannot be fused into
-one instruction. A branch cannot internalize a resource effect whose state
-it does not publish.
+## Branches and recovery
+
+Control recovery turns the regions into blocks and asks the adapter in
+`core/src/backend/isel/edges.rs` for each branch. The adapter reads the
+automaton's `branches`, the graph and its extraction, and what the commit
+recorded (`select::Emitted`):
+
+- `types`: the source type of each value an instruction defines or reads;
+- `literals`: the integer each built literal holds;
+- `implicit`: the instructions each instruction implicitly follows.
+
+A control whose predicate is defined by an operation the commit left for it
+gets the branch of that operation's class. The adapter takes the class of the
+predicate from the driver, the chain the extraction chose for it, and the
+`branches` entry of the chain's pattern. The operands come from the chain's
+form (`Commit::slots`): a constant a field holds is read off the form, and a
+register is the next operand of the operation that stayed. A predicate an
+instruction computes leads to the same operation through
+`Emitted::implicit`. The branch tree is emitted into the block over those
+operands, after the block's bindings, with the taken block bound. The control
+reads the registers and not the boolean (`Edges::control_reads`). Recovery
+renames the operands of an operation as it places it, so the adapter keeps
+what each such operation read when it was first asked. Once the blocks exist,
+`Commit::branched` erases the operations that stayed, which nothing reads.
+
+The branch goes to the edge on which its compare holds, and the other edge
+falls through. Where the outcome recovery asks about is the compare not
+holding, the two edges change places. The inverse entry is used for one
+purpose: where the edge on which the compare does not hold continues a loop
+(`Edge::loops_back`) and the other does not, the inverse branches back and
+the exit falls through. A taken edge that carries arguments goes through a
+block of its own. A predicate the commit built as a literal decides its
+outcomes without a test.
+
+Any other predicate is tested through the same table. When the pass is
+created, the operation generic recovery builds to test a case
+(`destructure::case_test`, equality with the case) is matched to the instance
+synthesis made of it at each integer width, and the label of its row is kept
+per seed. `edges::Cases` lists, per seed, the patterns with that label and a
+branch: the ones whose field holds the case (`field[P]`), with the field's
+class, cheapest branch first, and then the compare of two registers. A
+switch's case takes the first pattern whose class the case fits, so the case
+is an immediate wherever a field holds it and is built in the block only
+otherwise. A boolean that is no compare is tested for zero through the same
+list, and the branch on it is the inverse of that entry, so it goes where the
+boolean holds.
+
+Each block is then ordered by its machine dependences, which include the
+registers an instruction names without a value, such as the flags between a
+compare and its branch. The score counts every recovered instruction once, so
+a pass comparing semantic alternatives can read it. Adoption publishes the
+staged function.
+
+Recovery orders the default arm of a wider predicate last and reaches it by
+falling through the tests of the named cases, so the adapter is asked for
+equality tests only. A default outcome it were asked to test has no entry:
+the table holds the test for equality.
+
+Three limits remain. A compare of a masked value with zero is one flag
+instruction and a branch (`test` with `jcc`, `tst` with `b.ne`), derived from
+the instruction's flags like any other compare. A bare boolean does not bind
+it: the instruction reads its register whole, and only bit zero of a boolean's
+register is defined, so the test is `and`, `test`, `jcc` on x86-64, and
+AArch64 builds the mask in a register. `DATA` counts the
+complement of a boolean (`xori` with one) as a reader and does not follow a
+boolean through a gate's result or a loop's port, so such a compare is priced
+and computed as a value and its complement is tested as a bare boolean. An
+emitted instruction joins its region behind every gate and loop the region
+holds, and recovery routes a branch past a gate only where no computation
+lies between the two.
 
 ## Small and large constants
 
@@ -448,53 +889,36 @@ in its own register.
 
 Now consider a 64-bit addition of `x` and `2048`. RISC-V's signed 12-bit
 add-immediate field represents values from `-2048` through `2047`. Encoding
-`2048` there would change its value, so that immediate match is illegal.
+`2048` there would change its value, so that immediate match is illegal. The
+selector adds the field's extreme and what is left in two adds where that
+costs less than building the constant in a register and adding the registers.
 
-The selector can instead produce `2048` in a register, then use a
-register-register addition: the addition's reference is `x`'s class at offset
-2048, which a register-register addition defines from the class at offset zero
-and the constant 2048 in a register.
-
-A constant is matched where it is demanded, by evaluating patterns over it.
-A pattern with one immediate whose result scales with it, such as an addition,
-an inserted halfword or a shifted upper part, takes the bits of the constant
-its field holds at that scale. A pattern with no other operand matches when
-it reproduces the constant exactly: `lui`, `movz`, `movn` and `mov` produce
-the constants their fields reach. A pattern with a register operand as well
-demands the rest of the constant there: `addi` takes the low 12 bits and
-`movk` a halfword. Where the immediate is a shift amount, the pattern takes
-the constant's trailing zeros and demands it shifted back, as `slli` does. A
-candidate is kept only if evaluating the pattern over it gives the constant
-back, and a constant some materializer produces alone is not split at all.
-If an operand uses an operator the evaluator does not support, the candidate
-is rejected.
-The demanded rest is a constant like any other, so `2048` on RISC-V is `1`
-shifted by 11, and a 64-bit constant becomes a chain of `lui`, `addi` and
-`slli`. The exact sequence can change with available target features and
-costs. The design requirement stays the same: every immediate must fit, and
-the sequence must compute the original value.
+A constant in a register is built by the materializers synthesis found: a
+pattern with one immediate whose result scales with it takes the bits its
+field holds at that scale, a pattern with no other operand matches when it
+reproduces the constant exactly, and a pattern with a register operand as well
+demands the rest of the constant there. A pattern that complements its
+immediate builds the constants whose complement fits the field, and one that
+replaces a field of a register builds a constant one field at a time, the
+highest first, over zeros or over ones, whichever takes fewer instructions.
+`2048` on RISC-V is `lui` and `addi`,
+and a 64-bit constant becomes a chain of `lui`, `addi` and `slli`; on AArch64
+`65536` is `movz` and `movk`, and `-1` is one `movn`. The exact
+sequence changes with the available target features and costs; every immediate
+fits, and the sequence computes the original value. At one cost a pattern whose
+immediate is the constant itself goes first, so zero on RISC-V is `addi` from
+the zero register and not `lui`. A pattern that names the width it computes at
+builds constants of that width only and goes before an unnamed one, so a
+32-bit constant on a 64-bit RISC-V target ends in `addiw`.
 
 LLVM input conversion retains binary-operation no-wrap flags. A sign extension of an `add nsw`
 or `sub nsw` with a constant operand can be expressed as wider arithmetic on
 sign-extended operands. The constant is interpreted at its source width first.
 Other uses retain the narrow operation; unflagged and unsigned-only arithmetic
-retain wrapping before sign extension. This conversion uses LLVM's guarantee
-that signed overflow does not occur on defined executions and introduces
-ordinary TIR operations for selection. GEP conversion scales the variable and
+retain wrapping before sign extension. GEP conversion scales the variable and
 constant parts of these signed additions separately. It adds dynamic offsets
 to the base before literal offsets, and returns the base directly for zero
 offsets, exposing shared products and displacement addressing to selection.
-A constant displacement at the end of a previously converted GEP is combined
-with the new displacement using wrapping byte arithmetic. The earlier address
-remains intact for its other users.
-
-For constant-arm selects, shared selection axioms rewrite the mask blend as
-an XOR with the differing constant bits. A one-bit mask is reduced through an
-explicit low-bit extraction before zero extension, preserving correctness when
-its physical register has unspecified upper bits.
-Shared zero identities remove a zero-valued `and` arm and its surrounding `or`
-before instruction matching, so a lowered select with a zero arm does not
-require a separate mask chain.
 
 Frames use the stack pointer as their base, so the ABI's optional frame-pointer
 register remains available for allocation. Its ordinary callee-save obligation
@@ -508,37 +932,12 @@ relocation computes the same address at every replay site. x86-64 permits this
 for symbolic RIP-relative `lea`; arbitrary numeric PC-relative computations do
 not acquire that guarantee from the symbol-address hook.
 
-## From selected computations to executable instructions
-
-Selection planning and emission run in a fork of the current context. Emitters
-construct machine operations there and connect their results to consumers.
-A rule's emission plan lists its machine instructions in the order they run.
-Every instruction but the last defines only machine state the next one reads,
-such as the flags a compare sets for its branch. TMDL derives such rules by
-composing the instructions' semantics, and the plan names each instruction's
-own table.
-Covered computations give way to the selected instructions, with effect
-dependencies preserved. The source context remains available if the candidate
-is rejected.
-
-Predicative recovery then connects computation fragments using the saved
-control provenance and region bindings. Fused-branch inputs receive the same
-simultaneous substitutions as edge arguments. The compiler orders each block
-according to its machine dependencies before adopting the staged result.
-This order must make inputs available before use and preserve required effects.
+## After selection
 
 Call lowering snapshots each distinct argument value and register class once
 per call, before placing arguments in their ABI registers or stack slots.
 Repeated arguments share that snapshot, so their copies do not create
 overlapping live ranges proportional to the argument count.
-
-A pass that compares semantic alternatives, such as floating-point contraction,
-prepares each candidate the same way and keeps its own IR. The score it reads
-counts every recovered machine instruction once, including branches, the
-instruction a rule emits ahead of its own, and conversions. A candidate that
-cannot be selected or recovered has no score, so it cannot win as a cheap
-alternative. Calls, returns, and virtual branches have no cost before register
-allocation and layout; the score reports how many such operations remain.
 
 Register allocation assigns physical registers afterward. It follows
 Buchwald, Zwinkau, and Bersch, "SSA-based Register Allocation with PBQP"
@@ -559,7 +958,49 @@ can make choices that depend on those assignments. For example, RISC-V
 compression can replace an instruction with a shorter encoding when its actual
 registers and immediates meet the compressed form's restrictions.
 
-The separation gives each stage the information it needs. Semantic selection
-chooses computations and legal instruction forms. Dependency ordering preserves
-execution constraints. Register allocation and final lowering complete the
-machine details that depend on the selected program.
+## Diagnostics
+
+`TIR_ISEL_SYNTH` reports what synthesis found and how long it took, and lists
+the generated rules with the steps of their plans. `TIR_ISEL_TRACE` prints, for
+each function after extraction, the rows seeded, the seed chains, the chains
+and forms the rules inserted, what the classes were extracted as, how the two
+facts settled each foldable access, how many of those observe a state with a
+depth, how many accesses the extracted trees fold, and every uncovered operation with one row
+of it, its operands' states and the reason no accepted chain reached it. During
+the commit it prints each chain spelled, with the operations its rows were
+seeded from and the step that threads each, and each chain refused, with the
+reason. `TIR_ISEL_TIMES` prints one line per function with the microseconds of
+the seed, the chains, the facts, the saturation, the extraction, the commit
+and recovery. The
+rounds and the matches of each are on the `tir-sat` line of `TIR_TIME_PASSES`.
+`TIR_RULE_STATS` reports the applications of each rule, and
+`TIR_SAT_DUMP` writes the function's graph and rules for the saturation
+workload tool.
+
+## What the rules do not yet cover
+
+A tie between an operand and a row folded elsewhere in the chain, and a tree
+folding an access below its root's own operands, are not synthesized: the
+automaton keys ties between leaves only. A read-modify-write of an address
+with a displacement and the mask form of a select need such a tie. A rule's tree encodes its operands' constants as they are, so an
+axiom that computes a constant from two operands, or extends a constant
+operand, yields no rule. A read
+whose copies in two arms are ready at different depths is not folded into a
+row that reads another register. An offset is factored only where it is read
+from a register, not from a held row. A
+gate's arm selects without the
+fact its predicate states there. Integer widths a function computes in that
+synthesis did not instantiate are not re-synthesized.
+
+A gate's result whose arms agree is the class of the value agreed on, and
+that class's depth does not include the gate. Where the commit hands the
+reader that value this is right. Where the value has no spelling outside the
+arms, as with the same read in sibling arms, the reader stays on the gate's
+result and the class is too shallow for it; the commit has no spelling for
+that shape either (see "State ports").
+
+A vector pattern that names its lane count by value, as the AArch64 Advanced
+SIMD patterns do, matches no instance: the instance's count is open. Keying
+the count as a constant a state may pin, the way an operand constant is
+pinned, would cover them. Vectors of floats have no instance, and a tree
+folding rows of different lane counts would read one count for all of them.

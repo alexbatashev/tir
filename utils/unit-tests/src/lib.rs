@@ -51,9 +51,9 @@ mod symbolic {
 }
 
 #[cfg(test)]
-mod relational {
-    mod egraph;
+mod egraph {
     mod egraph_pattern;
+    mod engine;
     mod rewrite_runner_extract;
     mod test_lang;
 }
@@ -124,18 +124,20 @@ mod core {
     mod dialects;
     mod edits;
     mod encodings;
+    mod epochs;
     mod fixtures;
     mod float;
     mod float_refinement;
+    mod idmap;
     mod instcombine;
     mod interfaces;
     mod isel;
+    mod isel_automaton;
     mod isel_rules;
     mod layout;
     mod liveness;
     mod machine_ir;
     mod objects;
-    mod overlay;
     mod pass;
     mod regalloc;
     mod region;

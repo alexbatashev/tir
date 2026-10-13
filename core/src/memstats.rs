@@ -8,7 +8,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use tir_relational::{Engine, Label as ENode};
+use tir_egraph::{Engine, Label as ENode};
 
 static FORCED: AtomicBool = AtomicBool::new(false);
 static PASS_TOTALS: Mutex<Vec<(&'static str, i64)>> = Mutex::new(Vec::new());
@@ -42,39 +42,6 @@ fn sample() -> (u64, u64) {
     (field("VmHWM:"), field("VmRSS:"))
 }
 
-/// Slab capacities against live-entity counts; the gap is unreclaimed storage.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct SlabCensus {
-    pub ops_slab: usize,
-    pub ops_live: usize,
-    pub values_slab: usize,
-    pub values_live: usize,
-    pub blocks_slab: usize,
-    pub blocks_live: usize,
-    pub regions_slab: usize,
-    pub regions_live: usize,
-    /// Chunks each hive holds; the gap against the live count is fragmentation.
-    pub ops_chunks: usize,
-    pub values_chunks: usize,
-    pub blocks_chunks: usize,
-    pub regions_chunks: usize,
-    /// Live port and attribute runs, and the bytes their arenas hold.
-    pub runs_live: usize,
-    pub runs_bytes: usize,
-    pub attrs_live: usize,
-    pub attrs_bytes: usize,
-    /// Per-arena heap: `Arc` header plus entity struct plus the capacity of the
-    /// `Vec`s it owns. Attribute payloads (`Str`, `Array`, `Dict`) are not
-    /// chased, so these are estimates for ranking, like [`egraph_census`].
-    pub ops_bytes: usize,
-    pub values_bytes: usize,
-    pub blocks_bytes: usize,
-    pub regions_bytes: usize,
-    pub slab_bytes: usize,
-    /// What the overlay holds beside the base.
-    pub overlay: crate::overlay::OverlayCensus,
-}
-
 /// Straddles one pass run; [`PassScope::finish`] emits the delta and census.
 pub struct PassScope {
     name: &'static str,
@@ -92,7 +59,7 @@ pub fn pass_scope(name: &'static str) -> Option<PassScope> {
 }
 
 impl PassScope {
-    pub fn finish(self, census: SlabCensus) {
+    pub fn finish(self, census: crate::Census) {
         let (hwm, rss) = sample();
         let hwm_delta = hwm as i64 - self.hwm as i64;
         eprintln!(
@@ -101,41 +68,28 @@ impl PassScope {
             rss as i64 - self.rss as i64,
         );
         eprintln!(
-            "tir-mem: context after={} ops_slab={} ops_live={} values_slab={} values_live={} \
-             blocks_slab={} blocks_live={} regions_slab={} regions_live={} ops_chunks={} \
-             values_chunks={} blocks_chunks={} regions_chunks={} runs_live={} \
-             runs_bytes={} attrs_live={} attrs_bytes={} ops_bytes={} \
-             values_bytes={} blocks_bytes={} regions_bytes={} slab_bytes={} bytes_per_live_op={} \
-             overlay_local={} overlay_shadows={} overlay_use_deltas={} overlay_replaced={} \
-             overlay_bytes={}",
+            "tir-mem: context after={} ops_live={} values_live={} blocks_live={} regions_live={} \
+             ops_chunks={} values_chunks={} blocks_chunks={} regions_chunks={} ops_bytes={} \
+             values_bytes={} blocks_bytes={} regions_bytes={} storage_bytes={} bytes_per_live_op={} \
+             groupings_bytes={} touched_chunks={} touched_bytes={}",
             self.name,
-            census.ops_slab,
             census.ops_live,
-            census.values_slab,
             census.values_live,
-            census.blocks_slab,
             census.blocks_live,
-            census.regions_slab,
             census.regions_live,
             census.ops_chunks,
             census.values_chunks,
             census.blocks_chunks,
             census.regions_chunks,
-            census.runs_live,
-            census.runs_bytes,
-            census.attrs_live,
-            census.attrs_bytes,
             census.ops_bytes,
             census.values_bytes,
             census.blocks_bytes,
             census.regions_bytes,
-            census.slab_bytes,
+            census.bytes(),
             census.ops_bytes / census.ops_live.max(1),
-            census.overlay.local,
-            census.overlay.shadows,
-            census.overlay.use_deltas,
-            census.overlay.replaced,
-            census.overlay.bytes,
+            census.groupings_bytes,
+            census.touched_chunks,
+            census.touched_bytes,
         );
         let mut totals = PASS_TOTALS.lock().unwrap();
         match totals.iter_mut().find(|(name, _)| *name == self.name) {
@@ -156,7 +110,7 @@ pub fn analysis_census(pass: &'static str, entries: usize) {
 }
 
 /// One epoch of callable tasks, measured after every task finished and
-/// before its batches commit: what the base holds, the largest overlay any
+/// before its batches commit: what the base holds, the most any
 /// task held while it ran, and the bytes the finished batches retain until
 /// the commit takes them.
 pub fn epoch_census(

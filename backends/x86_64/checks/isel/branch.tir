@@ -94,10 +94,12 @@ module {
     func.return %5
   }
   // The zero is proven constant, so the ops computing it are erased and cannot
-  // satisfy a register operand: the branch folds it as an immediate instead of
-  // reading a register that nothing in this block defines.
+  // satisfy a register operand: the branch reads a register that is defined
+  // again in this block by materializing the zero.
   // CHECK: asm.symbol {name = "constant_operand_branch"
-  // CHECK: x86_64.cmp_imm {dst = %{{[0-9]+}}:GPR, imm = 0}
+  // CHECK: x86_64.mov_imm32 {dst = %[[Z:[0-9]+]]:GPR32, imm = 0}
+  // CHECK-NEXT: x86_64.movsxd {dst = %[[S:[0-9]+]]:GPR, src = %[[Z]]:GPR32}
+  // CHECK-NEXT: x86_64.cmp {dst = %{{[0-9]+}}:GPR, src = %[[S]]:GPR}
   // CHECK-NEXT: x86_64.jge {imm = ^bb{{[0-9]+}}}
 
   module_end

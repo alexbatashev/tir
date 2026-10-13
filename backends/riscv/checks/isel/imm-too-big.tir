@@ -14,5 +14,5 @@ module {
   module_end
 }
 
-// CHECK: addi x5, x10, 1
-// CHECK-NEXT: addi x10, x5, 2047
+// CHECK: addi x5, x10, 2047
+// CHECK-NEXT: addi x10, x5, 1

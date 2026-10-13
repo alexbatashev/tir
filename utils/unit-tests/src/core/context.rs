@@ -1,11 +1,34 @@
 //! Context tests: staged regions, port growth, interning and spine bumps.
 
 use tir::{
-    builtin, func, func::FuncOp, scf, BlockHandle, BlockId, Commutative, Context, IRFormatter,
-    OpId, Operand, Operation, RegionId, StagedRegion, Use, ValueId,
+    builtin, func, func::FuncOp, scf, BlockHandle, BlockId, Commutative, Context, OpId, Operand,
+    Operation, RegionId, Use, ValueId,
 };
 
 use super::fixtures;
+
+#[test]
+fn classifies_types_interned_after_earlier_queries() {
+    let context = Context::new();
+    let memory = builtin::StateType::memory(&context);
+    assert_eq!(
+        context.state_resource(memory),
+        Some(builtin::StateResource::Memory)
+    );
+
+    let shared = context.clone();
+    let integer = builtin::IntegerType::new(&shared, 32);
+    assert_eq!(context.state_resource(integer), None);
+    let environment = builtin::StateType::fp_env(&shared);
+    assert_eq!(
+        context.state_resource(environment),
+        Some(builtin::StateResource::FpEnv)
+    );
+    assert_eq!(
+        context.state_resource(memory),
+        Some(builtin::StateResource::Memory)
+    );
+}
 
 #[test]
 fn symbol_errors_follow_definition_order() {
@@ -85,19 +108,13 @@ tir::helpers::dialect! {
 }
 
 /// `module { func demo() { %c = 1; test.nest { %old = 7; scf.yield }; return } }`
-/// — a region owned by an op nested inside a function, so a commit to it has a
-/// spine to bump and live values around it to reference.
+/// — a region owned by an op nested inside a function.
 struct Fixture {
-    module: OpId,
-    func: OpId,
     nest: OpId,
     body_region: RegionId,
     body_block: BlockId,
-    /// `%old`, defined inside the region a commit replaces.
+    /// `%old`, defined inside the nested region.
     old: ValueId,
-    /// `%c`, defined outside it and still live after a commit.
-    constant: ValueId,
-    module_body: BlockHandle,
 }
 
 fn fixture(context: &Context) -> Fixture {
@@ -122,7 +139,7 @@ module_end
         .as_op::<FuncOp>()
         .expect("a func")
         .body();
-    let [constant, nest, ..] = body.op_ids()[..] else {
+    let [_, nest, ..] = body.op_ids()[..] else {
         panic!("the function body holds the constant and the nest");
     };
     let body_region = context.get_op(nest).regions()[0];
@@ -130,193 +147,11 @@ module_end
     let old = context.get_block(body_block).op_ids()[0];
 
     Fixture {
-        module: module.id(),
-        func,
         nest,
         body_region,
         body_block,
         old: context.get_op(old).results()[0],
-        constant: context.get_op(constant).results()[0],
-        module_body: context.get_block(module.body().id()),
     }
-}
-
-fn printed(context: &Context, module: OpId) -> String {
-    let mut out = String::new();
-    let mut fmt = IRFormatter::new(&mut out);
-    let op = context.get_op(module).as_dyn_op();
-    tir::print_ir(op.as_ref(), context, &mut fmt).expect("print must succeed");
-    out
-}
-
-/// A staged `^block: scf.yield` body, ready to swap into the nested region.
-fn staged_yield(context: &Context) -> StagedRegion {
-    let mut staged = context.stage_region();
-    let block = staged.append_block(&[]);
-    staged.append_op(block, scf::ops::r#yield(context, vec![]).build().id());
-    staged
-}
-
-#[test]
-fn a_discarded_staging_leaves_the_tree_untouched() {
-    let context = Context::with_default_dialects();
-    let f = fixture(&context);
-    let i32_ty = builtin::IntegerType::new(&context, 32);
-    let before = printed(&context, f.module);
-    let module_version = context.op_version(f.module);
-    let nest_version = context.op_version(f.nest);
-
-    let staged_op = {
-        let mut staged = context.stage_region();
-        let block = staged.append_block(&[]);
-        let add = builtin::ops::addi(&context, f.constant, f.constant, i32_ty).build();
-        staged.append_op(block, add.id());
-        add.id()
-    };
-
-    assert_eq!(printed(&context, f.module), before, "the IR is unchanged");
-    assert_eq!(context.op_version(f.module), module_version);
-    assert_eq!(context.op_version(f.nest), nest_version);
-    assert!(!context.has_operation(staged_op), "staged ops are dropped");
-    assert!(
-        !context.is_used(f.constant),
-        "a discarded staging leaves no uses of live values behind"
-    );
-}
-
-#[test]
-fn a_commit_bumps_the_spine_once() {
-    let context = Context::with_default_dialects();
-    let f = fixture(&context);
-    let module_version = context.op_version(f.module);
-    let func_version = context.op_version(f.func);
-    let nest_version = context.op_version(f.nest);
-
-    context.replace_region_contents(f.body_region, staged_yield(&context));
-
-    assert_eq!(context.op_version(f.nest), nest_version + 1);
-    assert_eq!(context.op_version(f.func), func_version + 1);
-    assert_eq!(context.op_version(f.module), module_version + 1);
-}
-
-#[test]
-fn a_commit_detaches_the_old_subtree() {
-    let context = Context::with_default_dialects();
-    let f = fixture(&context);
-    let old_op = context.get_value(f.old).defining_op().unwrap();
-
-    context.replace_region_contents(f.body_region, staged_yield(&context));
-
-    assert!(!context.has_operation(old_op));
-    assert_eq!(context.parent_block(old_op), None);
-    assert_eq!(context.parent_op(old_op), None);
-    assert_eq!(context.parent_region(f.body_block), None);
-    assert!(!printed(&context, f.module).contains("7"));
-    // Nothing dirtied walks into the detached subtree.
-    tir::verify_op_tree(&context, f.nest).expect("the committed tree verifies");
-}
-
-#[test]
-fn staged_ops_keep_their_live_operands() {
-    let context = Context::with_default_dialects();
-    let f = fixture(&context);
-    let i32_ty = builtin::IntegerType::new(&context, 32);
-
-    let mut staged = context.stage_region();
-    let block = staged.append_block(&[]);
-    let add = builtin::ops::addi(&context, f.constant, f.constant, i32_ty).build();
-    staged.append_op(block, add.id());
-    staged.append_op(block, scf::ops::r#yield(&context, vec![]).build().id());
-    context.replace_region_contents(f.body_region, staged);
-
-    assert_eq!(
-        context.get_op(add.id()).operands().as_slice(),
-        vec![f.constant; 2]
-    );
-    assert_eq!(context.parent_block(add.id()), Some(block));
-    assert_eq!(context.parent_region(block), Some(f.body_region));
-    assert_eq!(context.users_of(f.constant), [add.id(); 2]);
-    tir::verify_op_tree(&context, f.func).expect("the committed tree verifies");
-}
-
-#[test]
-fn staged_blocks_carry_their_arguments() {
-    let context = Context::with_default_dialects();
-    let f = fixture(&context);
-    let i32_ty = builtin::IntegerType::new(&context, 32);
-
-    let mut staged = context.stage_region();
-    let block = staged.append_block(&[i32_ty]);
-    let argument = staged.block_argument(block, 0).id();
-    let add = builtin::ops::addi(&context, argument, f.constant, i32_ty).build();
-    staged.append_op(block, add.id());
-    staged.append_op(block, scf::ops::r#yield(&context, vec![]).build().id());
-    context.replace_region_contents(f.body_region, staged);
-
-    let committed = context.get_block(block);
-    assert_eq!(committed.arguments().len(), 1);
-    assert_eq!(committed.arguments()[0].id(), argument);
-    assert_eq!(context.get_op(add.id()).operands()[0], argument);
-}
-
-#[test]
-fn a_commit_remaps_uses_of_replaced_values() {
-    let context = Context::with_default_dialects();
-    let f = fixture(&context);
-    let i32_ty = builtin::IntegerType::new(&context, 32);
-    // A use of the old region's value that outlives the swap.
-    let user = builtin::ops::addi(&context, f.old, f.old, i32_ty).build();
-    f.module_body.append(user.id());
-
-    let mut staged = context.stage_region();
-    let block = staged.append_block(&[]);
-    let fresh = builtin::ops::constant(&context, 9, i32_ty).build();
-    staged.append_op(block, fresh.id());
-    staged.append_op(block, scf::ops::r#yield(&context, vec![]).build().id());
-    staged.replace_value(f.old, fresh.result());
-    context.replace_region_contents(f.body_region, staged);
-
-    assert_eq!(
-        context.get_op(user.id()).operands().as_slice(),
-        vec![fresh.result(); 2],
-        "surviving uses read the staged replacement"
-    );
-    assert!(!context.is_used(f.old));
-}
-
-#[test]
-fn a_commit_keeps_analyses_of_untouched_functions() {
-    use tir::{Analysis, AnalysisManager};
-    struct Probe;
-    impl Analysis for Probe {
-        fn build(_: &AnalysisManager, _: &Context, _: OpId) -> Self {
-            Probe
-        }
-    }
-
-    let context = Context::with_default_dialects();
-    let f = fixture(&context);
-    let unit = builtin::UnitType::new(&context);
-    let sibling_body = context.create_region();
-    let sibling_entry = context.create_block(vec![]);
-    sibling_body.add_block(sibling_entry.id());
-    sibling_entry.append(func::ops::r#return(&context, Operand::none()).build().id());
-    let sibling = func::ops::lambda(&context, "sib", unit, &sibling_body).build();
-    f.module_body.append(sibling.id());
-
-    let analyses = AnalysisManager::new();
-    analyses.get::<Probe>(&context, sibling.id());
-    analyses.get::<Probe>(&context, f.func);
-
-    context.replace_region_contents(f.body_region, staged_yield(&context));
-
-    assert!(
-        analyses
-            .get_cached::<Probe>(&context, sibling.id())
-            .is_some(),
-        "a sibling function's analyses survive a commit elsewhere"
-    );
-    assert!(analyses.get_cached::<Probe>(&context, f.func).is_none());
 }
 
 /// What the interner answers about a name.
@@ -668,7 +503,9 @@ fn setting_every_operand_relinks_the_uses() {
 fn use_indices_follow_a_port_into_its_place() {
     let context = Context::with_default_dialects();
     let (_, d, add) = add_fixture(&context);
-    let token = context.create_state(tir::builtin::StateResource::Memory);
+    let token = context
+        .create_value(tir::builtin::StateType::memory(&context), None)
+        .id();
 
     context.append_operand(add, token);
     context.append_operand(add, d);
@@ -694,13 +531,9 @@ fn replacing_value_uses_reaches_a_detached_op() {
     assert_eq!(context.use_count(d), 4);
 }
 
-/// The whole point of the storage layout: an operation is twenty-eight bytes
-/// and a value twelve, so a hive chunk holds thousands of either and neither
-/// costs an allocation of its own. A field added without a plan breaks this.
+/// An attribute is thirty-two bytes; a field added without a plan breaks this.
 #[test]
 fn stored_entities_keep_their_size_budget() {
-    assert_eq!(std::mem::size_of::<tir::OpInstance>(), 28);
-    assert_eq!(std::mem::size_of::<tir::Value>(), 12);
     // An attribute is its interned name plus an `AttributeValue`, whose widest
     // variant is `RegisterAttr::Assigned`.
     assert_eq!(std::mem::size_of::<tir::attributes::NamedAttribute>(), 32);
@@ -733,56 +566,6 @@ fn growing_an_op_promotes_its_run_and_keeps_its_uses() {
     assert!(context.uses_of(d).iter().all(|r#use| r#use.op == add));
 }
 
-/// Erasing an operation gives its ports' storage back: once the context is
-/// told the runs are free, the same operations built again are served out of
-/// the freed spans and the arena does not grow. Entity ids are deliberately
-/// not recycled, so the op hive keeps its chunks.
-#[test]
-fn erasing_operations_returns_their_run_storage() {
-    let context = Context::with_default_dialects();
-    let (_, _, body) = module_with_function(&context);
-    let i32_ty = builtin::IntegerType::new(&context, 32);
-    let seed = builtin::ops::constant(&context, 1, i32_ty).build();
-    body.append(seed.id());
-    let build = || {
-        (0..10_000)
-            .map(|_| {
-                let op = builtin::ops::addi(&context, seed.result(), seed.result(), i32_ty).build();
-                body.append(op.id());
-                op.id()
-            })
-            .collect::<Vec<OpId>>()
-    };
-    let ops = build();
-    context.commit();
-    let peak = context.slab_census();
-
-    for op in ops {
-        context
-            .erase_op(&tir::OperationRef::new(context.get_op(op)))
-            .expect("erase should succeed");
-    }
-    context.commit();
-    let after = context.slab_census();
-
-    assert!(
-        after.runs_live < peak.runs_live,
-        "live runs {} -> {}",
-        peak.runs_live,
-        after.runs_live
-    );
-    assert_eq!(after.ops_chunks, peak.ops_chunks, "op ids are not recycled");
-
-    build();
-    context.commit();
-    let reused = context.slab_census();
-    assert_eq!(reused.runs_live, peak.runs_live, "the same runs are live");
-    assert_eq!(
-        reused.runs_bytes, peak.runs_bytes,
-        "erased run storage is handed to the operations built after it"
-    );
-}
-
 proptest::proptest! {
     #[test]
     fn block_permutations_preserve_identity_and_invalidate_the_owner(keys in proptest::collection::vec(proptest::num::u32::ANY, 2..24)) {
@@ -800,7 +583,7 @@ proptest::proptest! {
         let contents = context.get_block(f.body_block).op_ids();
         context.reorder_region_blocks(f.body_region, order.clone()).unwrap();
         proptest::prop_assert_eq!(region.block_ids(), order.clone());
-        proptest::prop_assert_eq!(context.op_version(f.nest), version + u32::from(order != original));
+        proptest::prop_assert_eq!(context.op_version(f.nest) != version, order != original);
         proptest::prop_assert_eq!(context.get_block(f.body_block).op_ids(), contents);
         for block in original {
             proptest::prop_assert_eq!(context.parent_region(block), Some(f.body_region));

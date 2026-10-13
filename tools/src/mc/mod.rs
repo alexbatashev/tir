@@ -5,7 +5,7 @@ use std::{error::Error, ffi::OsString};
 
 use clap::{Args, ValueEnum};
 use tir::backend::binary::{ObjectEmission, render_ascii, write_elf};
-use tir::backend::pipeline::{Oracles, StopAfter, build_pipeline, lower_and_emit};
+use tir::backend::pipeline::{Oracles, StopAfter, build_pipeline, lower_and_emit, structure};
 use tir::{Context, IRFormatter, Operation};
 
 use crate::common::{
@@ -100,6 +100,10 @@ pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
     if needs_lowering {
         tir::verify_op_tree(&context, module.id())
             .map_err(|e| format!("verification failed: {e}"))?;
+        // IR text and LLVM IR hold control-flow graphs; the backend takes
+        // regions.
+        structure(&context, context.get_op(module.id()))
+            .map_err(|e| format!("pass pipeline failed: {e}"))?;
     }
     let imported = started.elapsed();
     let backend_started = std::time::Instant::now();
@@ -147,6 +151,7 @@ pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
                 target.as_ref(),
                 &context,
                 &module,
+                target.isel_pass(&context),
                 oracles,
                 |context, op| {
                     printer
@@ -179,6 +184,7 @@ pub fn run(args: ToolArgs) -> Result<(), Box<dyn Error>> {
                     target.as_ref(),
                     &context,
                     &module,
+                    target.isel_pass(&context),
                     oracles,
                     |context, op| {
                         writer

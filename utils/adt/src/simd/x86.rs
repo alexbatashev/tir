@@ -25,6 +25,8 @@ pub(super) static AVX2: Kernels = Kernels {
     select_moved: avx2::select_moved,
     hash_mix: avx2::hash_mix,
     hash_finish: avx2::hash_finish,
+    intersect_sorted: avx2::intersect_sorted,
+    and_words: avx2::and_words,
 };
 
 pub(super) static AVX512: Kernels = Kernels {
@@ -34,6 +36,8 @@ pub(super) static AVX512: Kernels = Kernels {
     select_moved: avx512::select_moved,
     hash_mix: avx512::hash_mix,
     hash_finish: avx512::hash_finish,
+    intersect_sorted: avx512::intersect_sorted,
+    and_words: avx512::and_words,
 };
 
 mod avx2 {
@@ -144,6 +148,68 @@ mod avx2 {
             row += LANES;
         }
         unsafe { scalar::hash_finish(hash.add(row), len - row) };
+    }
+
+    // Compares a vector of `a` with a vector of `b` all pairs at once, writes
+    // the lanes of `a` that met an equal lane, then steps past whichever vector
+    // ends lower (both on a tie). A cell of `a` sits in one vector of `b`, and
+    // the vectors are visited in merge order, so each common cell is written
+    // once and in order.
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn intersect_sorted(
+        a: *const u32,
+        alen: usize,
+        b: *const u32,
+        blen: usize,
+        out: *mut u32,
+    ) -> usize {
+        let room = alen.min(blen);
+        let (mut i, mut j, mut found) = (0, 0, 0);
+        while i + LANES <= alen && j + LANES <= blen && found + LANES <= room {
+            let (left, right) = unsafe { (load(a.add(i)), load(b.add(j))) };
+            // Rotating each half of `b` four ways, with and without the halves
+            // swapped, brings every lane of `b` under every lane of `a`.
+            let mut hits = 0;
+            for right in [right, _mm256_permute2x128_si256::<1>(right, right)] {
+                hits |= equal(left, right)
+                    | equal(left, _mm256_shuffle_epi32::<0b00_11_10_01>(right))
+                    | equal(left, _mm256_shuffle_epi32::<0b01_00_11_10>(right))
+                    | equal(left, _mm256_shuffle_epi32::<0b10_01_00_11>(right));
+            }
+            while hits != 0 {
+                unsafe { *out.add(found) = *a.add(i + hits.trailing_zeros() as usize) };
+                found += 1;
+                hits &= hits - 1;
+            }
+            let (high_a, high_b) = unsafe { (*a.add(i + LANES - 1), *b.add(j + LANES - 1)) };
+            i += if high_a <= high_b { LANES } else { 0 };
+            j += if high_b <= high_a { LANES } else { 0 };
+        }
+        found
+            + unsafe {
+                scalar::intersect_sorted_within(
+                    a.add(i),
+                    alen - i,
+                    b.add(j),
+                    blen - j,
+                    out.add(found),
+                    room - found,
+                )
+            }
+    }
+
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn and_words(a: *mut u64, b: *const u64, len: usize) {
+        let mut word = 0;
+        while word + 4 <= len {
+            unsafe {
+                let left = _mm256_loadu_si256(a.add(word).cast());
+                let right = _mm256_loadu_si256(b.add(word).cast());
+                _mm256_storeu_si256(a.add(word).cast(), _mm256_and_si256(left, right));
+            }
+            word += 4;
+        }
+        unsafe { scalar::and_words(a.add(word), b.add(word), len - word) };
     }
 }
 
@@ -267,5 +333,61 @@ mod avx512 {
             }
             row += LANES;
         }
+    }
+
+    // The loop of `avx2::intersect_sorted`, sixteen lanes wide: `b` is rotated
+    // a lane at a time through all sixteen positions under `a`, and the lanes
+    // of `a` that met an equal lane are compressed to the front and stored.
+    #[target_feature(enable = "avx512f")]
+    pub(super) unsafe fn intersect_sorted(
+        a: *const u32,
+        alen: usize,
+        b: *const u32,
+        blen: usize,
+        out: *mut u32,
+    ) -> usize {
+        let rotate = _mm512_setr_epi32(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0);
+        let room = alen.min(blen);
+        let (mut i, mut j, mut found) = (0, 0, 0);
+        while i + LANES <= alen && j + LANES <= blen && found + LANES <= room {
+            let (left, mut right) = unsafe { (load(u16::MAX, a.add(i)), load(u16::MAX, b.add(j))) };
+            let mut hits: __mmask16 = 0;
+            for _ in 0..LANES {
+                hits |= _mm512_cmpeq_epi32_mask(left, right);
+                right = _mm512_permutexvar_epi32(rotate, right);
+            }
+            let count = hits.count_ones() as usize;
+            let packed = _mm512_maskz_compress_epi32(hits, left);
+            unsafe { _mm512_mask_storeu_epi32(out.add(found).cast(), lanes(0, count), packed) };
+            found += count;
+            let (high_a, high_b) = unsafe { (*a.add(i + LANES - 1), *b.add(j + LANES - 1)) };
+            i += if high_a <= high_b { LANES } else { 0 };
+            j += if high_b <= high_a { LANES } else { 0 };
+        }
+        found
+            + unsafe {
+                scalar::intersect_sorted_within(
+                    a.add(i),
+                    alen - i,
+                    b.add(j),
+                    blen - j,
+                    out.add(found),
+                    room - found,
+                )
+            }
+    }
+
+    #[target_feature(enable = "avx512f")]
+    pub(super) unsafe fn and_words(a: *mut u64, b: *const u64, len: usize) {
+        let mut word = 0;
+        while word + 8 <= len {
+            unsafe {
+                let left = _mm512_loadu_si512(a.add(word).cast());
+                let right = _mm512_loadu_si512(b.add(word).cast());
+                _mm512_storeu_si512(a.add(word).cast(), _mm512_and_si512(left, right));
+            }
+            word += 8;
+        }
+        unsafe { scalar::and_words(a.add(word), b.add(word), len - word) };
     }
 }

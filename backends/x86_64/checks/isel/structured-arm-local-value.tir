@@ -1,10 +1,10 @@
 // RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
-// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck --check-prefix=NOESCAPE %s
 
 // An arm-local value does not escape its arm. The product the arm computes and
 // the one computed after the gate are the same term, so they share an e-class,
-// but the arm's register holds it only where the arm has run: what follows the
-// gate computes it again instead of reading the arm's.
+// but an arm's register holds it only where the arm has run. The product is
+// computed once where both readers see it, ahead of the gate: the arm and what
+// follows the gate read that register.
 
 module {
   %fn_no_escape = func.func @no_escape(%c: !i1, %a: !i64, %b: !i64) -> !i64 {
@@ -23,19 +23,13 @@ module {
   module_end
 }
 
-// The continuation computes its own product before the taken arm appears in
-// layout; the arm's distinct product only feeds its add and outgoing edge.
+// CHECK: x86_64.imul {dst = %[[PRODUCT:[0-9]+]]:GPR, dst_tied = %{{[0-9]+}}:GPR, src = %{{[0-9]+}}:GPR}
+// CHECK-NEXT: x86_64.test_imm32
+// CHECK-NEXT: x86_64.jne {imm = ^[[THEN:bb[0-9]+]]}
 // CHECK: ^[[CONT:bb[0-9]+]](%{{[0-9]+}}: !x86_64.GPR):
-// CHECK-NEXT: x86_64.imul {dst = %[[POST:[0-9]+]]:GPR, dst_tied = %{{[0-9]+}}:GPR, src = %{{[0-9]+}}:GPR}
-// CHECK-NEXT: x86_64.sub
+// CHECK-NEXT: x86_64.sub {dst = %{{[0-9]+}}:GPR, dst_tied = %{{[0-9]+}}:GPR, src = %[[PRODUCT]]:GPR}
 // CHECK-NEXT: asm.vret
-// CHECK: ^[[THEN:bb[0-9]+]]:
-// CHECK-NEXT: x86_64.imul {dst = %[[ARM:[0-9]+]]:GPR
-// CHECK-NEXT: x86_64.add
+// CHECK: ^[[THEN]]:
+// CHECK-NEXT: x86_64.add {dst = %{{[0-9]+}}:GPR, dst_tied = %{{[0-9]+}}:GPR, src = %[[PRODUCT]]:GPR}
 // CHECK-NEXT: asm.vbr %{{[0-9]+}} ^[[CONT]]
-
-// Capture the later arm definition before checking that the preceding join
-// does not read it. DAG resolves ARM before evaluating the pending NOT.
-// NOESCAPE: x86_64.jne {imm = ^[[THEN:bb[0-9]+]]}
-// NOESCAPE-NOT: %[[ARM]]:GPR
-// NOESCAPE-DAG: ^[[THEN]]:{{\n[ ]*}}x86_64.imul {dst = %[[ARM:[0-9]+]]:GPR
+// CHECK-NOT: x86_64.imul

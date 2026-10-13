@@ -1,10 +1,9 @@
-// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
+// RUN: tir opt --pass restructure-nodes,instcombine-nodes %s | tir mc --march=x86_64 --stage=isel | filecheck %s
 
 // A gate's decision is read by the tests its destruction branches on, not by any
-// operation of the block, so a literal decision is a tile whose only consumer is
-// a branch. It has to be placed ahead of that branch like any other operand: a
-// tile that lands after the block it is read in is a register read before it is
-// written. The comparison of two constants below folds to that literal.
+// operation of the block. The comparison of two constants below folds to a
+// literal, which decides the gate: the arm it takes follows the entry, and
+// neither the literal nor a branch on it is emitted.
 
 module {
   %fn_g = func.func @g(%0: !i64) -> !i64 {
@@ -24,6 +23,6 @@ module {
 }
 
 // CHECK-LABEL: asm.symbol {name = "g"
-// CHECK: x86_64.mov_imm32 {dst = %[[D:[0-9]+]]{{.*}}, imm = 0}
-// CHECK: x86_64.cmp32 {dst = %[[D]]{{.*}}}
-// CHECK: x86_64.jne
+// CHECK-NEXT: x86_64.add {dst = %[[SUM:[0-9]+]]:GPR, dst_tied = %{{[0-9]+}}:GPR, src = %{{[0-9]+}}:GPR}
+// CHECK-NEXT: asm.vret %[[SUM]]
+// CHECK-NOT: x86_64.j

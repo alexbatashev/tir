@@ -165,8 +165,8 @@ pub fn generate(file: &File) -> Result<String, Vec<Diagnostic>> {
         quote! { #base => #table(id % PDL_EXTERN_STRIDE, args, &mut *out), }
     });
     format_rust(quote! {
-        pub(super) fn generated_ruleset(context: &Context, pointer_width: Option<u32>) -> Ruleset {
-            let mut ruleset = Ruleset::new(context, pointer_width);
+        pub(super) fn generated_ruleset(context: &Context) -> Ruleset {
+            let mut ruleset = Ruleset::new();
             #(#initializers)*
             ruleset
         }
@@ -597,10 +597,10 @@ fn generate_rule(rule: &Rule, function: Ident, base: u32) -> Option<TokenStream>
             }
         });
     Some(quote! {
-        fn #function(context: &Context, index: usize) -> tir_relational::Rule<Node> {
+        fn #function(context: &Context, index: usize) -> tir_egraph::Rule<Node> {
             let _ = (context, index);
             #(#law_checks)*
-            tir_relational::Rule {
+            tir_egraph::Rule {
                 name: #rule_name.to_string(),
                 plan: Plan::compile(Query {
                     vars: #vars,

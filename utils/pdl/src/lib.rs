@@ -2,6 +2,7 @@ mod ast;
 mod codegen;
 mod diagnostic;
 mod lexer;
+mod literal;
 mod parser;
 mod sema;
 
@@ -10,6 +11,7 @@ use chumsky::span::SimpleSpan;
 pub use ast::*;
 pub use diagnostic::Diagnostic;
 pub use lexer::{Token, lex};
+pub use literal::file_to_rust;
 
 pub type Span = SimpleSpan;
 pub type Spanned<T> = (T, Span);

@@ -27,6 +27,7 @@ module {data_layout = #data_layout} {
 // The body advances the counter by the step and carries it round the back edge.
 // CHECK: ^[[BODY]]:
 // CHECK-NEXT: riscv.addi {rd = %{{[0-9]+}}:GPR, rs1 = %{{[0-9]+}}:GPR, imm = 5}
-// CHECK-NEXT: riscv.add {rd = %[[NEXT:[0-9]+]]:GPR, rs1 = %[[IV]]:GPR, rs2 = %{{[0-9]+}}:GPR}
+// A three-address instruction reads its two operands in either order.
+// CHECK-NEXT: riscv.add {rd = %[[NEXT:[0-9]+]]:GPR, rs1 = %{{[0-9]+}}:GPR, rs2 = %[[IV]]:GPR}
 // CHECK-NEXT: asm.vbr %[[NEXT]], %{{[0-9]+}} ^[[HDR]]
 // CHECK-NOT: scf.

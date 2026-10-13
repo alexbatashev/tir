@@ -22,7 +22,7 @@ struct Mixed make_mixed(double fp, long integer) {
 
 // ASM-LABEL: consume_mixed:
 // ASM: str x0
-// ASM: str x1
+// ASM: stur x1
 // A mixed struct is no HFA: the double parameter arrives in d0 but leaves as
 // the low half of the x0/x1 return pair, with the long parameter in x1. Which
 // register carries which field is the ABI fact; whether x1 is reloaded from the

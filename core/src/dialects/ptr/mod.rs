@@ -184,7 +184,17 @@ operation! {
         results: R {
             result: "crate::ptr::PtrType",
         },
+        interfaces: [crate::ConstantLike],
         sem: "(set result $null_address)",
+    }
+}
+
+impl crate::ConstantLike for NullOp {
+    fn constant_value(&self) -> tir::utils::APInt {
+        let context = self.0.context.clone();
+        let layout = crate::DataLayout::for_instance(&context, &self.0);
+        let width = layout.and_then(|layout| layout.pointer_size());
+        tir::utils::APInt::new(width.unwrap_or(64), 0)
     }
 }
 

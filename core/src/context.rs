@@ -1,5 +1,6 @@
 use std::{
     any::Any,
+    cell::{Ref, RefCell, RefMut},
     collections::{HashMap, HashSet},
     hash::{DefaultHasher, Hasher},
     sync::{
@@ -8,17 +9,14 @@ use std::{
     },
 };
 
-use std::cell::{Ref, RefCell, RefMut};
-use tir_adt::{IndexMap, Interner, Sym};
+use tir_adt::{Interner, Sym};
 
-use crate::overlay::{Delta, EditBatch, Frozen, commit_epoch, conflict};
-use crate::run::AttrRunId;
-use crate::store::{ERASED, Store};
+use crate::store::Db;
 
-pub use crate::store::Parent;
+pub use crate::store::{Census, Parent};
 
 use crate::{
-    Block, Dialect, Error, OpId, OpInstance, Operation, OperationParser, Region, TypeId,
+    Dialect, Error, OpId, Operation, OperationParser, TypeId,
     attributes::{AttributeValue, NamedAttribute},
     block::{BlockHandle, BlockId},
     builtin::BuiltinDialect,
@@ -39,20 +37,20 @@ use crate::{
     vector::VectorDialect,
 };
 
-/// The overlay every reader and editor of the IR holds.
+/// What every reader and editor of the IR holds.
 ///
-/// A context is a frozen base plus the edits made since it was frozen. Every
-/// read resolves those edits first, so an edit is visible to the next read;
-/// every edit lands in the overlay, so nothing touches the base until
-/// [`Context::commit`] takes it over with no reader left. Ids are minted once
-/// and never move, so an id read before a commit names the same entity after.
+/// A context reads and edits the IR's chunks directly, so every edit is
+/// visible to the next read. A chunk another context still reads (a fork, a
+/// task of a parallel epoch) is copied on its first write, so no context ever
+/// sees another's edits. [`Context::commit`] closes an epoch. Ids are minted
+/// once and never move or get reused, so an id names the same entity for as
+/// long as the entity lives.
 ///
 /// The context also owns what is not IR: the dialects, interned names and
 /// types, and interface registrations.
 ///
 /// A context belongs to one thread: it is neither `Send` nor `Sync`, and its
-/// reads and edits take no lock. The committed base crosses threads as a
-/// [`Frozen`], which is an immutable, shared read of the IR.
+/// reads and edits take no lock.
 ///
 /// # Example
 ///
@@ -74,7 +72,7 @@ pub trait GetFromContext {
     fn get_from_context(&self, context: &Context) -> Self::Item;
 }
 
-/// Entities an erase reclaims, gathered before the overlay is borrowed for
+/// Entities an erase reclaims, gathered before the storage is borrowed for
 /// writing.
 #[derive(Default)]
 struct Owned {
@@ -90,9 +88,13 @@ struct Registry {
     /// Register-class names of registered targets, for resolving a parsed
     /// `CLASS[n]` register attribute back to a [`RegClassId`].
     reg_classes: HashMap<&'static str, crate::backend::regalloc::RegClassId>,
-    op_interface_converters:
-        HashMap<(&'static str, &'static str, std::any::TypeId), OpInterfaceConverter>,
+    /// The interfaces each op name implements, by [`OpNameId`]: an op's name
+    /// is a column, so a lookup indexes by it and compares a few type ids.
+    interfaces: Vec<Vec<(std::any::TypeId, OpInterfaceConverter)>>,
     type_cache: Vec<Arc<dyn Type>>,
+    /// The resource each interned type is a state of, by type id: asked of
+    /// every operand and result when values are told from states.
+    state_types: Vec<Option<crate::builtin::StateResource>>,
     /// Interned type ids bucketed by [`Type::hash`], so [`Context::get_type_id`]
     /// only runs [`Type::eq`] against colliding candidates.
     type_lookup: HashMap<u64, Vec<TypeId>>,
@@ -109,105 +111,85 @@ struct Registry {
     segment_sizes: Sym,
 }
 
-/// What a second overlay over one base is opened from; see
+/// The names and types a context interned, readable from any thread. An id
+/// the registry handed out says in what order things were met; whoever must
+/// not depend on that order reads what the id stands for through this.
+#[derive(Clone)]
+pub struct Names(Arc<RwLock<Registry>>);
+
+impl Names {
+    /// The name `sym` was interned from.
+    pub fn name(&self, sym: Sym) -> String {
+        let registry = self.0.read().unwrap_or_else(|e| e.into_inner());
+        registry.names.resolve(sym).to_string()
+    }
+
+    /// `ty` as the IR spells it, its dialect first.
+    pub fn type_spelling(&self, ty: TypeId) -> String {
+        let registry = self.0.read().unwrap_or_else(|e| e.into_inner());
+        let data = registry.type_cache[ty.as_index()].clone();
+        drop(registry);
+        let mut out = format!("{}.", data.dialect());
+        data.print(&mut IRFormatter::new(&mut out))
+            .expect("type print must succeed");
+        out
+    }
+}
+
+/// What another context over the IR this one reads is opened from; see
 /// [`Context::snapshot`].
 #[derive(Clone)]
 pub(crate) struct Snapshot {
     registry: Arc<RwLock<Registry>>,
-    base: Frozen,
-    versions: Arc<Vec<u32>>,
+    db: Db,
     epoch: u32,
 }
 
-/// The base and the edits over it. One thread owns a context, so the
-/// edits need no lock; the base is shared read-only and needs none.
-struct Overlay {
-    base: Frozen,
-    delta: Delta,
+impl Snapshot {
+    /// The partition each of `targets` mints into.
+    pub(crate) fn partitions(&self, targets: &[OpId]) -> Vec<u32> {
+        targets
+            .iter()
+            .map(|target| self.db.partition_of(*target))
+            .collect()
+    }
 }
 
-impl Overlay {
-    fn base(&self) -> &Store {
-        &self.base.0
-    }
+/// What a task of a parallel epoch wrote: its chunks, to be merged into the
+/// base it was opened over.
+pub(crate) struct EditBatch(Db);
 
-    fn parts(&mut self) -> (&Store, &mut Delta) {
-        (&self.base.0, &mut self.delta)
-    }
-
-    fn op(&self, id: OpId) -> Option<&OpInstance> {
-        self.delta.op(&self.base.0, id)
-    }
-
-    fn value(&self, id: ValueId) -> Option<&Value> {
-        self.delta.value(&self.base.0, id)
-    }
-
-    fn block(&self, id: BlockId) -> Option<&Block> {
-        self.delta.block(&self.base.0, id)
-    }
-
-    fn region(&self, id: RegionId) -> Option<&Region> {
-        self.delta.region(&self.base.0, id)
-    }
-
-    fn op_parent(&self, id: OpId) -> Option<Parent> {
-        self.delta.op_parent(&self.base.0, id)
-    }
-
-    fn block_parent(&self, id: BlockId) -> Option<RegionId> {
-        self.delta.block_parent(&self.base.0, id)
-    }
-
-    fn value_block(&self, id: ValueId) -> Option<BlockId> {
-        self.delta.value_block(&self.base.0, id)
-    }
-
-    fn value_region(&self, id: ValueId) -> Option<RegionId> {
-        self.delta.value_region(&self.base.0, id)
-    }
-
-    fn op_operands(&self, id: OpId) -> crate::operation::ValueIds {
-        self.delta.op_operands(&self.base.0, id)
-    }
-
-    fn op_results(&self, id: OpId) -> crate::operation::ValueIds {
-        self.delta.op_results(&self.base.0, id)
-    }
-
-    fn op_regions(&self, id: OpId) -> crate::operation::RegionIds {
-        self.delta.op_regions(&self.base.0, id)
-    }
-
-    fn op_attrs(&self, id: OpId) -> &[NamedAttribute] {
-        self.delta.op_attrs(&self.base.0, id)
-    }
-
-    fn uses(&self, value: ValueId) -> Vec<Use> {
-        self.delta.uses(&self.base.0, value)
-    }
-
-    fn is_used(&self, value: ValueId) -> bool {
-        self.delta.is_used(&self.base.0, value)
-    }
-
-    fn enclosing_op_of(&self, op: OpId) -> Option<OpId> {
-        self.delta.enclosing_op_of(&self.base.0, op)
+impl EditBatch {
+    /// Bytes of the chunks the batch wrote.
+    pub(crate) fn bytes(&self) -> usize {
+        self.0.census().touched_bytes
     }
 }
 
 struct Inner {
-    /// Shared by every context over one base: a worker's overlay interns
-    /// into the same tables the module was built with.
+    /// Shared by every context over one module: a worker interns into the
+    /// same tables the module was built with.
     registry: Arc<RwLock<Registry>>,
-    overlay: RefCell<Overlay>,
-    /// Structural version per op as of the last commit; the overlay's
-    /// revisions add to it. See [`Context::op_version`]. Shared with the
-    /// overlays opened over the same base, which only read it.
-    versions: RefCell<Arc<Vec<u32>>>,
-    /// Which overlay this is: bumped by every commit and discard, so a handle
-    /// to an entity of a dropped overlay reads as stale.
+    /// Type metadata never changes. Cache the append-only registry's state
+    /// classification locally so operand and e-graph reads take no lock.
+    state_types: RefCell<Vec<Option<crate::builtin::StateResource>>>,
+    db: RefCell<Db>,
+    /// Advances at every commit.
     epoch: AtomicU32,
+    frozen: bool,
+}
+
+/// Mints into a partition of its own until dropped; see
+/// [`Context::function_scope`].
+pub struct FunctionScope {
+    context: Context,
+    previous: u32,
+}
+
+impl Drop for FunctionScope {
+    fn drop(&mut self) {
+        self.context.db_mut().mint_into(self.previous);
+    }
 }
 
 /// The attribute names every registered operation declares, interned ahead of
@@ -224,6 +206,12 @@ fn schema_vocabulary() -> Interner {
     names
 }
 
+pub(crate) struct Refused(pub(crate) String);
+
+fn refuse(what: String) -> ! {
+    std::panic::resume_unwind(Box::new(Refused(what)))
+}
+
 fn type_hash(ty: &dyn Type) -> u64 {
     let mut hasher = DefaultHasher::new();
     hasher.write(ty.dialect().as_bytes());
@@ -236,14 +224,13 @@ impl Context {
     pub fn new() -> Self {
         let mut names = schema_vocabulary();
         let segment_sizes = names.intern("operand_segment_sizes");
-        let base = Frozen::empty();
-        let delta = Delta::new(base.0.frontier());
         let context = Context(std::rc::Rc::new(Inner {
             registry: Arc::new(RwLock::new(Registry {
                 dialects: HashMap::new(),
                 reg_classes: HashMap::new(),
-                op_interface_converters: HashMap::new(),
+                interfaces: Vec::new(),
                 type_cache: vec![],
+                state_types: vec![],
                 type_lookup: HashMap::new(),
                 fp_semantics: HashMap::new(),
                 evaluation_contracts: HashMap::new(),
@@ -252,9 +239,10 @@ impl Context {
                 op_name_ids: HashMap::new(),
                 segment_sizes,
             })),
-            overlay: RefCell::new(Overlay { base, delta }),
-            versions: RefCell::new(Arc::new(Vec::new())),
+            db: RefCell::new(Db::new()),
+            state_types: RefCell::default(),
             epoch: AtomicU32::new(0),
+            frozen: false,
         }));
         crate::builtin::StateType::memory(&context);
         context
@@ -284,16 +272,26 @@ impl Context {
         self.0.registry.write().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn view(&self) -> Ref<'_, Overlay> {
-        self.0.overlay.borrow()
+    fn db(&self) -> Ref<'_, Db> {
+        self.0.db.borrow()
     }
 
-    fn view_mut(&self) -> RefMut<'_, Overlay> {
-        self.0.overlay.borrow_mut()
+    fn db_mut(&self) -> RefMut<'_, Db> {
+        self.0.db.borrow_mut()
+    }
+
+    /// See [`Names`].
+    pub fn names(&self) -> Names {
+        Names(self.0.registry.clone())
     }
 
     /// Intern an attribute name.
     pub fn intern(&self, name: &str) -> Sym {
+        if self.0.frozen {
+            return self
+                .sym(name)
+                .unwrap_or_else(|| refuse(format!("the name `{name}`")));
+        }
         self.registry_mut().names.intern(name)
     }
 
@@ -339,6 +337,10 @@ impl Context {
         if let Some(id) = registry.op_name_ids.get(&(dialect, name)) {
             return *id;
         }
+        if self.0.frozen {
+            drop(registry);
+            refuse(format!("the operation `{dialect}.{name}`"));
+        }
         let id = OpNameId::new(registry.op_names.len() as u32);
         registry.op_names.push((dialect, name));
         registry.op_name_ids.insert((dialect, name), id);
@@ -349,231 +351,154 @@ impl Context {
         NamedAttribute::new(self.intern(name), value)
     }
 
-    /// Storage counts of the base and the overlay, for the memory census.
-    pub fn slab_census(&self) -> crate::memstats::SlabCensus {
-        let view = self.view();
-        let base = view.base();
-        let (blocks_heap, regions_heap) = base.owned_heap_bytes();
-        let runs = base.runs.census();
-        let attrs = base.attr_runs.census();
-        crate::memstats::SlabCensus {
-            ops_slab: base.ops.capacity(),
-            ops_live: base.ops.len(),
-            values_slab: base.values.capacity(),
-            values_live: base.values.len(),
-            blocks_slab: base.blocks.capacity(),
-            blocks_live: base.blocks.len(),
-            regions_slab: base.regions.capacity(),
-            regions_live: base.regions.len(),
-            runs_live: runs.0,
-            runs_bytes: runs.1,
-            attrs_live: attrs.0,
-            attrs_bytes: attrs.1,
-            ops_chunks: base.ops.chunk_count(),
-            values_chunks: base.values.chunk_count(),
-            blocks_chunks: base.blocks.chunk_count(),
-            regions_chunks: base.regions.chunk_count(),
-            ops_bytes: base.ops.bytes(),
-            values_bytes: base.values.bytes(),
-            blocks_bytes: base.blocks.bytes() + blocks_heap,
-            regions_bytes: base.regions.bytes() + regions_heap,
-            slab_bytes: base.bytes(),
-            overlay: view.delta.census(),
-        }
-    }
-
-    /// The overlay's own counts: what it created, copied and replaced.
-    pub fn overlay_census(&self) -> crate::overlay::OverlayCensus {
-        self.view().delta.census()
+    /// Live rows, chunks and bytes of the IR's storage, for the memory census.
+    pub fn census(&self) -> Census {
+        self.db().census()
     }
 
     // Epochs.
 
-    /// Which overlay this is; advances at every commit.
+    /// Which epoch this is; advances at every commit.
     pub fn epoch(&self) -> u32 {
         self.0.epoch.load(Ordering::Relaxed)
     }
 
-    /// One more reader of the base as it stands. A commit waits for none: it
-    /// panics while a reader is alive, so scope readers to what they read.
-    pub fn frozen(&self) -> Frozen {
-        self.view().base.clone()
-    }
-
-    /// Whether `id` names an entity created in the current overlay, and not
-    /// yet committed.
-    pub fn is_pending_op(&self, id: OpId) -> bool {
-        self.view().delta.store.owns_op(id)
-    }
-
-    pub fn is_pending_value(&self, id: ValueId) -> bool {
-        self.view().delta.store.owns_value(id)
-    }
-
-    /// Whether the overlay holds any edit.
-    pub fn has_pending_edits(&self) -> bool {
-        !self.view().delta.is_empty()
-    }
-
-    /// Take the overlay's edits as an owned batch, leaving an empty overlay
-    /// over the same base. The batch names no handle of this context. Ids
-    /// created afterwards would repeat the batch's, so a commit follows.
+    /// What this context wrote since it was opened, for the context it was
+    /// opened from to merge.
     pub(crate) fn finish(&self) -> EditBatch {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        delta.fold_swaps(base);
-        let frontier = view.base().frontier();
-        let delta = std::mem::replace(&mut view.delta, Delta::new(frontier));
-        EditBatch::new(self.epoch(), view.base.identity(), delta)
+        EditBatch(self.db().clone())
     }
 
-    /// Apply every edit made since the last commit to the base. No reader of
-    /// the base ([`Context::frozen`]) may be alive. Ids do not move.
+    /// Close the epoch. Ids do not move.
     pub fn commit(&self) {
-        let batch = self.finish();
-        self.commit_batches(vec![batch])
-            .expect("one overlay's edits never conflict with themselves");
+        self.db_mut().commit();
+        self.0.epoch.store(self.epoch() + 1, Ordering::Relaxed);
     }
 
-    /// Apply `batches`, each finished over the base this context reads, in
-    /// the order given; see [`crate::overlay::commit_epoch`]. Two batches
-    /// writing one base entity are refused before anything changes, naming
-    /// the entity. The overlay must hold no edit of its own.
+    /// Merge `batches`, each finished by a context opened over this one as
+    /// committed, in the order given. Two batches writing one row are refused
+    /// before anything changes, naming the row.
     pub(crate) fn commit_batches(&self, batches: Vec<EditBatch>) -> Result<(), String> {
-        if let Some(conflict) = conflict(&batches) {
-            return Err(conflict);
-        }
-        let mut view = self.view_mut();
-        assert!(
-            view.delta.is_empty(),
-            "batches commit over an overlay holding no edit of its own"
-        );
-        assert_eq!(
-            Arc::strong_count(&view.base.0),
-            1,
-            "commit while a reader still holds the base"
-        );
-        let base = std::mem::replace(&mut view.base, Frozen::empty());
-        let committed = commit_epoch(base, batches);
-        view.delta = Delta::new(committed.base.0.frontier());
-        view.delta.replaced_ops.extend(committed.replaced_ops);
-        view.base = committed.base;
-        drop(view);
-        self.fold_revisions(&committed.revisions);
+        self.db_mut()
+            .merge(batches.into_iter().map(|batch| batch.0).collect())?;
         self.0.epoch.store(self.epoch() + 1, Ordering::Relaxed);
         Ok(())
     }
 
-    /// Drop every edit made since the last commit. Every version the overlay
-    /// advanced moves past what it reached, so nothing cached against the
-    /// dropped state is reused.
-    pub fn discard(&self) {
-        let batch = self.finish();
-        let past: Vec<(u32, u32)> = batch
-            .revision()
-            .iter()
-            .map(|(op, bump)| (*op, bump + 1))
-            .collect();
-        self.fold_revisions(&past);
-        self.0.epoch.store(self.epoch() + 1, Ordering::Relaxed);
-    }
-
-    /// What another overlay over the base this context reads needs: the
-    /// tables, the base and the committed versions. `Send`, so the overlay can
-    /// be opened on another thread. Every edit must be committed first.
+    /// What another context over the IR this one reads needs. `Send`, so the
+    /// context can be opened on another thread. Every edit must be committed
+    /// first.
     pub(crate) fn snapshot(&self) -> Snapshot {
-        let view = self.view();
-        assert!(
-            view.delta.is_empty(),
-            "a snapshot is taken of a committed base"
-        );
+        let db = self.db();
+        assert!(db.is_clean(), "a snapshot is taken of a committed base");
         Snapshot {
             registry: self.0.registry.clone(),
-            base: view.base.clone(),
-            versions: self.0.versions.borrow().clone(),
+            db: db.clone(),
             epoch: self.epoch(),
         }
     }
 
-    /// A fresh overlay over `snapshot`'s base, sharing its tables. Ids it
-    /// mints start where any other overlay over that base starts; a commit
-    /// moves them past what earlier batches added.
-    pub(crate) fn open(snapshot: Snapshot) -> Self {
-        let delta = Delta::new(snapshot.base.0.frontier());
+    /// A context over `snapshot` for task `index` of the `count` an epoch
+    /// runs on `target`s of their own. It mints into `target`'s partition
+    /// through chunk indices no other task takes; `exclusive` says no other
+    /// task of the epoch mints into that partition.
+    pub(crate) fn open(
+        snapshot: &Snapshot,
+        index: usize,
+        count: usize,
+        target: OpId,
+        exclusive: bool,
+    ) -> Self {
+        let part = snapshot.db.partition_of(target);
+        Context(std::rc::Rc::new(Inner {
+            registry: snapshot.registry.clone(),
+            state_types: RefCell::default(),
+            db: RefCell::new(
+                snapshot
+                    .db
+                    .lane(index as u32, count as u32, part, exclusive),
+            ),
+            epoch: AtomicU32::new(snapshot.epoch),
+            frozen: false,
+        }))
+    }
+
+    pub(crate) fn detach(self) -> Snapshot {
+        Snapshot {
+            registry: self.0.registry.clone(),
+            db: self.db().clone(),
+            epoch: self.epoch(),
+        }
+    }
+
+    // Two threads interning at once would number the registry's entries by
+    // their race.
+    pub(crate) fn open_frozen(snapshot: Snapshot) -> Self {
         Context(std::rc::Rc::new(Inner {
             registry: snapshot.registry,
-            overlay: RefCell::new(Overlay {
-                base: snapshot.base,
-                delta,
-            }),
-            versions: RefCell::new(snapshot.versions),
+            state_types: RefCell::default(),
+            db: RefCell::new(snapshot.db),
             epoch: AtomicU32::new(snapshot.epoch),
+            frozen: true,
         }))
     }
 
-    /// A copy of this overlay to try an edit in: same base, same tables, the
-    /// pending edits duplicated. Ids minted in the fork continue from this
-    /// overlay's, so [`Context::adopt`] hands them back unchanged.
+    /// A copy of this context to try an edit in. Ids minted in the fork
+    /// continue from this context's, so [`Context::adopt`] hands them back
+    /// unchanged.
     pub(crate) fn fork(&self) -> Self {
-        let view = self.view();
         Context(std::rc::Rc::new(Inner {
             registry: self.0.registry.clone(),
-            overlay: RefCell::new(Overlay {
-                base: view.base.clone(),
-                delta: view.delta.clone(),
-            }),
-            versions: RefCell::new(self.0.versions.borrow().clone()),
+            state_types: RefCell::default(),
+            db: RefCell::new(self.db().clone()),
             epoch: AtomicU32::new(self.epoch()),
+            frozen: self.0.frozen,
         }))
     }
 
-    /// Take the edits of `fork`, a [`Context::fork`] of this overlay, as this
-    /// overlay's own. Handles into `fork` die with it; its ids stay valid
+    /// Take the IR of `fork`, a [`Context::fork`] of this context, as this
+    /// context's own. Handles into `fork` die with it; its ids stay valid
     /// here.
     pub(crate) fn adopt(&self, fork: Context) {
-        let delta = {
-            let mut forked = fork.view_mut();
-            let frontier = forked.base().frontier();
-            std::mem::replace(&mut forked.delta, Delta::new(frontier))
-        };
-        let mut view = self.view_mut();
-        assert_eq!(
-            fork.view().base.identity(),
-            view.base.identity(),
-            "a fork is adopted by the overlay it was forked from"
-        );
+        let db = fork.db().clone();
         drop(fork);
-        view.delta = delta;
+        *self.db_mut() = db;
     }
 
-    fn fold_revisions(&self, revisions: &[(u32, u32)]) {
-        if revisions.is_empty() {
-            return;
+    /// Mint what is created until the scope drops into a partition of its
+    /// own. A frontend brackets the construction of one function with this,
+    /// so the function's rows share chunks with no other function's.
+    pub fn function_scope(&self) -> FunctionScope {
+        FunctionScope {
+            context: self.clone(),
+            previous: self.db_mut().enter_partition(),
         }
-        let mut shared = self.0.versions.borrow_mut();
-        let versions = Arc::make_mut(&mut shared);
-        for (op, bump) in revisions {
-            let idx = *op as usize;
-            if idx >= versions.len() {
-                versions.resize(idx + 1, 0);
-            }
-            versions[idx] = versions[idx]
-                .checked_add(*bump)
-                .expect("a version counter wrapped");
-        }
+    }
+
+    /// [`Context::function_scope`] into the partition `op` already has, for
+    /// a pass that walks a module and builds inside one function of it.
+    /// `None` when `op` has no partition of its own or is already the one
+    /// minted into.
+    pub fn partition_scope(&self, op: OpId) -> Option<FunctionScope> {
+        let previous = self.db_mut().mint_under(op)?;
+        Some(FunctionScope {
+            context: self.clone(),
+            previous,
+        })
     }
 
     /// Record that `old` was replaced by `new` in place, so a pipeline can
     /// follow its root across the swap.
     pub(crate) fn record_replaced_op(&self, old: OpId, new: OpId) {
-        self.view_mut().delta.replaced_ops.insert(old, new);
+        self.db_mut().replaced_ops.insert(old, new);
     }
 
-    /// The op that took `id`'s place in the current overlay, if a rewrite
-    /// replaced it.
-    pub fn replaced_op(&self, id: OpId) -> Option<OpId> {
-        self.view().delta.replaced_ops.get(&id).copied()
+    /// The op that took `id`'s place, if a rewrite replaced it.
+    pub(crate) fn replaced_op(&self, id: OpId) -> Option<OpId> {
+        self.db().replaced_ops.get(&id).copied()
     }
+
+    // Dialects, interfaces and types.
 
     // Dialects, interfaces and types.
 
@@ -624,9 +549,17 @@ impl Context {
         op_name: &'static str,
         converter: OpInterfaceConverter,
     ) {
-        self.registry_mut()
-            .op_interface_converters
-            .insert((dialect, op_name, std::any::TypeId::of::<I>()), converter);
+        let name = self.intern_op_name(dialect, op_name).index();
+        let interface = std::any::TypeId::of::<I>();
+        let mut registry = self.registry_mut();
+        if registry.interfaces.len() <= name {
+            registry.interfaces.resize_with(name + 1, Vec::new);
+        }
+        let held = &mut registry.interfaces[name];
+        match held.iter_mut().find(|(ty, _)| *ty == interface) {
+            Some(entry) => entry.1 = converter,
+            None => held.push((interface, converter)),
+        }
     }
 
     pub fn register_operation_interface<Op, I>(&self)
@@ -644,19 +577,22 @@ impl Context {
     }
 
     pub(crate) fn get_op_interface<I: ?Sized + 'static>(&self, op: OpHandle) -> Option<Box<I>> {
-        let converter = self.find_op_interface::<I>(self.op_identity(op.id))?;
+        let converter = self.find_op_interface::<I>(self.op_name_id(op.id))?;
         let erased = converter(op);
         downcast_op_interface::<I>(erased)
     }
 
     pub(crate) fn find_op_interface<I: ?Sized + 'static>(
         &self,
-        identity: (&'static str, &'static str),
+        name: OpNameId,
     ) -> Option<OpInterfaceConverter> {
+        let interface = std::any::TypeId::of::<I>();
         self.registry()
-            .op_interface_converters
-            .get(&(identity.0, identity.1, std::any::TypeId::of::<I>()))
-            .copied()
+            .interfaces
+            .get(name.index())?
+            .iter()
+            .find(|(ty, _)| *ty == interface)
+            .map(|(_, converter)| *converter)
     }
 
     pub fn get_parser(&self, dialect: &str, name: &str) -> Result<OperationParser, Error> {
@@ -707,10 +643,31 @@ impl Context {
                 }
             }
         }
+        if self.0.frozen {
+            drop(registry);
+            let mut spelled = String::new();
+            let _ = ty.print(&mut IRFormatter::new(&mut spelled));
+            refuse(format!("the type `{spelled}`"));
+        }
         let id = TypeId::from_number(registry.type_cache.len() as u32);
+        let state = (ty.as_ref() as &dyn Any)
+            .downcast_ref::<crate::builtin::StateType>()
+            .map(crate::builtin::StateType::resource);
+        registry.state_types.push(state);
         registry.type_cache.push(ty);
         registry.type_lookup.entry(hash).or_default().push(id);
         id
+    }
+
+    /// The ids of the interned types `keep` holds of, in the order they were
+    /// interned.
+    pub fn types_where(&self, keep: impl Fn(&dyn Type) -> bool) -> Vec<TypeId> {
+        let registry = self.registry();
+        let types = registry.type_cache.iter().enumerate();
+        types
+            .filter(|(_, ty)| keep(ty.as_ref()))
+            .map(|(index, _)| TypeId::from_number(index as u32))
+            .collect()
     }
 
     pub fn get_type_data(&self, ty: TypeId) -> Arc<dyn Type> {
@@ -722,10 +679,16 @@ impl Context {
     }
 
     pub fn state_resource(&self, ty: TypeId) -> Option<crate::builtin::StateResource> {
-        let data = self.get_type_data(ty);
-        (data.as_ref() as &dyn Any)
-            .downcast_ref::<crate::builtin::StateType>()
-            .map(crate::builtin::StateType::resource)
+        let states = self.0.state_types.borrow();
+        if let Some(&state) = states.get(ty.as_index()) {
+            return state;
+        }
+        drop(states);
+        let registry = self.registry();
+        let mut states = self.0.state_types.borrow_mut();
+        let from = states.len();
+        states.extend_from_slice(&registry.state_types[from..]);
+        states[ty.as_index()]
     }
 
     pub fn is_state_type(&self, ty: TypeId) -> bool {
@@ -753,146 +716,90 @@ impl Context {
 
     // Handles.
 
-    /// The epoch `id` was created in, or [`ERASED`] for an id no live op has.
-    /// A handle records this when it is minted and compares on every read.
-    pub(crate) fn op_generation(&self, id: OpId) -> u32 {
-        let view = self.view();
-        if view.delta.store.owns_op(id) {
-            return if view.delta.store.op(id).is_some() {
-                self.epoch()
-            } else {
-                ERASED
-            };
-        }
-        if view.delta.erased_op(id) {
-            return ERASED;
-        }
-        view.base().op_epoch(id)
-    }
-
-    pub(crate) fn block_generation(&self, id: BlockId) -> u32 {
-        let view = self.view();
-        if view.delta.store.owns_block(id) {
-            return if view.delta.store.block(id).is_some() {
-                self.epoch()
-            } else {
-                ERASED
-            };
-        }
-        if view.delta.erased_block(id) {
-            return ERASED;
-        }
-        view.base().block_epoch(id)
-    }
-
-    pub(crate) fn region_generation(&self, id: RegionId) -> u32 {
-        let view = self.view();
-        if view.delta.store.owns_region(id) {
-            return if view.delta.store.region(id).is_some() {
-                self.epoch()
-            } else {
-                ERASED
-            };
-        }
-        if view.delta.erased_region(id) {
-            return ERASED;
-        }
-        view.base().region_epoch(id)
-    }
-
     /// The handle naming `id`. Panics for an id no live operation has: a handle
     /// reads the operation as it stands, and an erased one does not stand.
     pub fn get_op(&self, id: OpId) -> OpHandle {
-        let generation = self.op_generation(id);
-        assert!(generation != ERASED, "live operation {id:?}");
+        assert!(self.has_operation(id), "live operation {id:?}");
         OpHandle {
             context: self.clone(),
             id,
-            generation,
         }
     }
 
     /// The handle naming `id`. Panics for an id no live block has.
     pub fn get_block(&self, id: BlockId) -> BlockHandle {
-        let generation = self.block_generation(id);
-        assert!(generation != ERASED, "live block {id:?}");
+        assert!(self.has_block(id), "live block {id:?}");
         BlockHandle {
             context: self.clone(),
-            generation,
             id,
         }
     }
 
     /// The handle naming `id`; see [`Context::get_block`].
     pub fn get_region(&self, id: RegionId) -> RegionHandle {
-        let generation = self.region_generation(id);
-        assert!(generation != ERASED, "live region {id:?}");
+        assert!(self.has_region(id), "live region {id:?}");
         RegionHandle {
             context: self.clone(),
-            generation,
             id,
         }
     }
 
     fn find_op(&self, id: OpId) -> Option<OpHandle> {
-        (self.op_generation(id) != ERASED).then(|| self.get_op(id))
+        self.has_operation(id).then(|| self.get_op(id))
     }
 
     fn find_block(&self, id: BlockId) -> Option<BlockHandle> {
-        (self.block_generation(id) != ERASED).then(|| self.get_block(id))
+        self.has_block(id).then(|| self.get_block(id))
     }
 
     fn find_region(&self, id: RegionId) -> Option<RegionHandle> {
-        (self.region_generation(id) != ERASED).then(|| self.get_region(id))
+        self.has_region(id).then(|| self.get_region(id))
     }
 
     // Reads.
 
     pub fn has_operation(&self, id: OpId) -> bool {
-        self.view().op(id).is_some()
+        self.db().op_live(id)
     }
 
     pub fn has_value(&self, id: ValueId) -> bool {
-        self.view().value(id).is_some()
+        self.db().value_live(id)
     }
 
     pub fn has_region(&self, id: RegionId) -> bool {
-        self.view().region(id).is_some()
+        self.db().region_live(id)
     }
 
     pub fn has_block(&self, id: BlockId) -> bool {
-        self.view().block(id).is_some()
+        self.db().block_live(id)
     }
 
-    /// The structural version of `op`: a counter bumped by every edit to `op` or
-    /// to anything under it, continuous across commits. Analyses cached against
-    /// a version are stale as soon as it moves; see
-    /// [`crate::analysis::AnalysisManager`].
+    /// A counter that moves with every edit under `op`, and may move with an
+    /// edit elsewhere: it counts the writes to the rows of `op`'s partition
+    /// and of the module's. Analyses cached against a version are stale as
+    /// soon as it moves; see [`crate::analysis::AnalysisManager`].
     pub fn op_version(&self, op: OpId) -> u32 {
-        let committed = self
-            .0
-            .versions
-            .borrow()
-            .get(op.index())
-            .copied()
-            .unwrap_or(0);
-        committed
-            .checked_add(self.view().delta.revision(op))
-            .expect("a version counter wrapped")
+        self.db().version(op)
+    }
+
+    /// Whether `pass` already ran on `op` as it stands now and edited nothing.
+    pub(crate) fn is_settled(&self, pass: &'static str, op: OpId) -> bool {
+        self.db().is_settled(pass, op)
+    }
+
+    /// Record that `pass` ran on `op` as it stands now and edited nothing.
+    pub(crate) fn settle(&self, pass: &'static str, op: OpId) {
+        self.db_mut().settle(pass, op);
     }
 
     /// The subtrees edited since the last call, innermost-dirtied op per edit and
     /// deduplicated. The pass manager drains this to scope post-pass verification.
     pub(crate) fn take_dirty_ops(&self) -> Vec<OpId> {
-        let dirty = self.view_mut().delta.take_dirty();
-        dirty
-            .into_iter()
-            .filter(|op| self.has_operation(*op))
-            .collect()
+        self.db_mut().take_dirty()
     }
 
     pub fn get_value(&self, id: ValueId) -> Value {
-        self.view().value(id).expect("live value").clone()
+        self.db().value(id).expect("live value")
     }
 
     /// The values of `ids` that are not memory states, in order.
@@ -906,26 +813,26 @@ impl Context {
     }
 
     fn filter_states(&self, ids: &[ValueId], states: bool) -> crate::operation::ValueIds {
-        let view = self.view();
-        let (base, delta) = (view.base(), &view.delta);
+        let db = self.db();
+        let registry = self.registry();
         ids.iter()
             .copied()
             .filter(|&id| {
-                delta
-                    .value(base, id)
-                    .is_some_and(|value| self.is_state_type(value.ty()))
+                db.value(id)
+                    .is_some_and(|value| registry.state_types[value.ty().as_index()].is_some())
                     == states
             })
             .collect()
     }
 
-    /// Every operand slot holding `value`, in the order the uses were recorded.
+    /// Every operand slot holding `value`: ascending by reading operation,
+    /// with the operations edited most recently last.
     ///
     /// This is the def-use chain: it lists what live operation storage holds,
     /// whether or not the reading op sits in the tree. Attributes naming a
     /// value are not uses: they record where the ABI places it, not a read.
     pub fn uses_of(&self, value: ValueId) -> Vec<Use> {
-        self.view().uses(value)
+        self.db_mut().uses(value)
     }
 
     /// The operations reading `value`, one entry per operand slot.
@@ -937,50 +844,30 @@ impl Context {
     }
 
     pub fn is_used(&self, value: ValueId) -> bool {
-        self.view().is_used(value)
+        self.db_mut().is_used(value)
     }
 
     pub fn use_count(&self, value: ValueId) -> usize {
         self.uses_of(value).len()
     }
 
-    /// Rebuild the use lists from live operation storage and compare. A
-    /// mismatch means an operand mutator skipped its bookkeeping, which every
-    /// def-use query would then answer wrongly; the pass manager runs this
-    /// after each mutating pass when IR verification is on.
-    pub fn verify_use_lists(&self) -> Result<(), Error> {
-        let view = self.view();
-        let (base, delta) = (view.base(), &view.delta);
-        let mut expected: IndexMap<ValueId, Vec<Use>> = IndexMap::new();
-        let base_ops = base
-            .ops
-            .handles()
-            .map(OpId::new)
-            .filter(|op| !delta.store.shadows_op(*op) && !delta.erased_op(*op));
-        let delta_ops = delta
-            .store
-            .ops
-            .handles()
-            .filter_map(|handle| delta.store.ops.get(handle))
-            .map(|instance| instance.id);
-        for op in base_ops.chain(delta_ops) {
-            for (slot, value) in delta.op_operands(base, op).iter().enumerate() {
-                expected.entry(*value).or_default().push(Use::new(op, slot));
-            }
-        }
-        let key = |r#use: &Use| (r#use.op.index(), r#use.index);
-        for (value, mut expected) in expected {
-            let mut held = delta.uses(base, value);
-            expected.sort_unstable_by_key(key);
-            held.sort_unstable_by_key(key);
-            if expected != held {
-                return Err(Error::VerificationError(format!(
-                    "use list of value {} holds {held:?}, but operands say {expected:?}",
-                    value.number()
-                )));
-            }
-        }
-        Ok(())
+    /// Every region result slot naming `value`, as `(region, index)`: where
+    /// an unordered region publishes it. Region results sit in no use list.
+    pub fn result_uses(&self, value: ValueId) -> Vec<(RegionId, usize)> {
+        self.db_mut().result_uses(value)
+    }
+
+    /// Whether `region` or a region nested in it names `value` as a result.
+    pub(crate) fn published_under(&self, region: RegionId, value: ValueId) -> bool {
+        let mut db = self.db_mut();
+        let uses = db.result_uses(value);
+        uses.into_iter()
+            .any(|(naming, _)| db.region_under(naming, region))
+    }
+
+    /// Whether `region` is `root` or nested in it, at any depth.
+    pub(crate) fn region_under(&self, region: RegionId, root: RegionId) -> bool {
+        self.db().region_under(region, root)
     }
 
     pub fn is_block_argument(&self, id: ValueId) -> bool {
@@ -996,18 +883,18 @@ impl Context {
     /// The region `id` is a port of, or `None` when it is a block argument or
     /// an operation defines it.
     pub fn region_of_port(&self, id: ValueId) -> Option<RegionId> {
-        self.view().value_region(id)
+        self.db().value_region(id)
     }
 
     /// The block `id` is an argument of, or `None` when an operation defines it.
     pub fn block_of_argument(&self, id: ValueId) -> Option<BlockId> {
-        self.view().value_block(id)
+        self.db().value_block(id)
     }
 
     /// The block currently holding `op`, or `None` for an op not in any block
     /// (the root op, or one detached by a rewrite).
     pub fn parent_block(&self, op: OpId) -> Option<BlockId> {
-        match self.view().op_parent(op) {
+        match self.db().op_parent(op) {
             Some(Parent::Block(block)) => Some(block),
             _ => None,
         }
@@ -1016,7 +903,7 @@ impl Context {
     /// The unordered region holding `op` directly, or `None` for an op that
     /// sits in a block or in no region at all.
     pub fn parent_nodes_region(&self, op: OpId) -> Option<RegionId> {
-        match self.view().op_parent(op) {
+        match self.db().op_parent(op) {
             Some(Parent::Region(region)) => Some(region),
             _ => None,
         }
@@ -1024,27 +911,45 @@ impl Context {
 
     /// The region holding `op`, through its block where it has one.
     pub fn region_of_op(&self, op: OpId) -> Option<RegionId> {
-        match self.view().op_parent(op)? {
+        let db = self.db();
+        match db.op_parent(op)? {
             Parent::Region(region) => Some(region),
-            Parent::Block(block) => self.parent_region(block),
+            Parent::Block(block) => db.block_parent(block),
         }
     }
 
     /// The operation enclosing `op`: the owner of the region holding `op`'s
     /// block. `None` for a root op or one detached by a rewrite.
     pub fn parent_op(&self, op: OpId) -> Option<OpId> {
-        self.view().enclosing_op_of(op)
+        self.db().enclosing_op_of(op)
     }
 
     /// The region currently holding `block`, or `None` for a detached block.
     pub fn parent_region(&self, block: BlockId) -> Option<RegionId> {
-        self.view().block_parent(block)
+        self.db().block_parent(block)
+    }
+
+    // `read` must not edit the context: the storage is borrowed for the read.
+    pub(crate) fn with_attributes<R>(
+        &self,
+        id: OpId,
+        read: impl FnOnce(&[crate::attributes::NamedAttribute]) -> R,
+    ) -> R {
+        read(self.db().op_attrs(id))
+    }
+
+    // `read` must not edit the context, nor ask it for a use list or for what
+    // a block or a region holds:
+    // those bring a grouping up to date, and the storage is borrowed for the
+    // read.
+    pub(crate) fn with_rows<R>(&self, read: impl FnOnce(&Db) -> R) -> R {
+        read(&self.db())
     }
 
     /// Read an attribute of `op` in place. For an attribute large enough that
     /// cloning it per lookup would matter.
     ///
-    /// `read` must not edit the context: the overlay is borrowed for the read.
+    /// `read` must not edit the context: the storage is borrowed for the read.
     pub fn with_attr<R>(
         &self,
         id: OpId,
@@ -1052,129 +957,132 @@ impl Context {
         read: impl FnOnce(&AttributeValue) -> R,
     ) -> Option<R> {
         let name = self.sym(name)?;
-        let view = self.view();
-        let (base, delta) = (view.base(), &view.delta);
-        delta
-            .op_attrs(base, id)
+        self.db()
+            .op_attrs(id)
             .iter()
             .find(|attribute| attribute.name == name)
             .map(|attribute| read(&attribute.value))
     }
 
     pub(crate) fn op_operands(&self, id: OpId) -> crate::operation::ValueIds {
-        self.view().op_operands(id)
+        self.db().operands(id)
     }
 
     pub(crate) fn op_results(&self, id: OpId) -> crate::operation::ValueIds {
-        self.view().op_results(id)
+        self.db().results(id)
     }
 
     pub(crate) fn op_regions(&self, id: OpId) -> crate::operation::RegionIds {
-        self.view().op_regions(id)
+        self.db().regions(id)
     }
 
     pub(crate) fn op_attributes(&self, id: OpId) -> Vec<NamedAttribute> {
-        self.view().op_attrs(id).to_vec()
+        self.db().op_attrs(id).to_vec()
     }
 
     /// [`OpHandle::attr_sym`]: the lookup is a `u32` compare per attribute.
     pub(crate) fn op_attr_sym(&self, id: OpId, name: Sym) -> Option<AttributeValue> {
-        self.view()
+        self.db()
             .op_attrs(id)
             .iter()
             .find(|attribute| attribute.name == name)
             .map(|attribute| attribute.value.clone())
     }
 
+    /// The interned name of `id`.
+    pub(crate) fn op_name_id(&self, id: OpId) -> OpNameId {
+        self.db().op_name(id)
+    }
+
     /// The `(dialect, name)` pair `id` is spelled by.
     pub(crate) fn op_identity(&self, id: OpId) -> (&'static str, &'static str) {
-        let name = self.view().op(id).expect("live operation").name_id();
+        let name = self.db().op_name(id);
         self.registry().op_names[name.index()]
     }
 
-    /// Read a block's storage record.
-    ///
-    /// `read` must not edit the context: the overlay is borrowed for the read.
-    pub(crate) fn with_block<R>(&self, id: BlockId, read: impl FnOnce(&Block) -> R) -> R {
-        let view = self.view();
-        let (base, delta) = (view.base(), &view.delta);
-        read(delta.block(base, id).expect("live block"))
+    pub(crate) fn block_arguments(&self, id: BlockId) -> Vec<Value> {
+        self.db().block_args(id)
     }
 
-    /// [`Context::with_block`] for a region.
-    pub(crate) fn with_region<R>(&self, id: RegionId, read: impl FnOnce(&Region) -> R) -> R {
-        let view = self.view();
-        let (base, delta) = (view.base(), &view.delta);
-        read(delta.region(base, id).expect("live region"))
+    pub(crate) fn block_attributes(&self, id: BlockId) -> Vec<NamedAttribute> {
+        self.db().block_attrs(id).to_vec()
     }
 
     /// [`BlockHandle::attr`].
     pub(crate) fn block_attr(&self, block: BlockId, name: &str) -> Option<AttributeValue> {
         let name = self.sym(name)?;
-        self.with_block(block, |block| {
-            block
-                .attributes()
-                .iter()
-                .find(|attribute| attribute.name == name)
-                .map(|attribute| attribute.value.clone())
-        })
+        self.db()
+            .block_attrs(block)
+            .iter()
+            .find(|attribute| attribute.name == name)
+            .map(|attribute| attribute.value.clone())
     }
 
-    // Edits. Each borrows the base for reading and the overlay for writing,
-    // copies whatever base record it touches into the overlay first, and
-    // reports the edit on the spine.
+    /// The operations `block` holds, in order.
+    pub(crate) fn block_ops(&self, id: BlockId) -> Vec<OpId> {
+        self.db_mut().block_ops(id)
+    }
+
+    pub(crate) fn region_parent_op(&self, id: RegionId) -> Option<OpId> {
+        self.db().region_parent(id)
+    }
+
+    pub(crate) fn region_is_nodes(&self, id: RegionId) -> bool {
+        self.db().region_is_nodes(id)
+    }
+
+    /// The blocks an ordered region holds, in order; none for an unordered one.
+    pub(crate) fn region_blocks(&self, id: RegionId) -> Vec<BlockId> {
+        self.db_mut().region_blocks(id)
+    }
+
+    /// The operations an unordered region holds directly, in the order they
+    /// joined it; none for an ordered one.
+    pub(crate) fn region_ops(&self, id: RegionId) -> Vec<OpId> {
+        self.db_mut().region_ops(id)
+    }
+
+    /// Every op under `roots`, the roots included.
+    pub(crate) fn subtree_ops(&self, roots: &[OpId]) -> Vec<OpId> {
+        self.db_mut().subtree_ops(roots)
+    }
+
+    /// `region` and every region nested in it.
+    pub(crate) fn nested_regions(&self, region: RegionId) -> Vec<RegionId> {
+        self.db_mut().nested_regions(region)
+    }
+
+    pub(crate) fn sibling_reads(&self, root: RegionId, nested: bool) -> Vec<(OpId, OpId)> {
+        self.db_mut().sibling_reads(root, nested)
+    }
+
+    pub(crate) fn sibling_read(&self, reader: OpId, value: ValueId) -> Option<(OpId, OpId)> {
+        self.db().sibling_read(reader, value, None)
+    }
+
+    /// The ports an unordered region owns itself; none for an ordered one.
+    pub(crate) fn region_ports(&self, id: RegionId) -> Vec<Value> {
+        self.db().region_ports(id)
+    }
+
+    pub(crate) fn region_results(&self, id: RegionId) -> Vec<ValueId> {
+        self.db().region_results(id)
+    }
+
+    // Edits. Each writes the rows it names and reports the subtree it
+    // touched, for verification after the pass.
 
     pub fn add_operation(&self, op: crate::operation::NewOp) -> OpHandle {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        let op_id = delta.store.insert_op(|id| OpInstance {
-            id,
-            name: op.name,
-            run: crate::run::RunId::NONE,
-            operand_count: 0,
-            result_count: 0,
-            region_count: 0,
-            _pad: 0,
-            attrs: AttrRunId::NONE,
-            attr_count: 0,
-        });
-        let operands: Vec<u32> = op.operands.iter().map(|value| value.number()).collect();
-        let results: Vec<u32> = op.results.iter().map(|value| value.number()).collect();
-        let regions: Vec<u32> = op.regions.iter().map(|region| region.number()).collect();
-        delta.store.set_ports(op_id, &operands, &results, &regions);
-        delta.store.set_op_attrs(op_id, op.attributes);
-        // Results are created before op id assignment in builders; patch their
-        // def-site now.
-        for result in op.results {
-            if delta.shadow_value(base, result) {
-                delta
-                    .store
-                    .value_mut(result)
-                    .expect("live value")
-                    .set_defining_op(op_id);
-            }
-        }
-        for region in op.regions {
-            assert!(delta.shadow_region(base, region), "live region");
-            delta
-                .store
-                .region_mut(region)
-                .expect("live region")
-                .set_parent_op(op_id);
-        }
-        delta.bump(op_id);
-        drop(view);
-        self.get_op(op_id)
+        let id = self.db_mut().add_operation(op);
+        self.get_op(id)
     }
 
     /// Replace an operation's attributes in place, keeping its id, position, and
     /// regions.
     pub fn set_op_attributes(&self, id: OpId, attributes: Vec<NamedAttribute>) {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        if delta.shadow_op(base, id) {
-            delta.store.set_op_attrs(id, attributes);
-            delta.edit_op(base, id);
+        let mut db = self.db_mut();
+        if db.set_op_attrs(id, attributes) {
+            db.edit_op(id);
         }
     }
 
@@ -1201,109 +1109,65 @@ impl Context {
         {
             return;
         }
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        if delta.shadow_op(base, id) {
-            delta.store.replace_operand_at(id, index, new);
-            delta.edit_op(base, id);
+        let mut db = self.db_mut();
+        if db.set_operand(id, index, new) {
+            db.edit_op(id);
         }
     }
 
     /// Replace all of an operation's SSA operands.
     pub fn set_op_operands(&self, id: OpId, operands: Vec<ValueId>) {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        if !delta.shadow_op(base, id) {
-            return;
+        let mut db = self.db_mut();
+        let count = db.operands(id).len();
+        if db.splice_operands(id, 0, count, &operands) {
+            db.edit_op(id);
         }
-        let (_, results, regions) = delta.store.ports(id);
-        let operands: Vec<u32> = operands.iter().map(|value| value.number()).collect();
-        delta.store.set_ports(id, &operands, &results, &regions);
-        delta.edit_op(base, id);
     }
 
     /// Replace a single operation's SSA result at `index`, moving the
-    /// definition of `new` onto this op.
+    /// definition of `new` onto this op. `new` is a value no other operation
+    /// defines.
     pub fn set_op_result(&self, id: OpId, index: usize, new: ValueId) {
         if self.op_results(id).get(index).is_none_or(|old| *old == new) {
             return;
         }
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        if !delta.shadow_op(base, id) {
-            return;
+        let mut db = self.db_mut();
+        if db.splice_results(id, index, 1, &[new]) {
+            db.edit_op(id);
         }
-        delta.store.replace_result_at(id, index, new);
-        if delta.shadow_value(base, new) {
-            delta
-                .store
-                .value_mut(new)
-                .expect("live value")
-                .set_defining_op(id);
-        }
-        delta.edit_op(base, id);
     }
 
     /// Give a value a new type, keeping its id and every use of it.
     pub fn retype_value(&self, value: ValueId, ty: TypeId) {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        if !delta.shadow_value(base, value) {
+        let mut db = self.db_mut();
+        if !db.set_value_type(value, ty) {
             return;
         }
-        let record = delta.store.value_mut(value).expect("live value");
-        record.set_ty(ty);
-        match (record.defining_op(), delta.value_block(base, value)) {
-            (Some(op), _) => delta.edit_op(base, op),
-            (None, Some(block)) => delta.edit_block(base, block),
+        let record = db.value(value).expect("live value");
+        match (record.defining_op(), db.value_block(value)) {
+            (Some(op), _) => db.edit_op(op),
+            (None, Some(block)) => db.edit_block(block),
             (None, None) => {
-                if let Some(region) = delta.value_region(base, value) {
-                    delta.edit_region(base, region);
+                if let Some(region) = db.value_region(value) {
+                    db.edit_region(region);
                 }
             }
         }
     }
 
     /// [`Context::retype_value`] for a block argument, whose type the block
-    /// stores alongside the value arena's copy.
+    /// declares alongside the value's own.
     pub fn retype_block_argument(&self, block: BlockId, index: usize, ty: TypeId) {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        if !delta.shadow_block(base, block) {
+        let mut db = self.db_mut();
+        if !db.block_live(block) {
             return;
         }
-        let Some(argument) = delta
-            .store
-            .block_mut(block)
-            .and_then(|block| block.arguments_mut().get_mut(index))
-        else {
-            return;
-        };
-        argument.set_ty(ty);
-        let value_id = argument.id();
-        if delta.shadow_value(base, value_id) {
-            delta
-                .store
-                .value_mut(value_id)
-                .expect("live value")
-                .set_ty(ty);
-        }
-        delta.edit_block(base, block);
+        db.retype_block_argument(block, index, ty);
+        db.edit_block(block);
     }
 
     pub fn create_value(&self, ty: TypeId, defining_op: Option<OpId>) -> Value {
-        let mut view = self.view_mut();
-        let delta = &mut view.delta;
-        let id = delta
-            .store
-            .insert_value(|id| Value::new(id, ty, defining_op));
-        delta.store.value(id).expect("just inserted").clone()
-    }
-
-    /// Mint a state value whose only meaning is an ordering dependency.
-    pub fn create_state(&self, resource: crate::builtin::StateResource) -> ValueId {
-        self.create_value(crate::builtin::StateType::new(self, resource), None)
-            .id()
+        self.db_mut().create_value(ty, defining_op)
     }
 
     /// Replace every SSA operand use of `old` with `new`.
@@ -1316,18 +1180,17 @@ impl Context {
         if old == new {
             return;
         }
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        let mut edited = delta.replace_value_uses(base, old, new);
+        let mut db = self.db_mut();
+        let mut edited = db.replace_value_uses(old, new);
         edited.sort_unstable();
         edited.dedup();
         for op in edited {
-            delta.edit_op(base, op);
+            db.edit_op(op);
         }
     }
 
     pub fn create_region(&self) -> RegionHandle {
-        let id = self.view_mut().delta.store.insert_region(Region::new());
+        let id = self.db_mut().create_region();
         self.get_region(id)
     }
 
@@ -1347,48 +1210,37 @@ impl Context {
     /// Put `op` into the unordered `region`. Nothing about the position means
     /// anything: the region's dependencies say what runs before what.
     pub fn add(&self, region: RegionId, op: OpId) {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        assert!(delta.shadow_region(base, region), "live region");
-        match delta.store.region_mut(region).map(Region::body_mut) {
-            Some(crate::region::RegionBody::Nodes { ops, .. }) => ops.push(op),
-            _ => panic!("only an unordered region takes an operation without a position"),
-        }
+        let mut db = self.db_mut();
+        assert!(
+            db.region_is_nodes(region),
+            "only an unordered region takes an operation without a position"
+        );
         debug_assert!(
-            delta.op_parent(base, op).is_none(),
+            db.op_parent(op).is_none(),
             "an operation joins an unordered region from nowhere else",
         );
-        assert!(delta.shadow_op(base, op), "live op");
-        delta.store.set_op_parent(op, Some(Parent::Region(region)));
-        delta.edit_region(base, region);
+        db.append_held(Parent::Region(region), op);
+        db.edit_region(region);
     }
 
     /// Choose another insertion order for the operations the unordered
     /// `region` already holds; `ops` must be a permutation of them.
     pub fn set_region_ops(&self, region: RegionId, ops: Vec<OpId>) {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        assert!(delta.shadow_region(base, region), "live region");
-        match delta.store.region_mut(region).map(Region::body_mut) {
-            Some(crate::region::RegionBody::Nodes { ops: held, .. }) => {
-                debug_assert_eq!(held.len(), ops.len());
-                *held = ops;
-            }
-            _ => panic!("only an unordered region holds an insertion order"),
-        }
-        delta.edit_region(base, region);
+        let mut db = self.db_mut();
+        assert!(
+            db.region_is_nodes(region),
+            "only an unordered region holds an insertion order"
+        );
+        debug_assert_eq!(db.region_ops(region).len(), ops.len());
+        db.set_held(Parent::Region(region), &ops);
+        db.edit_region(region);
     }
 
     /// Name the values the unordered `region` produces.
     pub fn set_region_results(&self, region: RegionId, results: Vec<ValueId>) {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        assert!(delta.shadow_region(base, region), "live region");
-        match delta.store.region_mut(region).map(Region::body_mut) {
-            Some(crate::region::RegionBody::Nodes { results: held, .. }) => *held = results,
-            _ => panic!("only an unordered region names its results"),
-        }
-        delta.edit_region(base, region);
+        let mut db = self.db_mut();
+        db.set_region_results(region, &results);
+        db.edit_region(region);
     }
 
     /// Make an empty region unordered; see [`Context::create_nodes_region`].
@@ -1399,55 +1251,26 @@ impl Context {
         ops: Vec<OpId>,
         results: Vec<ValueId>,
     ) {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        assert!(delta.shadow_region(base, region), "live region");
-        let port_ids: Vec<ValueId> = ports.iter().map(Value::id).collect();
-        let held = ops.clone();
-        assert!(
-            matches!(
-                delta.store.region(region).expect("live region").body(),
-                crate::region::RegionBody::Blocks(blocks) if blocks.is_empty(),
-            ),
-            "only an empty ordered region becomes unordered",
-        );
-        let entry = delta.store.region_mut(region).expect("live region");
-        let parent = entry.parent_op();
-        *entry = Region::new_nodes(ports, ops, results);
-        if let Some(parent) = parent {
-            entry.set_parent_op(parent);
-        }
-        for port in port_ids {
-            assert!(delta.shadow_value(base, port), "live value");
-            delta.store.set_value_region(port, Some(region));
-        }
-        for op in held {
+        let mut db = self.db_mut();
+        db.make_nodes(region, &ports, &results);
+        for op in ops {
             debug_assert!(
-                delta.op_parent(base, op).is_none(),
+                db.op_parent(op).is_none(),
                 "an operation joins an unordered region from nowhere else",
             );
-            assert!(delta.shadow_op(base, op), "live op");
-            delta.store.set_op_parent(op, Some(Parent::Region(region)));
+            db.append_held(Parent::Region(region), op);
         }
     }
 
     pub fn create_block(&self, arguments: Vec<Value>) -> BlockHandle {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        let argument_ids: Vec<ValueId> = arguments.iter().map(Value::id).collect();
-        let block_id = delta.store.insert_block(Block::new(arguments));
-        for argument in argument_ids {
-            assert!(delta.shadow_value(base, argument), "live value");
-            delta.store.set_value_block(argument, Some(block_id));
-        }
-        drop(view);
-        self.get_block(block_id)
+        let id = self.db_mut().create_block(&arguments);
+        self.get_block(id)
     }
 
     /// Append an argument of type `ty` to `block` and return it.
     pub fn append_block_argument(&self, block: BlockId, ty: TypeId) -> Value {
         let value = self.create_value(ty, None);
-        self.place_block_argument(block, value.clone());
+        self.place_block_argument(block, value.id());
         value
     }
 
@@ -1455,38 +1278,17 @@ impl Context {
     /// had. Nothing is renamed: the value keeps its identity, so every reader
     /// goes on naming it.
     pub fn adopt_block_argument(&self, block: BlockId, value: ValueId) {
-        let Some(adopted) = self.view().value(value).cloned() else {
-            return;
-        };
-        let adopted = Value::new(value, adopted.ty(), None);
-        if self.place_block_argument(block, adopted) {
-            let mut view = self.view_mut();
-            let (base, delta) = view.parts();
-            if delta.shadow_value(base, value) {
-                delta
-                    .store
-                    .value_mut(value)
-                    .expect("live value")
-                    .clear_defining_op();
-            }
+        if self.has_value(value) && self.place_block_argument(block, value) {
+            self.db_mut().set_value_def(value, None);
         }
     }
 
-    fn place_block_argument(&self, block: BlockId, argument: Value) -> bool {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        if !delta.shadow_block(base, block) {
+    fn place_block_argument(&self, block: BlockId, argument: ValueId) -> bool {
+        let mut db = self.db_mut();
+        if !db.push_block_argument(block, argument) {
             return false;
         }
-        delta
-            .store
-            .block_mut(block)
-            .expect("live block")
-            .arguments_mut()
-            .push(argument.clone());
-        assert!(delta.shadow_value(base, argument.id()), "live value");
-        delta.store.set_value_block(argument.id(), Some(block));
-        delta.edit_block(base, block);
+        db.edit_block(block);
         true
     }
 
@@ -1494,74 +1296,64 @@ impl Context {
     /// describe the trailing variadic group in step.
     pub fn append_operand(&self, op: OpId, value: ValueId) {
         let segment_sizes = self.registry().segment_sizes;
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        if !delta.shadow_op(base, op) {
+        let mut db = self.db_mut();
+        let index = db.operands(op).len();
+        if !db.splice_operands(op, index, 0, &[value]) {
             return;
         }
-        let index = delta.store.op(op).expect("live op").operand_count as usize;
-        delta.store.insert_operand(op, index, value);
-        delta.store.adjust_last_segment(op, segment_sizes, 1);
-        delta.edit_op(base, op);
+        db.edit_segment_sizes(op, segment_sizes, |sizes| {
+            if let Some(AttributeValue::UInt(last)) = sizes.last_mut() {
+                *last += 1;
+            }
+        });
+        db.edit_op(op);
     }
 
     /// Append `value` to `op`'s results, moving its definition onto `op`.
     pub fn adopt_result(&self, op: OpId, value: ValueId) {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        if !delta.shadow_op(base, op) {
-            return;
-        }
-        delta.store.append_result_port(op, value);
-        if delta.shadow_value(base, value) {
-            delta
-                .store
-                .value_mut(value)
-                .expect("live value")
-                .set_defining_op(op);
-        }
-        delta.edit_op(base, op);
+        let index = self.op_results(op).len();
+        self.insert_result_at(op, index, value);
     }
 
     /// Drop the operand at `index`, and with it the use it made.
     pub(crate) fn remove_operand(&self, op: OpId, index: usize) {
         let segment_sizes = self.registry().segment_sizes;
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        if !delta.shadow_op(base, op) {
+        let mut db = self.db_mut();
+        if !db.op_live(op) {
             return;
         }
-        delta.store.shrink_segment_holding(op, segment_sizes, index);
-        delta.store.remove_operand(op, index);
-        delta.edit_op(base, op);
+        // Shrink by one the declared operand group holding the operand. A
+        // fixed-arity op tracks no segments.
+        db.edit_segment_sizes(op, segment_sizes, |sizes| {
+            let mut start = 0;
+            for size in sizes.iter_mut() {
+                if let AttributeValue::UInt(size) = size {
+                    if index < start + *size as usize {
+                        *size -= 1;
+                        return;
+                    }
+                    start += *size as usize;
+                }
+            }
+        });
+        db.splice_operands(op, index, 1, &[]);
+        db.edit_op(op);
     }
 
     /// Drop the result at `index`. The value it named is left with no
     /// definition, so a caller drops one nothing reads.
     pub(crate) fn remove_result(&self, op: OpId, index: usize) {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        if !delta.shadow_op(base, op) {
-            return;
+        let mut db = self.db_mut();
+        if db.splice_results(op, index, 1, &[]) {
+            db.edit_op(op);
         }
-        let (operands, mut results, regions) = delta.store.ports(op);
-        results.remove(index);
-        delta.store.set_ports(op, &operands, &results, &regions);
-        delta.edit_op(base, op);
     }
 
     /// Drop the port at `index` of an unordered region.
     pub(crate) fn remove_region_port(&self, region: RegionId, index: usize) {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        assert!(delta.shadow_region(base, region), "live region");
-        match delta.store.region_mut(region).map(Region::body_mut) {
-            Some(crate::region::RegionBody::Nodes { ports, .. }) => {
-                ports.remove(index);
-            }
-            _ => panic!("only an unordered region drops a port by position"),
-        }
-        delta.edit_region(base, region);
+        let mut db = self.db_mut();
+        db.splice_region_ports(region, index, 1, &[]);
+        db.edit_region(region);
     }
 
     /// Grow `op` by one carried port of type `ty`.
@@ -1591,139 +1383,74 @@ impl Context {
         group_end: usize,
     ) {
         let segment_sizes = self.registry().segment_sizes;
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        if !delta.shadow_op(base, op) {
+        let mut db = self.db_mut();
+        if !db.splice_operands(op, index, 0, &[value]) {
             return;
         }
-        delta.store.insert_operand(op, index, value);
-        delta
-            .store
-            .grow_segment_ending_at(op, segment_sizes, group_end);
-        delta.edit_op(base, op);
+        // Grow by one the declared group whose operands ended at `group_end`
+        // before the insert, the last such group when several end there (an
+        // empty variadic group after a fixed one).
+        db.edit_segment_sizes(op, segment_sizes, |sizes| {
+            let mut end = 0;
+            let mut chosen = None;
+            for (position, size) in sizes.iter().enumerate() {
+                if let AttributeValue::UInt(size) = size {
+                    end += *size as usize;
+                    if end == group_end {
+                        chosen = Some(position);
+                    }
+                }
+            }
+            if let Some(AttributeValue::UInt(size)) =
+                chosen.and_then(|position| sizes.get_mut(position))
+            {
+                *size += 1;
+            }
+        });
+        db.edit_op(op);
     }
 
     /// Put `port` at position `index` of the unordered `region`'s ports.
     pub(crate) fn insert_region_port(&self, region: RegionId, index: usize, port: Value) {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        assert!(delta.shadow_region(base, region), "live region");
-        let id = port.id();
-        match delta.store.region_mut(region).map(Region::body_mut) {
-            Some(crate::region::RegionBody::Nodes { ports, .. }) => ports.insert(index, port),
-            _ => panic!("only an unordered region takes a port by position"),
-        }
-        assert!(delta.shadow_value(base, id), "live value");
-        delta.store.set_value_region(id, Some(region));
-        delta.edit_region(base, region);
+        let mut db = self.db_mut();
+        db.splice_region_ports(region, index, 0, &[port]);
+        db.edit_region(region);
     }
 
     /// Name `value` at position `index` of the unordered `region`'s results.
     pub(crate) fn insert_region_result(&self, region: RegionId, index: usize, value: ValueId) {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        assert!(delta.shadow_region(base, region), "live region");
-        match delta.store.region_mut(region).map(Region::body_mut) {
-            Some(crate::region::RegionBody::Nodes { results, .. }) => results.insert(index, value),
-            _ => panic!("only an unordered region names its results by position"),
-        }
-        delta.edit_region(base, region);
+        let mut db = self.db_mut();
+        db.splice_region_results(region, index, 0, &[value]);
+        db.edit_region(region);
     }
 
     /// Take `op` out of the unordered `region` without erasing it; the inverse
     /// of [`Context::add`].
     pub fn remove_from_region(&self, region: RegionId, op: OpId) {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        assert!(delta.shadow_region(base, region), "live region");
-        match delta.store.region_mut(region).map(Region::body_mut) {
-            Some(crate::region::RegionBody::Nodes { ops, .. }) => ops.retain(|held| *held != op),
-            _ => panic!("only an unordered region holds an operation without a position"),
-        }
-        if delta.shadow_op(base, op) {
-            delta.store.set_op_parent(op, None);
-        }
-        delta.edit_region(base, region);
+        let mut db = self.db_mut();
+        assert!(
+            db.region_is_nodes(region),
+            "only an unordered region holds an operation without a position"
+        );
+        db.remove_held(Parent::Region(region), op);
+        db.edit_region(region);
     }
 
     /// Put `value` at position `index` of `op`'s results, moving its
     /// definition onto `op`.
     pub(crate) fn insert_result_at(&self, op: OpId, index: usize, value: ValueId) {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        if !delta.shadow_op(base, op) {
-            return;
+        let mut db = self.db_mut();
+        if db.splice_results(op, index, 0, &[value]) {
+            db.edit_op(op);
         }
-        let at = delta.store.op(op).expect("live op").operand_count as usize + index;
-        delta.store.insert_port(op, at, value.number());
-        delta.store.op_mut(op).expect("live op").result_count += 1;
-        if delta.shadow_value(base, value) {
-            delta
-                .store
-                .value_mut(value)
-                .expect("live value")
-                .set_defining_op(op);
-        }
-        delta.edit_op(base, op);
     }
 
     /// Give `op` one more result of type `ty`.
     pub fn append_result(&self, op: OpId, ty: TypeId) -> ValueId {
         let result = self.create_value(ty, Some(op)).id();
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        if delta.shadow_op(base, op) {
-            delta.store.append_result_port(op, result);
-            delta.edit_op(base, op);
-        }
+        let index = self.op_results(op).len();
+        self.insert_result_at(op, index, result);
         result
-    }
-
-    /// Begin building a region body off to the side of the live IR.
-    ///
-    /// The staged blocks belong to no region, so building them bumps no version
-    /// and dirties no subtree. Hand the result to
-    /// [`Context::replace_region_contents`] to swap it in, or drop it to discard.
-    pub fn stage_region(&self) -> StagedRegion {
-        StagedRegion {
-            context: self.clone(),
-            blocks: Vec::new(),
-            remap: Vec::new(),
-            discard: true,
-        }
-    }
-
-    /// Swap `staged` in as `region`'s contents, in one edit.
-    ///
-    /// The old contents leave the tree, the uses they held on surviving values
-    /// are dropped, and their parent links are cleared, so no walk reaches into
-    /// them. Uses of old values recorded with [`StagedRegion::replace_value`]
-    /// are then retargeted to their staged replacements. The swap itself bumps
-    /// the spine exactly once, at `region`'s owner, and dirties that one
-    /// subtree.
-    pub fn replace_region_contents(&self, region: RegionId, mut staged: StagedRegion) {
-        staged.discard = false;
-        let handle = self.get_region(region);
-        let owner = handle.parent_op();
-
-        self.detach_subtree(&handle.block_ids());
-        self.set_region_blocks(region, staged.blocks.clone());
-
-        {
-            let mut view = self.view_mut();
-            let (base, delta) = view.parts();
-            for &block in &staged.blocks {
-                assert!(delta.shadow_block(base, block), "live block");
-                delta.store.set_block_parent(block, Some(region));
-            }
-            if let Some(owner) = owner {
-                delta.edit_subtree(base, owner);
-            }
-        }
-
-        for &(old, new) in &staged.remap {
-            self.replace_value_uses(old, new);
-        }
     }
 
     /// Make the ordered `region` the unordered region `staged` was built as:
@@ -1734,38 +1461,10 @@ impl Context {
         let handle = self.get_region(region);
         let owner = handle.parent_op();
         self.detach_subtree(&handle.block_ids());
-
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        assert!(delta.shadow_region(base, staged), "live region");
-        assert!(delta.shadow_region(base, region), "live region");
-        let body = std::mem::replace(
-            delta
-                .store
-                .region_mut(staged)
-                .expect("live region")
-                .body_mut(),
-            crate::region::RegionBody::Blocks(vec![]),
-        );
-        let crate::region::RegionBody::Nodes { ports, ops, .. } = &body else {
-            panic!("only an unordered region replaces an ordered one's body");
-        };
-        for port in ports {
-            assert!(delta.shadow_value(base, port.id()), "live value");
-            delta.store.set_value_region(port.id(), Some(region));
-        }
-        for &op in ops {
-            assert!(delta.shadow_op(base, op), "live op");
-            delta.store.set_op_parent(op, Some(Parent::Region(region)));
-        }
-        *delta
-            .store
-            .region_mut(region)
-            .expect("live region")
-            .body_mut() = body;
-        delta.erase_region(staged);
+        let mut db = self.db_mut();
+        db.take_nodes(region, staged);
         if let Some(owner) = owner {
-            delta.edit_subtree(base, owner);
+            db.mark_dirty(owner);
         }
     }
 
@@ -1778,37 +1477,14 @@ impl Context {
         let owner = handle.parent_op();
         let leftover = handle.op_ids();
         self.free(self.owned_entities(leftover));
-
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        assert!(delta.shadow_region(base, region), "live region");
-        let body = std::mem::replace(
-            delta
-                .store
-                .region_mut(region)
-                .expect("live region")
-                .body_mut(),
-            crate::region::RegionBody::Blocks(blocks.clone()),
-        );
-        let crate::region::RegionBody::Nodes { ports, .. } = &body else {
-            panic!("only an ordered region replaces an unordered one's body");
-        };
-        for port in ports {
-            if delta.shadow_value(base, port.id()) {
-                delta.store.set_value_region(port.id(), None);
-            }
-        }
-        for &block in &blocks {
-            assert!(delta.shadow_block(base, block), "live block");
-            delta.store.set_block_parent(block, Some(region));
-        }
+        let mut db = self.db_mut();
+        db.make_blocks(region, &blocks);
         if let Some(owner) = owner {
-            delta.edit_subtree(base, owner);
+            db.mark_dirty(owner);
         }
     }
 
-    /// Take the subtree under `blocks` out of the live IR and give its storage
-    /// back. Bumps no version: the caller reports the edit.
+    /// Take the subtree under `blocks` out of the live IR.
     fn detach_subtree(&self, blocks: &[BlockId]) {
         self.free(self.collect_owned(Vec::new(), blocks.to_vec()));
     }
@@ -1821,10 +1497,8 @@ impl Context {
 
     /// Walks ops and blocks alternately, reading through handles.
     ///
-    /// A nested entity is reclaimed only while its parent link still points at
-    /// the entity being erased: a rewrite that lifts a block out of a region it
-    /// is destroying leaves the block listed in the dying region, and that
-    /// stale listing must not free live IR.
+    /// A region is reclaimed only while its parent link still points at the
+    /// op being erased: a replacement that took the region over owns it now.
     fn collect_owned(&self, mut ops: Vec<OpId>, mut blocks: Vec<BlockId>) -> Owned {
         let mut owned = Owned::default();
         loop {
@@ -1856,19 +1530,10 @@ impl Context {
                                 .map(Value::id)
                                 .filter(|port| !self.is_block_argument(*port)),
                         );
-                        ops.extend(
-                            handle
-                                .op_ids()
-                                .into_iter()
-                                .filter(|op| self.parent_nodes_region(*op) == Some(region)),
-                        );
+                        ops.extend(handle.op_ids());
                         continue;
                     }
-                    let held = handle
-                        .block_ids()
-                        .into_iter()
-                        .filter(|block| self.parent_region(*block) == Some(region));
-                    blocks.extend(held);
+                    blocks.extend(handle.block_ids());
                 }
             }
             let Some(block) = blocks.pop() else {
@@ -1881,142 +1546,84 @@ impl Context {
             owned
                 .values
                 .extend(block.arguments().iter().map(|argument| argument.id()));
-            ops.extend(
-                block
-                    .op_ids()
-                    .into_iter()
-                    .filter(|op| self.parent_block(*op) == Some(block.id())),
-            );
+            ops.extend(block.op_ids());
         }
     }
 
     /// Take entities that have left the IR out of the visible graph.
     fn free(&self, owned: Owned) {
-        let mut view = self.view_mut();
-        let delta = &mut view.delta;
+        let mut db = self.db_mut();
         for op in owned.ops {
-            delta.erase_op(op);
+            db.kill_op(op);
         }
         for value in owned.values {
-            delta.erase_value(value);
+            db.kill_value(value);
         }
         for block in owned.blocks {
-            delta.erase_block(block);
+            db.kill_block(block);
         }
         for region in owned.regions {
-            delta.erase_region(region);
+            db.kill_region(region);
         }
     }
 
     /// Insert `op` into `block` at `index`, recording the new parent.
     pub(crate) fn insert_op(&self, block: BlockId, index: usize, op: OpId) {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        if delta.shadow_block(base, block) {
-            delta
-                .store
-                .block_mut(block)
-                .expect("live block")
-                .operations_mut()
-                .insert(index, op);
-        }
-        assert!(delta.shadow_op(base, op), "live op");
-        delta.store.set_op_parent(op, Some(Parent::Block(block)));
-        delta.edit_block(base, block);
+        let mut db = self.db_mut();
+        db.insert_held(block, index, op);
+        db.edit_block(block);
     }
 
     /// Insert `op` after everything `block` currently holds.
     pub(crate) fn append_op(&self, block: BlockId, op: OpId) {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        if delta.shadow_block(base, block) {
-            delta
-                .store
-                .block_mut(block)
-                .expect("live block")
-                .operations_mut()
-                .push(op);
-        }
-        assert!(delta.shadow_op(base, op), "live op");
-        delta.store.set_op_parent(op, Some(Parent::Block(block)));
-        delta.edit_block(base, block);
+        let mut db = self.db_mut();
+        db.append_held(Parent::Block(block), op);
+        db.edit_block(block);
     }
 
     pub(crate) fn replace_op_in_block(&self, block: BlockId, old: OpId, new: OpId) -> bool {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        if !delta.shadow_block(base, block) {
+        let mut db = self.db_mut();
+        if !db.block_live(block) || !db.replace_held(block, old, new) {
             return false;
         }
-        let operations = delta
-            .store
-            .block_mut(block)
-            .expect("live block")
-            .operations_mut();
-        let Some(position) = operations.iter().position(|id| *id == old) else {
-            return false;
-        };
-        operations[position] = new;
-        if delta.shadow_op(base, old) {
-            delta.store.set_op_parent(old, None);
-        }
-        assert!(delta.shadow_op(base, new), "live op");
-        delta.store.set_op_parent(new, Some(Parent::Block(block)));
-        delta.edit_block(base, block);
+        db.edit_block(block);
         true
     }
 
     pub(crate) fn remove_op_from_block(&self, block: BlockId, op: OpId) -> bool {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        if !delta.shadow_block(base, block) {
+        let mut db = self.db_mut();
+        if !db.block_live(block) || !db.remove_held(Parent::Block(block), op) {
             return false;
         }
-        let operations = delta
-            .store
-            .block_mut(block)
-            .expect("live block")
-            .operations_mut();
-        let Some(position) = operations.iter().position(|id| *id == op) else {
-            return false;
-        };
-        operations.remove(position);
-        if delta.shadow_op(base, op) {
-            delta.store.set_op_parent(op, None);
-        }
-        delta.edit_block(base, block);
+        db.edit_block(block);
         true
+    }
+
+    /// [`BlockHandle::set_ops`].
+    pub(crate) fn set_block_ops(&self, block: BlockId, ops: Vec<OpId>) {
+        let mut db = self.db_mut();
+        debug_assert_eq!(
+            db.block_ops(block).len(),
+            ops.len(),
+            "a reordering holds the block's own operations",
+        );
+        db.set_held(Parent::Block(block), &ops);
+        db.edit_block(block);
     }
 
     pub(crate) fn set_block_attr(&self, block: BlockId, name: &str, value: AttributeValue) {
         let name = self.intern(name);
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        if !delta.shadow_block(base, block) {
+        let mut db = self.db_mut();
+        if !db.block_live(block) {
             return;
         }
-        let attributes = delta
-            .store
-            .block_mut(block)
-            .expect("live block")
-            .attributes_mut();
+        let mut attributes = db.block_attrs(block).to_vec();
         match attributes.iter_mut().find(|a| a.name == name) {
             Some(attribute) => attribute.value = value,
             None => attributes.push(NamedAttribute::new(name, value)),
         }
-        delta.edit_block(base, block);
-    }
-
-    /// Edit a block's storage record, dirtying the subtree it sits in.
-    ///
-    /// `edit` must not touch the context: the overlay is borrowed for writing.
-    pub(crate) fn with_block_mut<R>(&self, id: BlockId, edit: impl FnOnce(&mut Block) -> R) -> R {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        assert!(delta.shadow_block(base, id), "live block");
-        let edited = edit(delta.store.block_mut(id).expect("live block"));
-        delta.edit_block(base, id);
-        edited
+        db.set_block_attrs(block, attributes);
+        db.edit_block(block);
     }
 
     /// Reorder an ordered region without changing its entry, membership, or block identities.
@@ -2041,123 +1648,25 @@ impl Context {
         if blocks == original {
             return Ok(());
         }
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        assert!(delta.shadow_region(base, region), "live region");
-        *delta
-            .store
-            .region_mut(region)
-            .expect("live region")
-            .blocks_mut() = blocks;
-        delta.edit_region(base, region);
+        let mut db = self.db_mut();
+        db.set_region_blocks(region, &blocks);
+        db.edit_region(region);
         Ok(())
     }
 
     pub(crate) fn add_block_to_region(&self, region: RegionId, block: BlockId) {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        if delta.shadow_region(base, region) {
-            delta
-                .store
-                .region_mut(region)
-                .expect("live region")
-                .blocks_mut()
-                .push(block);
-        }
-        assert!(delta.shadow_block(base, block), "live block");
-        delta.store.set_block_parent(block, Some(region));
-        delta.edit_region(base, region);
+        let mut db = self.db_mut();
+        db.append_block(region, block);
+        db.edit_region(region);
     }
 
     pub(crate) fn remove_block_from_region(&self, region: RegionId, block: BlockId) -> bool {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        if !delta.shadow_region(base, region) {
+        let mut db = self.db_mut();
+        if !db.region_live(region) || !db.remove_block(region, block) {
             return false;
         }
-        let blocks = delta
-            .store
-            .region_mut(region)
-            .expect("live region")
-            .blocks_mut();
-        let Some(position) = blocks.iter().position(|id| *id == block) else {
-            return false;
-        };
-        blocks.remove(position);
-        if delta.shadow_block(base, block) {
-            delta.store.set_block_parent(block, None);
-        }
-        delta.edit_region(base, region);
+        db.edit_region(region);
         true
-    }
-
-    /// Replace `region`'s whole block list at once. Only
-    /// [`Context::replace_region_contents`] uses this: it owns the parent
-    /// bookkeeping and the single version bump the swap is allowed to make.
-    pub(crate) fn set_region_blocks(&self, region: RegionId, blocks: Vec<BlockId>) {
-        let mut view = self.view_mut();
-        let (base, delta) = view.parts();
-        if delta.shadow_region(base, region) {
-            *delta
-                .store
-                .region_mut(region)
-                .expect("live region")
-                .blocks_mut() = blocks;
-        }
-    }
-}
-
-/// A region body under construction, detached from the live IR.
-///
-/// Its blocks, values and ops exist from the moment they are built, but they
-/// belong to no region until the staging is committed: they print nowhere,
-/// bump no version, and dirty no subtree. Staged ops may take values defined
-/// outside the region as operands; those uses become live with the commit and
-/// are dropped again if the staging is discarded.
-///
-/// Created by [`Context::stage_region`]; committed by
-/// [`Context::replace_region_contents`], discarded by dropping it.
-pub struct StagedRegion {
-    context: Context,
-    blocks: Vec<BlockId>,
-    remap: Vec<(ValueId, ValueId)>,
-    discard: bool,
-}
-
-impl StagedRegion {
-    /// Append a block carrying one argument per entry of `argument_types`. The
-    /// first staged block becomes the region's entry.
-    pub fn append_block(&mut self, argument_types: &[TypeId]) -> BlockId {
-        let arguments = argument_types
-            .iter()
-            .map(|&ty| self.context.create_value(ty, None))
-            .collect();
-        let block = self.context.create_block(arguments);
-        self.blocks.push(block.id());
-        block.id()
-    }
-
-    /// The `index`-th argument of a staged block, for staged ops to consume.
-    pub fn block_argument(&self, block: BlockId, index: usize) -> Value {
-        self.context.get_block(block).arguments()[index].clone()
-    }
-
-    /// Append `op` after everything the staged block holds.
-    pub fn append_op(&self, block: BlockId, op: OpId) {
-        self.context.append_op(block, op);
-    }
-
-    /// On commit, retarget every use of `old` that outlives the swap to `new`.
-    pub fn replace_value(&mut self, old: ValueId, new: ValueId) {
-        self.remap.push((old, new));
-    }
-}
-
-impl Drop for StagedRegion {
-    fn drop(&mut self) {
-        if self.discard {
-            self.context.detach_subtree(&self.blocks);
-        }
     }
 }
 

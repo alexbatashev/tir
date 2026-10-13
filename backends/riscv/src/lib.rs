@@ -559,7 +559,7 @@ fn create_isel_pass_for(
         .copied()
         .filter(|f| !COMPRESSED_FEATURES.contains(f))
         .collect();
-    tir::backend::isel::InstructionSelectPass::new(get_isel_rules(context, &features))
+    tir::backend::isel::InstructionSelectPass::new(context, get_isel_rules(context, &features))
         .with_hardwired_zero_fields(hardwired_zero_state_fields())
         .with_branch_emitters(tir::backend::isel::BranchEmitters {
             uncond: tir::backend::emit_uncond_branch,

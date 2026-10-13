@@ -1,275 +1,177 @@
-use std::collections::HashMap;
+//! Extraction as a fold: the least cost of each id, where an id costs the least
+//! of its members and a member costs its own price plus its children's.
 
 use crate::Csr;
-use tir_adt::FxBuildHasher;
 
-use crate::{ClassId as Id, Engine, Label as ENode, Ref, RowId};
-
-type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
-
-/// No slot: a class the extraction's table does not cover.
+/// No slot: an id the fold does not cover.
 const NONE: u32 = u32::MAX;
 
-/// Cheapest representative e-node per e-class, chosen by [`Engine::extract_best`].
+/// The price of a member that cannot be chosen where its id has any other.
+pub const UNPRICED: u64 = u64::MAX;
+
+// A sum of prices is unpriced only where a term is: finite terms too large
+// to add stay below it.
+fn sum(cost: u64, term: u64) -> u64 {
+    match cost.checked_add(term) {
+        Some(total) => total,
+        None if cost == UNPRICED || term == UNPRICED => UNPRICED,
+        None => UNPRICED - 1,
+    }
+}
+
+/// Where a client hands over the members of one id.
+pub struct Members<'a> {
+    index: &'a [u32],
+    outside: &'a dyn Fn(u32) -> Option<u64>,
+    table: &'a mut Table,
+    edges: &'a mut Vec<(u32, u32)>,
+    slot: usize,
+}
+
+impl Members<'_> {
+    /// One member of the id: its tag, its own price and its children.
+    pub fn push(&mut self, tag: u32, price: u64, children: impl IntoIterator<Item = u32>) {
+        let position = self.table.entries.len() as u32;
+        let start = self.table.children.len();
+        let mut member = Entry {
+            tag,
+            slot: self.slot,
+            base: price,
+            children: 0..0,
+            costable: true,
+        };
+        for child in children {
+            match self.index[child as usize] {
+                NONE => match (self.outside)(child) {
+                    Some(cost) => member.base = sum(member.base, cost),
+                    None => member.costable = false,
+                },
+                child => {
+                    self.table.children.push(child as usize);
+                    self.edges.push((child, position));
+                }
+            }
+        }
+        member.children = start..self.table.children.len();
+        self.table.entries.push(member);
+    }
+}
+
+/// Least cost per id of `ids`, and the tag of the member that spells it.
 ///
-/// A scope's extraction is a layer over the one it refreshed rather than a copy
-/// of it, so it holds only the classes its assumption dirtied and costs the
-/// dirty set instead of the graph.
-pub struct Extraction<'a, L: ENode> {
-    base: Option<&'a Extraction<'a, L>>,
-    /// What this layer settled. An explicit `None` is a class the layer
-    /// recomputed and found no finite cost for; it must read as nothing rather
-    /// than fall through to the base's stale answer.
-    best: FxHashMap<Id, Option<Chosen<L>>>,
-}
-
-/// What a class was extracted as, and what that spelling cost. The cost is what
-/// an incremental re-extraction reads for a class it does not recompute.
-#[derive(Clone)]
-struct Chosen<L> {
-    node: L,
-    row: RowId,
-    cost: u64,
-}
-
-impl<'a, L: ENode> Extraction<'a, L> {
-    /// Chosen node for `id`'s class, or `None` if no node has finite cost. `id` must
-    /// be canonical ([`Engine::find`]).
-    pub fn node(&self, id: Id) -> Option<&L> {
-        self.chosen(id).map(|chosen| &chosen.node)
+/// `members(id, out)` pushes every member of `id` onto `out`. A member costs
+/// its price plus each child's least cost; a child outside `ids` is priced by
+/// `outside`, and a member with a child nothing prices is never chosen. A
+/// sum costs [`UNPRICED`] only where one of its terms does: prices too large
+/// to add come to the largest cost below it, so they tie with each other and
+/// still beat a member that has no price.
+/// Neither is a member with its own id for a child, whatever it costs: it
+/// spells the id by the id.
+/// Members wait for un-costed children and the fold runs to a fixpoint, so a
+/// cycle is costed through its other inputs. On a tie the first member in scan
+/// order wins: `ids` in order, then each id's members in the order pushed.
+/// `bound` is one past the largest id a child names.
+pub fn fold(
+    bound: usize,
+    ids: &[u32],
+    outside: &dyn Fn(u32) -> Option<u64>,
+    mut members: impl FnMut(u32, &mut Members<'_>),
+) -> Vec<Option<(u32, u64)>> {
+    let started = crate::telemetry::enabled().then(std::time::Instant::now);
+    // Id -> slot, as a dense array: ids run to the high-water mark, absorbed
+    // ones included, but the array is a fraction of what a probe per child
+    // costs.
+    let mut index: Vec<u32> = vec![NONE; bound];
+    for (slot, &id) in ids.iter().enumerate() {
+        index[id as usize] = slot as u32;
     }
-
-    /// The e-node chosen for `id`'s class: [`Engine::children`] reads its
-    /// operands as references, and [`Engine::value`] the offset it sits at
-    /// from the class, which a spelling of the class subtracts.
-    pub fn row(&self, id: Id) -> Option<RowId> {
-        self.chosen(id).map(|chosen| chosen.row)
+    let mut table = Table {
+        entries: Vec::new(),
+        parents: Csr::default(),
+        children: Vec::new(),
+    };
+    let mut edges: Vec<(u32, u32)> = Vec::new();
+    for (slot, &id) in ids.iter().enumerate() {
+        let mut out = Members {
+            index: &index,
+            outside,
+            table: &mut table,
+            edges: &mut edges,
+            slot,
+        };
+        members(id, &mut out);
     }
+    table.parents = Csr::build(ids.len(), edges);
+    let cost = table.costs(ids.len());
 
-    /// This extraction with the classes in `dirty`, and only those, recomputed
-    /// against `eg` as it stands now.
-    ///
-    /// A class's answer depends on its own rows and its children's costs, so
-    /// `dirty` must name every class changed since `self` was taken, closed
-    /// upward over parents:
-    /// [`tir_relational::Engine::scope_dirty`] where `self` is the base
-    /// extraction, [`tir_relational::Engine::innermost_dirty`] where it is the
-    /// one the enclosing scope refreshed. A class outside it has the rows and
-    /// the child costs it had when `self` was taken, so it keeps its answer.
-    /// Ascending order makes the sweep the same scan a full pass takes over those
-    /// classes, which is what keeps the cost ties broken the same way.
-    pub fn refresh<'b>(
-        &'b self,
-        eg: &Engine<L>,
-        dirty: &[Id],
-        cost_of: impl Fn(Id, &L, &[Ref], u64) -> u64,
-    ) -> Extraction<'b, L> {
-        let started = super::telemetry::enabled().then(std::time::Instant::now);
-        let extraction = FlatGraph::new(eg, dirty, Some(self), cost_of).solve(Some(self));
-        if let Some(started) = started {
-            super::telemetry::count_extract(started.elapsed());
-        }
-        extraction
-    }
-
-    fn cost(&self, id: Id) -> Option<u64> {
-        self.chosen(id).map(|chosen| chosen.cost)
-    }
-
-    /// What the innermost layer holding `id` settled on, `None` once a layer
-    /// says the class has no finite cost.
-    fn chosen(&self, id: Id) -> Option<&Chosen<L>> {
-        match self.best.get(&id) {
-            Some(settled) => settled.as_ref(),
-            None => self.base?.chosen(id),
+    // The winner is the first member in scan order that spells its id at the
+    // settled cost. Reading it off the costs rather than off the fixpoint's
+    // improvement order makes a tie break the same way whatever schedule
+    // reached those costs, which an incremental fold over part of the ids,
+    // starting from costs an earlier fold settled, needs.
+    let mut chosen: Vec<Option<(u32, u64)>> = vec![None; ids.len()];
+    for member in &table.entries {
+        if let Some(settled) = cost[member.slot]
+            && chosen[member.slot].is_none()
+            && table.cost_of(member, &cost) == Some(settled)
+            // A zero price or a sum at the top ties a self-loop with the
+            // member that costed its id.
+            && !table.children[member.children.clone()].contains(&member.slot)
+        {
+            chosen[member.slot] = Some((member.tag, settled));
         }
     }
-}
-
-impl<L: ENode> Engine<L> {
-    /// Greedy bottom-up extraction: per class, the node minimizing
-    /// `cost_of(class, node, operands, offset)` plus each operand class's
-    /// chosen cost. The class is the canonical id the node would represent,
-    /// so a cost model may reject a form the class cannot be spelled in. The
-    /// operands are the node's canonical references, and `offset` is where the
-    /// node sits from the class: a model charges an add-of-constant for each
-    /// non-zero one it has to spell, and nothing for an operand
-    /// [`Engine::int_const`] reads as a constant. Cycle-tolerant — a node with un-costed
-    /// children is skipped and revisited to a fixpoint, so a cycle is costed
-    /// through its non-cyclic input. Scope-aware via
-    /// [`Engine::classes`]/[`Engine::find`].
-    pub fn extract_best(
-        &self,
-        cost_of: impl Fn(Id, &L, &[Ref], u64) -> u64,
-    ) -> Extraction<'static, L> {
-        let started = super::telemetry::enabled().then(std::time::Instant::now);
-        let classes: Vec<Id> = self.class_ids().collect();
-        let extraction = FlatGraph::new(self, &classes, None, cost_of).solve(None);
-        if let Some(started) = started {
-            super::telemetry::count_extract(started.elapsed());
-        }
-        extraction
+    if let Some(started) = started {
+        crate::telemetry::count_extract(started.elapsed());
     }
+    chosen
 }
 
-/// The e-graph flattened for extraction: dense class slots and e-nodes in scan
-/// order, with operator cost and child slots resolved once so the cost fixpoint
-/// touches neither the union-find nor a hash map.
-///
-/// The table covers the classes it was built over, which is every class for a
-/// full extraction and the dirty set for a scope's. A child outside the table is
-/// costed from `outside`, the extraction the scope refreshes, and is un-costable
-/// without one.
-struct FlatGraph<'a, L: ENode> {
-    /// Slot -> canonical class id.
-    classes: &'a [Id],
-    nodes: Vec<FlatNode<'a, L>>,
-    /// Class slot -> positions of the e-nodes taking it as a child, ascending.
+/// The ids flattened for the fold: dense slots and members in scan order, with
+/// prices and child slots resolved once so the fixpoint touches neither the
+/// union-find nor a hash map.
+struct Table {
+    entries: Vec<Entry>,
+    /// Slot -> positions of the members taking it as a child, ascending.
     parents: Csr,
-    /// Child slots, sliced by [`FlatNode::children`].
+    /// Child slots, sliced by [`Entry::children`].
     children: Vec<usize>,
 }
 
-struct FlatNode<'a, L> {
-    node: &'a L,
-    row: RowId,
-    class: usize,
-    /// Operator cost, plus the settled cost of every child outside the table.
+struct Entry {
+    tag: u32,
+    slot: usize,
+    /// Price, plus the cost of every child outside the fold.
     base: u64,
     children: std::ops::Range<usize>,
-    /// A child outside the table that nothing costs can never be costed, so
-    /// neither can this node.
+    /// A child outside the fold that nothing prices can never be costed, so
+    /// neither can this member.
     costable: bool,
 }
 
-impl<'a, L: ENode> FlatGraph<'a, L> {
-    fn new(
-        eg: &'a Engine<L>,
-        classes: &'a [Id],
-        outside: Option<&Extraction<'_, L>>,
-        cost_of: impl Fn(Id, &L, &[Ref], u64) -> u64,
-    ) -> Self {
-        // Class id -> slot, as a dense array: ids run to the graph's high-water
-        // mark, absorbed and scope-minted ones included, but the table is a
-        // fraction of what a probe per child costs.
-        let mut index: Vec<u32> = vec![NONE; eg.class_count()];
-        let mut nodes: Vec<FlatNode<'a, L>> = Vec::new();
-        // Every node's operands back to back; a node's `children` range
-        // indexes this until its slots are resolved below.
-        let mut operands: Vec<Ref> = Vec::new();
-        for (slot, &id) in classes.iter().enumerate() {
-            index[id.index()] = slot as u32;
-            for row in eg.rows(id) {
-                let node = eg.node(row);
-                let start = operands.len();
-                operands.extend(eg.children(row));
-                nodes.push(FlatNode {
-                    node,
-                    row,
-                    class: slot,
-                    base: cost_of(id, node, &operands[start..], eg.value(row).offset),
-                    children: start..operands.len(),
-                    costable: true,
-                });
-            }
-        }
-
-        let mut children = Vec::new();
-        let mut edges: Vec<(u32, u32)> = Vec::new();
-        for (position, entry) in nodes.iter_mut().enumerate() {
-            let start = children.len();
-            for operand in &operands[entry.children.clone()] {
-                let child = operand.class;
-                match index[child.index()] {
-                    NONE => match outside.and_then(|base| base.cost(child)) {
-                        Some(cost) => entry.base = entry.base.saturating_add(cost),
-                        None => entry.costable = false,
-                    },
-                    slot => {
-                        children.push(slot as usize);
-                        edges.push((slot, position as u32));
-                    }
-                }
-            }
-            entry.children = start..children.len();
-        }
-
-        Self {
-            parents: Csr::build(classes.len(), edges),
-            classes,
-            nodes,
-            children,
-        }
-    }
-
-    /// Run the cost fixpoint over the table and record its winners as a layer
-    /// over `base`.
-    fn solve<'b>(&self, base: Option<&'b Extraction<'b, L>>) -> Extraction<'b, L> {
-        let cost = self.costs();
-
-        // The winner is the first node in scan order — class order, then node
-        // order — that spells its class at the settled cost. Reading it off the
-        // costs rather than off the fixpoint's improvement order is what makes a
-        // tie break the same way whatever schedule reached those costs, which is
-        // what [`Extraction::refresh`] needs: it starts from the costs a base
-        // extraction settled, so it converges in a different order than a full
-        // pass over the same graph.
-        let mut chosen: Vec<Option<usize>> = vec![None; self.classes.len()];
-        for (position, node) in self.nodes.iter().enumerate() {
-            if cost[node.class].is_some()
-                && chosen[node.class].is_none()
-                && self.cost_of(node, &cost) == cost[node.class]
-            {
-                chosen[node.class] = Some(position);
-            }
-        }
-
-        let mut best = FxHashMap::default();
-        for (slot, &id) in self.classes.iter().enumerate() {
-            match chosen[slot] {
-                Some(position) => {
-                    best.insert(
-                        id,
-                        Some(Chosen {
-                            node: self.nodes[position].node.clone(),
-                            row: self.nodes[position].row,
-                            cost: cost[slot].expect("a chosen node is a costed one"),
-                        }),
-                    );
-                }
-                // Only a layer has a base to shadow; the bottom one says nothing
-                // about a class it could not cost.
-                None if base.is_some() => {
-                    best.insert(id, None);
-                }
-                None => {}
-            }
-        }
-        Extraction { base, best }
-    }
-
-    /// Least cost per class slot, or `None` where no node has a finite one.
+impl Table {
+    /// Least cost per slot, or `None` where no member has a finite one.
     ///
-    /// Only the parents of a class improved in the previous sweep can improve in
+    /// Only the parents of a slot improved in the previous sweep can improve in
     /// the next, so `dirty` shrinks to the propagation frontier.
-    fn costs(&self) -> Vec<Option<u64>> {
-        let mut cost: Vec<Option<u64>> = vec![None; self.classes.len()];
-        let mut dirty = vec![true; self.nodes.len()];
-        let mut next = vec![false; self.nodes.len()];
-        let mut queued = self.nodes.len();
+    fn costs(&self, slots: usize) -> Vec<Option<u64>> {
+        let mut cost: Vec<Option<u64>> = vec![None; slots];
+        let mut dirty = vec![true; self.entries.len()];
+        let mut next = vec![false; self.entries.len()];
+        let mut queued = self.entries.len();
         while queued > 0 {
             queued = 0;
-            for position in 0..self.nodes.len() {
+            for position in 0..self.entries.len() {
                 if !std::mem::replace(&mut dirty[position], false) {
                     continue;
                 }
-                let node = &self.nodes[position];
-                let Some(total) = self.cost_of(node, &cost) else {
+                let member = &self.entries[position];
+                let Some(total) = self.cost_of(member, &cost) else {
                     continue;
                 };
-                if cost[node.class].is_none_or(|best| total < best) {
-                    cost[node.class] = Some(total);
-                    for &parent in self.parents.get(node.class as u32) {
+                if cost[member.slot].is_none_or(|best| total < best) {
+                    cost[member.slot] = Some(total);
+                    for &parent in self.parents.get(member.slot as u32) {
                         // A parent still ahead of the sweep sees the improvement
                         // in this round; an earlier one waits for the next.
                         let parent = parent as usize;
@@ -287,15 +189,15 @@ impl<'a, L: ENode> FlatGraph<'a, L> {
         cost
     }
 
-    /// The node's operator cost plus each child class's best cost, or `None` if any
+    /// The member's base plus each child slot's best cost, or `None` if any
     /// child is un-costed.
-    fn cost_of(&self, node: &FlatNode<'a, L>, cost: &[Option<u64>]) -> Option<u64> {
-        if !node.costable {
+    fn cost_of(&self, member: &Entry, cost: &[Option<u64>]) -> Option<u64> {
+        if !member.costable {
             return None;
         }
-        let mut total = node.base;
-        for &slot in &self.children[node.children.clone()] {
-            total = total.saturating_add(cost[slot]?);
+        let mut total = member.base;
+        for &slot in &self.children[member.children.clone()] {
+            total = sum(total, cost[slot]?);
         }
         Some(total)
     }
@@ -303,47 +205,44 @@ impl<'a, L: ENode> FlatGraph<'a, L> {
 
 #[cfg(test)]
 mod tests {
-    use crate::testing::Term;
-    use crate::{ClassId, Engine, Label, Ref};
+    use super::*;
 
-    /// Charges one per node, a hundred for a leaf named `r`, and ten for each
-    /// add-of-constant a spelling needs: a non-zero operand offset that is not
-    /// a constant, and a node that sits at an offset from its class.
-    fn cost(eg: &Engine<Term>) -> impl Fn(ClassId, &Term, &[Ref], u64) -> u64 + '_ {
-        move |_, node, operands, offset| {
-            let adds = operands
-                .iter()
-                .filter(|operand| operand.offset != 0 && eg.int_const(**operand).is_none())
-                .count() as u64
-                + u64::from(offset != 0);
-            1 + 99 * u64::from(node.op == "r") + 10 * adds
-        }
+    fn folded(members: &[&[(u32, u64, &[u32])]]) -> Vec<Option<(u32, u64)>> {
+        let ids: Vec<u32> = (0..members.len() as u32).collect();
+        fold(members.len(), &ids, &|_| None, |id, out| {
+            for &(tag, price, children) in members[id as usize] {
+                out.push(tag, price, children.iter().copied());
+            }
+        })
     }
 
     #[test]
-    fn a_spelling_pays_for_the_offsets_it_has_to_add() {
-        let mut eg = Engine::new();
-        let r = eg.add(Term::typed("r", 8, &[]));
-        let s = eg.add(Term::typed("s", 8, &[]));
-        let p = eg.add(Term::typed("p", 8, &[]));
-        // r == s + 7, and one class holds h(p + 4) and k(p).
-        eg.union(r, Ref::new(s.class, 7)).unwrap();
-        let shifted = eg.insert(Term::typed("h", 8, &[ClassId(0)]), &[Ref::new(p.class, 4)]);
-        let plain = eg.insert(Term::typed("k", 8, &[ClassId(0)]), &[p]);
-        eg.union(shifted, plain).unwrap();
-        eg.rebuild();
-        let extraction = eg.extract_best(cost(&eg));
+    fn an_id_with_a_self_loop_alone_has_no_cost() {
+        assert_eq!(folded(&[&[(0, u64::MAX, &[0])]]), vec![None]);
+        assert_eq!(folded(&[&[(0, 0, &[0])]]), vec![None]);
+    }
 
-        let class = eg.root(plain.class);
+    // The loop's sum saturates to the id's own cost, and at no price it is
+    // that cost: first in scan order, it still does not spell the id.
+    #[test]
+    fn a_self_loop_that_ties_is_not_chosen() {
+        let top = u64::MAX;
         assert_eq!(
-            extraction.node(class).map(|node| node.op.as_str()),
-            Some("k")
+            folded(&[&[(0, top, &[0]), (1, top, &[])]]),
+            vec![Some((1, top))]
         );
-        // `r` names the class, but `s - 7` is the cheaper spelling of it.
-        let class = eg.root(r.class);
-        let row = extraction.row(class).expect("a costed class");
-        assert_eq!(eg.node(row).op, "s");
-        assert_eq!(eg.value(row), Ref::new(class, 249));
-        assert_eq!(eg.node(row).children().len(), 0);
+        assert_eq!(
+            folded(&[&[(0, 0, &[0]), (1, 3, &[])], &[(2, 1, &[0])]]),
+            vec![Some((1, 3)), Some((2, 4))]
+        );
+    }
+
+    #[test]
+    fn finite_prices_too_large_to_add_beat_an_unpriced_member() {
+        let large = u64::MAX / 2 + 1;
+        assert_eq!(
+            folded(&[&[(0, large, &[])], &[(1, UNPRICED, &[]), (2, large, &[0])]]),
+            vec![Some((0, large)), Some((2, UNPRICED - 1))]
+        );
     }
 }

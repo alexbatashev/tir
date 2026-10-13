@@ -17,12 +17,20 @@ operation! {
         results: R {
             result: "FloatType",
         },
-        interfaces: [crate::interp::Interp, crate::Speculatable],
+        interfaces: [crate::ConstantLike, crate::interp::Interp, crate::Speculatable],
         verifier: "true",
     }
 }
 
 impl crate::Speculatable for ConstantOp {}
+
+impl crate::ConstantLike for ConstantOp {
+    fn constant_value(&self) -> tir_adt::APInt {
+        let context = self.handle().context.clone();
+        let width = float_format(&context, self.result()).map_or(64, |(.., width)| width);
+        tir_adt::APInt::new(width, self.bits())
+    }
+}
 
 impl tir::Verifiable for ConstantOp {
     fn verify_impl(&self, context: &Context) -> Result<(), Error> {

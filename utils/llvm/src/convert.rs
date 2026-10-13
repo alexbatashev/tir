@@ -324,6 +324,8 @@ fn lower_function(
     layout: &Layout,
     function_types: &HashMap<String, (Vec<Type>, Type, bool)>,
 ) -> Result<tir::func::FuncOp, Error> {
+    // The function's rows share chunks with no other function's.
+    let _scope = context.function_scope();
     let region = context.create_region();
     let mut values: HashMap<String, ValueId> = HashMap::new();
 

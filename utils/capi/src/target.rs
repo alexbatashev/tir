@@ -7,7 +7,7 @@ use std::ffi::{CStr, c_char};
 
 // Force the backend crates to be linked so their target, pass, and schema
 // registrations are included in the cdylib.
-use tir::backend::pipeline::{StopAfter, build_pipeline};
+use tir::backend::pipeline::{StopAfter, build_pipeline, structure};
 use tir::backend::{select_target, supported_targets};
 use tir_arm64 as _;
 use tir_riscv as _;
@@ -107,7 +107,8 @@ pub unsafe extern "C" fn tir_context_run_target_pipeline(
             return false;
         };
         let mut pm = build_pipeline(target.as_ref(), ctx, stop, Default::default());
-        match pm.run(ctx, op) {
+        // A client builds control-flow graphs; the backend takes regions.
+        match structure(ctx, op.clone()).and_then(|()| pm.run(ctx, op)) {
             Ok(()) => true,
             Err(e) => {
                 set_error(format!("target pipeline failed: {e}"));

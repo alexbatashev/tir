@@ -1,6 +1,7 @@
-//! Loops over `u32` columns, written by hand for each instruction set and
-//! picked once at run time: AVX-512 and AVX2 on x86-64, SVE2 and NEON on
-//! AArch64, the V extension on RISC-V, and plain Rust everywhere else.
+//! Loops over `u32` columns, sorted `u32` lists and `u64` bitset words, written
+//! by hand for each instruction set and picked once at run time: AVX-512 and
+//! AVX2 on x86-64, SVE2 and NEON on AArch64, the V extension on RISC-V, and
+//! plain Rust everywhere else.
 //!
 //! Nothing here relies on the compiler vectorizing a loop. The x86-64 and NEON
 //! kernels use intrinsics. Stable Rust has no intrinsics for the scalable
@@ -45,6 +46,14 @@ pub(crate) struct Kernels {
     hash_mix: unsafe fn(hash: *mut u32, column: *const u32, len: usize),
     /// `hash[row] ^= hash[row] >> 15`.
     hash_finish: unsafe fn(hash: *mut u32, len: usize),
+    /// The cells two ascending lists of distinct cells share, written ascending
+    /// to `out`; returns how many. Writes at most `min(alen, blen)` cells
+    /// whatever the lists hold, so lists out of order give a wrong answer but
+    /// stay inside `out`.
+    intersect_sorted:
+        unsafe fn(a: *const u32, alen: usize, b: *const u32, blen: usize, out: *mut u32) -> usize,
+    /// `a[word] &= b[word]`.
+    and_words: unsafe fn(a: *mut u64, b: *const u64, len: usize),
 }
 
 /// The instruction sets this CPU has kernels for, widest first; the plain Rust
@@ -182,6 +191,42 @@ pub fn hash_rows(columns: &[&[u32]], out: &mut [u32]) {
     hash_rows_with(kernels(), columns, out);
 }
 
+fn intersect_sorted_with(set: &Kernels, a: &[u32], b: &[u32], out: &mut Vec<u32>) {
+    let start = out.len();
+    out.reserve(a.len().min(b.len()));
+    // SAFETY: both lists are as long as stated, and `out` has room past its
+    // end for the shorter one, which bounds what the kernel writes.
+    unsafe {
+        let found = (set.intersect_sorted)(
+            a.as_ptr(),
+            a.len(),
+            b.as_ptr(),
+            b.len(),
+            out.as_mut_ptr().add(start),
+        );
+        out.set_len(start + found);
+    }
+}
+
+/// Append to `out` the cells two ascending lists of distinct cells share,
+/// ascending. Lists that are not ascending and distinct give an unspecified
+/// subset of their cells.
+pub fn intersect_sorted(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
+    intersect_sorted_with(kernels(), a, b, out);
+}
+
+fn and_words_with(set: &Kernels, a: &mut [u64], b: &[u64]) {
+    assert_eq!(a.len(), b.len(), "bitsets over one range");
+    // SAFETY: both slices are `a.len()` words long.
+    unsafe { (set.and_words)(a.as_mut_ptr(), b.as_ptr(), a.len()) };
+}
+
+/// Intersect the bitset `a` with `b` over the same range of cells, in place.
+/// Panics if their lengths differ.
+pub fn and_words(a: &mut [u64], b: &[u64]) {
+    and_words_with(kernels(), a, b);
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
@@ -200,6 +245,10 @@ mod tests {
         fn every_instruction_set_agrees_with_the_model(
             rows in prop::collection::vec((0u32..5, 0u32..5, any::<u32>()), 0..200),
             map in prop::collection::vec(0u32..5, 5),
+            left in prop::collection::btree_set(0u32..512, 0..200),
+            right in prop::collection::btree_set(0u32..512, 0..200),
+            words in prop::collection::vec(any::<(u64, u64)>(), 41..200),
+            offset in 0usize..9,
         ) {
             let a: Vec<u32> = rows.iter().map(|row| row.0).collect();
             let b: Vec<u32> = rows.iter().map(|row| row.1).collect();
@@ -234,6 +283,47 @@ mod tests {
                 let mut out = vec![0; rows.len()];
                 hash_rows_with(set, &[&a, &b, &wide], &mut out);
                 prop_assert_eq!(&out, &hashes, "hash_rows on {}", set.name);
+            }
+
+            // Identical, interleaved but disjoint, and single-cell lists, cut
+            // at an offset so the kernels see unaligned starts and at lengths
+            // on both sides of every vector width, in both argument orders.
+            // The overlapping lists straddle 2^31, where a signed comparison
+            // would misorder them.
+            let evens: Vec<u32> = left.iter().map(|&cell| 2 * cell).collect();
+            let odds: Vec<u32> = right.iter().map(|&cell| 2 * cell + 1).collect();
+            let left: Vec<u32> = left.into_iter().map(|cell| cell + (1 << 31) - 256).collect();
+            let right: Vec<u32> = right.into_iter().map(|cell| cell + (1 << 31) - 256).collect();
+            let single = &left[..left.len().min(1)];
+            let pairs = [(&left[..], &right[..]), (&left[..], &left[..]), (&evens[..], &odds[..]), (single, &right[..])];
+            for (x, y) in pairs {
+                let (x, y) = (&x[offset.min(x.len())..], &y[offset.min(y.len())..]);
+                for len in [0, 1, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, usize::MAX] {
+                    let x = &x[..len.min(x.len())];
+                    for (a, b) in [(x, y), (y, x)] {
+                        let mut want = vec![u32::MAX];
+                        want.extend(a.iter().filter(|cell| b.binary_search(cell).is_ok()));
+                        for set in available() {
+                            let mut got = vec![u32::MAX];
+                            intersect_sorted_with(set, a, b, &mut got);
+                            prop_assert_eq!(&got, &want, "intersect_sorted on {} of {:?} and {:?}", set.name, a, b);
+                        }
+                    }
+                }
+            }
+
+            let (mine, theirs): (Vec<u64>, Vec<u64>) = words.into_iter().unzip();
+            for len in [0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, mine.len() - offset] {
+                let range = offset..offset + len;
+                let mut want = mine.clone();
+                for word in range.clone() {
+                    want[word] &= theirs[word];
+                }
+                for set in available() {
+                    let mut got = mine.clone();
+                    and_words_with(set, &mut got[range.clone()], &theirs[range.clone()]);
+                    prop_assert_eq!(&got, &want, "and_words on {} at {:?}", set.name, range);
+                }
             }
         }
     }

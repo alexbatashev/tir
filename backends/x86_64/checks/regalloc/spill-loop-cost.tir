@@ -63,6 +63,7 @@ module {
 // CHECK-NEXT: ^[[BACK]]:
 // CHECK-NEXT: x86_64.mov
 // CHECK-NEXT: x86_64.mov
+// CHECK-NEXT: x86_64.mov
 // CHECK-NEXT: asm.vbr ^[[INNER]]
 // CHECK: x86_64.mov_load_disp
 
@@ -71,6 +72,7 @@ module {
 // ASM-LABEL: pressure:
 // ASM: jmp .L[[INNER:[0-9]+]]
 // ASM-NEXT: .L[[BACK:[0-9]+]]:
+// ASM-NEXT: mov
 // ASM-NEXT: mov
 // ASM-NEXT: mov
 // ASM-NEXT: .L[[INNER]]:

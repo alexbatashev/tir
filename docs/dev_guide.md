@@ -141,8 +141,8 @@ register allocation retries and unsuccessful solves. Dump failures produce a
 warning on stderr and do not stop compilation. Files use the name
 `<kind>-<pid>-<sequence>.json`. The compiler never replaces an existing file.
 
-Each file contains one version 1 `tir-pbqp` JSON object. `kind` is `isel` or
-`regalloc`. `node_costs` holds one cost vector per node. Each `edges` entry has
+Each file contains one version 1 `tir-pbqp` JSON object. `kind` is `regalloc`.
+`node_costs` holds one cost vector per node. Each `edges` entry has
 `lhs`, `rhs`, and `matrix` IDs. Each `matrices` entry has `rows`, `cols`, and a
 flat `costs` array. Node IDs and matrix IDs are zero-based array positions.
 Edges are sorted by `(lhs, rhs)`, where `lhs < rhs`. Matrix rows index the `lhs`
@@ -158,26 +158,6 @@ can change costs.
 
 The dump records the mathematical task before solver reductions. It does not
 contain a solution.
-
-### Searching for cheaper instruction covers
-
-Instruction selection keeps the cover its PBQP heuristic finds unless
-`TIR_ISEL_SEARCH` is set. With it, a bounded SAT search looks for a strictly
-cheaper assignment of each function's recorded problem and uses the one it
-finds. The search is slow, so use it to check a cover and leave it off
-otherwise. `TIR_MEM_STATS` reports what it found:
-
-```sh
-TIR_ISEL_SEARCH=1 TIR_MEM_STATS=1 tir mc --march=x86_64 --stage=isel input.tir 2>&1 | grep 'tir-mem: selection'
-```
-
-Each function prints one line, for example
-`tir-mem: selection instances=77 incumbent=150 best=59 status=optimal`.
-`instances` counts the candidate instructions, `incumbent` and `best` are model
-costs, and `status` is described in the instruction selection chapter. A
-`best` below `incumbent` is a cover the heuristic missed. The search also runs
-without the variable when the heuristic finds no cover, and then reports
-`feasible` or `infeasible`.
 
 ### Running benchmarks
 

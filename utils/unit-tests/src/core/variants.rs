@@ -1,4 +1,4 @@
-//! Candidate selection over one overlay: each candidate is built in a fork,
+//! Candidate selection over one context: each candidate is built in a fork,
 //! scored, and only the cheapest is kept.
 
 use tir::builtin::{ops, IntegerType};
@@ -18,7 +18,7 @@ module_end
 }"#,
     );
     let body = func.body();
-    let ops_live = context.slab_census().ops_live;
+    let ops_live = context.census().ops_live;
     (context, body, ops_live)
 }
 
@@ -48,9 +48,7 @@ fn a_cheaper_later_candidate_wins_and_the_losers_leave_nothing() {
     .expect("every candidate builds");
     assert_eq!(chosen, Some(1));
     assert_eq!(constants(&context, &body), 3);
-    assert_eq!(context.slab_census().ops_live, ops_before);
-    context.commit();
-    assert_eq!(context.slab_census().ops_live, ops_before + 3);
+    assert_eq!(context.census().ops_live, ops_before + 3);
 }
 
 #[test]
@@ -60,7 +58,7 @@ fn a_tie_goes_to_the_lower_index() {
         &context,
         &[2usize, 2, 1],
         |fork, count| build(fork, count, &body),
-        |fork| if fork.has_pending_edits() { 5 } else { 9 },
+        |fork| if constants(fork, &body) > 0 { 5 } else { 9 },
     )
     .expect("every candidate builds");
     assert_eq!(chosen, Some(0));
@@ -79,8 +77,7 @@ fn nothing_is_adopted_when_no_candidate_beats_the_overlay_as_it_stands() {
     .expect("every candidate builds");
     assert_eq!(chosen, None);
     assert_eq!(constants(&context, &body), 0);
-    assert!(!context.has_pending_edits());
-    assert_eq!(context.slab_census().ops_live, ops_before);
+    assert_eq!(context.census().ops_live, ops_before);
 }
 
 #[test]

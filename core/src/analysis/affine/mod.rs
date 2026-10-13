@@ -204,7 +204,7 @@ pub fn nests_under(context: &Context, root: OpId) -> Vec<AffineView> {
             pending.extend(context.get_region(region).op_ids());
         }
     }
-    views.sort_by_key(|view| view.root.index());
+    views.sort_by_key(|view| view.root.number());
     views
 }
 

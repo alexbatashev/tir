@@ -1,7 +1,9 @@
 // RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
 
 // Where every inner arm computes nothing, PCFR drops that gate. The outer
-// condition branches once: false returns and true reaches an empty self-loop.
+// condition branches once: false returns and true reaches a self-loop that
+// only advances the counter, which keeps the loop from being a value nothing
+// reads.
 
 module {
   %fn_spin = func.func @spin(%c: !i1, %n: !i32) -> !i32 {
@@ -15,7 +17,9 @@ module {
   ^bb4:
     cfg.br ^bb5
   ^bb5:
-    cfg.br ^bb1(%i : !i32)
+    %one = constant {value = 1} : !i32
+    %ni = addi %i, %one : !i32
+    cfg.br ^bb1(%ni : !i32)
   ^bb6:
     func.return %i
   }
@@ -23,10 +27,13 @@ module {
 }
 
 // CHECK: x86_64.test_imm32 {dst = %[[C:[0-9]+]]:GPR, imm = 1}
-// CHECK-NEXT: x86_64.jne {imm = ^[[BODY:bb[0-9]+]]}
+// CHECK-NEXT: x86_64.jne {imm = ^[[ENTER:bb[0-9]+]]}
 // CHECK-NEXT: asm.vbr ^[[EXIT:bb[0-9]+]]
+// CHECK: ^[[ENTER]]:
+// CHECK-NEXT: asm.vbr %{{[0-9]+}} ^[[BODY:bb[0-9]+]]
 // CHECK: ^[[EXIT]]:
 // CHECK-NEXT: asm.vret
-// CHECK: ^[[BODY]]:
-// CHECK-NEXT: asm.vbr ^[[BODY]]
+// CHECK: ^[[BODY]](%[[I:[0-9]+]]: !x86_64.GPR32):
+// CHECK-NEXT: x86_64.inc32 {dst = %[[NEXT:[0-9]+]]:GPR32, dst_tied = %[[I]]:GPR32}
+// CHECK-NEXT: asm.vbr %[[NEXT]] ^[[BODY]]
 // CHECK-NOT: x86_64.test_imm32

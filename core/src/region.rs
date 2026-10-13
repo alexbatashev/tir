@@ -1,35 +1,8 @@
-use crate::{BlockId, Context, ContextIterator, GetFromContext, OpId, Terminator, Value, ValueId};
+use crate::{
+    BlockId, Context, ContextIterator, GetFromContext, IdMap, OpId, Terminator, Value, ValueId,
+};
 
 id_newtype!(RegionId);
-
-/// What a region holds, and how what it holds is ordered.
-///
-/// An ordered region is a control-flow graph: its blocks run one after another
-/// and hand control on through terminators. An unordered region is a dependence
-/// graph: nothing but the def-use edges between its operations says what runs
-/// before what, so `ops` is insertion order and is never read as meaning.
-#[derive(Debug, Clone)]
-pub enum RegionBody {
-    Blocks(Vec<BlockId>),
-    Nodes {
-        /// The region's own arguments. An ordered region has these too — they
-        /// are its entry block's arguments; see [`RegionHandle::ports`].
-        ports: Vec<Value>,
-        ops: Vec<OpId>,
-        /// The values the region produces, in the order the enclosing operation
-        /// binds them.
-        results: Vec<ValueId>,
-    },
-}
-
-/// A region's storage record, living densely in the context's region slab and
-/// edited in place through [`Context`] under its write lock. Reads go through
-/// [`RegionHandle`].
-#[derive(Debug, Clone)]
-pub struct Region {
-    body: RegionBody,
-    parent_op: OpId,
-}
 
 /// Which kind of body an operation declares for a region, as spelled in
 /// `operation!`. `Any` accepts either, so the parser reads the kind off the
@@ -41,106 +14,11 @@ pub enum RegionKind {
     Any,
 }
 
-impl Region {
-    pub(crate) fn new() -> Region {
-        Region {
-            body: RegionBody::Blocks(vec![]),
-            parent_op: OpId::invalid(),
-        }
-    }
-
-    pub(crate) fn new_nodes(ports: Vec<Value>, ops: Vec<OpId>, results: Vec<ValueId>) -> Region {
-        Region {
-            body: RegionBody::Nodes {
-                ports,
-                ops,
-                results,
-            },
-            parent_op: OpId::invalid(),
-        }
-    }
-
-    pub(crate) fn heap_bytes(&self) -> usize {
-        match &self.body {
-            RegionBody::Blocks(blocks) => blocks.capacity() * std::mem::size_of::<BlockId>(),
-            RegionBody::Nodes {
-                ports,
-                ops,
-                results,
-                ..
-            } => {
-                ports.capacity() * std::mem::size_of::<Value>()
-                    + ops.capacity() * std::mem::size_of::<OpId>()
-                    + results.capacity() * std::mem::size_of::<ValueId>()
-            }
-        }
-    }
-
-    /// Move every id the region holds by `shift`.
-    pub(crate) fn shift(&mut self, shift: &crate::overlay::Shift) {
-        self.parent_op = shift.op(self.parent_op);
-        match &mut self.body {
-            RegionBody::Blocks(blocks) => {
-                for block in blocks {
-                    *block = shift.block(*block);
-                }
-            }
-            RegionBody::Nodes {
-                ports,
-                ops,
-                results,
-            } => {
-                for port in ports {
-                    port.shift(shift);
-                }
-                for op in ops {
-                    *op = shift.op(*op);
-                }
-                for result in results {
-                    *result = shift.value(*result);
-                }
-            }
-        }
-    }
-
-    pub(crate) fn set_parent_op(&mut self, op: OpId) {
-        self.parent_op = op;
-    }
-
-    /// The operation owning this region, if it has been attached to one.
-    pub(crate) fn parent_op(&self) -> Option<OpId> {
-        (self.parent_op != OpId::invalid()).then_some(self.parent_op)
-    }
-
-    pub(crate) fn body(&self) -> &RegionBody {
-        &self.body
-    }
-
-    pub(crate) fn body_mut(&mut self) -> &mut RegionBody {
-        &mut self.body
-    }
-
-    pub(crate) fn blocks(&self) -> &[BlockId] {
-        match &self.body {
-            RegionBody::Blocks(blocks) => blocks,
-            RegionBody::Nodes { .. } => &[],
-        }
-    }
-
-    pub(crate) fn blocks_mut(&mut self) -> &mut Vec<BlockId> {
-        match &mut self.body {
-            RegionBody::Blocks(blocks) => blocks,
-            RegionBody::Nodes { .. } => panic!("an unordered region holds no blocks"),
-        }
-    }
-}
-
 /// A reference to a region: the context that owns it, and its id. Reads answer
 /// with the region as it stands now; see [`crate::OpHandle`].
 #[derive(Clone)]
 pub struct RegionHandle {
     pub context: Context,
-    pub(crate) generation: u32,
     pub id: RegionId,
 }
 
@@ -154,9 +32,8 @@ impl RegionHandle {
     /// The owning context, after checking this handle still names its own region.
     fn context(&self) -> Context {
         let context = self.context.clone();
-        debug_assert_eq!(
-            context.region_generation(self.id),
-            self.generation,
+        debug_assert!(
+            context.has_region(self.id),
             "handle to erased region {:?}",
             self.id
         );
@@ -166,7 +43,7 @@ impl RegionHandle {
     /// Whether this handle still names the region it was minted for; see
     /// [`crate::OpHandle::is_live`].
     pub fn is_live(&self) -> bool {
-        self.context.region_generation(self.id) == self.generation
+        self.context.has_region(self.id)
     }
 
     pub fn id(&self) -> RegionId {
@@ -175,14 +52,12 @@ impl RegionHandle {
 
     /// The operation owning this region, if it has been attached to one.
     pub fn parent_op(&self) -> Option<OpId> {
-        self.context().with_region(self.id, Region::parent_op)
+        self.context().region_parent_op(self.id)
     }
 
     /// Whether this region holds an unordered graph rather than blocks.
     pub fn is_nodes(&self) -> bool {
-        self.context().with_region(self.id, |region| {
-            matches!(region.body(), RegionBody::Nodes { .. })
-        })
+        self.context().region_is_nodes(self.id)
     }
 
     pub fn add_block(&self, id: BlockId) {
@@ -194,8 +69,7 @@ impl RegionHandle {
     }
 
     pub fn block_ids(&self) -> Vec<BlockId> {
-        self.context()
-            .with_region(self.id, |region| region.blocks().to_vec())
+        self.context().region_blocks(self.id)
     }
 
     /// The entry block of an ordered region: where control enters and where its
@@ -209,16 +83,12 @@ impl RegionHandle {
     /// the region's contents iterates, whichever kind it is.
     pub fn op_ids(&self) -> Vec<OpId> {
         let context = self.context();
-        let (ops, blocks) = context.with_region(self.id, |region| match region.body() {
-            RegionBody::Nodes { ops, .. } => (ops.clone(), Vec::new()),
-            RegionBody::Blocks(blocks) => (Vec::new(), blocks.clone()),
-        });
-        if blocks.is_empty() {
-            return ops;
+        if context.region_is_nodes(self.id) {
+            return context.region_ops(self.id);
         }
-        blocks
+        self.block_ids()
             .into_iter()
-            .flat_map(|block| context.get_block(block).op_ids())
+            .flat_map(|block| context.block_ops(block))
             .collect()
     }
 
@@ -227,13 +97,12 @@ impl RegionHandle {
     /// need not know which kind it holds.
     pub fn ports(&self) -> Vec<Value> {
         let context = self.context();
-        let (ports, entry) = context.with_region(self.id, |region| match region.body() {
-            RegionBody::Nodes { ports, .. } => (ports.clone(), None),
-            RegionBody::Blocks(blocks) => (Vec::new(), blocks.first().copied()),
-        });
-        match entry {
-            Some(entry) => context.get_block(entry).arguments(),
-            None => ports,
+        if context.region_is_nodes(self.id) {
+            return context.region_ports(self.id);
+        }
+        match self.block_ids().first() {
+            Some(entry) => context.block_arguments(*entry),
+            None => Vec::new(),
         }
     }
 
@@ -258,11 +127,7 @@ impl RegionHandle {
     /// The values an unordered region produces; empty for an ordered one,
     /// which binds its results through its terminator instead.
     pub fn results(&self) -> Vec<ValueId> {
-        self.context()
-            .with_region(self.id, |region| match region.body() {
-                RegionBody::Nodes { results, .. } => results.clone(),
-                RegionBody::Blocks(_) => Vec::new(),
-            })
+        self.context().region_results(self.id)
     }
 
     /// The results that are not memory states.
@@ -390,7 +255,8 @@ pub(crate) fn topological_order(
     context: &Context,
     region: RegionId,
 ) -> Result<Vec<OpId>, crate::Error> {
-    topological_order_picking(context, region, |ready| ready.pop_first())
+    let reads = SiblingReads::of_region(context, region);
+    topological_order_picking(context, region, &reads, |ready| ready.pop_first())
 }
 
 /// [`topological_order`] with the tie among ready operations broken by `rng`
@@ -400,7 +266,8 @@ pub(crate) fn shuffled_topological_order(
     region: RegionId,
     rng: &mut crate::utils::Rng,
 ) -> Result<Vec<OpId>, crate::Error> {
-    topological_order_picking(context, region, |ready| {
+    let reads = SiblingReads::of_region(context, region);
+    topological_order_picking(context, region, &reads, |ready| {
         if ready.is_empty() {
             return None;
         }
@@ -409,51 +276,25 @@ pub(crate) fn shuffled_topological_order(
     })
 }
 
-/// [`topological_order`] with the tie among ready operations broken by
-/// insertion order: the order the region was built in, which a converter
-/// leaves as source order.
-pub(crate) fn insertion_topological_order(
-    context: &Context,
-    region: RegionId,
-) -> Result<Vec<OpId>, crate::Error> {
-    let inserted: std::collections::HashMap<OpId, usize> = context
-        .get_region(region)
-        .op_ids()
-        .into_iter()
-        .enumerate()
-        .map(|(index, op)| (op, index))
-        .collect();
-    topological_order_picking(context, region, |ready| {
-        let pick = ready.iter().copied().min_by_key(|op| inserted[op])?;
-        ready.take(&pick)
-    })
-}
-
 fn topological_order_picking(
     context: &Context,
     region: RegionId,
+    reads: &SiblingReads,
     mut pick: impl FnMut(&mut std::collections::BTreeSet<OpId>) -> Option<OpId>,
 ) -> Result<Vec<OpId>, crate::Error> {
-    use std::collections::{BTreeSet, HashMap, HashSet};
-
-    let ops: HashSet<OpId> = context.get_region(region).op_ids().into_iter().collect();
-    let mut inputs: HashMap<OpId, Vec<OpId>> = HashMap::new();
-    let mut readers: HashMap<OpId, Vec<OpId>> = HashMap::new();
-    let mut pending: HashMap<OpId, usize> = HashMap::new();
+    let ops = context.get_region(region).op_ids();
+    let mut readers: IdMap<OpId, Vec<OpId>> = IdMap::new();
+    let mut pending: IdMap<OpId, usize> = IdMap::new();
     for &op in &ops {
-        let read: Vec<OpId> = values_read(context, op)
-            .into_iter()
-            .filter_map(|value| context.get_value(value).defining_op())
-            .filter(|producer| ops.contains(producer))
-            .collect();
-        for producer in &read {
-            readers.entry(*producer).or_default().push(op);
+        let mut read = 0;
+        for producer in reads.of(op) {
+            readers.entry(producer).or_default().push(op);
+            read += 1;
         }
-        pending.insert(op, read.len());
-        inputs.insert(op, read);
+        pending.insert(op, read);
     }
 
-    let mut ready: BTreeSet<OpId> = pending
+    let mut ready: std::collections::BTreeSet<OpId> = pending
         .iter()
         .filter(|(_, count)| **count == 0)
         .map(|(op, _)| *op)
@@ -473,7 +314,7 @@ fn topological_order_picking(
     if order.len() == ops.len() {
         return Ok(order);
     }
-    let instance = context.get_op(cycle_member(&inputs, &pending));
+    let instance = context.get_op(cycle_member(reads, &pending));
     Err(crate::Error::VerificationError(format!(
         "{}.{} closes a dependency cycle",
         instance.dialect(),
@@ -504,6 +345,48 @@ pub(crate) fn values_read(context: &Context, op: OpId) -> Vec<ValueId> {
     values
 }
 
+// A value defined under the reader has its producer in another region and
+// orders nothing beside the reader.
+#[derive(Default)]
+pub(crate) struct SiblingReads {
+    // Sorted.
+    pairs: Vec<(OpId, OpId)>,
+}
+
+impl SiblingReads {
+    pub(crate) fn under(
+        context: &Context,
+        root: RegionId,
+        tests: impl IntoIterator<Item = (OpId, ValueId)>,
+    ) -> Self {
+        let mut pairs = context.sibling_reads(root, true);
+        pairs.extend(
+            tests
+                .into_iter()
+                .filter_map(|(reader, value)| context.sibling_read(reader, value)),
+        );
+        Self::sorted(pairs)
+    }
+
+    pub(crate) fn of_region(context: &Context, region: RegionId) -> Self {
+        Self::sorted(context.sibling_reads(region, false))
+    }
+
+    fn sorted(mut pairs: Vec<(OpId, OpId)>) -> Self {
+        pairs.sort_unstable();
+        pairs.dedup();
+        Self { pairs }
+    }
+
+    pub(crate) fn of(&self, op: OpId) -> impl Iterator<Item = OpId> + '_ {
+        let start = self.pairs.partition_point(|pair| pair.0 < op);
+        self.pairs[start..]
+            .iter()
+            .take_while(move |pair| pair.0 == op)
+            .map(|pair| pair.1)
+    }
+}
+
 /// What `region` and everything under it reads, and what the same span defines.
 fn collect_region_reads(
     context: &Context,
@@ -527,10 +410,7 @@ fn collect_region_reads(
 /// One operation actually on a cycle, rather than merely downstream of one:
 /// walk back through the operations Kahn left pending until the walk repeats
 /// itself, and answer with the smallest id it went round.
-fn cycle_member(
-    inputs: &std::collections::HashMap<OpId, Vec<OpId>>,
-    pending: &std::collections::HashMap<OpId, usize>,
-) -> OpId {
+fn cycle_member(reads: &SiblingReads, pending: &IdMap<OpId, usize>) -> OpId {
     let blocked = |op: &OpId| pending.get(op).is_some_and(|count| *count > 0);
     let start = pending
         .keys()
@@ -541,11 +421,10 @@ fn cycle_member(
 
     let mut path = vec![start];
     loop {
-        let next = inputs[path.last().unwrap()]
-            .iter()
+        let next = reads
+            .of(*path.last().unwrap())
             .filter(|input| blocked(input))
             .min()
-            .copied()
             .expect("an operation Kahn left pending reads one it also left");
         if let Some(from) = path.iter().position(|op| *op == next) {
             return path[from..]

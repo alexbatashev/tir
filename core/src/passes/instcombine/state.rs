@@ -8,28 +8,24 @@
 //! constant is an offset law, so the address reference is the extent: a
 //! `ptradd` chain of any length lands on its base at the summed offset.
 
-use tir_relational::ClassId as Id;
-use tir_relational::{Atom, Cmp, ColumnId, Expr, Guard, HeadOp, Plan, Query, Source};
+use tir_egraph::ClassId as Id;
+use tir_egraph::{Atom, ColumnId, Guard, HeadOp, Plan, Query, Source};
+use tir_relational::{Cmp, Expr};
 
+use crate::rewrite::{ADDRESS, BYTES, LOAD_ARITY, STORE_ARITY};
 use crate::sem::{SemNode as Node, SymKind, node::field};
 
-/// `Load(address, bytes, metadata, state)`.
-pub(super) const LOAD_ARITY: usize = 4;
 const LOAD_STATE: usize = 3;
-/// `Store(address, bytes, value, address_space, state)`.
-pub(super) const STORE_ARITY: usize = 5;
 const STORE_VALUE: usize = 2;
-pub(super) const ADDRESS: usize = 0;
-pub(super) const BYTES: usize = 1;
 
 /// S1: a load whose state a matching store left reads that store's value. The
 /// store is a node of the state class the load names, and the two extents are
 /// one base, one offset and one byte count — the base through the shared
 /// variable, the rest through the guards.
-pub(crate) fn forward_load() -> tir_relational::Rule<Node> {
+pub(crate) fn forward_load() -> tir_egraph::Rule<Node> {
     // Variables: 0 the load, 1..4 its operands, 5 the base both address, 6..10
     // the store's operands.
-    tir_relational::Rule {
+    tir_egraph::Rule {
         name: "store-to-load".into(),
         plan: Plan::compile(Query {
             vars: 11,

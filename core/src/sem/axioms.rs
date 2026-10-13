@@ -38,8 +38,9 @@ use std::sync::{LazyLock, Mutex, OnceLock};
 
 use smallvec::{SmallVec, smallvec};
 use tir_adt::APInt;
-use tir_relational::ClassId as Id;
-use tir_relational::{Atom, Cmp, ColumnId, Expr, Guard, HeadOp, LabelFill, Plan, Query};
+use tir_egraph::ClassId as Id;
+use tir_egraph::{Atom, ColumnId, Guard, HeadOp, LabelFill, Plan, Query};
+use tir_relational::{Cmp, Expr};
 
 pub(crate) mod pdl;
 
@@ -55,8 +56,9 @@ use super::node::{SemNode, field, template_node};
 /// Whether the SMT obligations behind the semantic invariants and the guarded
 /// relaxations are discharged. They validate the target description, they are not
 /// inputs to selection, so running hundreds of SAT queries on every compile buys
-/// nothing: `TIR_VERIFY_AXIOMS` turns them on for the target-definition test runs
-/// that actually need the check.
+/// nothing: `TIR_VERIFY_AXIOMS` turns them on for the CI run that checks the
+/// rules. A floating-point rule is no exception: it applies unproved by
+/// default, and that run is where an instance that does not hold is caught.
 pub(crate) fn verify_axioms() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("TIR_VERIFY_AXIOMS").is_some())
@@ -230,9 +232,6 @@ pub struct Axiom {
     /// The RHS references the matched root itself (excludes var references).
     uses_root: bool,
     obligation: ProofObligation,
-    /// The source rule uses floating-point semantics and must always prove its
-    /// equality before the e-graph can apply it.
-    floating_point: bool,
     /// Declared `(phase post-saturation)`: applied once after the iterative
     /// fixpoint instead of participating in it.
     post_saturation: bool,
@@ -282,9 +281,33 @@ fn holes_of(node: &AxNode, out: &mut Vec<(String, Option<usize>)>) {
     }
 }
 
+#[derive(PartialEq)]
+pub(crate) enum Shape {
+    Operator(SymKind, Vec<Shape>),
+    Variable(usize),
+    Width,
+    Ones,
+    Constant(u64),
+    Other,
+}
+
 impl Axiom {
-    fn requires_mandatory_proof(&self) -> bool {
-        self.floating_point || self.symbol_types.iter().any(Option::is_some)
+    pub(crate) fn sides(&self) -> (Shape, Shape) {
+        (self.shape(&self.lhs), self.shape(&self.rhs))
+    }
+
+    fn shape(&self, node: &AxNode) -> Shape {
+        match node {
+            AxNode::Node(kind, children) => Shape::Operator(
+                *kind,
+                children.iter().map(|child| self.shape(child)).collect(),
+            ),
+            AxNode::Hole(_, Some(var)) => Shape::Variable(*var),
+            AxNode::Hole(name, None) if self.width_names.contains(name) => Shape::Width,
+            AxNode::ConstMatch(WidthExpr::Ones(_)) => Shape::Ones,
+            AxNode::ConstMatch(WidthExpr::Lit(value)) => Shape::Constant(*value),
+            _ => Shape::Other,
+        }
     }
 
     pub(crate) fn counterexample(
@@ -320,7 +343,7 @@ impl Axiom {
         index: usize,
         folds: &mut Vec<SymKind>,
         assume: Folding,
-    ) -> Option<(tir_relational::Rule<SemNode>, bool)> {
+    ) -> Option<(tir_egraph::Rule<SemNode>, bool)> {
         let mut low = Lowering::new(self, folds, assume);
         low.left(self);
         low.widths(self);
@@ -331,7 +354,7 @@ impl Axiom {
         let head = low.right(self)?;
         let assumed = low.assumed;
         Some((
-            tir_relational::Rule {
+            tir_egraph::Rule {
                 name: format!("axiom-{}", self.name),
                 plan: Plan::compile(Query {
                     vars: match_vars,
@@ -620,9 +643,19 @@ impl Axiom {
                 self.realize(&children[0], g, r)
             }
             AxNode::Node(kind, children) => {
+                // The width an extension extends to is no value of the
+                // register: a register narrower than the width's own digits
+                // would truncate it.
+                let extends = matches!(kind, SymKind::ZExt | SymKind::SExt);
                 let children = children
                     .iter()
-                    .map(|c| self.realize(c, g, r))
+                    .enumerate()
+                    .map(|(index, c)| match c {
+                        AxNode::Const(e, ConstWidth::Register) if extends && index == 1 => {
+                            Some(con(g, e.eval(widths)?, 16))
+                        }
+                        _ => self.realize(c, g, r),
+                    })
                     .collect::<Option<Vec<_>>>()?;
                 Some(op(g, *kind, &children))
             }
@@ -722,7 +755,7 @@ impl<'a> Interpretation<'a> {
     }
 }
 
-impl tir_relational::Externs<SemNode> for Interpretation<'_> {
+impl tir_egraph::Externs<SemNode> for Interpretation<'_> {
     fn call(&self, id: u32, _terms: &[&SemNode], args: &[u64], out: &mut [u64]) -> bool {
         match id {
             call::WIDTH_OF => match type_width(self.context, TypeId::from_number(args[0] as u32)) {
@@ -774,11 +807,6 @@ impl tir_relational::Externs<SemNode> for Interpretation<'_> {
             }
             proof if proof >= call::VERIFY => {
                 let axiom = &self.axioms[(proof - call::VERIFY) as usize];
-                if axiom.requires_mandatory_proof() {
-                    return axiom
-                        .prove_outcome(&args[..axiom.width_names.len()])
-                        .is_proven();
-                }
                 if verify_axioms() {
                     // The scalars past the widths are there to order the guard,
                     // not to key the proof.
@@ -1072,7 +1100,7 @@ impl<'a> Lowering<'a> {
         // filter itself, so it is pushed after them: the planner schedules a
         // guard as soon as everything it reads is bound, and of two ready at
         // once the first pushed goes first.
-        if verify_axioms() || axiom.requires_mandatory_proof() {
+        if verify_axioms() {
             self.guards.push(Guard::Extern {
                 call: call::VERIFY + index as u32,
                 terms: SmallVec::new(),

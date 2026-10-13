@@ -14,19 +14,19 @@ void copy(struct record *destination, struct record *source) {
 // CHECK-NEXT: #target_env = {arch = "x86_64", features = ["x86", "x86_64", "sse", "sse2"]}
 // CHECK-EMPTY:
 // CHECK: module {data_layout = #data_layout, target_env = #target_env} {
-// CHECK-NEXT:   %2 = func.func @copy(%19: !ptr.p, %20: !ptr.p) {
+// CHECK-NEXT:   %2 = func.func @copy(%8203: !ptr.p, %8204: !ptr.p) {
 // CHECK-NEXT:     %3 = ptr.alloca {size = 8, align = 8} : !ptr.p
 // CHECK-NEXT:     %4 = ptr.alloca {size = 8, align = 8} : !ptr.p
-// CHECK-NEXT:     %7 = constant {value = 31} : !i64
-// CHECK-NEXT:     %21 = state.entry_state : !state<memory>
-// CHECK-NEXT:     %22, %23, %24 = state.split state(%21)
-// CHECK-NEXT:     %11 = ptr.store %19, %3 state(%22)
-// CHECK-NEXT:     %12 = ptr.store %20, %4 state(%23)
-// CHECK-NEXT:     %5, %13 = ptr.load %3 state(%11) : !ptr.p
-// CHECK-NEXT:     %6, %14 = ptr.load %4 state(%12) : !ptr.p
-// CHECK-NEXT:     %15 = ptr.memcpy %5, %6, %7 state(%24)
-// CHECK-NEXT:     %25 = state.join state(%13, %14, %15)
-// CHECK-NEXT:     -> %25
+// CHECK-NEXT:     %4096 = constant {value = 31} : !i64
+// CHECK-NEXT:     %8205 = state.entry_state : !state<memory>
+// CHECK-NEXT:     %8206, %8207, %8208 = state.split state(%8205)
+// CHECK-NEXT:     %8195 = ptr.store %8203, %3 state(%8206)
+// CHECK-NEXT:     %8196 = ptr.store %8204, %4 state(%8207)
+// CHECK-NEXT:     %5, %8197 = ptr.load %3 state(%8195) : !ptr.p
+// CHECK-NEXT:     %6, %8198 = ptr.load %4 state(%8196) : !ptr.p
+// CHECK-NEXT:     %8199 = ptr.memcpy %5, %6, %4096 state(%8208)
+// CHECK-NEXT:     %8209 = state.join state(%8197, %8198, %8199)
+// CHECK-NEXT:     -> %8209
 // CHECK-NEXT:   }
 // CHECK-NEXT:   module_end
 // CHECK-NEXT: }

@@ -106,6 +106,11 @@ impl DataLayout {
         bits(self.entries.get("cache_line"))
     }
 
+    /// The layout as the attribute an operation carries it in.
+    pub fn into_value(self) -> AttributeValue {
+        AttributeValue::Dict(Box::new(self.entries))
+    }
+
     /// Width of a pointer, in bits.
     pub fn pointer_size(&self) -> Option<u32> {
         self.class_layout("p").map(|(size, _)| size)

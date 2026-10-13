@@ -1,11 +1,12 @@
-//! Lattice columns: what a class is *known* to be, as opposed to what it holds.
+//! Lattice columns: what an id is *known* to be, as opposed to what the tables
+//! hold about it.
 //!
-//! A column is keyed on canonical class and joined — by a union, and by a rule
-//! raising a value onto one already there. Absence is the bottom of the lattice
-//! and [`Fact::Conflict`] its top, so a class proven two different values reads
-//! back as nothing known: "proven contradictory" does not entail "proven to be
-//! five", and failing the read is the conservative answer a refuted hypothesis
-//! needs.
+//! A column is keyed on a canonical id and joined — when two ids are equated,
+//! and when a rule raises a value onto one already there. Absence is the bottom
+//! of the lattice and [`Fact::Conflict`] its top, so an id proven two different
+//! values reads back as nothing known: "proven contradictory" does not entail
+//! "proven to be five", and failing the read is the conservative answer a
+//! refuted hypothesis needs.
 //!
 //! Values only ever rise, which is what lets semi-naive saturation trust a
 //! column's delta the way it trusts a row's: a match a fact enabled cannot be
@@ -13,34 +14,47 @@
 
 use std::hash::Hash;
 
-use crate::ClassId;
-use crate::label::FxHashMap;
+use crate::FxHashMap;
 
-/// What a class is known to be.
+/// What an id is known to be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fact<V> {
     Known(V),
-    /// Two different values were proven of one class.
+    /// Two different values were proven of one id.
     Conflict,
 }
 
-/// How a column combines two values proven of one class.
+/// How a column combines two values proven of one id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Join {
     /// Equal values agree, different ones conflict. The lattice a proof lives
-    /// in: two constants for one class is a refutation.
+    /// in: two constants for one id is a refutation.
     Agree,
     /// The first value proven wins. For a column whose values are a property of
-    /// the class rather than a claim about it — an e-node's type, which
-    /// congruence already forces its class to agree on.
+    /// the id rather than a claim about it, which the client already forces
+    /// every equated id to agree on.
     First,
+    /// The greater value wins: a bound that only rises, as a rule's head
+    /// raises it. A guard that compares it holds of the value a round read,
+    /// so the rules that raise such a column are saturated before any rule
+    /// that compares it.
+    Max,
+    /// The lesser value wins; see [`Join::Max`].
+    Min,
+    /// The values add up: a count of what a client says once each of the
+    /// ids that end up one. Saying a value twice counts it twice, so no
+    /// rule raises such a column.
+    Sum,
 }
 
-impl<V: Eq> Fact<V> {
+impl<V: Ord + std::ops::Add<Output = V>> Fact<V> {
     pub fn join(self, other: Self, how: Join) -> Self {
         match (self, other, how) {
             (Fact::Known(a), _, Join::First) => Fact::Known(a),
             (Fact::Known(a), Fact::Known(b), Join::Agree) if a == b => Fact::Known(a),
+            (Fact::Known(a), Fact::Known(b), Join::Max) => Fact::Known(a.max(b)),
+            (Fact::Known(a), Fact::Known(b), Join::Min) => Fact::Known(a.min(b)),
+            (Fact::Known(a), Fact::Known(b), Join::Sum) => Fact::Known(a + b),
             _ => Fact::Conflict,
         }
     }
@@ -50,13 +64,13 @@ impl<V: Eq> Fact<V> {
 #[derive(Debug)]
 pub struct Column<V> {
     how: Join,
-    fact: FxHashMap<ClassId, Entry<V>>,
-    /// Value -> the classes that have held it. Entries go stale when a class
+    fact: FxHashMap<u32, Entry<V>>,
+    /// Value -> the ids that have held it. Entries go stale when an id
     /// rises to `Conflict` or a scope pops, so a read confirms against `fact`.
-    by_value: FxHashMap<V, Vec<ClassId>>,
+    by_value: FxHashMap<V, Vec<u32>>,
     /// Per open scope, the keys it wrote and what they held before, innermost
     /// last. A scope never keeps a fact past its pop.
-    scopes: Vec<Vec<(ClassId, Option<Entry<V>>)>>,
+    scopes: Vec<Vec<(u32, Option<Entry<V>>)>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,76 +91,76 @@ impl<V> Column<V> {
     }
 }
 
-impl<V: Copy + Eq + Hash> Column<V> {
-    /// Join `value` onto what `class` is known to be, stamping the entry with
+impl<V: Copy + Ord + Hash + std::ops::Add<Output = V>> Column<V> {
+    /// Join `value` onto what `key` is known to be, stamping the entry with
     /// `epoch`. Reports whether the column moved.
-    pub fn raise(&mut self, class: ClassId, value: V, epoch: u32) -> bool {
-        self.write(class, Fact::Known(value), epoch)
+    pub fn raise(&mut self, key: u32, value: V, epoch: u32) -> bool {
+        self.write(key, Fact::Known(value), epoch)
     }
 
-    /// Join `fact` onto what `class` is known to be.
-    pub fn write(&mut self, class: ClassId, fact: Fact<V>, epoch: u32) -> bool {
-        let joined = match self.fact.get(&class) {
+    /// Join `fact` onto what `key` is known to be.
+    pub fn write(&mut self, key: u32, fact: Fact<V>, epoch: u32) -> bool {
+        let joined = match self.fact.get(&key) {
             Some(entry) => entry.fact.join(fact, self.how),
             None => fact,
         };
-        self.set(class, joined, epoch)
+        self.set(key, joined, epoch)
     }
 
-    fn set(&mut self, class: ClassId, joined: Fact<V>, epoch: u32) -> bool {
-        let previous = self.fact.get(&class).copied();
+    fn set(&mut self, key: u32, joined: Fact<V>, epoch: u32) -> bool {
+        let previous = self.fact.get(&key).copied();
         if previous.is_some_and(|entry| entry.fact == joined) {
             return false;
         }
         if let Some(frame) = self.scopes.last_mut() {
-            frame.push((class, previous));
+            frame.push((key, previous));
         }
         self.fact.insert(
-            class,
+            key,
             Entry {
                 fact: joined,
                 stamp: epoch,
             },
         );
         if let Fact::Known(value) = joined {
-            self.by_value.entry(value).or_default().push(class);
+            self.by_value.entry(value).or_default().push(key);
         }
         true
     }
 
-    /// What `class` is known to be, or `None` for unknown and for a conflict.
-    pub fn get(&self, class: ClassId) -> Option<V> {
-        match self.entry(class)? {
+    /// What `key` is known to be, or `None` for unknown and for a conflict.
+    pub fn get(&self, key: u32) -> Option<V> {
+        match self.entry(key)? {
             Fact::Known(value) => Some(value),
             Fact::Conflict => None,
         }
     }
 
     /// The whole entry, telling unknown from conflicted.
-    pub fn entry(&self, class: ClassId) -> Option<Fact<V>> {
-        self.fact.get(&class).map(|entry| entry.fact)
+    pub fn entry(&self, key: u32) -> Option<Fact<V>> {
+        self.fact.get(&key).map(|entry| entry.fact)
     }
 
-    /// Remove `class`'s entry, logging it for the scope to put back.
-    pub fn detach(&mut self, class: ClassId) -> Option<Fact<V>> {
-        let entry = self.fact.remove(&class)?;
+    /// Remove `key`'s entry, logging it for the scope to put back.
+    pub fn detach(&mut self, key: u32) -> Option<Fact<V>> {
+        let entry = self.fact.remove(&key)?;
         if let Some(frame) = self.scopes.last_mut() {
-            frame.push((class, Some(entry)));
+            frame.push((key, Some(entry)));
         }
         Some(entry.fact)
     }
 
-    /// Whether the entry for `class` rose in the epoch that just ended.
-    pub fn is_new(&self, class: ClassId, epoch: u32) -> bool {
+    /// Whether the entry for `key` rose in the epoch that just ended.
+    pub fn is_new(&self, key: u32, epoch: u32) -> bool {
         self.fact
-            .get(&class)
+            .get(&key)
             .is_some_and(|entry| entry.stamp + 1 == epoch)
     }
 
-    /// Whether `class` was proven two different values.
-    pub fn is_conflicted(&self, class: ClassId) -> bool {
+    /// Whether `key` was proven two different values.
+    pub fn is_conflicted(&self, key: u32) -> bool {
         matches!(
-            self.fact.get(&class),
+            self.fact.get(&key),
             Some(Entry {
                 fact: Fact::Conflict,
                 ..
@@ -154,19 +168,19 @@ impl<V: Copy + Eq + Hash> Column<V> {
         )
     }
 
-    /// The classes known to be `value`, in the order they first were.
-    pub fn classes_with(&self, value: V) -> impl Iterator<Item = ClassId> + '_ {
+    /// The ids known to be `value`, in the order they first were.
+    pub fn keys_with(&self, value: V) -> impl Iterator<Item = u32> + '_ {
         self.by_value
             .get(&value)
             .into_iter()
             .flatten()
             .copied()
-            .filter(move |&class| self.get(class) == Some(value))
+            .filter(move |&key| self.get(key) == Some(value))
     }
 
     /// Move `absorbed`'s value onto `survivor`, joining with whatever is there.
     /// Reports whether the survivor's entry moved.
-    pub fn merge(&mut self, absorbed: ClassId, survivor: ClassId, epoch: u32) -> bool {
+    pub fn merge(&mut self, absorbed: u32, survivor: u32, epoch: u32) -> bool {
         if self.fact.is_empty() {
             return false;
         }
@@ -176,24 +190,26 @@ impl<V: Copy + Eq + Hash> Column<V> {
         }
     }
 
-    /// The classes the open scopes have written. Duplicated across frames, and
+    /// Whether no id has an entry.
+    pub fn is_empty(&self) -> bool {
+        self.fact.is_empty()
+    }
+
+    /// The ids the open scopes have written. Duplicated across frames, and
     /// not canonicalized: a caller closing over them does both.
-    pub fn scoped_keys(&self) -> impl Iterator<Item = ClassId> + '_ {
+    pub fn scoped_keys(&self) -> impl Iterator<Item = u32> + '_ {
         self.scoped_keys_from(0)
     }
 
     /// The same, from the `depth`th open scope inward.
-    pub fn scoped_keys_from(&self, depth: usize) -> impl Iterator<Item = ClassId> + '_ {
-        self.scopes[depth..]
-            .iter()
-            .flatten()
-            .map(|&(class, _)| class)
+    pub fn scoped_keys_from(&self, depth: usize) -> impl Iterator<Item = u32> + '_ {
+        self.scopes[depth..].iter().flatten().map(|&(key, _)| key)
     }
 
-    /// Whether an open scope wrote `class`'s entry — an assumption, as opposed
-    /// to what the class states about itself.
-    pub fn written_in_scope(&self, class: ClassId) -> bool {
-        self.scoped_keys().any(|written| written == class)
+    /// Whether an open scope wrote `key`'s entry — an assumption, as opposed
+    /// to what the id was known to be before the scope opened.
+    pub fn written_in_scope(&self, key: u32) -> bool {
+        self.scoped_keys().any(|written| written == key)
     }
 
     pub fn push_scope(&mut self) {
@@ -202,10 +218,10 @@ impl<V: Copy + Eq + Hash> Column<V> {
 
     /// Undo everything the innermost scope wrote.
     pub fn pop_scope(&mut self) {
-        for (class, previous) in self.scopes.pop().expect("open scope").into_iter().rev() {
+        for (key, previous) in self.scopes.pop().expect("open scope").into_iter().rev() {
             match previous {
-                Some(entry) => self.fact.insert(class, entry),
-                None => self.fact.remove(&class),
+                Some(entry) => self.fact.insert(key, entry),
+                None => self.fact.remove(&key),
             };
         }
     }
@@ -215,8 +231,8 @@ impl<V: Copy + Eq + Hash> Column<V> {
 mod tests {
     use super::*;
 
-    fn class(id: u32) -> ClassId {
-        ClassId(id)
+    fn class(id: u32) -> u32 {
+        id
     }
 
     fn agreeing<V>() -> Column<V> {
@@ -271,7 +287,7 @@ mod tests {
         column.raise(class(0), 1u32, 1);
         column.raise(class(1), 1, 1);
         column.raise(class(1), 2, 2);
-        let holders: Vec<ClassId> = column.classes_with(1).collect();
+        let holders: Vec<u32> = column.keys_with(1).collect();
         assert_eq!(holders, vec![class(0)]);
     }
 

@@ -1,48 +1,65 @@
-//! The relational engine behind TIR's e-graph, in two layers.
+//! A relational engine: tables of ids, the equalities over them, and the
+//! queries and fixpoints a compiler runs over both.
 //!
-//! [`store`] is the generic one: tables of `u32` cells, each optionally
-//! weighted, whose key columns determine a value column, with the
-//! whole-column loops done by [`tir_adt::simd`]. It holds any graph and knows
-//! nothing about classes.
+//! [`store`] holds tables of `u32` cells, each optionally weighted, whose key
+//! columns determine a value column, with the whole-column loops done by
+//! [`tir_adt::simd`]. A table holds any relation and knows nothing about what
+//! its cells name.
 //!
-//! [`Engine`] is the e-graph on top of it. A value is a [`Ref`]: a class plus
-//! a constant offset, kept by a union-find that places each class at an offset
-//! from its representative. Each label is a table from operands to the
-//! reference the node is, with the offsets the label's laws move to the result
-//! factored out of the key, so hash-consing is a key lookup, congruence is the
-//! table's functional dependency, and a rewrite's left-hand side is a join.
-//! Rewrites are conjunctive queries; saturation is the least fixpoint of the
-//! rule set.
+//! [`Database`] puts tables together with what their cells name: id spaces,
+//! each partitioned by a union-find that places every id at a constant offset
+//! from its representative, so a cell and its weight read as a [`Ref`]. It
+//! pushes the equalities into the tables on [`Database::canonicalize`],
+//! carrying the offsets along and reporting the rows that came to share a key.
+//! It also keeps lattice columns of what an id is known to be, the epoch
+//! stamps and change log a semi-naive fixpoint reads, the indexes (rows grouped
+//! by a column, ids to the rows naming them) built once per change, and
+//! assumption scopes that snapshot all of it along with the client's own state.
+//!
+//! [`chunk`] is the other physical layout: relations keyed by a row id, as
+//! positional columns and clustered tables cut into chunks a partition owns,
+//! with [`grouping`] for the access paths by any other cell.
+//!
+//! [`query`] is conjunctive queries over a database, with an evaluator that
+//! answers by loops over the tables, or by a worst-case optimal join over
+//! sorted tries where several atoms share a variable; [`rule`] is what a match
+//! writes;
+//! [`saturate`] is the semi-naive fixpoint over a rule set; [`extract`] is the
+//! least-cost fold a client reads a solution off with. They name tables,
+//! columns and cells, and ask their client for whatever means more than that.
+//!
+//! [`Words`] is a client's own table: rows of words, built once and shared by
+//! every database whose queries range over it, for what a rule set knows and
+//! no id names.
+//!
+//! The e-graph is one such client and lives in its own crate, `tir-egraph`.
 
+pub mod chunk;
 mod column;
 mod csr;
-mod engine;
-mod extract;
-mod label;
-mod query;
-mod rule;
-mod saturate;
+mod db;
+pub mod extract;
+pub mod grouping;
+pub mod query;
+pub mod rule;
+pub mod saturate;
 pub mod store;
 mod telemetry;
-mod unionfind;
+pub mod unionfind;
+mod words;
 
-#[cfg(test)]
-mod testing;
-
-pub use column::Fact;
+pub use column::{Column, Fact, Join};
 pub use csr::Csr;
-pub use engine::{ClassRef, Contradiction, Engine, Rows, Stats};
-pub use extract::Extraction;
-pub use label::{Carrier, Label};
-pub use query::{
-    Atom, Cmp, ColumnId, Expr, Externs, Field, Guard, Match, Nested, NoExterns, Plan, Query,
-    Scalar, Source, Step, Var,
+pub use db::{
+    Core, Database, Dissolve, Groups, LatticeId, Marks, Placed, Placement, SpaceId, Stats,
 };
-pub use rule::{HeadOp, LabelFill, Rule};
-pub use saturate::{Delta, round_roots};
+pub use query::{Cmp, Expr, Scalar, Step, Var};
 pub use telemetry::{RoundStats, Timer, report_saturation};
+pub use words::Words;
 
-/// Whether `TIR_SAT_TRACE` asked for a saturation trace on stderr: every class
+pub(crate) type FxHashMap<K, V> = std::collections::HashMap<K, V, tir_adt::FxBuildHasher>;
+
+/// Whether `TIR_SAT_TRACE` asked for a saturation trace on stderr: every id
 /// minted (`A id node children`) and every merge (`U a b -> survivor`), plus
 /// whatever the drivers add.
 ///
@@ -56,69 +73,24 @@ pub fn trace_enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("TIR_SAT_TRACE").is_some_and(|value| value != "0"))
 }
 
-/// An e-class. Only [`Engine::root`] turns one into its canonical form.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ClassId(pub u32);
-
-impl ClassId {
-    pub fn index(self) -> usize {
-        self.0 as usize
-    }
-
-    pub fn from_raw(raw: u32) -> Self {
-        ClassId(raw)
-    }
-}
-
-/// A value: a class plus a constant, read as "the class's value plus
-/// `offset`" modulo 2^W, W being the width of the class's carrier. A class
-/// whose label declares no carrier is only ever referred to at offset zero.
-/// Only [`Engine::find`] turns one into its canonical form.
+/// A reference to an id of a space: the id plus a constant, read as "the id's
+/// value plus `offset`" modulo 2^W, W being the width of the id's carrier. An
+/// id without a carrier is only ever referred to at offset zero. Only
+/// [`Database::find`] turns one into its canonical form.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Ref {
-    pub class: ClassId,
+    pub id: u32,
     pub offset: u64,
 }
 
-/// Most references sit at offset zero, and those hash as their class alone:
-/// a hashed set of references costs what one of classes does.
-impl std::hash::Hash for Ref {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.class.hash(state);
-        if self.offset != 0 {
-            self.offset.hash(state);
-        }
-    }
-}
-
 impl Ref {
-    pub fn new(class: ClassId, offset: u64) -> Self {
-        Self { class, offset }
+    pub fn new(id: u32, offset: u64) -> Self {
+        Self { id, offset }
     }
 }
 
-impl From<ClassId> for Ref {
-    fn from(class: ClassId) -> Self {
-        Self { class, offset: 0 }
-    }
-}
-
-/// A row of one relation: an e-node.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RowId(pub u32);
-
-impl RowId {
-    pub fn index(self) -> usize {
-        self.0 as usize
-    }
-}
-
-/// An interned label: an e-node stripped of its children.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LabelId(pub u32);
-
-impl LabelId {
-    pub fn index(self) -> usize {
-        self.0 as usize
+impl From<u32> for Ref {
+    fn from(id: u32) -> Self {
+        Self { id, offset: 0 }
     }
 }

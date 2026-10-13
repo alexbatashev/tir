@@ -82,6 +82,10 @@ impl Pass for VerifyDepsPass {
         PassTarget::operation_on::<FuncOp>(RegionKind::Nodes)
     }
 
+    fn settles(&self) -> bool {
+        true
+    }
+
     fn run(
         &mut self,
         operation: &OperationRef,

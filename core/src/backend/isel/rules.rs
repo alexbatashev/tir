@@ -252,6 +252,10 @@ pub struct RegOperandSpec {
     pub symbol: u32,
     pub class: RegClassId,
     pub whole: bool,
+    /// The width the value is defined at where the instruction reads its
+    /// register whole and the rule's immediate field keeps the bits above
+    /// that width out of what it computes.
+    pub defined: Option<u32>,
     pub capability: CapabilityKind,
 }
 
@@ -326,6 +330,7 @@ fn requirement(
     register_widths: &[(&str, u32)],
     class: RegClassId,
     whole: bool,
+    defined: Option<u32>,
     capability: CapabilityKind,
 ) -> Option<RegisterRequirement> {
     let (_, width) = register_widths
@@ -336,10 +341,10 @@ fn requirement(
         CapabilityKind::Float => RegisterCapability::float(*width),
         CapabilityKind::Any => RegisterCapability::any(*width),
     };
-    let requirement = if whole {
-        RegisterRequirement::whole(capability)
-    } else {
-        RegisterRequirement::low_bits(capability)
+    let requirement = match (whole, defined) {
+        (true, Some(width)) => RegisterRequirement::whole(capability).defined_at(width),
+        (true, None) => RegisterRequirement::whole(capability),
+        (false, _) => RegisterRequirement::low_bits(capability),
     };
     Some(requirement.at_view_offset(class.info().view.bit_offset))
 }
@@ -373,13 +378,13 @@ pub fn build_rules(
             .registers
             .iter()
             .filter_map(|r| {
-                requirement(register_widths, r.class, r.whole, r.capability)
+                requirement(register_widths, r.class, r.whole, r.defined, r.capability)
                     .map(|req| (r.symbol, req))
             })
             .collect();
         let result_register = spec
             .result
-            .and_then(|r| requirement(register_widths, r.class, false, r.capability));
+            .and_then(|r| requirement(register_widths, r.class, false, None, r.capability));
         rules.push(Rule {
             name: spec.name,
             pattern: build_pattern(context, kinds, blob, &spec.pattern),

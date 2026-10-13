@@ -24,7 +24,7 @@ module {
 }
 
 // CHECK: asm.symbol {name = "aligned"
-// CHECK: arm64.load_doubleword {rt = %{{[0-9]+}}:GPR, rn = %{{[0-9]+}}:GPR, imm = 8}
+// CHECK: arm64.load_doubleword_unscaled {rt = %{{[0-9]+}}:GPR, rn = %{{[0-9]+}}:GPR, imm = 8}
 
 // CHECK: asm.symbol {name = "misaligned"
 // CHECK-NOT: arm64.load_doubleword {

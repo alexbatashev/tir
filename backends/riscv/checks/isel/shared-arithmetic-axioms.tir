@@ -1,4 +1,4 @@
-// RUN: env TIR_VERIFY_AXIOMS=1 tir mc --march=rv64im --stage=isel %s | filecheck %s
+// RUN: tir opt --pass restructure-nodes,instcombine-nodes %s | env TIR_VERIFY_AXIOMS=1 tir mc --march=rv64im --stage=isel | filecheck %s
 
 module {
   %fn_constant_address = func.func @constant_address(%0: !ptr.p<!i32>) -> !i32 {

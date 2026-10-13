@@ -171,7 +171,7 @@ pub mod node;
 pub(crate) mod rewrites;
 pub(crate) mod workload;
 pub use egraph::SemEGraph;
-pub use node::{IrOp, Kind, Prov, SemNode, SemPayload, template_node};
+pub use node::{ANY_FORM, ANY_STATE, IrOp, Kind, Prov, SemNode, SemPayload, template_node};
 pub use rewrites::{SaturationLimits, Theory};
 
 /// Provenance a [`SemGraph`] node may carry; kept out of the node label/leaf payload so it never affects e-node identity.

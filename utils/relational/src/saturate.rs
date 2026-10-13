@@ -2,74 +2,186 @@
 //! searching only what the round before changed, plus the change frontier a
 //! round narrows itself by.
 
-use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::sync::{Mutex, OnceLock};
 
-use tir_adt::FxBuildHasher;
+use smallvec::SmallVec;
 
-use crate::query::{Matches, PlanCache};
-use crate::telemetry::{RoundStats, Timer, apply_rule, register_rules};
-use crate::{ClassId, Engine, Externs, Label, LabelId, Match, Plan, Rule, trace_enabled};
+use crate::FxHashMap;
+use crate::db::{Core, Groups, SpaceId};
+use crate::query::{Atom, Calls, Host, Matches, Param, Plan, PlanCache, Prepared, Unchecked};
+use crate::rule::{Batch, Client, Head, Rule, apply};
+use crate::telemetry::{RoundStats, Timer, count_rule, register_rules};
+use crate::trace_enabled;
+
+/// What a driver asks its client on top of a head's [`Client`].
+pub trait Saturate<C, const S: usize>: Client<C, S> {
+    /// What the client keeps per frontier, dropped with it.
+    type Frontier: Default;
+    /// See [`Host::version`]; one version covers every rule's host.
+    fn version(&self) -> u64;
+    /// The host of rule `rule`'s plan.
+    fn host(&self, rule: usize) -> impl Host + '_;
+    /// What a search calls of [`Self::host`] while it runs, as several
+    /// threads may at once.
+    type Shared<'a>: Calls + Send + Sync
+    where
+        Self: 'a;
+    /// The host of rule `rule`'s plan for a search another thread runs.
+    /// `None`, for a host that reads what is bound to one thread, keeps the
+    /// rule's searches on the driver's.
+    fn shared(&self, rule: usize) -> Option<Self::Shared<'_>>;
+    /// Rule `rule`'s head. Asked for once per saturation, at the rule's first
+    /// match: most rules of a set never match.
+    fn head(&self, rule: usize) -> Vec<Head>;
+    /// The ids rule `rule` is searched at: where it can match anew in
+    /// `frontier`, or with `None` everywhere it can match.
+    fn roots(&mut self, rule: usize, frontier: Option<&mut Delta<Self::Frontier>>) -> Vec<u32>;
+    /// Make the database canonical again after a batch of writes, restoring
+    /// whatever the client's tables promise.
+    fn rebuild(&mut self);
+    /// What the size limit of a saturation counts.
+    fn size(&self) -> usize;
+}
+
+const RULE_SETS: usize = 4;
+
+/// What a client keeps for its saturations: per plan, its search cache, and
+/// which rules a round visits for the rule sets last saturated with.
+#[derive(Default)]
+pub struct Caches {
+    plans: FxHashMap<u64, PlanCache>,
+    indexes: Vec<RuleIndex>,
+}
+
+impl Caches {
+    /// The cache of `plan`, brought up to `host`'s version, or `None` when the
+    /// plan has no match. A plan the host can tell has none gets no cache;
+    /// `blocked` remembers the selection that told, to ask about first next
+    /// time.
+    fn refreshed<C, const S: usize, H: Host + ?Sized>(
+        &mut self,
+        plan: &Plan,
+        db: &Core<C, S>,
+        host: &H,
+        blocked: &mut Option<Param>,
+    ) -> Option<&mut PlanCache> {
+        if blocked.is_some_and(|param| host.empty(param)) {
+            return None;
+        }
+        *blocked = None;
+        let cache = match self.plans.entry(plan.id()) {
+            Entry::Occupied(cache) => cache.into_mut(),
+            Entry::Vacant(cache) => match plan.blocked(host) {
+                Some(param) => {
+                    *blocked = Some(param);
+                    return None;
+                }
+                None => cache.insert(PlanCache::default()),
+            },
+        };
+        plan.refresh(db, host, cache).then_some(cache)
+    }
+
+    /// The cache of `plan`, brought up to `host`'s version, or `None` when the
+    /// plan has no match.
+    pub fn plan<C, const S: usize, H: Host + ?Sized>(
+        &mut self,
+        plan: &Plan,
+        db: &Core<C, S>,
+        host: &H,
+    ) -> Option<&mut PlanCache> {
+        self.refreshed(plan, db, host, &mut None)
+    }
+}
 
 /// Which rules a round has to visit, by what the round before wrote.
-pub(crate) struct RuleIndex {
-    /// Identifies the rule set the index was built for: its rules' plan ids,
-    /// folded.
+struct RuleIndex {
+    /// Identifies the rule set the index was built for.
     rules: u64,
-    /// Operator bucket -> the anchorable rules with a row atom in it.
-    by_op: HashMap<u64, Vec<u32>, FxBuildHasher>,
-    /// The anchorable rules a risen fact can make match, with the columns they
-    /// read.
-    factual: Vec<(u32, u8)>,
-    /// The rules that read no row, with the columns they read: a fact alone
-    /// makes them match, a class minted with it included.
-    rowless: Vec<(u32, u8)>,
+    /// The host version `by_cell` was extended to.
+    version: Option<u64>,
+    /// The row atoms of anchorable rules, in rule order.
+    selects: Vec<Selection>,
+    /// `(table, selected cell)` -> the anchorable rules with a row atom
+    /// selecting it.
+    by_cell: FxHashMap<(u32, u32), SmallVec<[u32; 2]>>,
+    /// Per rule, the selection that last told it has no match.
+    blocked: Vec<Option<Param>>,
+    /// The `(table, column)` pairs `by_cell` names cells of.
+    keyed: Vec<(u32, u8)>,
+    /// The anchorable rules a risen value can make match, with the lattice
+    /// columns they read as a mask.
+    factual: Vec<(u32, u64)>,
+    /// The rules that read no row, with the columns they read: a value alone
+    /// makes them match, an id minted with it included.
+    rowless: Vec<(u32, u64)>,
     /// The rules the change log cannot narrow: searched every round.
     always: Vec<u32>,
     /// Every rule of the saturation proper, for the round that searches all.
     all: Vec<usize>,
 }
 
-impl RuleIndex {
-    /// The plan ids of `rules`, folded into one word. A plan id is never
-    /// reused, so two rule sets that agree here are the same plans in the
-    /// same order.
-    fn fingerprint<L: Label>(rules: &[Rule<L>]) -> u64 {
-        rules.iter().fold(rules.len() as u64, |hash, rule| {
-            let id = rule.plan.id() ^ u64::from(rule.post_saturation);
-            (hash.rotate_left(5) ^ id).wrapping_mul(0x9e37_79b9_7f4a_7c15)
-        })
-    }
+/// A row atom's selection, and per table how many of its cells `by_cell`
+/// holds: resolutions only grow, a table's cells at the end.
+struct Selection {
+    rule: u32,
+    param: Param,
+    column: u8,
+    seen: SmallVec<[(u32, usize); 2]>,
+}
 
-    fn new<L: Label>(rules: &[Rule<L>]) -> Self {
+/// The plan ids of `rules`, folded into one word. A plan id is never reused,
+/// so two rule sets that agree here are the same plans in the same order.
+fn fingerprint(rules: &[Rule<'_>]) -> u64 {
+    rules.iter().fold(rules.len() as u64, |hash, rule| {
+        let id = rule.plan.id() ^ u64::from(rule.post_saturation);
+        (hash.rotate_left(5) ^ id).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+    })
+}
+
+impl RuleIndex {
+    fn new(rules: &[Rule<'_>]) -> Self {
+        let atoms = rules.iter().map(|rule| rule.plan.query().atoms.len()).sum();
         let mut index = Self {
-            rules: Self::fingerprint(rules),
-            by_op: HashMap::default(),
+            rules: fingerprint(rules),
+            version: None,
+            selects: Vec::with_capacity(atoms),
+            by_cell: FxHashMap::default(),
+            blocked: vec![None; rules.len()],
+            keyed: Vec::new(),
             factual: Vec::new(),
             rowless: Vec::new(),
             always: Vec::new(),
-            all: Vec::new(),
+            all: Vec::with_capacity(rules.len()),
         };
         for (at, rule) in rules.iter().enumerate() {
             if rule.post_saturation {
                 continue;
             }
             index.all.push(at);
-            if !rule.plan.anchorable() {
-                // A plan of facts alone matches anew only where a fact rose.
-                if rule.plan.rowless() && rule.plan.fact_anchorable() {
-                    index.rowless.push((at as u32, rule.plan.fact_columns()));
+            let plan = rule.plan;
+            if !plan.anchorable() {
+                // A plan of lattice atoms alone matches anew only where a
+                // value rose.
+                if plan.rowless() && plan.fact_anchorable() {
+                    index.rowless.push((at as u32, plan.fact_columns()));
                 } else {
                     index.always.push(at as u32);
                 }
                 continue;
             }
-            for op in rule.plan.row_ops() {
-                let rules = index.by_op.entry(op).or_default();
-                if rules.last() != Some(&(at as u32)) {
-                    rules.push(at as u32);
+            for atom in &plan.query().atoms {
+                if let Atom::Rows(rows) = atom {
+                    index.selects.push(Selection {
+                        rule: at as u32,
+                        param: rows.select.param,
+                        column: rows.select.column,
+                        seen: SmallVec::new(),
+                    });
                 }
             }
-            let columns = rule.plan.fact_columns();
+            let columns = plan.fact_columns();
             if columns != 0 {
                 index.factual.push((at as u32, columns));
             }
@@ -77,19 +189,81 @@ impl RuleIndex {
         index
     }
 
-    /// The rules this round visits, ascending, into `visit`.
-    fn round<L: Label>(&self, eg: &Engine<L>, narrowed: bool, visit: &mut Vec<usize>) {
+    /// The rules this round visits, ascending, into `visit`. A rule is
+    /// visited when a row the round before wrote holds a cell one of its row
+    /// atoms selects, or a value it reads rose.
+    fn round<C, const S: usize, X: Saturate<C, S>>(
+        &mut self,
+        client: &X,
+        caches: &mut Caches,
+        rules: &[Rule<'_>],
+        narrowed: bool,
+        visit: &mut Vec<usize>,
+    ) {
         visit.clear();
         if !narrowed {
+            // A plan cached for another database is asked afresh of this one.
+            for &at in &self.all {
+                let blocked = &mut self.blocked[at];
+                if blocked.is_none() {
+                    *blocked = rules[at].plan.blocked(&client.host(at));
+                }
+            }
             visit.extend_from_slice(&self.all);
             return;
         }
-        for op in eg.new_ops() {
-            if let Some(rules) = self.by_op.get(&op) {
-                visit.extend(rules.iter().map(|&rule| rule as usize));
+        let version = client.version();
+        if self.version != Some(version) {
+            // A rule's cells are indexed once it can match. Its selections
+            // sit together, in rule order.
+            let (by_cell, keyed) = (&mut self.by_cell, &mut self.keyed);
+            for selects in self.selects.chunk_by_mut(|a, b| a.rule == b.rule) {
+                let rule = selects[0].rule;
+                let plan = rules[rule as usize].plan;
+                let host = client.host(rule as usize);
+                let blocked = &mut self.blocked[rule as usize];
+                let Some(cache) = caches.refreshed(plan, client.db(), &host, blocked) else {
+                    continue;
+                };
+                for select in selects {
+                    let tables = &cache.resolution(select.param).tables;
+                    for (table, cells) in tables {
+                        let known = select.seen.iter().position(|(seen, _)| seen == table);
+                        let at = known.unwrap_or_else(|| {
+                            select.seen.push((*table, 0));
+                            if !keyed.contains(&(*table, select.column)) {
+                                keyed.push((*table, select.column));
+                            }
+                            select.seen.len() - 1
+                        });
+                        for &cell in &cells[select.seen[at].1..] {
+                            let rules = by_cell.entry((*table, cell)).or_default();
+                            if rules.last() != Some(&rule) {
+                                rules.push(rule);
+                            }
+                        }
+                        select.seen[at].1 = cells.len();
+                    }
+                }
             }
+            self.version = Some(version);
         }
-        let rose = eg.facts_rose(false);
+        let db = client.db();
+        for &(table, column) in &self.keyed {
+            if !db.wrote(table) {
+                continue;
+            }
+            let mut last = None;
+            // The rows are sorted by cell, so each cell shows up as a run.
+            db.each_new_cell(table, column as usize, |cell| {
+                if last.replace(cell) != Some(cell)
+                    && let Some(rules) = self.by_cell.get(&(table, cell))
+                {
+                    visit.extend(rules.iter().map(|&rule| rule as usize));
+                }
+            });
+        }
+        let rose = db.rose(false);
         if rose != 0 {
             let reading = self
                 .factual
@@ -97,7 +271,7 @@ impl RuleIndex {
                 .filter(|(_, columns)| columns & rose != 0);
             visit.extend(reading.map(|&(rule, _)| rule as usize));
         }
-        let rose = rose | eg.facts_rose(true);
+        let rose = rose | db.rose(true);
         if rose != 0 {
             let reading = self
                 .rowless
@@ -111,39 +285,26 @@ impl RuleIndex {
     }
 }
 
-/// What an engine keeps for one rule between searches and saturations.
-#[derive(Default)]
-pub(crate) struct RuleCache {
-    pub(crate) plan: PlanCache,
-    /// The label each insert of the head builds, once it has been interned.
-    heads: Vec<Option<LabelId>>,
-}
-
-/// Δ_h grouped by operator, as `(op, row, class)` sorted: for each operator,
-/// the classes holding it paired with the row each one enters that
-/// operator's bucket at, which is what orders the group.
-type OpGroups = Vec<(u64, u32, ClassId)>;
-
 /// Per-round frontier of semi-naive saturation: the change log of the previous
-/// round closed upward, cached by the pattern heights a rule set asks for.
-pub struct Delta {
+/// round closed upward, cached by the heights a rule set asks for, and
+/// whatever the client keeps beside it.
+pub struct Delta<G = ()> {
     /// `levels[h]` is Δ_h; grown on demand, each from the one below it.
-    levels: Vec<Vec<ClassId>>,
-    /// `by_op[h]` groups Δ_h by the operators its classes hold, so a round scans
-    /// each depth once instead of once per rule.
-    /// Each group is ordered by the row a class enters the bucket at.
-    by_op: Vec<OpGroups>,
+    levels: Vec<Vec<u32>>,
+    pub client: G,
 }
 
-impl Delta {
-    /// Seed from a [`Engine::take_changed`] drain.
-    pub fn new(changed: Vec<ClassId>) -> Self {
+impl<G: Default> Delta<G> {
+    /// Seed from a drained change log.
+    pub fn new(changed: Vec<u32>) -> Self {
         Self {
             levels: vec![changed],
-            by_op: Vec::new(),
+            client: G::default(),
         }
     }
+}
 
+impl<G> Delta<G> {
     /// Nothing changed, so no rule can match anywhere new.
     pub fn is_empty(&self) -> bool {
         self.levels[0].is_empty()
@@ -160,288 +321,362 @@ impl Delta {
         self.levels.last().expect("seeded level").len()
     }
 
-    /// Δ_height, ascending.
-    pub fn at<L: Label>(&mut self, eg: &Engine<L>, height: usize) -> &[ClassId] {
+    /// Δ_height of `space`, ascending.
+    pub fn at<C, const S: usize>(
+        &mut self,
+        db: &crate::Database<C, S>,
+        space: SpaceId,
+        height: usize,
+    ) -> &[u32] {
         while self.levels.len() <= height {
             let below = self.levels.last().expect("seeded level");
-            self.levels.push(eg.delta(below, 1));
+            let next = db.close_upward(space, below.iter().copied(), Some(1));
+            self.levels.push(next);
         }
         &self.levels[height]
     }
 
-    /// The classes of Δ_height holding `op`, in the order the operator's row
-    /// bucket holds them: where a rule of that height rooted on that operator can
-    /// match anew.
-    ///
-    /// Scanning the frontier once per depth beats materializing each rule's whole
-    /// bucket and filtering it, because a settled round's frontier is a handful of
-    /// classes while the bucket holds every term of that shape in the function.
-    /// The bucket is appended to as rows are minted, and a class enters it at its
-    /// first row of that operator, so ordering each group by that row reproduces
-    /// the bucket's order exactly — which is the root order a match's position in
-    /// the round is defined by, and so the order class ids are assigned in.
-    pub fn roots<L: Label>(
-        &mut self,
-        eg: &Engine<L>,
-        height: usize,
-        op: u64,
-    ) -> &[(u64, u32, ClassId)] {
-        self.at(eg, height);
-        while self.by_op.len() <= height {
-            let mut by_op: OpGroups = Vec::new();
-            for &class in &self.levels[self.by_op.len()] {
-                let first = by_op.len();
-                for row in eg.rows(class) {
-                    let op = eg.row_op(row);
-                    match by_op[first..].iter_mut().find(|(seen, _, _)| *seen == op) {
-                        Some((_, at, _)) => *at = (*at).min(row.0),
-                        None => by_op.push((op, row.0, class)),
-                    }
-                }
-            }
-            by_op.sort_unstable();
-            self.by_op.push(by_op);
-        }
-        let groups = &self.by_op[height];
-        let from = groups.partition_point(|&(other, _, _)| other < op);
-        let to = groups.partition_point(|&(other, _, _)| other <= op);
-        &groups[from..to]
+    /// Δ_height, once [`Self::at`] has grown the frontier that far.
+    pub fn level(&self, height: usize) -> &[u32] {
+        &self.levels[height]
     }
 }
 
-/// The classes a semi-naive round searches `plan` at: the change frontier at the
-/// plan's height, restricted to the operator its root binds.
-pub fn round_roots<L: Label>(eg: &Engine<L>, plan: &Plan<L>, delta: &mut Delta) -> Vec<ClassId> {
-    match plan.root_op() {
-        Some(op) => delta
-            .roots(eg, plan.height(), op)
-            .iter()
-            .map(|&(_, _, class)| class)
-            .collect(),
-        None => delta.at(eg, plan.height()).to_vec(),
-    }
+const MAX_THREADS: usize = 8;
+
+// Below that, starting the thread costs more than its share of the searches.
+const ROWS_PER_THREAD: usize = 2048;
+
+// One thread is left to whatever runs beside the saturation.
+fn threads() -> usize {
+    static THREADS: OnceLock<usize> = OnceLock::new();
+    *THREADS.get_or_init(|| {
+        let asked = std::env::var("TIR_SATURATE_THREADS").ok();
+        let asked = asked.and_then(|threads| threads.parse::<usize>().ok());
+        let found = || std::thread::available_parallelism().map_or(1, usize::from);
+        asked
+            .unwrap_or_else(|| (found() - 1).min(MAX_THREADS))
+            .max(1)
+    })
 }
 
-impl<L: Label> Engine<L> {
-    /// The index of `rules`, built once per rule set the engine saturates with.
-    fn rule_index(&mut self, rules: &[Rule<L>]) -> std::sync::Arc<RuleIndex> {
-        let wanted = RuleIndex::fingerprint(rules);
-        match &self.rule_index {
-            Some(index) if index.rules == wanted => index.clone(),
-            _ => {
-                let index = std::sync::Arc::new(RuleIndex::new(rules));
-                self.rule_index = Some(index.clone());
-                index
-            }
-        }
-    }
-
-    /// Saturate in place with `rules`, and the host functions their guards call.
-    /// Each iteration searches every rule against one snapshot, then applies and
-    /// rebuilds — a node born this iteration is visible only to the next. Stops
-    /// at a fixpoint (nothing the class and node counts or the fact columns see
-    /// changed, or an empty change log) or at a limit.
-    ///
-    /// A [`Rule::post_saturation`] rule sits out those rounds and fires once
-    /// against the fixpoint, over the classes the saturation touched: the rest of
-    /// the graph was already at that phase's fixpoint when the caller handed it
-    /// over, so only those can hold a match it does not have. The phase is
-    /// terminal — nothing feeds its results back — so a saturation that reached a
-    /// fixpoint drains the change log on the way out, which leaves the next
-    /// assumption scope's entry log holding that scope's own assertion rather
-    /// than this fixpoint's tail. A stop on a limit is not a fixpoint: it marks
-    /// everything changed instead, since the matches it never reached are not
-    /// named by the log.
-    pub fn saturate_rules(
-        &mut self,
-        rules: &[Rule<L>],
-        externs: &dyn Externs<L>,
-        iter_limit: usize,
-        node_limit: usize,
-    ) {
-        let timer = Timer::start();
-        register_rules(rules);
-        // The first round searches before anything else rebuilds.
-        self.rebuild();
-        let mut log = self.take_changed();
-        let mut touched = log.clone();
-        let mut delta = log.take().map(Delta::new);
-        let mut caches = self.take_caches();
-        let index = self.rule_index(rules);
-        let mut visit: Vec<usize> = Vec::new();
-        let mut iters = 0;
-        let mut on_a_limit = true;
+// A search reads the database's core and its own plan's cache, so which thread
+// ran it shows nowhere.
+fn search_shared<C: Sync, const S: usize, X: Saturate<C, S>>(
+    client: &X,
+    caches: &mut Caches,
+    rules: &[Rule<'_>],
+    jobs: Vec<(usize, Prepared)>,
+    found: &mut [(usize, Matches)],
+) {
+    let rows: usize = jobs.iter().map(|(_, prepared)| prepared.starts()).sum();
+    let workers = threads().min(rows / ROWS_PER_THREAD).max(1);
+    let groups = client.db().groups();
+    let (core, groups): (&Core<C, S>, &Groups) = (client.db(), &groups);
+    let work: Vec<_> = jobs
+        .into_iter()
+        .filter_map(|(slot, prepared)| {
+            let rule = found[slot].0;
+            let cache = caches.plans.remove(&rules[rule].plan.id())?;
+            Some((slot, rule, prepared, cache, client.shared(rule)?))
+        })
+        .collect();
+    let queue = Mutex::new(work.into_iter());
+    let search = || {
+        let mut done = Vec::new();
         loop {
-            let size = self.total_size();
-            if iters >= iter_limit || size >= node_limit {
-                break;
-            }
-            let before = (self.num_classes(), size, self.stats().raises);
-
-            let mut stats = RoundStats::start(self, delta.as_ref());
-            let mut found: Vec<(usize, Matches)> = Vec::new();
-            // Most rounds write a handful of rows, and most rules read none of
-            // their operators: those rules are not visited at all.
-            index.round(self, delta.is_some(), &mut visit);
-            for &index in &visit {
-                let rule = &rules[index];
-                // A rule one of whose operators the graph does not hold has no
-                // match, and is settled before its cache is looked up.
-                if rule
-                    .plan
-                    .row_ops()
-                    .any(|op| self.labels_with_op(op).is_empty())
-                {
-                    continue;
-                }
-                let cache = &mut caches.entry(rule.plan.id()).or_default().plan;
-                if rule.plan.anchorable() {
-                    // The round's new matches are the ones holding a row the
-                    // round before wrote, found from those rows, plus the ones
-                    // a fact alone made new, found the way the change log names
-                    // them: at the roots near a change, among old rows.
-                    let matches = match delta.as_mut() {
-                        None => rule.plan.search_all(self, externs, cache),
-                        Some(delta) => {
-                            let mut matches = rule.plan.search_new(self, externs, cache);
-                            if rule.plan.fact_columns() & self.facts_rose(false) != 0 {
-                                if rule.plan.fact_anchorable() {
-                                    let risen = rule.plan.search_risen(self, false, externs, cache);
-                                    matches.extend(risen);
-                                } else {
-                                    let roots = round_roots(self, &rule.plan, delta);
-                                    stats.searched(roots.len(), Some(delta));
-                                    let found = rule.plan.search_facts(self, roots, externs, cache);
-                                    matches.extend(found);
-                                }
-                            }
-                            matches
-                        }
-                    };
-                    found.push((index, matches));
-                    continue;
-                }
-                if delta.is_some() && rule.plan.rowless() && rule.plan.fact_anchorable() {
-                    let matches = rule.plan.search_risen(self, true, externs, cache);
-                    found.push((index, matches));
-                    continue;
-                }
-                // Everything a rule reads is an atom or a guard over what an atom
-                // bound, so both narrowings come free of any hand-asserted
-                // licence — for a rule the change log can speak for. It cannot
-                // speak for one whose match depends on rows outside the root's
-                // cone.
-                let bounded = !rule.plan.unbounded();
-                let roots = match delta.as_mut().filter(|_| bounded) {
-                    Some(delta) => round_roots(self, &rule.plan, delta),
-                    None => rule.plan.roots(self),
-                };
-                stats.searched(roots.len(), delta.as_ref());
-                if roots.is_empty() {
-                    continue;
-                }
-                let fresh = (delta.is_some() && bounded, 0);
-                let matches = rule
-                    .plan
-                    .search_roots(self, roots, None, fresh, externs, cache);
-                found.push((index, matches));
-            }
-            let tracing = trace_enabled();
-            for (index, matches) in found {
-                let rule = &rules[index];
-                let cache = caches.entry(rule.plan.id()).or_default();
-                let heads = &mut cache.heads;
-                for at in 0..matches.len() {
-                    let (root, bindings, scalars) = matches.get(at);
-                    if tracing {
-                        eprintln!("M {} {}", rule.name, self.root(root).index());
-                    }
-                    stats.apply(self, |eg| {
-                        apply_rule(&rule.name, eg, |eg| {
-                            eg.apply_head_cached(
-                                &rule.head,
-                                rule.head_vars,
-                                bindings,
-                                scalars,
-                                heads,
-                            )
-                        })
-                    });
-                }
-                cache.plan.recycle(matches);
-            }
-            self.rebuild();
-            stats.finish(self);
-
-            iters += 1;
-            let log = self.take_changed();
-            match (&mut touched, &log) {
-                (Some(all), Some(changed)) => all.extend(changed.iter().copied()),
-                _ => touched = None,
-            }
-            delta = log.map(Delta::new);
-            if delta.as_ref().is_some_and(Delta::is_empty) {
-                on_a_limit = false;
-                break;
-            }
-            if (self.num_classes(), self.total_size(), self.stats().raises) == before {
-                // The counts held, but a round that changed only facts changed
-                // nothing they count, and is not a fixpoint. `None` is the widest
-                // such log there is, so it counts too.
-                on_a_limit = delta.as_ref().is_none_or(|delta| !delta.is_empty());
-                break;
-            }
-        }
-        self.put_caches(caches);
-        if on_a_limit {
-            self.mark_all_changed();
-            touched = None;
-        }
-        self.rebuild();
-        self.post_saturate(rules, externs, touched);
-        if !on_a_limit {
-            self.take_changed();
-        }
-        timer.finish();
-    }
-
-    /// Fire every [`Rule::post_saturation`] rule once over `touched`, or over the
-    /// whole graph where the saturation could not name what it changed.
-    fn post_saturate(
-        &mut self,
-        rules: &[Rule<L>],
-        externs: &dyn Externs<L>,
-        touched: Option<Vec<ClassId>>,
-    ) {
-        let mut touched = touched.map(|mut all| {
-            for id in &mut all {
-                *id = self.root(*id);
-            }
-            all.sort_unstable();
-            all.dedup();
-            Delta::new(all)
-        });
-        let mut found: Vec<(&Rule<L>, Vec<Match>)> = Vec::new();
-        for rule in rules.iter().filter(|rule| rule.post_saturation) {
-            let roots = match touched.as_mut().filter(|_| !rule.plan.unbounded()) {
-                Some(touched) => round_roots(self, &rule.plan, touched),
-                None => rule.plan.roots(self),
+            let next = queue.lock().expect("a queue of searches").next();
+            let Some((slot, rule, prepared, mut cache, host)) = next else {
+                return done;
             };
+            let plan = rules[rule].plan;
+            let matches = plan.run(core, groups, &host, &prepared, &mut cache);
+            done.push((slot, rule, matches, cache));
+        }
+    };
+    let done = std::thread::scope(|scope| {
+        let others: Vec<_> = (1..workers).map(|_| scope.spawn(search)).collect();
+        let mut done = search();
+        for other in others {
+            done.extend(other.join().expect("a search thread"));
+        }
+        done
+    });
+    for (slot, rule, matches, cache) in done {
+        let later = std::mem::replace(&mut found[slot].1, matches);
+        found[slot].1.extend(later);
+        caches.plans.insert(rules[rule].plan.id(), cache);
+    }
+}
+
+/// Saturate `rules` over `space` in place. Each round searches every rule
+/// against one snapshot, then applies the matches a rule at a time, rebuilding
+/// after each — a row born this round is visible only to the next round's
+/// searches. Stops at a fixpoint (nothing the live ids, the
+/// client's size or the raised values count changed, or an empty change log)
+/// or at a limit.
+///
+/// A [`Rule::post_saturation`] rule sits out those rounds and fires once
+/// against the fixpoint, over the ids the saturation touched: the rest was
+/// already at that phase's fixpoint when the caller handed it over, so only
+/// those can hold a match it does not have. The phase is terminal, so a
+/// saturation that reached a fixpoint drains the change log on the way out,
+/// which leaves the next assumption scope's log holding that scope's own
+/// assertion rather than this fixpoint's tail. A stop on a limit is not a
+/// fixpoint: it marks everything changed instead, since the matches it never
+/// reached are not named by the log.
+pub fn saturate<C: Sync, const S: usize, X: Saturate<C, S>>(
+    client: &mut X,
+    caches: &mut Caches,
+    space: SpaceId,
+    rules: &[Rule<'_>],
+    iter_limit: usize,
+    size_limit: usize,
+) {
+    let timer = Timer::start();
+    register_rules(rules.iter().map(|rule| rule.name));
+    // The first round searches before anything else rebuilds.
+    client.rebuild();
+    let mut log = take_changed(client, space);
+    let mut touched = log.clone();
+    let mut delta: Option<Delta<X::Frontier>> = log.take().map(Delta::new);
+    let known = fingerprint(rules);
+    let known = caches.indexes.iter().position(|index| index.rules == known);
+    let mut index = match known {
+        Some(at) => caches.indexes.swap_remove(at),
+        None => RuleIndex::new(rules),
+    };
+    let mut visit: Vec<usize> = Vec::with_capacity(rules.len());
+    let mut heads: Vec<Option<Vec<Head>>> = vec![None; rules.len()];
+    let mut batch = Batch::default();
+    let mut iters = 0;
+    let mut on_a_limit = true;
+    loop {
+        let size = client.size();
+        if iters >= iter_limit || size >= size_limit {
+            break;
+        }
+        let progress = |client: &X| {
+            let db = client.db();
+            (db.live(space), client.size(), db.stats().raises)
+        };
+        let before = progress(client);
+
+        let mut stats = RoundStats::start(client.db().stats(), delta.as_ref());
+        let mut found: Vec<(usize, Matches)> = Vec::with_capacity(rules.len());
+        let mut shared: Vec<(usize, Prepared)> = Vec::new();
+        // Most rounds write a handful of rows, and most rules select none of
+        // their cells: those rules are not visited at all.
+        index.round(client, caches, rules, delta.is_some(), &mut visit);
+        for &at in &visit {
+            let plan = rules[at].plan;
+            // A rule one of whose row atoms reads no table has no match, and is
+            // settled before any root is worked out.
+            let blocked = &mut index.blocked[at];
+            let Some(cache) = caches.refreshed(plan, client.db(), &client.host(at), blocked) else {
+                continue;
+            };
+            if plan.anchorable() {
+                // The round's new matches are the ones holding a row the round
+                // before wrote, found from those rows, plus the ones a value
+                // alone made new, found the way the change log names them: at
+                // the roots near a change, among old rows.
+                // A host other threads may read has the search from rows
+                // prepared here and run with the round's other such.
+                let (db, host) = (client.db(), client.host(at));
+                let rows = match (delta.is_some(), client.shared(at).is_some()) {
+                    (false, false) => Ok(plan.search_all(db, &host, cache)),
+                    (true, false) => Ok(plan.search_new(db, &host, cache)),
+                    (false, true) => Err(plan.prepare_all(db, &host, cache)),
+                    (true, true) => Err(plan.prepare_new(db, &host, cache)),
+                };
+                drop(host);
+                let (mut matches, prepared) = match rows {
+                    Ok(matches) => (matches, None),
+                    Err(prepared) => (Matches::default(), prepared),
+                };
+                shared.extend(prepared.map(|prepared| (found.len(), prepared)));
+                let matches = match delta.as_mut() {
+                    None => matches,
+                    Some(delta) => {
+                        if plan.fact_columns() & client.db().rose(false) != 0 {
+                            if plan.fact_anchorable() {
+                                let host = client.host(at);
+                                matches.extend(plan.search_risen(client.db(), &host, false, cache));
+                            } else {
+                                let roots = client.roots(at, Some(delta));
+                                stats.searched(roots.len(), Some(delta));
+                                let host = client.host(at);
+                                let found = plan.search_facts(client.db(), &host, roots, cache);
+                                matches.extend(found);
+                            }
+                        }
+                        matches
+                    }
+                };
+                found.push((at, matches));
+                continue;
+            }
+            if delta.is_some() && plan.rowless() && plan.fact_anchorable() {
+                let matches = plan.search_risen(client.db(), &client.host(at), true, cache);
+                found.push((at, matches));
+                continue;
+            }
+            // Everything a rule reads is an atom or a guard over what an atom
+            // bound, so both narrowings come free of any hand-asserted licence
+            // — for a rule the change log can speak for. It cannot speak for
+            // one whose match depends on rows outside the root's cone.
+            let bounded = !plan.unbounded();
+            let roots = client.roots(at, delta.as_mut().filter(|_| bounded));
+            stats.searched(roots.len(), delta.as_ref());
             if roots.is_empty() {
                 continue;
             }
-            found.push((
-                rule,
-                rule.plan.search(self, roots, &|_, _| true, false, externs),
-            ));
+            let fresh = (delta.is_some() && bounded, 0);
+            let host = client.host(at);
+            let matches =
+                plan.search_roots(client.db(), &host, roots, None::<&Unchecked>, fresh, cache);
+            found.push((at, matches));
         }
-        for (rule, matches) in &found {
-            for m in matches {
-                apply_rule(&rule.name, self, |eg| {
-                    eg.apply_head(&rule.head, rule.head_vars, m)
-                });
+        if !shared.is_empty() {
+            search_shared(client, caches, rules, shared, &mut found);
+        }
+        let tracing = trace_enabled();
+        for (at, matches) in found {
+            if matches.is_empty() {
+                continue;
+            }
+            let rule = &rules[at];
+            let head = heads[at].get_or_insert_with(|| client.head(at));
+            if tracing {
+                for index in 0..matches.len() {
+                    let root = client.db().root(space, matches.get(index).0);
+                    eprintln!("M {} {root}", rule.name);
+                }
+            }
+            apply(
+                client,
+                space,
+                at,
+                head,
+                rule.head_vars,
+                &matches,
+                &mut batch,
+            );
+            stats.applied(matches.len(), batch.idle());
+            count_rule(rule.name, matches.len(), batch.idle());
+            // The next rule's inserts are looked up in tables that name what
+            // this one equated.
+            client.rebuild();
+            if let Some(cache) = caches.plans.get_mut(&rule.plan.id()) {
+                cache.recycle(matches);
             }
         }
-        self.rebuild();
+        client.rebuild();
+        stats.finish(client.db().stats());
+
+        iters += 1;
+        let log = take_changed(client, space);
+        match (&mut touched, &log) {
+            (Some(all), Some(changed)) => all.extend(changed.iter().copied()),
+            _ => touched = None,
+        }
+        delta = log.map(Delta::new);
+        if delta.as_ref().is_some_and(Delta::is_empty) {
+            on_a_limit = false;
+            break;
+        }
+        if progress(client) == before {
+            // The counts held, but a round that changed only values changed
+            // nothing they count, and is not a fixpoint. `None` is the widest
+            // such log there is, so it counts too.
+            on_a_limit = delta.as_ref().is_none_or(|delta| !delta.is_empty());
+            break;
+        }
+    }
+    caches.indexes.truncate(RULE_SETS - 1);
+    caches.indexes.insert(0, index);
+    if on_a_limit {
+        client.db_mut().mark_all_changed(space);
+        touched = None;
+    }
+    client.rebuild();
+    post_saturate(client, caches, space, rules, &mut heads, touched);
+    if !on_a_limit {
+        take_changed(client, space);
+    }
+    timer.finish();
+}
+
+/// Close the epoch and drain `space`'s change log; see
+/// [`crate::Database::take_changed`].
+fn take_changed<C, const S: usize>(
+    client: &mut impl Client<C, S>,
+    space: SpaceId,
+) -> Option<Vec<u32>> {
+    let db = client.db_mut();
+    db.advance();
+    db.take_changed(space)
+}
+
+/// Fire every [`Rule::post_saturation`] rule once over `touched`, or over
+/// everything where the saturation could not name what it changed.
+fn post_saturate<C, const S: usize, X: Saturate<C, S>>(
+    client: &mut X,
+    caches: &mut Caches,
+    space: SpaceId,
+    rules: &[Rule<'_>],
+    heads: &mut [Option<Vec<Head>>],
+    touched: Option<Vec<u32>>,
+) {
+    let mut touched: Option<Delta<X::Frontier>> = touched.map(|mut all| {
+        for id in &mut all {
+            *id = client.db().root(space, *id);
+        }
+        all.sort_unstable();
+        all.dedup();
+        Delta::new(all)
+    });
+    let mut found: SmallVec<[(usize, Matches); 4]> = SmallVec::new();
+    for (at, rule) in rules.iter().enumerate() {
+        if !rule.post_saturation {
+            continue;
+        }
+        let roots = client.roots(at, touched.as_mut().filter(|_| !rule.plan.unbounded()));
+        if roots.is_empty() {
+            continue;
+        }
+        let host = client.host(at);
+        let Some(cache) = caches.plan(rule.plan, client.db(), &host) else {
+            continue;
+        };
+        let matches = rule.plan.search_roots(
+            client.db(),
+            &host,
+            roots,
+            None::<&Unchecked>,
+            (false, 0),
+            cache,
+        );
+        found.push((at, matches));
+    }
+    let mut batch = Batch::default();
+    for (at, matches) in &found {
+        if matches.is_empty() {
+            continue;
+        }
+        let rule = &rules[*at];
+        let head = heads[*at].get_or_insert_with(|| client.head(*at));
+        apply(
+            client,
+            space,
+            *at,
+            head,
+            rule.head_vars,
+            matches,
+            &mut batch,
+        );
+        count_rule(rule.name, matches.len(), batch.idle());
+        client.rebuild();
     }
 }

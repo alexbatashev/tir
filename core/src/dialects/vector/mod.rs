@@ -131,6 +131,7 @@ macro_rules! vector_binop {
             $op {
                 name: $name,
                 dialect: "vector",
+                verifier: "true",
                 operands: O {
                     lhs: "crate::vector::VectorType",
                     rhs: "crate::vector::VectorType",
@@ -142,7 +143,32 @@ macro_rules! vector_binop {
                 sem: $sem,
             }
         }
+
+        impl tir::Verifiable for $op {
+            fn verify_impl(&self, context: &Context) -> Result<(), Error> {
+                same_vector(context, &self.0)
+            }
+        }
     };
+}
+
+// An elementwise operation works lane by lane: its operands and its result
+// are one vector type.
+fn same_vector(context: &Context, op: &tir::OpHandle) -> Result<(), Error> {
+    let ty = |value: &tir::ValueId| context.get_value(*value).ty();
+    let result = ty(&op.results()[0]);
+    if op
+        .operands()
+        .iter()
+        .take(2)
+        .all(|value| ty(value) == result)
+    {
+        return Ok(());
+    }
+    Err(Error::VerificationError(format!(
+        "vector.{} operands must have the result's vector type",
+        op.name()
+    )))
 }
 
 vector_binop!(
@@ -185,24 +211,25 @@ operation! {
 }
 
 /// The active lane count for `$get_vlen`, the `n` each `split` cuts the operand
-/// bits into: a fixed vector takes it from the result type's static length (a
-/// constant); a scalable vector takes it from the dynamic `vl` operand (index 2).
+/// bits into: a scalable vector takes it from the dynamic `vl` operand (index 2);
+/// a fixed vector takes it from the result type's static length (a constant).
+/// With neither, the count is the `vl` operand the operation goes without: the
+/// lane count of whatever type the operation is used at.
 fn vlen_node(op: &tir::OpHandle, g: &mut tir::sem::SemGraph) -> tir::NodeId {
-    if op.operands().len() > 2 {
-        let n = g.add_node(tir::sem::SymKind::Symbol);
-        g.set_leaf_data(n, tir::sem::SymPayload::SymbolId(2));
-        return n;
-    }
     let context = op.context.clone();
     let ty = context.get_value(op.results()[0]).ty();
     let length = (context.get_type_data(ty).as_ref() as &dyn Any)
         .downcast_ref::<VectorType>()
-        .and_then(|t| t.length())
-        .unwrap_or(0) as u64;
+        .and_then(|t| t.length());
+    let Some(length) = length.filter(|_| op.operands().len() <= 2) else {
+        let n = g.add_node(tir::sem::SymKind::Symbol);
+        g.set_leaf_data(n, tir::sem::SymPayload::SymbolId(2));
+        return n;
+    };
     let n = g.add_node(tir::sem::SymKind::Constant);
     g.set_leaf_data(
         n,
-        tir::sem::SymPayload::Int(tir_adt::APInt::new(32, length)),
+        tir::sem::SymPayload::Int(tir_adt::APInt::new(32, u64::from(length))),
     );
     n
 }

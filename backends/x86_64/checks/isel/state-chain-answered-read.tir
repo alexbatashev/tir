@@ -27,7 +27,8 @@ module {
   module_end
 }
 
+// The stored constant is defined ahead of the loop, as the IR has it.
+// CHECK: x86_64.mov_imm32 {dst = %[[FOUR:[0-9]+]]:GPR32, imm = 4}
 // CHECK: ^bb{{[0-9]+}}(%[[ENTERED:[0-9]+]]: !state<memory>):
-// CHECK-NEXT: x86_64.mov_imm32
-// CHECK-NEXT: %[[WRITTEN:[0-9]+]] = x86_64.mov_store32 {{.*}} state(%[[ENTERED]])
+// CHECK-NEXT: %[[WRITTEN:[0-9]+]] = x86_64.mov_store32 {{.*}}src = %[[FOUR]]:GPR32} state(%[[ENTERED]])
 // CHECK: asm.vbr {{.*}} %[[WRITTEN]] ^bb1

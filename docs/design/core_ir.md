@@ -275,34 +275,77 @@ blocks and nodes. Local edits suit small rewrites whose surrounding structure
 stays useful. Staging avoids repeatedly exposing a half-rebuilt region to
 traversal and analysis.
 
-### Commit, discard, and parallel work
+### Storage
 
-A context reads a committed base together with its pending edits. Each edit is
-visible to later reads through that context. `commit` incorporates the pending
-edits into the base, while `discard` drops the edits made since the last commit.
+The IR is stored as relations over four ID spaces: operations, values, regions,
+and blocks. An ID is the position of a row. IDs are minted once and never reused.
+Inside a function a later ID is larger than an earlier one, and larger than every
+module-level ID that existed when it was minted.
+
+Each ID space is cut into chunks of 4096 rows. A chunk holds its rows as columns.
+A fact with one value per entity is a positional column: an operation's name, its
+holder, and its position there; a value's type and definition; a region's parent
+operation. A list an entity owns is a clustered table stored in the owner's chunk,
+sorted by owner, with an offset per owner: operands, results, and regions of an
+operation; ports and results of a region; arguments of a block. Reading one is an
+offset load and a slice.
+
+Every other access path is derived from those rows. Use lists are operand rows
+grouped by value, and the regions that publish a value are region result rows
+grouped the same way. The operations of a block or unordered region are operation
+rows grouped by holder and ordered by position, and the blocks of a region
+likewise. Positions leave gaps, so an insert between two neighbours writes one
+row. The groupings are built per partition when first read and brought up to date
+from the rows written since. A use list merges the operand rows of the operations
+written since into a sorted tail beside its base. A holder's list takes a written
+operation out of the list it sat in and puts it where its position says in the
+list it sits in now, so an append costs a search of that list and not a pass over
+it.
+
+A pass that derives a fact per operation, value, block, or region of one
+function keeps it in an `IdMap` or `IdSet`. These are columns indexed by row
+position, one vector per chunk the function touches, so a lookup hashes nothing
+and iteration is in ID order. An operation's interfaces are found the same way,
+through its name column.
+
+Each chunk belongs to one partition. The module is a partition, and a frontend
+opens another for each function it builds with `Context::function_scope`.
+Everything created inside the scope lands in that function's chunks, so a
+function's rows share chunks with no other function's.
+
+### Commit and parallel work
+
+A context reads and edits the chunks directly, and each edit is visible to the
+next read through that context. `commit` closes an epoch. It moves no ID.
 
 ```mermaid
 flowchart LR
-	B[Committed base] --> V[Context view]
-	E[Pending edits] --> V
+	C[Chunks] --> V[Context]
 	V --> Read[Reads see current IR]
-	E --> Commit[Commit]
-	Commit --> Next[New committed base]
-	E --> Discard[Discard]
-	Discard --> Old[Keep previous base]
+	V --> Edit[Edits write chunks]
+	Edit --> Commit[Commit closes the epoch]
+	C --> F[Fork or task context]
+	F --> Copy[Copies a chunk on first write]
 ```
 
-A frozen view shares the committed base without including pending edits. The
-base can cross threads, while each editing context belongs to one thread.
-Commit requires frozen readers to release the base first. Cloning an editing
-context shares its edits, so it does not create an independent transaction.
+Chunks are shared by pointer. Forking a context copies the pointers, and a write
+to a chunk that another context still reads copies that chunk first. A fork is
+therefore an independent trial that its origin can adopt or drop. Each context
+belongs to one thread.
 
-Parallel passes use separate editing contexts over a shared base. They return
-edit batches for a coordinated commit. The commit rejects overlapping writes to
-the same existing entity. Work on separate functions is a useful way to keep
-edits independent, provided those passes do not also change shared module data.
+Interned types and their state classifications never change. Each context caches
+the state classifications it has read, extending that cache when the shared type
+registry grows. Operand and e-graph queries can then classify existing types
+without locking the registry.
+
+Parallel passes run each function in a context of its own over the committed
+chunks. A task mints IDs from chunk indices reserved for its place in the epoch,
+so two tasks never mint the same ID and the result does not depend on how many
+workers ran. The commit takes a chunk whole when one task wrote it and merges row
+by row when several did. It rejects two tasks writing the same row. One task's
+use replacements are replayed over the rows the others wrote.
 
 Commit is a storage boundary, not proof that a transformation preserved the
-program. Change tracking lets analyses detect stale results, and verification
-checks graph structure and dialect constraints. The pass still has to preserve
-the computation and its effects.
+program. Each partition counts its edits, which lets analyses detect stale
+results, and verification checks graph structure and dialect constraints. The
+pass still has to preserve the computation and its effects.
