@@ -162,7 +162,9 @@ operation interfaces and dependencies.
 What every operation of a kind shares is read once, at the first one seeded:
 which of those interfaces the kind has and, per attribute list, the operator
 a representable operation becomes, with its laws and cost. An operation then
-contributes only its own operands, type and identity. The pass keeps what was
+contributes only its own operands, type and identity. An attribute the
+operation's schema does not declare is no part of that identity, so two
+operations differing only in such an attribute are one. The pass keeps what was
 read beside its vocabulary (`rewrite::Kinds`) and lends it to the seeding of
 its next function, as instruction selection does. Whether an operation is
 representable depends on its attributes and on the data layout in scope, so a
@@ -465,7 +467,8 @@ them.
 
 The rounds stop when no further progress is found or when a resource limit
 is reached. Bounds on work and graph size keep compilation finite even when
-the rules can generate many alternatives. The result therefore contains the
+the rules can generate many alternatives. The bound on size is a growth over
+the seeded graph, so a large function is searched like a small one. The result therefore contains the
 equivalences discovered within the search budget, not every possible identity.
 
 Some rules run in a terminal post-saturation phase. Reassociating a product

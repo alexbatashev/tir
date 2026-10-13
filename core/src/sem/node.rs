@@ -90,13 +90,18 @@ impl IrOp {
             instance.attributes().to_vec(),
             cost,
         );
-        // The attributes identify what the op computes, in one spelling: a
-        // data layout carried by a detached op and floating-point semantics
-        // equal to the operation's defaults add nothing, and a builder's
-        // order is not an identity.
-        let layout = context.sym(crate::DATA_LAYOUT);
+        // The attributes identify what the op computes, in one spelling:
+        // one the op does not declare and floating-point semantics equal to
+        // the operation's defaults add nothing, and a builder's order is not
+        // an identity.
+        let declared = crate::OP_SCHEMAS
+            .iter()
+            .find(|schema| schema.dialect == op.dialect && schema.name == op.name)
+            .map_or(&[][..], |schema| schema.attributes);
         op.attrs.retain(|attribute| {
-            Some(attribute.name) != layout
+            declared
+                .iter()
+                .any(|declared| context.sym(declared.name) == Some(attribute.name))
                 && !matches!(
                     &attribute.value,
                     AttributeValue::FpSemantics(semantics)

@@ -1,0 +1,14 @@
+// RUN: tir mc --march=x86_64 --stage=isel %s | filecheck %s
+
+// An attribute the op does not declare is no part of what it computes, so
+// the multiplication selects as it would without one.
+
+module {
+  %fn_f = func.func @f(%a: !i32, %b: !i32) -> !i32 {
+    %c = muli %a, %b {debug = 1} : !i32
+    func.return %c
+  }
+  module_end
+}
+
+// CHECK: x86_64.imul32
