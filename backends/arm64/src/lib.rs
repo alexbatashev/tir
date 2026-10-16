@@ -281,7 +281,7 @@ impl tir::backend::call_lowering::CallEmitter for Arm64CallEmitter {
         _abi: &tir::backend::abi::AbiInfo,
         _outgoing_size: u32,
         _vector_register_args: u8,
-    ) -> Vec<Box<dyn Operation>> {
+    ) -> Vec<(Box<dyn Operation>, tir::backend::liveness::PhysReg)> {
         Vec::new()
     }
 
@@ -372,6 +372,11 @@ impl tir::backend::regalloc::TargetRegAlloc for Arm64RegAlloc {
             "GPR" | "GPRsp" | "GPR32" | "GPR32sp" => mv(context, dst, src),
             "FPR64" => {
                 let builder = FMoveRegisterDoubleOpBuilder::new(context);
+                let builder = tir::reg_use!(builder, fa, src);
+                Box::new(tir::reg_def!(builder, fd, dst).build())
+            }
+            "FPR32" => {
+                let builder = FMoveRegisterSingleOpBuilder::new(context);
                 let builder = tir::reg_use!(builder, fa, src);
                 Box::new(tir::reg_def!(builder, fd, dst).build())
             }
