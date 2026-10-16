@@ -163,10 +163,6 @@ impl APInt {
         }
     }
 
-    /// Interpret the bit pattern as two's-complement at this width, regardless
-    /// of the `signed` flag. Signed division/remainder are defined on the bits,
-    /// so a value produced without the flag set (e.g. an `extract`) must still
-    /// divide with its high bit as the sign.
     fn signed_at_width(&self) -> i64 {
         if self.width >= 64 {
             self.value as i64
@@ -487,70 +483,51 @@ impl APInt {
 
     /// Unsigned division
     pub fn udiv(&self, other: &APInt) -> Self {
-        assert_eq!(self.width, other.width, "Widths must match");
-        assert!(!other.is_zero(), "Division by zero");
-        if self.width > 64 {
-            let (quotient, _) = divrem_words(&self.limbs(), &other.limbs(), self.width);
-            return Self::from_words(self.width, false, quotient);
-        }
-        APInt {
-            width: self.width,
-            signed: false,
-            value: self.value / other.value,
-            high: None,
-        }
+        self.divrem(other, false).0
     }
 
     /// Signed division
     pub fn sdiv(&self, other: &APInt) -> Self {
-        assert_eq!(self.width, other.width, "Widths must match");
-        assert!(!other.is_zero(), "Division by zero");
-        if self.width > 64 {
-            let (quotient, _) = self.signed_divrem(other);
-            return quotient;
-        }
-        let mask = Self::mask_for_width(self.width);
-        let result = self.signed_at_width().wrapping_div(other.signed_at_width());
-        APInt {
-            width: self.width,
-            signed: true,
-            value: (result as u64) & mask,
-            high: None,
-        }
+        self.divrem(other, true).0
     }
 
     /// Unsigned remainder
     pub fn urem(&self, other: &APInt) -> Self {
-        assert_eq!(self.width, other.width, "Widths must match");
-        assert!(!other.is_zero(), "Division by zero");
-        if self.width > 64 {
-            let (_, remainder) = divrem_words(&self.limbs(), &other.limbs(), self.width);
-            return Self::from_words(self.width, false, remainder);
-        }
-        APInt {
-            width: self.width,
-            signed: false,
-            value: self.value % other.value,
-            high: None,
-        }
+        self.divrem(other, false).1
     }
 
     /// Signed remainder
     pub fn srem(&self, other: &APInt) -> Self {
+        self.divrem(other, true).1
+    }
+
+    fn divrem(&self, other: &APInt, signed: bool) -> (Self, Self) {
         assert_eq!(self.width, other.width, "Widths must match");
         assert!(!other.is_zero(), "Division by zero");
+        if self.width > 64 && signed {
+            return self.signed_divrem(other);
+        }
         if self.width > 64 {
-            let (_, remainder) = self.signed_divrem(other);
-            return remainder;
+            let (quotient, remainder) = divrem_words(&self.limbs(), &other.limbs(), self.width);
+            return (
+                Self::from_words(self.width, false, quotient),
+                Self::from_words(self.width, false, remainder),
+            );
         }
+        let (quotient, remainder) = if signed {
+            let (lhs, rhs) = (self.signed_at_width(), other.signed_at_width());
+            (lhs.wrapping_div(rhs) as u64, lhs.wrapping_rem(rhs) as u64)
+        } else {
+            (self.value / other.value, self.value % other.value)
+        };
         let mask = Self::mask_for_width(self.width);
-        let result = self.signed_at_width().wrapping_rem(other.signed_at_width());
-        APInt {
+        let word = |value: u64| APInt {
             width: self.width,
-            signed: true,
-            value: (result as u64) & mask,
+            signed,
+            value: value & mask,
             high: None,
-        }
+        };
+        (word(quotient), word(remainder))
     }
 
     // Truncating division on the bits, the high bit the sign whatever the
@@ -644,7 +621,6 @@ impl APInt {
         widen(self).scmp(&widen(other))
     }
 
-    /// Primary ordering key: magnitude as i128 (signed sign-extended, unsigned zero-extended).
     fn numeric_key(&self) -> i128 {
         if self.signed {
             self.to_i64() as i128
@@ -737,7 +713,6 @@ impl APInt {
         u64::from((self.value & mask).count_ones())
     }
 
-    /// Value sign-extended to a full 128-bit pattern (negatives fill the high bits).
     fn sext_u128(&self) -> u128 {
         if self.is_negative() {
             (self.value as u128) | (u128::MAX << self.width)
@@ -746,7 +721,6 @@ impl APInt {
         }
     }
 
-    /// Low-`width`-bits mask.
     fn mask_for_width(width: u64) -> u64 {
         if width >= 64 {
             u64::MAX

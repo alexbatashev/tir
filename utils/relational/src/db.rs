@@ -363,8 +363,6 @@ impl Overlay {
         self.pending.push(id);
     }
 
-    /// `reference`, a representative of what lies below, as this layer places
-    /// it. `mask` answers for the destination.
     #[inline]
     fn find(&self, reference: Ref, mask: impl Fn(u32) -> u64) -> Ref {
         if !self.absorbed(reference.id) {
@@ -649,7 +647,7 @@ impl<C, const SPACES: usize> Core<C, SPACES> {
 
     /// Record `a == b`. Unless they were equal already, the lattice columns
     /// over the space join the absorbed id's value onto the survivor's; the
-    /// tables keep naming the absorbed id until [`Self::canonicalize`].
+    /// tables keep naming the absorbed id until [`Database::canonicalize`].
     ///
     /// Two references naming one id at different offsets, or two pinned ids,
     /// are a [`Merge::Contradiction`]: nothing merges, the sets are marked
@@ -935,14 +933,7 @@ impl<C, const SPACES: usize> Core<C, SPACES> {
 
     fn mark_stale(&mut self, slot: u32, side: usize, row: u32) {
         let layer = self.layers.last_mut().expect("an open layer");
-        if layer.stale.len() <= side {
-            layer.stale.resize_with(side + 1, Vec::new);
-        }
-        let slots = &mut layer.stale[side];
-        if slots.len() <= slot as usize {
-            slots.resize_with(slot as usize + 1, Vec::new);
-        }
-        let bits = &mut slots[slot as usize];
+        let bits = grown(&mut layer.stale, side, slot as usize);
         let word = row as usize / 64;
         if bits.len() <= word {
             bits.resize(word + 1, 0);
@@ -1401,7 +1392,6 @@ impl<C, const SPACES: usize> Core<C, SPACES> {
         self.write(lattice, key, Fact::Known(value), true, true)
     }
 
-    /// Join `fact` onto `key`'s entry.
     fn write(
         &mut self,
         lattice: LatticeId,
@@ -1421,7 +1411,6 @@ impl<C, const SPACES: usize> Core<C, SPACES> {
         moved
     }
 
-    /// Join `absorbed`'s entry onto `survivor`'s, for ids just equated.
     fn merge(&mut self, lattice: LatticeId, absorbed: u32, survivor: u32) {
         let entry = &mut self.lattices[lattice.0 as usize];
         if let Some(fact) = entry.column.detach(absorbed) {
@@ -1462,7 +1451,6 @@ impl<C, const SPACES: usize> Core<C, SPACES> {
             .fold(0, |mask, (at, _)| mask | 1 << at)
     }
 
-    /// Log that `key`'s value in `lattice` moved.
     fn log_rise(&mut self, lattice: LatticeId, key: u32, minted: bool) {
         self.state.rises[lattice.0 as usize].rising[usize::from(minted)].push(key);
         self.log_change(self.lattices[lattice.0 as usize].space, key);
@@ -1477,7 +1465,7 @@ impl<C, const SPACES: usize> Core<C, SPACES> {
         self.state.epoch
     }
 
-    /// Close the epoch: what it wrote becomes what [`Self::prepare_new_rows`]
+    /// Close the epoch: what it wrote becomes what [`Database::prepare_new_rows`]
     /// and [`Self::risen`] read.
     pub fn advance(&mut self) {
         self.state.epoch += 1;
@@ -1737,15 +1725,8 @@ impl<C, const SPACES: usize> Database<C, SPACES> {
             return;
         };
         let mut groups = self.groups.borrow_mut();
-        if groups.built.len() <= slot as usize {
-            groups.built.resize_with(slot as usize + 1, Vec::new);
-        }
-        let columns = &mut groups.built[slot as usize];
-        if columns.len() <= column {
-            columns.resize_with(column + 1, Default::default);
-        }
         let ids = self.ids(self.state.table_space[slot as usize]);
-        columns[column].refresh(table, column, ids);
+        grown(&mut groups.built, slot as usize, column).refresh(table, column, ids);
     }
 
     /// Order the rows of the base's table at `slot` by `column` and then by
@@ -1755,14 +1736,7 @@ impl<C, const SPACES: usize> Database<C, SPACES> {
             return;
         };
         let mut groups = self.groups.borrow_mut();
-        if groups.tag_orders.len() <= slot as usize {
-            groups.tag_orders.resize_with(slot as usize + 1, Vec::new);
-        }
-        let columns = &mut groups.tag_orders[slot as usize];
-        if columns.len() <= column {
-            columns.resize_with(column + 1, Default::default);
-        }
-        columns[column].refresh(table, column);
+        grown(&mut groups.tag_orders, slot as usize, column).refresh(table, column);
     }
 
     /// List the rows of the base's table at `slot` the epoch before wrote, by
@@ -1774,14 +1748,7 @@ impl<C, const SPACES: usize> Database<C, SPACES> {
         };
         let mut groups = self.groups.borrow_mut();
         let groups = &mut *groups;
-        if groups.new_rows.len() <= slot as usize {
-            groups.new_rows.resize_with(slot as usize + 1, Vec::new);
-        }
-        let columns = &mut groups.new_rows[slot as usize];
-        if columns.len() <= column {
-            columns.resize_with(column + 1, Default::default);
-        }
-        let NewRows { made, rows } = &mut columns[column];
+        let NewRows { made, rows } = grown(&mut groups.new_rows, slot as usize, column);
         let now = (table.version() + 1, self.state.epoch);
         if *made == now {
             return;
@@ -1918,9 +1885,6 @@ impl<C, const SPACES: usize> Database<C, SPACES> {
         closure
     }
 
-    /// Id -> the values of the rows of the base holding it in a key column,
-    /// canonical in the base, built once per base version. The tables are
-    /// keyed the other way, so an upward walk reads this instead.
     fn reverse(&self, space: SpaceId) -> cell::Ref<'_, Csr> {
         let at = space.0 as usize;
         let stale = self
@@ -2128,7 +2092,6 @@ impl Groups {
             .map_or(&[], |new| new.rows.as_slice())
     }
 
-    /// The trie [`Database::prepare_trie`] built over `columns`.
     pub(crate) fn trie(&self, slot: u32, columns: &[u8]) -> &Trie {
         let tries = &self.tries[slot as usize];
         let found = tries.iter().find(|trie| trie.columns() == columns);
@@ -2169,6 +2132,18 @@ impl Marks {
         let slot = &mut self.stamp[id];
         std::mem::replace(slot, self.epoch) != self.epoch
     }
+}
+
+#[inline]
+fn grown<T: Default>(lists: &mut Vec<Vec<T>>, outer: usize, inner: usize) -> &mut T {
+    if lists.len() <= outer {
+        lists.resize_with(outer + 1, Vec::new);
+    }
+    let list = &mut lists[outer];
+    if list.len() <= inner {
+        list.resize_with(inner + 1, Default::default);
+    }
+    &mut list[inner]
 }
 
 #[cfg(test)]

@@ -82,10 +82,6 @@ pub fn print_region(
     Ok(())
 }
 
-/// An unordered region prints in the evaluation order its dependencies impose,
-/// then names the values it produces on one trailing `->` line. A cycle has no
-/// such order; the verifier reports it, and printing falls back to insertion
-/// order so a broken region can still be read.
 fn print_nodes_region(
     fmt: &mut IRFormatter,
     context: &Context,
@@ -128,8 +124,6 @@ pub fn print_nodes_region_with(
     Ok(())
 }
 
-/// A region opening at the start of a line (a gamma's second arm) takes no
-/// leading space; one continuing an op line does.
 fn open_brace(fmt: &IRFormatter) -> &'static str {
     if fmt.at_line_start() { "{" } else { " {" }
 }
@@ -167,12 +161,7 @@ pub fn print_result_prefix(
     fmt: &mut IRFormatter<'_>,
     op: &crate::OpHandle,
 ) -> Result<(), std::fmt::Error> {
-    let results = op.results();
-    if results.is_empty() {
-        return Ok(());
-    }
-    print_value_list(fmt, &results)?;
-    fmt.write(" = ")
+    print_wrapped_values(fmt, &op.results(), "", " = ")
 }
 
 /// Print ` state(%c, %d)` for an op observing any state, and nothing otherwise.
@@ -180,13 +169,21 @@ pub fn print_state_operands(
     fmt: &mut IRFormatter<'_>,
     op: &crate::OpHandle,
 ) -> Result<(), std::fmt::Error> {
-    let states = op.state_operands();
-    if states.is_empty() {
+    print_wrapped_values(fmt, &op.state_operands(), " state(", ")")
+}
+
+fn print_wrapped_values(
+    fmt: &mut IRFormatter<'_>,
+    values: &[crate::ValueId],
+    open: &str,
+    close: &str,
+) -> Result<(), std::fmt::Error> {
+    if values.is_empty() {
         return Ok(());
     }
-    fmt.write(" state(")?;
-    print_value_list(fmt, &states)?;
-    fmt.write(")")
+    fmt.write(open)?;
+    print_value_list(fmt, values)?;
+    fmt.write(close)
 }
 
 /// Print an op in the generic form — `%r, %s = dialect.op %a, %b state(%c) {attrs} : ty`

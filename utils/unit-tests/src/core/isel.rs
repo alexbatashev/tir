@@ -5,7 +5,7 @@ use tir::{
     builtin::{IntegerType, ModuleOp},
     func::FuncOp,
     sem::{SemGraph, SymKind},
-    Context, Operation, PassError, PassManager, RegionId, TypeId,
+    Context, Operation, PassError, PassManager, RegionId, TypeId, ValueId,
 };
 
 use tir::backend::isel::{
@@ -46,15 +46,12 @@ macro_rules! marker {
     }};
 }
 
-/// The parsed module of `source`, its function's body region, and the dialect
-/// the test rules emit into registered.
 fn function(source: &str) -> (Context, ModuleOp, RegionId) {
     let (context, module, _, region) = fixtures::parse_function(source);
     context.register_dialect::<TestDialect>();
     (context, module, region)
 }
 
-/// Runs `pass` nested on the module's functions.
 fn run_pass(
     context: &Context,
     module: &ModuleOp,
@@ -84,8 +81,14 @@ fn select(context: &Context, module: &ModuleOp, rules: Vec<Rule>) {
         .expect("pass pipeline should succeed");
 }
 
-/// The op names of the selected body, in the order selection left them.
-/// Returns are left to the target's op lowerings, which these tests lack.
+fn assert_add_mul_cover(body: &str, expected: &[&str]) {
+    let (context, module, region) = function(&format!(
+        "module {{\nfunc.func @demo(%x: !i32, %y: !i32, %z: !i32) -> !i32 {{\n{body}}}\nmodule_end\n}}"
+    ));
+    select(&context, &module, add_mul_rules());
+    assert_eq!(body_names(&context, region), expected);
+}
+
 fn body_names(context: &Context, region: RegionId) -> Vec<&'static str> {
     body_ops(context, region)
         .iter()
@@ -122,27 +125,73 @@ fn add_mul_pattern() -> SemGraph {
     g
 }
 
+fn bound(req: &EmitRequest, m: &RuleMatch, symbol: u32) -> Result<ValueId, PassError> {
+    m.value_binding(symbol)
+        .ok_or(PassError::RewriteFailed(req.op_id()))
+}
+
+fn emit_binary(
+    kind: SymKind,
+    context: &Context,
+    req: &EmitRequest,
+    lhs: ValueId,
+    rhs: ValueId,
+) -> Result<Box<dyn Operation>, PassError> {
+    let result_ty = req.result_ty.expect("typed result");
+    Ok(match kind {
+        SymKind::Add => marker!(
+            AddMarkerOp,
+            AddMarkerOpBuilder,
+            context,
+            lhs,
+            rhs,
+            result_ty
+        ),
+        SymKind::Sub => marker!(
+            SubMarkerOp,
+            SubMarkerOpBuilder,
+            context,
+            lhs,
+            rhs,
+            result_ty
+        ),
+        SymKind::Mul => marker!(
+            MulMarkerOp,
+            MulMarkerOpBuilder,
+            context,
+            lhs,
+            rhs,
+            result_ty
+        ),
+        SymKind::ShiftLeft => marker!(
+            ShlMarkerOp,
+            ShlMarkerOpBuilder,
+            context,
+            lhs,
+            rhs,
+            result_ty
+        ),
+        _ => marker!(
+            ShrsMarkerOp,
+            ShrsMarkerOpBuilder,
+            context,
+            lhs,
+            rhs,
+            result_ty
+        ),
+    })
+}
+
 fn emit_add(
     context: &Context,
     req: &EmitRequest,
     m: &RuleMatch,
 ) -> Result<Box<dyn Operation>, PassError> {
-    let lhs = m
-        .value_binding(0)
-        .ok_or(PassError::RewriteFailed(req.op_id()))?;
-    let rhs = m
-        .value_binding(2)
-        .or_else(|| m.value_binding(1))
-        .ok_or(PassError::RewriteFailed(req.op_id()))?;
-    let result_ty = req.result_ty.expect("typed result");
-    Ok(marker!(
-        AddMarkerOp,
-        AddMarkerOpBuilder,
-        context,
-        lhs,
-        rhs,
-        result_ty
-    ))
+    let rhs = match m.value_binding(2) {
+        Some(rhs) => rhs,
+        None => bound(req, m, 1)?,
+    };
+    emit_binary(SymKind::Add, context, req, bound(req, m, 0)?, rhs)
 }
 
 fn emit_mul(
@@ -150,21 +199,8 @@ fn emit_mul(
     req: &EmitRequest,
     m: &RuleMatch,
 ) -> Result<Box<dyn Operation>, PassError> {
-    let lhs = m
-        .value_binding(0)
-        .ok_or(PassError::RewriteFailed(req.op_id()))?;
-    let rhs = m
-        .value_binding(1)
-        .ok_or(PassError::RewriteFailed(req.op_id()))?;
-    let result_ty = req.result_ty.expect("typed result");
-    Ok(marker!(
-        MulMarkerOp,
-        MulMarkerOpBuilder,
-        context,
-        lhs,
-        rhs,
-        result_ty
-    ))
+    let (lhs, rhs) = (bound(req, m, 0)?, bound(req, m, 1)?);
+    emit_binary(SymKind::Mul, context, req, lhs, rhs)
 }
 
 // A rule reads its operands from the match, not from the op it covers: a fused
@@ -174,21 +210,8 @@ fn emit_sub(
     req: &EmitRequest,
     m: &RuleMatch,
 ) -> Result<Box<dyn Operation>, PassError> {
-    let lhs = m
-        .value_binding(0)
-        .ok_or(PassError::RewriteFailed(req.op_id()))?;
-    let rhs = m
-        .value_binding(1)
-        .ok_or(PassError::RewriteFailed(req.op_id()))?;
-    let result_ty = req.result_ty.expect("typed result");
-    Ok(marker!(
-        SubMarkerOp,
-        SubMarkerOpBuilder,
-        context,
-        lhs,
-        rhs,
-        result_ty
-    ))
+    let (lhs, rhs) = (bound(req, m, 0)?, bound(req, m, 1)?);
+    emit_binary(SymKind::Sub, context, req, lhs, rhs)
 }
 
 fn add_mul_rules() -> Vec<Rule> {
@@ -211,26 +234,15 @@ fn add_mul_rules() -> Vec<Rule> {
 
 #[test]
 fn fused_rule_consumes_internal_nodes_of_selected_pattern() {
-    let (context, module, region) = function(
-        r#"module {
-func.func @demo(%x: !i32, %y: !i32, %z: !i32) -> !i32 {
-  %mul = muli %x, %y : !i32
+    assert_add_mul_cover(
+        "  %mul = muli %x, %y : !i32
   %add = addi %mul, %z : !i32
   func.return %add
-}
-module_end
-}"#,
+",
+        &["addi"],
     );
-
-    select(&context, &module, add_mul_rules());
-
-    assert_eq!(body_names(&context, region), vec!["addi"]);
 }
 
-/// A rule whose register class views its storage element at a nonzero bit
-/// offset (x86 `ah`) is only compatible with values living at that same offset:
-/// no instruction moves bits across views. Ordinary IR values live at offset 0,
-/// so such a rule may neither read them as operands nor define them.
 #[test]
 fn shifted_register_view_rule_does_not_select_for_offset_zero_values() {
     let run = |operand_offset: u32, result_offset: u32| {
@@ -304,45 +316,27 @@ module_end
     assert!(err.to_string().contains("builtin.muli has no instruction"));
 }
 
-/// A pure subexpression shared by two fused matches is *duplicated*: each
-/// add-mul instruction recomputes the mul internally, and the mul op — no
-/// longer needed as a register value — is consumed.
 #[test]
 fn fused_rule_duplicates_shared_pure_internal_nodes() {
-    let (context, module, region) = function(
-        r#"module {
-func.func @demo(%x: !i32, %y: !i32, %z: !i32) -> !i32 {
-  %mul = muli %x, %y : !i32
+    assert_add_mul_cover(
+        "  %mul = muli %x, %y : !i32
   %add0 = addi %mul, %z : !i32
   %add1 = addi %mul, %add0 : !i32
   func.return %add1
-}
-module_end
-}"#,
+",
+        &["addi", "addi"],
     );
-
-    select(&context, &module, add_mul_rules());
-
-    assert_eq!(body_names(&context, region), vec!["addi", "addi"]);
 }
 
-/// An unused consumer does not demand its result or operands.
 #[test]
 fn unused_consumer_does_not_create_demand() {
-    let (context, module, region) = function(
-        r#"module {
-func.func @demo(%x: !i32, %y: !i32, %z: !i32) -> !i32 {
-  %mul = muli %x, %y : !i32
+    assert_add_mul_cover(
+        "  %mul = muli %x, %y : !i32
   %dead = addi %mul, %z : !i32
   func.return %mul
-}
-module_end
-}"#,
+",
+        &["muli"],
     );
-
-    select(&context, &module, add_mul_rules());
-
-    assert_eq!(body_names(&context, region), vec!["muli"]);
 }
 
 fn add_mul_add_pattern() -> SemGraph {
@@ -400,8 +394,6 @@ module_end
     assert_eq!(body_names(&context, region), vec!["addi", "muli", "addi"]);
 }
 
-/// A binary pattern constrained to a specific result type via the pattern
-/// graph's actual-type annotation (the channel a typed rule would use).
 fn typed_binary_pattern(kind: SymKind, ty: TypeId) -> SemGraph {
     let mut g = SemGraph::new();
     let lhs = symbol(&mut g, 0);
@@ -445,11 +437,6 @@ module_end
     assert_eq!(body_names(&context, region), vec!["addi"]);
 }
 
-/// Build `add(add(a,b), c)` over i32 values and select it with a fused
-/// `Add(Add(_,_),_)` rule whose *internal* node carries `inner_width` as a type
-/// constraint (plus an untyped atomic `add` fallback). Returns the lowered op
-/// names. Fusion (the `subi` marker) only happens when the inner constraint
-/// agrees with the inferred i32 type of the inner add.
 fn run_inner_typed_fusion(inner_width: Option<u32>) -> Vec<&'static str> {
     let (context, module, region) = function(
         r#"module {
@@ -510,17 +497,9 @@ fn emit_add_imm_marker(
     m.int_binding(1)
         .or_else(|| m.int_binding(0))
         .ok_or(PassError::RewriteFailed(req.op_id()))?;
-    let result_ty = req.result_ty.expect("typed result");
     // The immediate folds into the instruction (`subi` is only a marker), so
     // the constant op loses its last use and is swept.
-    Ok(marker!(
-        SubMarkerOp,
-        SubMarkerOpBuilder,
-        context,
-        lhs,
-        lhs,
-        result_ty
-    ))
+    emit_binary(SymKind::Sub, context, req, lhs, lhs)
 }
 
 fn zero_materializer_pattern() -> SemGraph {
@@ -651,8 +630,6 @@ module_end
     }
 }
 
-/// Select `add(a, constant)` with a cheap immediate rule bounded to a signed
-/// 12-bit field (`subi` marker) and an expensive register-form fallback.
 fn run_immediate_range(constant: i64) -> Vec<&'static str> {
     let (context, module, region) = function(&format!(
         r#"module {{
@@ -716,45 +693,13 @@ fn shift_imm_pattern(kind: SymKind) -> SemGraph {
     g
 }
 
-/// Emit the marker instruction standing for `kind` over the match's register
-/// operand. The shift amount is an immediate (`m.int_binding(1)`); operands
-/// beyond the mnemonic don't matter here, so the source register is reused.
-fn emit_marker(
-    kind: SymKind,
-    context: &Context,
-    req: &EmitRequest,
-    m: &RuleMatch,
-) -> Result<Box<dyn Operation>, PassError> {
-    let rs1 = m
-        .value_binding(0)
-        .ok_or(PassError::RewriteFailed(req.op_id()))?;
-    let result_ty = req.result_ty.expect("typed result");
-    Ok(match kind {
-        SymKind::ShiftLeft => marker!(
-            ShlMarkerOp,
-            ShlMarkerOpBuilder,
-            context,
-            rs1,
-            rs1,
-            result_ty
-        ),
-        _ => marker!(
-            ShrsMarkerOp,
-            ShrsMarkerOpBuilder,
-            context,
-            rs1,
-            rs1,
-            result_ty
-        ),
-    })
-}
-
 fn emit_slli(
     context: &Context,
     req: &EmitRequest,
     m: &RuleMatch,
 ) -> Result<Box<dyn Operation>, PassError> {
-    emit_marker(SymKind::ShiftLeft, context, req, m)
+    let rs1 = bound(req, m, 0)?;
+    emit_binary(SymKind::ShiftLeft, context, req, rs1, rs1)
 }
 
 fn emit_shift_prelude(
@@ -762,18 +707,8 @@ fn emit_shift_prelude(
     req: &EmitRequest,
     m: &RuleMatch,
 ) -> Result<Box<dyn Operation>, PassError> {
-    let value = m
-        .value_binding(0)
-        .ok_or(PassError::RewriteFailed(req.op_id()))?;
-    let result_ty = req.result_ty.expect("typed result");
-    Ok(marker!(
-        SubMarkerOp,
-        SubMarkerOpBuilder,
-        context,
-        value,
-        value,
-        result_ty
-    ))
+    let value = bound(req, m, 0)?;
+    emit_binary(SymKind::Sub, context, req, value, value)
 }
 
 fn emit_srai(
@@ -781,7 +716,8 @@ fn emit_srai(
     req: &EmitRequest,
     m: &RuleMatch,
 ) -> Result<Box<dyn Operation>, PassError> {
-    emit_marker(SymKind::ShiftRightArithmetic, context, req, m)
+    let rs1 = bound(req, m, 0)?;
+    emit_binary(SymKind::ShiftRightArithmetic, context, req, rs1, rs1)
 }
 
 fn select_sign_extension(slli_rule: Rule) -> Vec<&'static str> {
@@ -820,10 +756,6 @@ module_end
     body_names(&context, region)
 }
 
-/// End-to-end square: `extsi(addi(a, b) : i16) : i64` lowers to `add, slli, srai`.
-/// The `add` covers the addi; saturation bridges the un-selectable sign extension
-/// into a `slli`/`srai` pair, and multi-instruction emission materializes the
-/// introduced `slli` (an e-class with no original op) before the `srai`.
 #[test]
 fn square_sign_extension_lowers_to_shift_pair() {
     let slli_rule = Rule {
@@ -861,7 +793,6 @@ fn introduced_rule_emits_its_plan_in_order() {
     assert_eq!(body_ops, vec!["addi", "subi", "shli", "shrsi"]);
 }
 
-/// At *equal* cost, the type-constrained rule must win the tie.
 #[test]
 fn equal_cost_tie_breaks_to_more_specific_rule() {
     let (context, module, region) = function(ADD_OF_TWO_ARGUMENTS);
@@ -889,9 +820,6 @@ fn equal_cost_tie_breaks_to_more_specific_rule() {
     assert_eq!(body_names(&context, region), vec!["subi"]);
 }
 
-/// A value recomputed in another block of the CFG is one class once the body
-/// is unordered: the add binds the single selected definition, and the
-/// recomputation nothing reads is swept.
 #[test]
 fn recomputation_across_blocks_binds_to_its_selected_definition() {
     // %d = a - b is used only within the entry block, so it never escapes;

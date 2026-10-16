@@ -40,8 +40,6 @@ mod isa {
         })
     }
 
-    /// Pre-RA: materialize an `fp.constant` that survived instruction selection
-    /// into `movabs r64, bits` + `movq xmm, r64`.
     fn lower_float_constant(
         context: &tir::Context,
         op: &tir::OperationRef,
@@ -71,10 +69,6 @@ mod isa {
         Ok(true)
     }
 
-    /// Emit the branch-if-nonzero fallback for a condition no branch rule
-    /// fused: `test cond, 1` + `jne dest`. The condition is a width-1 value, so
-    /// only bit 0 of its register is defined — a whole-register `test` would
-    /// branch on undefined bits.
     fn emit_branch_nonzero(
         context: &tir::Context,
         condition: tir::ValueId,
@@ -95,8 +89,6 @@ mod isa {
         ]
     }
 
-    /// Pre-RA: materialize a `constant` that survived instruction selection
-    /// (one no instruction folded as an immediate) into `mov rd, imm32`.
     fn lower_constant(
         context: &tir::Context,
         op: &tir::OperationRef,
@@ -127,8 +119,6 @@ mod isa {
         Ok(true)
     }
 
-    /// Pre-RA: materialize an `asm.symbol_address` as `lea rd, [rip + sym]`.
-    /// The encoder leaves the disp32 as a fixup emitted with R_X86_64_PC32.
     fn lower_symbol_address(
         context: &tir::Context,
         op: &tir::OperationRef,
@@ -149,7 +139,6 @@ mod isa {
         Ok(true)
     }
 
-    /// A register-to-register `mov dst, src`.
     fn mv(context: &tir::Context, dst: RegSlot, src: RegSlot) -> Box<dyn Operation> {
         let builder = MovOpBuilder::new(context);
         let builder = tir::reg_use!(builder, src, src);
@@ -236,7 +225,6 @@ mod isa {
         }
     }
 
-    /// Post-RA: `vret` becomes `ret`; `vbr` becomes `jmp dest`.
     fn finalize_virtual_ops(
         context: &tir::Context,
         op: &tir::OperationRef,
@@ -338,6 +326,50 @@ mod isa {
                 _ => None,
             }
         }
+
+        fn spill_access(
+            &self,
+            context: &tir::Context,
+            value: tir::ValueId,
+            class: tir::backend::regalloc::RegClassId,
+            frame: &tir::backend::liveness::PhysReg,
+            offset: i64,
+            store: bool,
+        ) -> Box<dyn Operation> {
+            macro_rules! access {
+                ($Store:ident, $Load:ident) => {
+                    if store {
+                        Box::new(
+                            $Store::new(context)
+                                .attr("base", phys_attr(*frame))
+                                .attr("imm", AttributeValue::Int(offset))
+                                .src(value)
+                                .build(),
+                        )
+                    } else {
+                        Box::new(
+                            $Load::new(context)
+                                .result_values(vec![value])
+                                .attr("base", phys_attr(*frame))
+                                .attr("imm", AttributeValue::Int(offset))
+                                .build(),
+                        )
+                    }
+                };
+            }
+            match self.move_kind(class) {
+                Some(MoveKind::Gpr64) => access!(MovStoreDispOpBuilder, MovLoadDispOpBuilder),
+                Some(MoveKind::Gpr32) => access!(Mov32StoreDispOpBuilder, Mov32LoadDispOpBuilder),
+                Some(MoveKind::Gpr16) => access!(Mov16StoreDispOpBuilder, Mov16LoadDispOpBuilder),
+                Some(MoveKind::Gpr8) => access!(Mov8StoreDispOpBuilder, Mov8LoadDispOpBuilder),
+                Some(MoveKind::Xmm128) => {
+                    access!(MovupsStoreDispOpBuilder, MovupsLoadDispOpBuilder)
+                }
+                Some(MoveKind::Xmm64) => access!(MovsdStoreDispOpBuilder, MovsdLoadDispOpBuilder),
+                Some(MoveKind::Xmm32) => access!(MovssStoreDispOpBuilder, MovssLoadDispOpBuilder),
+                _ => unimplemented!("x86-64 spilling for {} is not implemented", class.name()),
+            }
+        }
     }
 
     impl tir::backend::regalloc::TargetRegAlloc for X86RegAlloc {
@@ -373,27 +405,7 @@ mod isa {
             frame: &tir::backend::liveness::PhysReg,
             offset: i64,
         ) -> Box<dyn Operation> {
-            macro_rules! store {
-                ($Builder:ident) => {
-                    Box::new(
-                        $Builder::new(context)
-                            .attr("base", phys_attr(*frame))
-                            .attr("imm", AttributeValue::Int(offset))
-                            .src(value)
-                            .build(),
-                    )
-                };
-            }
-            match self.move_kind(class) {
-                Some(MoveKind::Gpr64) => store!(MovStoreDispOpBuilder),
-                Some(MoveKind::Gpr32) => store!(Mov32StoreDispOpBuilder),
-                Some(MoveKind::Gpr16) => store!(Mov16StoreDispOpBuilder),
-                Some(MoveKind::Gpr8) => store!(Mov8StoreDispOpBuilder),
-                Some(MoveKind::Xmm128) => store!(MovupsStoreDispOpBuilder),
-                Some(MoveKind::Xmm64) => store!(MovsdStoreDispOpBuilder),
-                Some(MoveKind::Xmm32) => store!(MovssStoreDispOpBuilder),
-                _ => unimplemented!("x86-64 spilling for {} is not implemented", class.name()),
-            }
+            self.spill_access(context, value, class, frame, offset, true)
         }
 
         fn emit_spill_reload(
@@ -404,27 +416,7 @@ mod isa {
             frame: &tir::backend::liveness::PhysReg,
             offset: i64,
         ) -> Box<dyn Operation> {
-            macro_rules! load {
-                ($Builder:ident) => {
-                    Box::new(
-                        $Builder::new(context)
-                            .result_values(vec![value])
-                            .attr("base", phys_attr(*frame))
-                            .attr("imm", AttributeValue::Int(offset))
-                            .build(),
-                    )
-                };
-            }
-            match self.move_kind(class) {
-                Some(MoveKind::Gpr64) => load!(MovLoadDispOpBuilder),
-                Some(MoveKind::Gpr32) => load!(Mov32LoadDispOpBuilder),
-                Some(MoveKind::Gpr16) => load!(Mov16LoadDispOpBuilder),
-                Some(MoveKind::Gpr8) => load!(Mov8LoadDispOpBuilder),
-                Some(MoveKind::Xmm128) => load!(MovupsLoadDispOpBuilder),
-                Some(MoveKind::Xmm64) => load!(MovsdLoadDispOpBuilder),
-                Some(MoveKind::Xmm32) => load!(MovssLoadDispOpBuilder),
-                _ => unimplemented!("x86-64 spilling for {} is not implemented", class.name()),
-            }
+            self.spill_access(context, value, class, frame, offset, false)
         }
 
         fn emit_copy(
@@ -553,9 +545,6 @@ mod isa {
     const R_X86_64_64: u32 = 1;
     const R_X86_64_PC8: u32 = 15;
 
-    /// The mnemonic an op name encodes. The base-ISA (`_legacy`) forms of the
-    /// pc-relative branches share their 64-bit counterpart's encoding, so they
-    /// relocate and measure their displacement identically.
     fn branch_mnemonic(op: &str) -> &str {
         op.strip_suffix("_legacy").unwrap_or(op)
     }
@@ -678,8 +667,6 @@ mod isa {
         }
     }
 
-    /// Resolve `--mcpu` to the machine model the compiler and the instrument
-    /// both schedule against. `generic` selects no machine.
     fn resolve_machine(mcpu: &str, features: &[Feature]) -> Result<Option<String>, String> {
         let name = mcpu.trim().to_ascii_lowercase();
         if name == "generic" {

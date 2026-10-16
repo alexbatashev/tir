@@ -71,8 +71,6 @@ pub fn run(sh: &Shell, root: &Path, options: Options) -> anyhow::Result<()> {
     many.map(drop)
 }
 
-/// Compile every case with `jobs` workers: same object as one worker, peaks
-/// within the threshold of the pinned sequential ones, CoreMark timed.
 fn parallel_pass(
     fcc: &Path,
     cases: &[Case],
@@ -141,18 +139,20 @@ fn parallel_pass(
         );
     }
     if peak_sum.1 as f64 > peak_sum.0 as f64 * PARALLEL_RSS_THRESHOLD {
-        anyhow::bail!("fcc gate: -j{jobs} peak RSS sum passed {PARALLEL_RSS_THRESHOLD}x the pinned sequential sum");
+        anyhow::bail!(
+            "fcc gate: -j{jobs} peak RSS sum passed {PARALLEL_RSS_THRESHOLD}x the pinned sequential sum"
+        );
     }
     if let Some((ratio, label, before, after)) =
         worst.filter(|(ratio, ..)| *ratio > PARALLEL_RSS_THRESHOLD)
     {
-        anyhow::bail!("fcc gate: -j{jobs} peak RSS on {label} is {ratio:.2}x the pinned {before} kB ({after} kB)");
+        anyhow::bail!(
+            "fcc gate: -j{jobs} peak RSS on {label} is {ratio:.2}x the pinned {before} kB ({after} kB)"
+        );
     }
     Ok(())
 }
 
-/// Compile the generated unit at one worker and at `jobs`, and hand back the
-/// sequential peak so a run without a reference can record one.
 fn many_functions(
     fcc: &Path,
     jobs: usize,
@@ -197,12 +197,13 @@ fn many_functions(
         peak_many as f64 / reference as f64
     );
     if peak_many as f64 > reference as f64 * PARALLEL_RSS_THRESHOLD {
-        anyhow::bail!("fcc gate: many-function peak RSS at -j{jobs} passed {PARALLEL_RSS_THRESHOLD}x the pinned reference");
+        anyhow::bail!(
+            "fcc gate: many-function peak RSS at -j{jobs} passed {PARALLEL_RSS_THRESHOLD}x the pinned reference"
+        );
     }
     Ok(reference)
 }
 
-/// The largest epoch the memory report saw, by each of its measures.
 fn epoch_summary(stderr: &str) -> Vec<String> {
     let mut largest: HashMap<&str, u64> = HashMap::new();
     for line in stderr
@@ -226,10 +227,6 @@ fn epoch_summary(stderr: &str) -> Vec<String> {
         .collect()
 }
 
-/// A C unit of `functions` functions from `seed`: each fills a local array
-/// in a counted loop and folds it back, which promotion and the simplifier
-/// rewrite wholesale, and each calls the one before it, which the inliner
-/// reads across functions.
 pub(crate) fn generate(functions: usize, seed: u64) -> String {
     let mut state = seed;
     let mut next = move || {

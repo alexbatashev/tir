@@ -221,7 +221,7 @@ pub struct RegisterView {
 }
 
 /// The register file of a target: every allocatable (and reserved) register class,
-/// keyed by the class name used in [`RegisterAttr`] operands.
+/// keyed by the class name used in [`crate::attributes::RegisterAttr`] operands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisterInfo {
     pub classes: &'static [RegClassInfo],
@@ -1847,8 +1847,6 @@ impl BodyScan {
     }
 }
 
-/// The `(source, destination)` virtual registers of a copy op: its first read
-/// and first written virtual register.
 pub(crate) fn copy_endpoints(context: &Context, op_id: OpId) -> Option<(u32, u32)> {
     let regs = liveness::op_regs(&context.get_op(op_id));
     let src = regs.uses.first()?.number();

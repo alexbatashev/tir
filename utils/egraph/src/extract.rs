@@ -65,8 +65,6 @@ impl<'a, L: ENode> Extraction<'a, L> {
         self.chosen(id).map(|chosen| chosen.cost)
     }
 
-    /// What the innermost layer holding `id` settled on, `None` once a layer
-    /// says the class has no finite cost.
     fn chosen(&self, id: Id) -> Option<&Chosen<L>> {
         match self.best.get(&id) {
             Some(settled) => settled.as_ref(),
@@ -83,7 +81,7 @@ impl<L: ENode> Engine<L> {
     /// operands are the node's canonical references, and `offset` is where the
     /// node sits from the class: a model charges an add-of-constant for each
     /// non-zero one it has to spell, and nothing for an operand
-    /// [`Engine::int_const`] reads as a constant. A [`Label::is_unique`] node
+    /// [`Engine::int_const`] reads as a constant. A [`ENode::is_unique`] node
     /// costs its own price alone: it stands for what it names, which no
     /// spelling of its operands is. Cycle-tolerant — a node with un-costed
     /// children is skipped and revisited to a fixpoint, so a cycle is costed
@@ -97,8 +95,6 @@ impl<L: ENode> Engine<L> {
         self.extraction(&classes, None, cost_of)
     }
 
-    /// Fold `classes` over their e-nodes in class-list order, a child outside
-    /// them costed from `base`, and record the winners as a layer over `base`.
     fn extraction<'b>(
         &self,
         classes: &[u32],
@@ -140,9 +136,6 @@ mod tests {
     use crate::testing::Term;
     use crate::{ClassId, Engine, Label, Ref};
 
-    /// Charges one per node, a hundred for a leaf named `r`, and ten for each
-    /// add-of-constant a spelling needs: a non-zero operand offset that is not
-    /// a constant, and a node that sits at an offset from its class.
     fn cost(eg: &Engine<Term>) -> impl Fn(ClassId, &Term, &[Ref], u64) -> u64 + '_ {
         move |_, node, operands, offset| {
             let adds = operands

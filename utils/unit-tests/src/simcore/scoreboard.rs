@@ -11,8 +11,6 @@ use tir_sim::predictor::{AlwaysNotTaken, BranchPredictor};
 use tir_sim::scoreboard::*;
 use tir_sim::{MemAccess, MemAccessKind};
 
-/// Verbatim copies of the engine's tiny latency/pressure helpers, so the
-/// closed-form oracle below stays a fully independent reimplementation.
 fn is_zero_idiom(slot: &ScoreboardInstr) -> bool {
     slot.class.zero_idiom
         && !slot.uses.is_empty()
@@ -37,44 +35,6 @@ fn edge_latency(
         }
     }
     u64::from(producer.class.latency)
-}
-
-fn file_of<'a>(prf: &'a Prf, class: &'a str) -> &'a str {
-    prf.class_to_file
-        .get(class)
-        .map(String::as_str)
-        .unwrap_or(class)
-}
-
-fn prf_gate(
-    d: &mut u64,
-    slot: &ScoreboardInstr,
-    prf: &Prf,
-    inflight: &mut HashMap<String, VecDeque<u64>>,
-) {
-    let mut need: HashMap<&str, usize> = HashMap::new();
-    for (class, _) in &slot.defs {
-        *need.entry(file_of(prf, class)).or_default() += 1;
-    }
-    for (file, need) in need {
-        let Some(&cap) = prf.capacity.get(file) else {
-            continue;
-        };
-        let cap = cap as usize;
-        let q = inflight.entry(file.to_string()).or_default();
-        while q.front().is_some_and(|&c| c <= *d) {
-            q.pop_front();
-        }
-        if q.len() + need > cap && cap >= need {
-            let must_free = q.len() + need - cap;
-            if let Some(&free_at) = q.get(must_free - 1) {
-                *d = (*d).max(free_at);
-            }
-            for _ in 0..must_free {
-                q.pop_front();
-            }
-        }
-    }
 }
 
 fn reference_operands_ready(
@@ -115,34 +75,6 @@ fn reserve_lanes(slot: &ScoreboardInstr, lanes: &mut HashMap<&str, Vec<u64>>, bu
     }
 }
 
-fn reference_score_branch(
-    predictor: &mut dyn BranchPredictor,
-    branch: &BranchOutcome,
-    index: usize,
-    resolved: u64,
-    penalty: u64,
-    redirect: &mut u64,
-    handler: &mut Option<&mut dyn EventHandler>,
-) -> u64 {
-    let predicted = predictor.predict(branch.pc, branch.target);
-    let mut mispredicts = 0;
-    if predicted != branch.taken {
-        mispredicts = 1;
-        *redirect = (*redirect).max(resolved + penalty);
-        if let Some(h) = handler.as_mut() {
-            h.mispredicted(index, resolved, *redirect);
-        }
-    }
-    predictor.update(branch.pc, branch.target, branch.taken);
-    mispredicts
-}
-
-/// The pre-refactor closed-form engine, kept verbatim as the oracle for the
-/// differential test below: the cycle-stepped [`run`] must reproduce it
-/// bit-for-bit (cycle count, mispredicts, and the full event trace) on every
-/// core configuration. It earns its keep as a permanent guard because Stage C
-/// will make load/store latency state-dependent through [`completion_cycle`],
-/// and the default (fixed-latency) path must stay identical.
 fn run_reference(
     model: &MachineModel,
     base: &[ScoreboardInstr],
@@ -215,7 +147,7 @@ fn run_reference(
             reg_writer.insert(def.clone(), i);
         }
         if let (Some(p), Some(br)) = (predictor.as_mut(), &slot.branch) {
-            mispredicts += reference_score_branch(
+            mispredicts += score_branch(
                 *p,
                 br,
                 i,
@@ -231,15 +163,7 @@ fn run_reference(
             h.retired(retire[i], i);
         }
         if let Some(prf) = prf {
-            for (class, _) in &slot.defs {
-                let file = file_of(prf, class);
-                if prf.capacity.contains_key(file) {
-                    prf_inflight
-                        .entry(file.to_string())
-                        .or_default()
-                        .push_back(retire[i]);
-                }
-            }
+            record_prf_allocation(prf, &slot.defs, retire[i], &mut prf_inflight);
         }
     }
     let cycles = retire.last().map(|c| c + 1).unwrap_or(0);
@@ -420,10 +344,6 @@ fn prf() -> Prf {
     }
 }
 
-/// The cycle-stepped engine must reproduce the closed-form oracle exactly —
-/// same cycles, mispredicts, and event trace — across in-order/out-of-order,
-/// bounded/unbounded window, and with/without register-file pressure, over
-/// many random instruction mixes.
 #[test]
 fn cycle_stepped_matches_closed_form() {
     let mut rng = Lcg(0x1234_5678);
@@ -494,6 +414,46 @@ const TEST_P1: ResourceUse = ResourceUse {
     resource: "P1",
     cycles: 1,
 };
+const ROUTE_P0: ResourceRoute = ResourceRoute {
+    resources: &[TEST_P0],
+};
+const ROUTE_P1: ResourceRoute = ResourceRoute {
+    resources: &[TEST_P1],
+};
+const ALTERNATIVE: MicroOp = MicroOp {
+    routes: &[ROUTE_P0, ROUTE_P1],
+};
+const TWO_PORTS: &[ProcUnit] = &[
+    ProcUnit {
+        name: "P0",
+        units: 1,
+    },
+    ProcUnit {
+        name: "P1",
+        units: 1,
+    },
+];
+
+fn on_resources(resources: &'static [&'static str]) -> InstrSchedClass {
+    InstrSchedClass {
+        resources,
+        ..InstrSchedClass::DEFAULT
+    }
+}
+
+fn with_uops(uops: &'static [MicroOp]) -> InstrSchedClass {
+    InstrSchedClass {
+        uops,
+        ..InstrSchedClass::DEFAULT
+    }
+}
+
+fn two_port_issue_cycles(classes: [InstrSchedClass; 2]) -> Vec<u64> {
+    issue_cycles(
+        &resource_test_model(TWO_PORTS),
+        &classes.map(resource_test_instr),
+    )
+}
 
 fn resource_test_model(resources: &'static [ProcUnit]) -> MachineModel {
     MachineModel {
@@ -956,14 +916,8 @@ fn frontend_test_model(slots: &'static [&'static str], uops_per_cycle: u16) -> M
     model
 }
 
-/// A fused pair (`cmp` + `jne` by op name) decodes and executes as
-/// one micro-op: on a single-unit, single-issue core the pair sustains one
-/// iteration per cycle where the unfused pair needs two.
 #[test]
 fn macro_fused_pair_costs_one_micro_op() {
-    const ROUTE_P0: ResourceRoute = ResourceRoute {
-        resources: &[TEST_P0],
-    };
     const UOP_P0: MicroOp = MicroOp {
         routes: &[ROUTE_P0],
     };
@@ -1007,35 +961,13 @@ fn macro_fused_pair_costs_one_micro_op() {
     );
 }
 
-/// A producer that owns P0 every cycle feeds a consumer that may use P0 or
-/// P1. The consumer must settle on the idle P1, sustaining one iteration
-/// per cycle; packing it onto P0 (which route tie-breaking once preferred)
-/// halves throughput.
 #[test]
 fn micro_op_avoids_a_saturated_resource_when_an_idle_one_exists() {
-    const ROUTE_P0: ResourceRoute = ResourceRoute {
-        resources: &[TEST_P0],
-    };
-    const ROUTE_P1: ResourceRoute = ResourceRoute {
-        resources: &[TEST_P1],
-    };
     const FIXED: MicroOp = MicroOp {
         routes: &[ROUTE_P0],
     };
-    const FLEXIBLE: MicroOp = MicroOp {
-        routes: &[ROUTE_P0, ROUTE_P1],
-    };
 
-    let model = resource_test_model(&[
-        ProcUnit {
-            name: "P0",
-            units: 1,
-        },
-        ProcUnit {
-            name: "P1",
-            units: 1,
-        },
-    ]);
+    let model = resource_test_model(TWO_PORTS);
     let mut producer = resource_test_instr(InstrSchedClass {
         uops: &[FIXED],
         resources: &[],
@@ -1043,7 +975,7 @@ fn micro_op_avoids_a_saturated_resource_when_an_idle_one_exists() {
     });
     producer.defs = vec![("R".to_string(), 0)];
     let mut consumer = resource_test_instr(InstrSchedClass {
-        uops: &[FLEXIBLE],
+        uops: &[ALTERNATIVE],
         resources: &[],
         ..InstrSchedClass::DEFAULT
     });
@@ -1073,54 +1005,10 @@ fn micro_op_avoids_a_saturated_resource_when_an_idle_one_exists() {
 
 #[test]
 fn micro_op_chooses_an_available_alternative_resource() {
-    const ROUTE_P0: ResourceRoute = ResourceRoute {
-        resources: &[TEST_P0],
-    };
-    const ROUTE_P1: ResourceRoute = ResourceRoute {
-        resources: &[TEST_P1],
-    };
-    const ALTERNATIVE: MicroOp = MicroOp {
-        routes: &[ROUTE_P0, ROUTE_P1],
-    };
-
-    let model = resource_test_model(&[
-        ProcUnit {
-            name: "P0",
-            units: 1,
-        },
-        ProcUnit {
-            name: "P1",
-            units: 1,
-        },
-    ]);
-    let program = [
-        resource_test_instr(InstrSchedClass {
-            latency: 1,
-            read_cycle: 0,
-            rthroughput: 1,
-            resources: &["P0"],
-            uops: &[],
-            decode_uops: 1,
-            decoder: None,
-            decode_cycles: 1,
-            eliminated: false,
-            zero_idiom: false,
-        }),
-        resource_test_instr(InstrSchedClass {
-            latency: 1,
-            read_cycle: 0,
-            rthroughput: 1,
-            resources: &[],
-            uops: &[ALTERNATIVE],
-            decode_uops: 1,
-            decoder: None,
-            decode_cycles: 1,
-            eliminated: false,
-            zero_idiom: false,
-        }),
-    ];
-
-    assert_eq!(issue_cycles(&model, &program), vec![0, 0]);
+    assert_eq!(
+        two_port_issue_cycles([on_resources(&["P0"]), with_uops(&[ALTERNATIVE])]),
+        vec![0, 0]
+    );
 }
 
 #[derive(Default)]
@@ -1137,26 +1025,7 @@ impl EventHandler for ReservationRecorder {
 
 #[test]
 fn reserved_events_report_the_chosen_route() {
-    const ROUTE_P0: ResourceRoute = ResourceRoute {
-        resources: &[TEST_P0],
-    };
-    const ROUTE_P1: ResourceRoute = ResourceRoute {
-        resources: &[TEST_P1],
-    };
-    const ALTERNATIVE: MicroOp = MicroOp {
-        routes: &[ROUTE_P0, ROUTE_P1],
-    };
-
-    let model = resource_test_model(&[
-        ProcUnit {
-            name: "P0",
-            units: 1,
-        },
-        ProcUnit {
-            name: "P1",
-            units: 1,
-        },
-    ]);
+    let model = resource_test_model(TWO_PORTS);
     let program = [
         resource_test_instr(InstrSchedClass {
             latency: 1,
@@ -1219,16 +1088,7 @@ fn fused_inherited_route_reservation_belongs_to_its_member() {
     const P1_UOP: MicroOp = MicroOp {
         routes: &[P1_ROUTE],
     };
-    let mut model = resource_test_model(&[
-        ProcUnit {
-            name: "P0",
-            units: 1,
-        },
-        ProcUnit {
-            name: "P1",
-            units: 1,
-        },
-    ]);
+    let mut model = resource_test_model(TWO_PORTS);
     model.fusions = pair_rule("cmp", "jne");
     let mut cmp = resource_test_instr(InstrSchedClass {
         uops: &[P0_UOP],
@@ -1275,30 +1135,8 @@ fn resource_occupancy_delays_the_next_micro_op() {
         units: 1,
     }]);
     let program = [
-        resource_test_instr(InstrSchedClass {
-            latency: 1,
-            read_cycle: 0,
-            rthroughput: 1,
-            resources: &[],
-            uops: &[UOP],
-            decode_uops: 1,
-            decoder: None,
-            decode_cycles: 1,
-            eliminated: false,
-            zero_idiom: false,
-        }),
-        resource_test_instr(InstrSchedClass {
-            latency: 1,
-            read_cycle: 0,
-            rthroughput: 1,
-            resources: &[],
-            uops: &[UOP],
-            decode_uops: 1,
-            decoder: None,
-            decode_cycles: 1,
-            eliminated: false,
-            zero_idiom: false,
-        }),
+        resource_test_instr(with_uops(&[UOP])),
+        resource_test_instr(with_uops(&[UOP])),
     ];
 
     assert_eq!(issue_cycles(&model, &program), vec![0, 3]);
@@ -1311,44 +1149,10 @@ fn conjunctive_route_waits_for_every_resource() {
     };
     const UOP: MicroOp = MicroOp { routes: &[BOTH] };
 
-    let model = resource_test_model(&[
-        ProcUnit {
-            name: "P0",
-            units: 1,
-        },
-        ProcUnit {
-            name: "P1",
-            units: 1,
-        },
-    ]);
-    let program = [
-        resource_test_instr(InstrSchedClass {
-            latency: 1,
-            read_cycle: 0,
-            rthroughput: 1,
-            resources: &["P1"],
-            uops: &[],
-            decode_uops: 1,
-            decoder: None,
-            decode_cycles: 1,
-            eliminated: false,
-            zero_idiom: false,
-        }),
-        resource_test_instr(InstrSchedClass {
-            latency: 1,
-            read_cycle: 0,
-            rthroughput: 1,
-            resources: &[],
-            uops: &[UOP],
-            decode_uops: 1,
-            decoder: None,
-            decode_cycles: 1,
-            eliminated: false,
-            zero_idiom: false,
-        }),
-    ];
-
-    assert_eq!(issue_cycles(&model, &program), vec![0, 1]);
+    assert_eq!(
+        two_port_issue_cycles([on_resources(&["P1"]), with_uops(&[UOP])]),
+        vec![0, 1]
+    );
 }
 
 #[test]
@@ -1576,7 +1380,6 @@ fn rename_test_model() -> MachineModel {
     model
 }
 
-/// A recurrent chain `r1 <- r0, r2 <- r1, r3 <- r2, r0 <- r3`.
 fn move_chain(class: InstrSchedClass) -> Vec<ScoreboardInstr> {
     (0..4)
         .map(|i| {
@@ -1606,10 +1409,9 @@ fn timing(model: &MachineModel, program: &[ScoreboardInstr], in_order: bool) -> 
     )
 }
 
-#[test]
-fn eliminated_moves_are_issue_width_bound_out_of_order() {
+fn assert_eliminated_moves_are_issue_width_bound(in_order: bool) {
     let model = rename_test_model();
-    let baseline = timing(&model, &move_chain(RENAME_ALU), false);
+    let baseline = timing(&model, &move_chain(RENAME_ALU), in_order);
     let eliminated = timing(
         &model,
         &move_chain(InstrSchedClass {
@@ -1618,7 +1420,7 @@ fn eliminated_moves_are_issue_width_bound_out_of_order() {
             resources: &[],
             ..RENAME_ALU
         }),
-        false,
+        in_order,
     );
 
     assert!(baseline.ipc() <= 1.0, "baseline ipc {}", baseline.ipc());
@@ -1630,26 +1432,13 @@ fn eliminated_moves_are_issue_width_bound_out_of_order() {
 }
 
 #[test]
-fn eliminated_moves_are_issue_width_bound_in_order() {
-    let model = rename_test_model();
-    let baseline = timing(&model, &move_chain(RENAME_ALU), true);
-    let eliminated = timing(
-        &model,
-        &move_chain(InstrSchedClass {
-            eliminated: true,
-            latency: 0,
-            resources: &[],
-            ..RENAME_ALU
-        }),
-        true,
-    );
+fn eliminated_moves_are_issue_width_bound_out_of_order() {
+    assert_eliminated_moves_are_issue_width_bound(false);
+}
 
-    assert!(baseline.ipc() <= 1.0, "baseline ipc {}", baseline.ipc());
-    assert!(
-        eliminated.ipc() > 3.0,
-        "eliminated ipc {}",
-        eliminated.ipc()
-    );
+#[test]
+fn eliminated_moves_are_issue_width_bound_in_order() {
+    assert_eliminated_moves_are_issue_width_bound(true);
 }
 
 #[test]

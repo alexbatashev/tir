@@ -3,6 +3,7 @@ mod fp_check;
 mod gate;
 mod gate_bench;
 mod isasim_accept;
+mod lint;
 mod test;
 mod verify_smt;
 
@@ -26,6 +27,8 @@ enum Task {
     /// Record and compare floating-point reference behavior.
     #[command(subcommand)]
     FpCheck(fp_check::Task),
+    /// Run the lints: ast-grep rules, duplicate code, clippy and rustdoc.
+    Lint,
     /// Build the TIR project
     Build,
     /// Build the project documentation
@@ -73,6 +76,7 @@ fn main() -> anyhow::Result<()> {
         Task::Test(options) => test::run(&project_root(), options),
         Task::TestPack(options) => test::pack(&project_root(), options),
         Task::FpCheck(task) => fp_check::run(&project_root(), task),
+        Task::Lint => lint::run(&sh, &project_root()),
         Task::Build => build(&sh),
         Task::Docs => build_docs(&sh),
         Task::Verify { isa, args } => verify_smt::verify_smt(&sh, &isa, args.into_iter()),
@@ -250,9 +254,6 @@ fn build_isa_reference(root: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run the differential ISA test suite: build the `tir-isasim` binary (the
-/// simulator under test), then compare each snippet's architectural state
-/// against a golden reference model (Spike for RISC-V).
 fn isa_test_suite(sh: &Shell) -> anyhow::Result<()> {
     let root = project_root();
     sh.change_dir(&root);
@@ -267,15 +268,16 @@ fn isa_test_suite(sh: &Shell) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Build the C ABI (whose build script regenerates `tir.h`), then compile and
-/// run the C smoke test against the cdylib.
-fn capi_smoke(sh: &Shell) -> anyhow::Result<()> {
+fn build_capi(sh: &Shell) -> anyhow::Result<PathBuf> {
     let root = project_root();
     sh.change_dir(&root);
-
     cmd!(sh, "cargo build -p tir-capi").run()?;
+    Ok(root.join("target/debug"))
+}
 
-    let lib_dir = root.join("target/debug");
+fn capi_smoke(sh: &Shell) -> anyhow::Result<()> {
+    let root = project_root();
+    let lib_dir = build_capi(sh)?;
     let smoke = root.join("utils/capi/tests/smoke.c");
     let bin = lib_dir.join("tir_capi_smoke");
     let rpath = format!("-Wl,-rpath,{}", lib_dir.display());
@@ -289,27 +291,15 @@ fn capi_smoke(sh: &Shell) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Build the C ABI cdylib, then run the Python test suite against it. The
-/// Python bindings build their typed op constructors from the schema at import,
-/// so there is nothing to regenerate.
 fn python_smoke(sh: &Shell) -> anyhow::Result<()> {
-    let root = project_root();
-    sh.change_dir(&root);
-
-    cmd!(sh, "cargo build -p tir-capi").run()?;
+    build_capi(sh)?;
     cmd!(sh, "python3 -m unittest discover -s utils/python/tests").run()?;
     Ok(())
 }
 
-/// Build the C ABI cdylib, then compile and run the Haskell bindings smoke test
-/// against it. Requires `ghc` on PATH.
 fn haskell_smoke(sh: &Shell) -> anyhow::Result<()> {
     let root = project_root();
-    sh.change_dir(&root);
-
-    cmd!(sh, "cargo build -p tir-capi").run()?;
-
-    let lib_dir = root.join("target/debug");
+    let lib_dir = build_capi(sh)?;
     let out = root.join("target/haskell");
     std::fs::create_dir_all(&out)?;
     let bin = out.join("tir_hs_smoke");

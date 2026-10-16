@@ -1,6 +1,6 @@
 //! Instruction selection.
 //!
-//! Creating the pass synthesizes its selection rules ([`synth`], [`pool`])
+//! Creating the pass synthesizes its selection rules (`synth`, `pool`)
 //! from the dialects the context holds and the target's instructions, on a
 //! thread the first function selected joins.
 
@@ -696,8 +696,6 @@ impl InstructionSelectPass {
         }
     }
 
-    /// Select `function` in a fork of `context`, recover its blocks there and
-    /// score the result.
     pub(crate) fn prepare(
         &mut self,
         context: &Context,

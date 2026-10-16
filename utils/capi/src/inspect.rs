@@ -10,8 +10,6 @@ use tir::{RegionId, TypeId, ValueId};
 
 use crate::{TIR_INVALID_ID, into_cstring, op_instance, set_error, with_context};
 
-/// Discriminant codes returned by [`tir_op_attribute_kind`]; kept in sync with
-/// the `TIR_ATTR_*` macros injected into the generated header.
 fn attr_kind_code(value: &AttributeValue) -> i32 {
     match value {
         // A predicate is a string to a C consumer: it reads and prints as one.
@@ -34,8 +32,6 @@ fn attr_kind_code(value: &AttributeValue) -> i32 {
     }
 }
 
-/// The `i`-th attribute value of op `op`, or `None` (with an error set) if the
-/// op or index is invalid.
 fn attr_value(ctx: &tir::Context, op: u32, i: usize) -> Option<AttributeValue> {
     let op = op_instance(ctx, op)?;
     match op.attributes().get(i) {
@@ -353,6 +349,24 @@ pub unsafe extern "C" fn tir_op_attribute_kind(ctx: *const tir::Context, op: u32
     })
 }
 
+// Write a `$variant` attribute to `*out`; any other kind, or a null `out`, is
+// reported as not `$kind`.
+macro_rules! read_attribute {
+    ($ctx:expr, $op:expr, $i:expr, $out:expr, $variant:ident, $kind:literal) => {
+        with_context($ctx, false, |ctx| match attr_value(ctx, $op, $i) {
+            Some(AttributeValue::$variant(v)) if !$out.is_null() => {
+                unsafe { *$out = v };
+                true
+            }
+            Some(_) => {
+                set_error(concat!("attribute is not ", $kind));
+                false
+            }
+            None => false,
+        })
+    };
+}
+
 /// Read a signed-int attribute into `*out`. Returns false if the attribute is a
 /// different kind or on error.
 ///
@@ -365,17 +379,7 @@ pub unsafe extern "C" fn tir_op_attribute_int(
     i: usize,
     out: *mut i64,
 ) -> bool {
-    with_context(ctx, false, |ctx| match attr_value(ctx, op, i) {
-        Some(AttributeValue::Int(v)) if !out.is_null() => {
-            unsafe { *out = v };
-            true
-        }
-        Some(_) => {
-            set_error("attribute is not a signed integer");
-            false
-        }
-        None => false,
-    })
+    read_attribute!(ctx, op, i, out, Int, "a signed integer")
 }
 
 /// Read an unsigned-int attribute into `*out`. Returns false on kind mismatch or error.
@@ -389,17 +393,7 @@ pub unsafe extern "C" fn tir_op_attribute_uint(
     i: usize,
     out: *mut u64,
 ) -> bool {
-    with_context(ctx, false, |ctx| match attr_value(ctx, op, i) {
-        Some(AttributeValue::UInt(v)) if !out.is_null() => {
-            unsafe { *out = v };
-            true
-        }
-        Some(_) => {
-            set_error("attribute is not an unsigned integer");
-            false
-        }
-        None => false,
-    })
+    read_attribute!(ctx, op, i, out, UInt, "an unsigned integer")
 }
 
 /// Read a floating-point attribute (`F32` or `F64`) into `*out`. Returns false
@@ -443,17 +437,7 @@ pub unsafe extern "C" fn tir_op_attribute_bool(
     i: usize,
     out: *mut bool,
 ) -> bool {
-    with_context(ctx, false, |ctx| match attr_value(ctx, op, i) {
-        Some(AttributeValue::Bool(v)) if !out.is_null() => {
-            unsafe { *out = v };
-            true
-        }
-        Some(_) => {
-            set_error("attribute is not a bool");
-            false
-        }
-        None => false,
-    })
+    read_attribute!(ctx, op, i, out, Bool, "a bool")
 }
 
 /// Value of a string attribute as an owned C string, or null on kind mismatch or

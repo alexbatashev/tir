@@ -148,8 +148,6 @@ fn parse_func(source: &str) -> (Context, FuncOp) {
     (context, func)
 }
 
-/// Runs `pass` over [`ADD_ITS_ARGUMENT`], whose `func.return` reads the addi a
-/// pass targeting it may leave dangling.
 fn run_on_broken_candidate(pass: Box<dyn Pass>) -> Result<(), PassError> {
     let (context, func) = parse_func(ADD_ITS_ARGUMENT);
     let mut pm = PassManager::new();
@@ -208,8 +206,7 @@ fn a_pass_that_changes_nothing_is_not_verified() {
         .expect("a pass that left no version behind skips verification");
 }
 
-#[test]
-fn an_analysis_survives_a_pass_that_changes_nothing() {
+fn analysis_survives<P: Pass + Clone + 'static>(pass: P) -> bool {
     use super::analysis::Simple;
 
     let (context, func) = parse_func(ADD_ITS_ARGUMENT);
@@ -217,15 +214,17 @@ fn an_analysis_survives_a_pass_that_changes_nothing() {
     let before = analyses.get::<Simple>(&context, func.id());
 
     let mut pm = PassManager::new();
-    pm.add_pass(ReadOnlyPass);
+    pm.add_pass(pass);
     let root = OperationRef::new(context.get_op(func.id()));
     pm.run_on_op_ref(&context, root, &analyses)
-        .expect("the pass changes nothing");
+        .expect("the pass keeps the IR valid");
 
-    assert!(std::rc::Rc::ptr_eq(
-        &before,
-        &analyses.get::<Simple>(&context, func.id())
-    ));
+    std::rc::Rc::ptr_eq(&before, &analyses.get::<Simple>(&context, func.id()))
+}
+
+#[test]
+fn an_analysis_survives_a_pass_that_changes_nothing() {
+    assert!(analysis_survives(ReadOnlyPass));
 }
 
 #[test]
@@ -254,22 +253,7 @@ fn repeated_pass_runs_do_not_grow_the_analysis_cache() {
 
 #[test]
 fn an_analysis_is_rebuilt_after_a_pass_mutates() {
-    use super::analysis::Simple;
-
-    let (context, func) = parse_func(ADD_ITS_ARGUMENT);
-    let analyses = AnalysisManager::new();
-    let before = analyses.get::<Simple>(&context, func.id());
-
-    let mut pm = PassManager::new();
-    pm.add_pass(AddToSubPass);
-    let root = OperationRef::new(context.get_op(func.id()));
-    pm.run_on_op_ref(&context, root, &analyses)
-        .expect("rewriting addi to subi keeps the IR valid");
-
-    assert!(!std::rc::Rc::ptr_eq(
-        &before,
-        &analyses.get::<Simple>(&context, func.id())
-    ));
+    assert!(!analysis_survives(AddToSubPass));
 }
 
 #[test]
@@ -358,8 +342,6 @@ fn erasing_an_op_drops_its_operand_uses() {
     );
 }
 
-/// A ring of blocks, each branching to the next two: strongly connected,
-/// entered at two of its members, and irreducible however it is traversed.
 fn tangle(blocks: usize) -> String {
     let mut source = String::from("func.func @tangle(%0: !i1, %1: !i32) -> !i32 {\n");
     source.push_str("  cfg.cond_br %0, ^bb1, ^bb2\n");
@@ -400,10 +382,6 @@ fn restructure_source(source: &str) -> (Context, FuncOp, usize) {
     (context, func, before)
 }
 
-/// Restructuring copies no node, so the output grows linearly: over a
-/// pathological irreducible graph every added block costs the same fixed
-/// number of operations (the dispatch constants, one conditional and its
-/// yields), and the output stays within 6x the input.
 #[test]
 fn a_pathological_graph_grows_linearly() {
     let mut measured = Vec::new();
@@ -432,9 +410,6 @@ fn a_pathological_graph_grows_linearly() {
     );
 }
 
-/// A copy that runs somewhere else names its inputs under the caller's names —
-/// the region's own arguments included, so the copy's arguments go unused rather
-/// than shadowing what was bound.
 #[test]
 fn cloning_a_region_with_a_mapping_binds_arguments_and_outside_values() {
     let context = Context::with_default_dialects();
@@ -594,7 +569,6 @@ fn module_text(context: &Context, module: tir::OpId) -> String {
     out
 }
 
-/// The module text after the pipeline, and what each function counted.
 fn run_peer_count(workers: usize) -> (String, Vec<i64>) {
     let (context, module) = fixtures::parse(TWO_FUNCTIONS);
     let mut pm = PassManager::new();

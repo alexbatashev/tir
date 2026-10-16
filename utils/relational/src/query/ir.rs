@@ -65,7 +65,6 @@ impl Expr {
         }
     }
 
-    /// Whether every scalar the expression reads is `known`.
     pub(super) fn ready(&self, known: &[bool]) -> bool {
         match self {
             Expr::Lit(_) => true,
@@ -122,7 +121,6 @@ impl Atom {
         }
     }
 
-    /// The scalars this atom binds.
     pub(crate) fn writes(&self) -> SmallVec<[Scalar; 4]> {
         match self {
             Atom::Rows(rows) => rows.tag.into_iter().chain(rows.cell).collect(),
@@ -143,7 +141,7 @@ impl Atom {
 }
 
 /// Rows of the client tables `table` resolves to (see
-/// [`Database::add_words`](crate::Database::add_words)), one term per
+/// [`Database::add_words`](crate::Core::add_words)), one term per
 /// column, at most 32. A term that is a lone scalar nothing has bound when
 /// the atom is reached is bound to the row's cell. Any other term is
 /// evaluated, and the row must hold its value in that column: a value no
@@ -225,8 +223,6 @@ impl Rows {
         }
     }
 
-    /// The key columns holding a variable, in column order: the atom's
-    /// arguments, which a sideways step numbers.
     pub(crate) fn args(&self) -> impl Iterator<Item = (usize, Var)> + '_ {
         let keys = &self.terms[..self.terms.len() - 1];
         keys.iter()
@@ -237,7 +233,6 @@ impl Rows {
             })
     }
 
-    /// The column whose cell sits in `column` when the row is read swapped.
     pub(crate) fn swapped(&self, column: usize) -> usize {
         match self.swap {
             Some(Swap {
@@ -265,7 +260,7 @@ pub enum Out {
     Word(Scalar),
     /// The value must be one of the parameter's cells.
     In(Param),
-    /// The value is not read, and need not exist: [`Host::accepts`] decides
+    /// The value is not read, and need not exist: [`Calls::accepts`] decides
     /// from `key`'s reference. The column still says which epoch the atom is
     /// from.
     Host(ExternId),
@@ -314,8 +309,6 @@ pub enum Guard {
 }
 
 impl Guard {
-    /// Whether every scalar the guard reads is `known` and every variable it
-    /// reads (only a disequality has any) is `bound`.
     pub(crate) fn ready(&self, known: &[bool], bound: &[bool]) -> bool {
         match self {
             Guard::Cmp(_, a, b) => a.ready(known) && b.ready(known),
@@ -374,7 +367,6 @@ impl Resolution {
         }
     }
 
-    /// The cells listed for `table`.
     pub(crate) fn cells_of(&self, table: u32) -> &[u32] {
         let found = self.tables.iter().find(|(known, _)| *known == table);
         found.map_or(&[], |(_, cells)| cells.as_slice())

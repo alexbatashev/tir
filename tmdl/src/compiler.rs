@@ -143,10 +143,6 @@ impl Compiler {
         }
     }
 
-    /// Read all inputs, lex them, collect every `macro` definition into one
-    /// shared table (cross-file visibility), then macro-expand each file.
-    /// Sources are read up front so their `String`s outlive the borrowed tokens.
-    /// Returns `None` after printing diagnostics.
     fn lex_collect_expand<'s>(
         &self,
         sources: &'s [String],
@@ -187,9 +183,6 @@ impl Compiler {
         Some(expanded)
     }
 
-    /// Full front end shared by AST-emitting and whole-program actions: read,
-    /// lex, expand, parse, resolve inheritance, then run semantic + type
-    /// analysis. Prints diagnostics and returns `Ok(None)` on any failure.
     fn parse_and_check(&self) -> Result<Option<Vec<crate::ast::File>>, TMDLError> {
         let sources = self.read_sources()?;
         let arena = StringArena::new();
@@ -620,9 +613,6 @@ fn print_report(
         .unwrap()
 }
 
-/// Print grouped-by-file diagnostics using the already-in-memory sources
-/// (`inputs[i]` names the file whose text is `sources[i]`). Diagnostics may
-/// reference any input file; unknown files are skipped.
 fn print_diags(diags: Vec<Diag>, inputs: &[String], sources: &[String]) {
     use std::collections::BTreeMap;
     let mut by_file: BTreeMap<String, Vec<Rich<'static, String, Span>>> = BTreeMap::new();
@@ -680,11 +670,29 @@ fn json_disabled() -> TMDLError {
     TMDLError::Codegen("tmdl was built without the `json` feature".to_string())
 }
 
-/// Write the `MODEL_CHECK_SOURCES` table a backend embeds for hardware model
-/// checking: every TMDL input this build compiles, named by file and inlined
-/// with `include_str!`. A backend `include!`s the result, so the sources it
+/// Generate a backend from its TMDL `inputs` in a build script: the Rust ISA
+/// model (`<dialect>.rs`), its operation list (`<dialect>_ops.rs`) and the
+/// `MODEL_CHECK_SOURCES` table (`model_check_sources.rs`), all in `OUT_DIR`.
+///
+/// The table names every input by file and inlines it with `include_str!`.
+/// A backend `include!`s it for hardware model checking, so the sources it
 /// embeds cannot drift from the ones it was generated from.
-pub fn emit_model_check_sources(inputs: &[&str], output: &std::path::Path) -> std::io::Result<()> {
+pub fn build_backend(dialect: &str, inputs: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+    let out_dir = std::env::var("OUT_DIR")?;
+    for input in inputs {
+        println!("cargo:rerun-if-changed={input}");
+    }
+    let compile = |action, output| {
+        let mut builder = Compiler::builder()
+            .output(OutputKind::File(format!("{out_dir}/{dialect}{output}")))
+            .dialect(Some(dialect.to_string()))
+            .action(action);
+        for input in inputs {
+            builder = builder.add_input(input);
+        }
+        builder.build().compile()
+    };
+
     let mut table = String::from("const MODEL_CHECK_SOURCES: &[(&str, &str)] = &[\n");
     for input in inputs {
         let path = std::fs::canonicalize(input)?;
@@ -697,5 +705,9 @@ pub fn emit_model_check_sources(inputs: &[&str], output: &std::path::Path) -> st
         table.push_str(&format!("    ({name:?}, include_str!({path:?})),\n"));
     }
     table.push_str("];\n");
-    std::fs::write(output, table)
+    std::fs::write(format!("{out_dir}/model_check_sources.rs"), table)?;
+
+    compile(Action::EmitRust, ".rs")?;
+    compile(Action::EmitOperationList, "_ops.rs")?;
+    Ok(())
 }

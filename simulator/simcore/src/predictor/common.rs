@@ -149,6 +149,32 @@ fn bad(key: &str, value: &str) -> String {
     format!("bad value '{value}' for predictor parameter '{key}'")
 }
 
+/// The state TAGE and BATAGE share: a signed base counter table, tagged
+/// components of payload `E` indexed by geometric history lengths, and the
+/// global history they hash.
+pub struct TaggedTables<E> {
+    pub hist_lengths: Vec<usize>,
+    pub base: Vec<i8>,
+    pub tables: Vec<Vec<E>>,
+    pub history: GlobalHistory,
+    /// Bounds of a `ctr_bits`-wide signed counter.
+    pub ctr_lo: i8,
+    pub ctr_hi: i8,
+}
+
+impl<E: Clone + Default> TaggedTables<E> {
+    pub fn new(params: &TageParams) -> Self {
+        TaggedTables {
+            hist_lengths: params.history_lengths(),
+            base: vec![0i8; 1usize << params.log_base],
+            tables: vec![vec![E::default(); 1usize << params.log_table]; params.num_tables],
+            history: GlobalHistory::new(params.max_hist),
+            ctr_lo: -(1i8 << (params.ctr_bits - 1)),
+            ctr_hi: (1i8 << (params.ctr_bits - 1)) - 1,
+        }
+    }
+}
+
 /// Global branch-history register: the sequence of resolved directions, most
 /// recent first. Only the last `max_len` bits are retained, since no tagged
 /// table indexes with a longer history.
@@ -173,9 +199,6 @@ impl GlobalHistory {
         }
     }
 
-    /// XOR-fold the most recent `len` history bits into a `width`-bit value.
-    /// This is the standard TAGE compression of a long history into a table
-    /// index or tag.
     fn fold(&self, len: usize, width: u32) -> u64 {
         let mut acc = 0u64;
         let mut pos = 0u32;

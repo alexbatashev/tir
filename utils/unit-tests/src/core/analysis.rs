@@ -34,7 +34,12 @@ fn test_op(context: &Context) -> OpId {
     ops::module(context, None).build().id()
 }
 
-/// Appends an op to `module`'s body, bumping its version.
+fn one_op() -> (Context, OpId, AnalysisManager) {
+    let context = Context::with_default_dialects();
+    let op = test_op(&context);
+    (context, op, AnalysisManager::new())
+}
+
 fn edit(context: &Context, module: OpId) {
     let body = context.get_op(module).regions()[0];
     let block = context
@@ -59,9 +64,7 @@ fn caches_per_op() {
 
 #[test]
 fn get_cached_never_computes() {
-    let context = Context::with_default_dialects();
-    let op = test_op(&context);
-    let am = AnalysisManager::new();
+    let (context, op, am) = one_op();
 
     assert!(am.get_cached::<Simple>(&context, op).is_none());
     let built = am.get::<Simple>(&context, op);
@@ -73,9 +76,7 @@ fn get_cached_never_computes() {
 
 #[test]
 fn an_edit_makes_the_cached_analysis_stale() {
-    let context = Context::with_default_dialects();
-    let op = test_op(&context);
-    let am = AnalysisManager::new();
+    let (context, op, am) = one_op();
     let first = am.get::<Simple>(&context, op);
 
     edit(&context, op);
@@ -99,9 +100,7 @@ fn an_edit_elsewhere_leaves_the_cached_analysis_alone() {
 
 #[test]
 fn a_dependency_goes_stale_with_its_dependent() {
-    let context = Context::with_default_dialects();
-    let op = test_op(&context);
-    let am = AnalysisManager::new();
+    let (context, op, am) = one_op();
 
     am.get::<Dependent>(&context, op);
     assert!(am.get_cached::<Simple>(&context, op).is_some());
@@ -114,9 +113,7 @@ fn a_dependency_goes_stale_with_its_dependent() {
 
 #[test]
 fn stale_entries_do_not_accumulate() {
-    let context = Context::with_default_dialects();
-    let op = test_op(&context);
-    let am = AnalysisManager::new();
+    let (context, op, am) = one_op();
 
     for _ in 0..8 {
         am.get::<Simple>(&context, op);
