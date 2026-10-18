@@ -69,7 +69,7 @@ impl Workspace {
     fn command(&self, binary: impl AsRef<Path>) -> Command {
         let mut command = Command::new(binary.as_ref());
         command
-            .env("CARGO_MANIFEST_DIR", self.root.join("xtask"))
+            .env("CARGO_MANIFEST_DIR", self.root.join("utils/xtask"))
             .current_dir(&self.root);
         command
     }

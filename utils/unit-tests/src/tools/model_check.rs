@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use tir_tools::model_check::stitch;
+use tir_cli::model_check::stitch;
 
 const IMPLEMENTATION: &str = "\
 1 sort bitvec 8

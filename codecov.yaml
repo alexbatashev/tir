@@ -1,7 +1,0 @@
-ignore:
-  - "utils/**"
-  - "fuzz"
-  - "**/tests/**"
-  - "xtask"
-  - "target/**"
-  - "**/benches/**"

@@ -580,7 +580,7 @@ fn reference_detects_a_store_moved_before_a_trap() {
     let manifest = directory.path().join("cases.toml");
     let report = directory.path().join("reference.json");
     let original = fs::read_to_string(
-        common::manifest_dir().join("../fcc/checks/Inputs/fp/reference/effects.c"),
+        common::manifest_dir().join("../../fcc/checks/Inputs/fp/reference/effects.c"),
     )
     .unwrap();
     let moved = original.replace(
@@ -695,7 +695,7 @@ fn check_accepts_the_fma_reference_bits_and_flags() {
 }"#,
     )
     .unwrap();
-    let manifest = common::manifest_dir().join("../fcc/checks/Inputs/fp/cases.toml");
+    let manifest = common::manifest_dir().join("../../fcc/checks/Inputs/fp/cases.toml");
     let mut manifest_digest = Sha256::new();
     manifest_digest.input(fs::read(manifest).unwrap());
     let manifest_digest = format!("sha256:{:x}", manifest_digest.result());

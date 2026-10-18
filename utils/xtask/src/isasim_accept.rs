@@ -94,7 +94,7 @@ enum Status {
 
 pub fn run(root: &Path, options: Options) -> anyhow::Result<()> {
     let manifest_path = options.manifest.unwrap_or_else(|| {
-        root.join("xtask/isasim-accept")
+        root.join("utils/xtask/isasim-accept")
             .join(format!("{}.toml", options.milestone))
     });
     let manifest_bytes = fs::read(&manifest_path)

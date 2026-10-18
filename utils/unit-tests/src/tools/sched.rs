@@ -1,6 +1,6 @@
 use tir::backend::sched::{InstrSchedClass, MachineModel};
+use tir_cli::sched::event::{make, View};
 use tir_sim::scoreboard::{ScoreboardInstr, SimContext};
-use tir_tools::sched::event::{make, View};
 
 const MODEL: MachineModel = MachineModel {
     name: "test",

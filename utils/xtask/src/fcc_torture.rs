@@ -15,7 +15,7 @@ const TORTURE_PATH: &str = "gcc/testsuite/gcc.c-torture";
 const CHECKOUT_PATH: &str = "target/test-suites/gcc";
 const ALLOWLIST_PATH: &str = "fcc/tests/gcc-torture-known-failures.txt";
 const EXECUTE_ALLOWLIST_PATH: &str = "fcc/tests/gcc-torture-execute-known-failures.txt";
-const KNOWN_FAILURES: &str = include_str!("../../fcc/tests/gcc-torture-known-failures.txt");
+const KNOWN_FAILURES: &str = include_str!("../../../fcc/tests/gcc-torture-known-failures.txt");
 /// The slowest case (`pr35800.c`, a 35-arm fall-through switch) spends ~45s in
 /// instruction selection on a fast desktop, so the budget has to leave room for
 /// a CI core several times slower before it reads as a regression. Raising it

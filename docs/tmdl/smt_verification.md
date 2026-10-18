@@ -41,7 +41,7 @@ invalidates the cache automatically.
 
 ## State map
 
-Each ISA is described by `xtask/verify/<isa>.toml`: the snapshot and its pin,
+Each ISA is described by `utils/xtask/verify/<isa>.toml`: the snapshot and its pin,
 the Isla config, the modeling assumptions that apply, and a `map` relating Sail
 locations to TMDL register slots. Every row has the same shape:
 
@@ -107,8 +107,8 @@ External inputs are:
 - a Sail RISC-V snapshot, e.g. `rv64d.ir` from
   [isla-snapshots](https://github.com/rems-project/isla-snapshots).
 
-The isla configurations live in `xtask/`, next to the state maps in
-`xtask/verify/`. The RISC-V configurations disable C,
+The isla configurations live in `utils/xtask/`, next to the state maps in
+`utils/xtask/verify/`. The RISC-V configurations disable C,
 which the PC alignment assumptions rely on. Point the harness at the tools:
 
 ```sh

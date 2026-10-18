@@ -35,7 +35,7 @@
 //!     memory map (CLINT) are excluded via their backing-register reads.
 //!
 //! External inputs: Bitwuzla, z3, a Sail snapshot, and an Isla config per ISA.
-//! `xtask/verify/<isa>.toml` names them and maps Sail state to TMDL slots.
+//! `utils/xtask/verify/<isa>.toml` names them and maps Sail state to TMDL slots.
 //! The Isla library revision is pinned in `utils/verify/Cargo.toml` and snapshots are downloaded on
 //! demand. Override locations with `TIR_ISLA_SNAPSHOT`, `TIR_ISLA_CONFIG`,
 //! `TIR_BITWUZLA`, and `TIR_Z3`; `TIR_ISLA_SNAPSHOTS_REF` overrides the snapshot pin.
@@ -72,7 +72,7 @@ use tir_verify::TraceValue;
 use tmdl::{RegisterClassMetadata, SmtMetadata};
 use xshell::{cmd, Shell};
 
-/// One ISA's verification setup, read from `xtask/verify/<isa>.toml`.
+/// One ISA's verification setup, read from `utils/xtask/verify/<isa>.toml`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IsaSpec {
@@ -86,7 +86,7 @@ pub struct IsaSpec {
     snapshot: String,
     snapshot_repo: String,
     snapshot_ref: String,
-    /// Isla config file name under `xtask/`.
+    /// Isla config file name under `utils/xtask/`.
     isla_config: String,
     xlen: u32,
     /// Simplify Isla traces.
@@ -234,7 +234,7 @@ fn expand_map<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Vec<MapRow>, D:
 impl IsaSpec {
     fn load(isa: &str) -> anyhow::Result<Self> {
         let path = project_root()
-            .join("xtask/verify")
+            .join("utils/xtask/verify")
             .join(format!("{isa}.toml"));
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("unsupported ISA {isa}: cannot read {}", path.display()))?;
@@ -430,7 +430,7 @@ pub fn verify_smt(sh: &Shell, isa: &str, args: impl Iterator<Item = String>) -> 
     println!("JSON report:      {}", report_path.display());
     if !report.unexpected_passes.is_empty() {
         anyhow::bail!(
-            "{} expected failure(s) verify; remove them from xtask/verify/{}.toml: {}",
+            "{} expected failure(s) verify; remove them from utils/xtask/verify/{}.toml: {}",
             report.unexpected_passes.len(),
             spec.name,
             report.unexpected_passes.join(", ")
@@ -510,7 +510,7 @@ impl Tools {
         };
         let isla_config = std::env::var("TIR_ISLA_CONFIG")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| project_root().join("xtask").join(&spec.isla_config));
+            .unwrap_or_else(|_| project_root().join("utils/xtask").join(&spec.isla_config));
         let threads = std::env::var("TIR_VERIFY_SMT_ISLA_JOBS")
             .ok()
             .and_then(|jobs| jobs.parse().ok())

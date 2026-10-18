@@ -562,7 +562,7 @@ does not register its rules with an optimization pass.
 The proof command checks supported obligations at a selected width:
 
 ```sh
-cargo run -p tir-tools -- prove rules.pdl --width 32
+cargo run -p tir-cli -- prove rules.pdl --width 32
 ```
 
 Its default width is 8. Every width name takes that width, then each guard

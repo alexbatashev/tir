@@ -2100,6 +2100,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tir-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "tir",
+ "tir-arm64",
+ "tir-bench",
+ "tir-gpu",
+ "tir-llvm",
+ "tir-riscv",
+ "tir-sim",
+ "tir-x86_64",
+ "tmdl",
+]
+
+[[package]]
 name = "tir-egraph"
 version = "0.1.0"
 dependencies = [
@@ -2259,23 +2276,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tir-tools"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "tir",
- "tir-arm64",
- "tir-bench",
- "tir-gpu",
- "tir-llvm",
- "tir-riscv",
- "tir-sim",
- "tir-x86_64",
- "tmdl",
-]
-
-[[package]]
 name = "tir-unit-tests"
 version = "0.1.0"
 dependencies = [
@@ -2288,6 +2288,7 @@ dependencies = [
  "tir-adt",
  "tir-arm64",
  "tir-capi",
+ "tir-cli",
  "tir-egraph",
  "tir-jit",
  "tir-lit",
@@ -2296,7 +2297,6 @@ dependencies = [
  "tir-riscv",
  "tir-sim",
  "tir-symbolic",
- "tir-tools",
  "tir-verify",
  "tir-x86_64",
  "tmdl",

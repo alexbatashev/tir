@@ -28,7 +28,7 @@ tir-sim.workspace = true
 tir-jit.workspace = true
 tir-llvm.workspace = true
 tir-capi = { path = "../capi" }
-tir-tools = { path = "../../tools" }
+tir-cli = { path = "../../tir" }
 fcc = { path = "../../fcc" }
 tmdl = { path = "../../tmdl" }
 serde_json.workspace = true
