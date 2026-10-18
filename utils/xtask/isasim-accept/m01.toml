@@ -1,7 +1,7 @@
 schema_version = 1
 milestone = "m01"
 fixtures = [
-  "simulator/isasim/checks",
+  "tools/isasim/checks",
   "utils/unit-tests/Cargo.toml",
   "utils/unit-tests/build.rs",
   "utils/unit-tests/src/simcore/conditional_latency.rs",
@@ -19,7 +19,7 @@ command = ["cargo", "xtask", "test", "--cargo-test", "--", "--test", "lit"]
 tool = "cargo"
 expected_cases = 82
 [cases.env]
-LIT_FILTER = "^simulator/isasim/checks/"
+LIT_FILTER = "^tools/isasim/checks/"
 
 [[cases]]
 name = "simcore-runtime-unit-tests"

@@ -1,5 +1,5 @@
 //! Dump a saturation's input as an engine-neutral workload, which the e-graph
-//! benchmarks under `utils/egraph/benches` replay on every engine they
+//! benchmarks under `libs/egraph/benches` replay on every engine they
 //! compare. Off unless `TIR_SAT_DUMP` names a directory.
 //!
 //! The format keeps what any e-graph library can express and erases the rest. A

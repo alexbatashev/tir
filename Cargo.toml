@@ -51,7 +51,7 @@ tir-pbqp = { path = "utils/pbqp" }
 tir-relational = { path = "libs/relational" }
 tir-egraph = { path = "libs/egraph" }
 tir-bench = { path = "utils/bench" }
-tir-pdl = { path = "utils/pdl" }
+tir-pdl = { path = "utils/pdl", default-features = false }
 
 # Per-target crates
 tir-riscv = { path = "backends/riscv" }

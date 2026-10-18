@@ -13,7 +13,7 @@ const PROGRESS_TIME_INTERVAL: Duration = Duration::from_secs(30);
 pub fn project_root() -> PathBuf {
     let dir = std::env::var("CARGO_MANIFEST_DIR")
         .unwrap_or_else(|_| env!("CARGO_MANIFEST_DIR").to_owned());
-    PathBuf::from(dir).parent().unwrap().to_owned()
+    PathBuf::from(dir).ancestors().nth(2).unwrap().to_owned()
 }
 
 /// Every `.c` file under `directory`, recursively. A path that is not a

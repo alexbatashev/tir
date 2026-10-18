@@ -118,9 +118,10 @@ and target-specific work.
 | `backends/` | Machine targets, including instruction descriptions and target-specific lowering. |
 | `gpu/` | Virtual GPU instruction sets and shared GPU support. |
 | `tmdl/` | The compiler and tooling for machine descriptions. |
-| `utils/` | Reusable algorithms and supporting tools, including symbolic reasoning, PDL, solvers, and testing infrastructure. |
-| `tools/` | Command-line tools for working with IR and machine code. |
-| `simulator/` | Instruction simulation and its shared runtime. |
+| `libs/` | Reusable libraries, including data structures, symbolic reasoning, e-graphs, and the simulator runtime. |
+| `tir/` | The `tir` command-line tool for working with IR and machine code. |
+| `tools/` | End-user tools, including the instruction simulator and LLVM IR import. |
+| `utils/` | Development support: PDL, solvers, testing infrastructure, and xtask. |
 
 Shared backend algorithms belong to the core, while a target supplies its
 instruction set and machine-specific rules. Likewise, the C frontend uses the
