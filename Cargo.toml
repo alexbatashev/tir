@@ -2,54 +2,56 @@
 resolver = "2"
 
 members = [
-    "utils/bench",
-    "utils/filecheck",
-    "utils/lit",
-    "utils/not",
-    "tmdl",
-    "xtask",
     "core",
-    "utils/macros",
-    "backends/riscv",
-    "utils/fuzz",
-    "simulator/isasim",
-    "simulator/simcore",
+    "fcc",
+    "gpu",
+    "tir",
+    "tmdl",
     "backends/arm64",
     "backends/x86_64",
-    "fcc",
-    "utils/isa-test-suite",
-    "utils/capi",
-    "utils/adt",
-    "utils/symbolic",
-    "utils/verify",
-    "utils/llvm",
-    "utils/jit",
-    "tools",
-    "gpu",
+    "backends/riscv",
+    "libs/adt",
+    "libs/egraph",
+    "libs/jit",
+    "libs/relational",
+    "libs/simcore",
+    "libs/symbolic",
+    "tools/isasim",
+    "tools/llvm",
     "utils/pdl",
     "utils/pbqp",
     "utils/unit-tests",
     "utils/arrange",
-    "utils/relational",
-    "utils/egraph",
+    "utils/bench",
+    "utils/filecheck",
+    "utils/lit",
+    "utils/not",
+    "utils/xtask",
+    "utils/verify",
+    "utils/macros",
+    "utils/fuzz",
+    "utils/capi",
+    "utils/isa-test-suite",
 ]
 
 [workspace.dependencies]
 tir = { path = "core" }
-tir-sim = { path = "simulator/simcore" }
+tir-sim = { path = "libs/simcore" }
 tmdl = { path = "tmdl", default-features = false }
 
 # Common utils
-tir-adt = { path = "utils/adt" }
+tir-adt = { path = "libs/adt" }
 tir-arrange = { path = "utils/arrange" }
-tir-symbolic = { path = "utils/symbolic" }
+tir-symbolic = { path = "libs/symbolic" }
 tir-macros = { path = "utils/macros" }
 tir-lit = { path = "utils/lit" }
-tir-llvm = { path = "utils/llvm" }
-tir-jit = { path = "utils/jit" }
+tir-llvm = { path = "tools/llvm" }
+tir-jit = { path = "libs/jit" }
 tir-pbqp = { path = "utils/pbqp" }
-tir-relational = { path = "utils/relational" }
-tir-egraph = { path = "utils/egraph" }
+tir-relational = { path = "libs/relational" }
+tir-egraph = { path = "libs/egraph" }
+tir-bench = { path = "utils/bench" }
+tir-pdl = { path = "utils/pdl" }
 
 # Per-target crates
 tir-riscv = { path = "backends/riscv" }
@@ -61,7 +63,6 @@ anyhow = "1.0.102"
 ariadne = "0.6.0"
 clap = "4.6.1"
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
-tir-bench = { path = "utils/bench" }
 linkme = "0.3.36"
 logos = "0.16.1"
 quote = "1.0.45"

@@ -1,6 +1,6 @@
-#[path = "../../fcc/benches/coremark.rs"]
+#[path = "../../../fcc/benches/coremark.rs"]
 mod coremark_bench;
-#[path = "../../fcc/benches/torture.rs"]
+#[path = "../../../fcc/benches/torture.rs"]
 mod torture_bench;
 
 use std::collections::HashMap;

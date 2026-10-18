@@ -38,17 +38,20 @@ the same amount of time (or less!) to do so.
    approved by the user.
 6. Rely on design documentation in `docs/design` as a summary of how TIR
    works in general.
+7. See `Source overview` section of README.md before writing new code.
 
 ## Minimal quality gates
 
 - `cargo xtask lint` passes cleanly (clippy, rustdoc, ast-grep rules in
   `.config/ast-grep/`, duplicate code; needs `uv`)
-- `cargo build` compiles (needs `mold` on Linux)
+- `cargo build` compiles
 - `cargo xtask test` passes cleanly
 - `cargo fmt` has no additional format changes
 - `cargo xtask test --profile ci --torture` finds no new failures
   when changing core IR or FCC
 - `cargo bench` is no worse than before change (unless explicitly approved regressions)
+
+Be mindful of what you run. Documentation or comments change does not need tests or benchmarks.
 
 ## Commit and PR rules
 
@@ -57,11 +60,3 @@ the same amount of time (or less!) to do so.
   If a small example of before/after is possible, include it.
 - PR description is usually commit title and body.
 - Keep it tidy: no headings, no "validation" section, no bullet lists. Simple formatting with plain text only.
-
-## Where to put things
-
-- `core` - base IR and dialects, shared optimizations and frameworks
-- `backends/<backend name>` - real binary targets (x86, RISC-V, ARM, etc)
-- `gpu` - virtual ISAs (PTX, SPIR-V, etc) and common GPU operations and optimizations; real binary targets still go under `backends/...`
-- `utils` - things that are not necessarily related to compiler itself (generic algorithms and data structures, SMT utils)
-- `tmdl` - dedicated TMDL DSL compiler

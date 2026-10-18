@@ -26,3 +26,25 @@ techniques or creating ISA extensions.
 TIR is a Rust project, and can be built with `cargo`, just like any other Rust
 project. If you want to contribute to this repository, refer to our
 [Developer guide](docs/dev_guide.md) and [Contribution guide](./CONTRIBUTING).
+
+## Source overview
+
+Below is a high level overview of project structure and general pointers of where
+things should go when implementing the code.
+
+|Path          |Description|
+|--------------|-----------|
+| `backends/`  | All native targets go here (RISC-V, X86, etc) |
+| `core/`      | TIR's core - builtin dialects, IR structure, etc. |
+| `fcc/`       | The Ferrum C Compiler - TIR's native C frontend |
+| `gpu/`       | Crates related to GPU virtual ISAs (SPIR-V, PTX, etc.) |
+| `libs/`      | Common libraries used by many other crates |
+| `- adt/`     | Common algorithms and data structures library |
+| `tmdl/`      | TIR Machine Description Language - our ADL for writing backends |
+| `tir/`       | Source for `tir` CLI tool that exposes common operations on TIR |
+| `tools/`     | Tools that are supposed to be shipped to end users |
+| `- isasim/`  | Tool running perf simulations based on TMDL models |
+| `- llvm/`    | Tool for importing LLVM IR into TIR |
+| `utils/`     | Useful utilities that support development process |
+| `- xtask/`   | xtask idiom wrapper for common tasks |
+| `- lit/`     | Snapshot testing driver |

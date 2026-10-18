@@ -23,10 +23,10 @@ linkme.workspace = true
 logos.workspace = true
 smallvec = "1.15.2"
 ariadne.workspace = true
-tir-pdl = { path = "../utils/pdl", default-features = false }
+tir-pdl = { workspace = true, default-features = false }
 
 [build-dependencies]
-tir-pdl = { path = "../utils/pdl", default-features = false }
+tir-pdl = { workspace = true, default-features = false }
 
 [dev-dependencies]
 tir-bench.workspace = true
